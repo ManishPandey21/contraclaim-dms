@@ -16,6 +16,7 @@ from .file_service import FileService
 from .ocr_service import OCRService
 from .openai_service import OpenAIService
 from .pydantic_ai_service import PydanticAIService, PydanticAIMetadataError
+from .metadata_integrity import assess_metadata_quality
 
 from .extraction.fallback.models import FallbackOutcome
 from .extraction.image_extractor import extract_image, extract_text_file
@@ -35,7 +36,16 @@ from ..models.document_metadata import ParsedDocumentMetadata, ProcessingResult
 # from it cannot disagree about a page.
 from ..models.processing_state import _UNRESOLVED_PAGE_STATUSES, ProcessingState
 
-from ..utils.exceptions import DocumentProcessingError
+from ..utils.exceptions import DocumentProcessingError, ModelOutputIncompleteError
+from .source_text import (
+    FULL_TEXT_SOURCE_SOURCE,
+    OCR_TEXT_KIND_REPORT,
+    OCR_TEXT_KIND_SOURCE,
+    SOURCE_TEXT_ABSENT,
+    SOURCE_TEXT_COMPLETE,
+    SOURCE_TEXT_UNVERIFIED,
+    source_text_is_complete,
+)
 from ..utils.pipeline_logging import configure_pipeline_logger
 
 logger = logging.getLogger(__name__)
@@ -752,13 +762,78 @@ class DocumentProcessor:
             except Exception as e:
                 logger.warning(f"Error closing database connection: {e}")
 
+    def _salvage_incomplete_report(
+        self, exc: ModelOutputIncompleteError
+    ) -> tuple[str, Optional[List[int]]]:
+        """The completed items of a cut-off report, and their item numbers.
+
+        The item the reply was writing when it stopped is dropped with
+        everything after it. Returns ``("", None)`` when nothing whole is left.
+        """
+        trimmed, kept = self.text_service.trim_incomplete_report(exc.partial_output or "")
+        if not trimmed.strip():
+            return "", None
+        return trimmed, kept
+
+    def _settle_body(
+        self,
+        metadata: ParsedDocumentMetadata,
+        *,
+        raw_ocr_text: Optional[str],
+        extracted_content: str,
+        source_complete: bool,
+        metadata_source: str,
+        salvaged_items: Optional[List[int]],
+        used_ocr_fallback: bool = False,
+    ) -> ParsedDocumentMetadata:
+        """Decide the letter body this run persists as ``full_text``.
+
+        * Complete source text: the source is the body. Item 25 was not asked
+          for; anything the parser still labelled "full content" is dropped.
+        * Deterministic OCR fallback: the report's Item 25 is the raw OCR text
+          verbatim, so the body is that source text, labelled as such.
+        * Otherwise Item 25 is the fallback body - from the numbered report
+          only, and only when the reply finished writing it.
+        """
+        has_source = bool(raw_ocr_text and raw_ocr_text.strip())
+        update: Dict[str, Any] = {}
+        if source_complete or (used_ocr_fallback and has_source):
+            update = {
+                "full_content": None,
+                "body_text": raw_ocr_text,
+                "body_text_source": FULL_TEXT_SOURCE_SOURCE,
+            }
+        elif salvaged_items is not None and 25 not in salvaged_items:
+            update = {"full_content": None}
+        elif metadata_source == "pydantic_ai" and extracted_content:
+            # The agent is never asked for Item 25; the numbered report is
+            # the only fallback body.
+            update = {
+                "full_content": self.text_service.parse_extraction_report(
+                    extracted_content
+                ).full_content
+            }
+        if not update:
+            return metadata
+        if hasattr(metadata, "model_copy"):
+            return metadata.model_copy(update=update)
+        for key, value in update.items():
+            setattr(metadata, key, value)
+        return metadata
+
     def _build_ocr_fallback_report(self, ocr_text: str, *, filename: str) -> str:
-        """Build a structured report from OCR text when AI extraction is unavailable."""
+        """Build a structured report from OCR text when AI extraction is unavailable.
+
+        Every value comes from a labelled line of the OCR text, or is
+        ``null``. The filename is never promoted to a letter number, subject
+        or summary: a guessed value stored as an extracted fact looks real,
+        yields a false ``letterNoNormalized`` and then false reference links
+        (DI-H6). The caller marks this source degraded (metadata_integrity).
+        """
 
         text = (ocr_text or "").strip()
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         first_lines = lines[:80]
-        filename_letter_no = self._letter_no_from_filename(filename)
 
         def first_match(patterns: list[str], source: str = text) -> Optional[str]:
             for pattern in patterns:
@@ -769,24 +844,21 @@ class DocumentProcessor:
                         return value[:250]
             return None
 
+        # Header fields are read from the start of a line only. Mid-sentence
+        # matches ("... our letter no. XYZ/12 dated 01.08.2024") and the first
+        # bare date in the text belong to some other letter.
         date = first_match(
             [
-                r"\bDate\s*[:\-]?\s*([0-3]?\d[./-][01]?\d[./-](?:19|20)?\d{2})",
-                r"\bDated?\s*[:\-]?\s*([0-3]?\d[./-][01]?\d[./-](?:19|20)?\d{2})",
-                r"\b([0-3]?\d[./-][01]?\d[./-](?:19|20)\d{2})\b",
+                r"^\s*Date\s*[:\-]?\s*([0-3]?\d[./-][01]?\d[./-](?:19|20)?\d{2})",
+                r"^\s*Dated?\s*[:\-]?\s*([0-3]?\d[./-][01]?\d[./-](?:19|20)?\d{2})",
             ]
         )
-        letter_no = first_match(
-            [
-                r"\bLetter\s*No\.?\s*[:\-]?\s*([A-Z0-9][A-Z0-9/_.\-\s]{4,90})",
-                r"\b(?:Our\s+)?Ref(?:erence)?\s*(?:No\.?)?\s*[:\-]?\s*([A-Z0-9][A-Z0-9/_.\-\s]{4,90})",
-            ]
-        ) or filename_letter_no
-        subject = self._subject_from_lines(first_lines) or filename_letter_no
+        letter_no = self._fallback_letter_number(lines[:40])
+        subject = self._subject_from_lines(first_lines)
         from_company = first_match([r"^\s*From\s*[:\-]\s*(.+)$"])
         to_company = first_match([r"^\s*To\s*[:\-]\s*(.+)$"])
         summary_lines = [line for line in lines if len(line) >= 24][:5]
-        summary = "\n".join(f"- {line[:220]}" for line in summary_lines) or f"- OCR completed for {filename}"
+        summary = "\n".join(f"- {line[:220]}" for line in summary_lines) or None
         keywords = self._keywords_from_text(" ".join(first_lines), letter_no=letter_no, subject=subject)
 
         def value_or_null(value: Optional[str]) -> str:
@@ -813,8 +885,8 @@ class DocumentProcessor:
                 f"18) Key Words: {', '.join(keywords) if keywords else 'null'}",
                 "19) Linked Event Suggested: null",
                 "20) Reference Chain: null",
-                f"21) Key Words: {', '.join(keywords) if keywords else 'null'}",
-                f"22) Summary: {summary}",
+                f"21) Additional Key Words: {', '.join(keywords) if keywords else 'null'}",
+                f"22) Summary: {value_or_null(summary)}",
                 "23) Contractual Clauses: null",
                 "24) Key Reply Points - Points to be Addressed While Responding: null",
                 f"25) Full Content: {text}",
@@ -823,10 +895,41 @@ class DocumentProcessor:
             ]
         )
 
-    def _letter_no_from_filename(self, filename: str) -> Optional[str]:
-        stem = Path(filename or "").stem.strip()
-        stem = re.sub(r"^[a-f0-9]{24}_", "", stem, flags=re.IGNORECASE)
-        return stem or None
+    #: "Letter No.: X" / "Our Ref: X" / "Ref. No. X" at the start of a line.
+    #: The label must end in a delimiter or "No", so "References:" and
+    #: "Refund of retention ..." are not labels.
+    _LETTER_NO_LABEL = re.compile(
+        r"^(?P<label>Letter[ \t]*(?:No\.?|Number)|(?:Our[ \t]+)?Ref(?:erence)?\b\.?(?:[ \t]*No\.?)?)"
+        r"[ \t]*[:\-]?[ \t]*(?P<value>\S.*)$",
+        flags=re.IGNORECASE,
+    )
+    _DATED_CLAUSE = re.compile(r"\s+(?:dated|dtd|dt\.?|date)\b", flags=re.IGNORECASE)
+
+    def _fallback_letter_number(self, lines: list[str]) -> Optional[str]:
+        """This letter's own number from a labelled header line, or None.
+
+        A candidate must be one identifier-shaped token containing a digit.
+        A ``Ref:`` line carrying "dated ..." cites *another* letter and is
+        skipped; a ``Letter No.`` line may carry its own date.
+        """
+        for line in lines:
+            match = self._LETTER_NO_LABEL.match(line.strip())
+            if not match:
+                continue
+            is_ref_label = re.sub(r"^our\s+", "", match.group("label").lower()).startswith("ref")
+            value = match.group("value").strip()
+            parts = self._DATED_CLAUSE.split(value, maxsplit=1)
+            if is_ref_label and len(parts) > 1:
+                continue
+            candidate = parts[0].strip(" :-.,;")[:90]
+            # One identifier-shaped token: segments joined by / - _ . with a
+            # digit somewhere. Prose ("to your letter no. 12", "GCC Clause
+            # 8.4", "2 above is relevant") has spaces and is rejected.
+            if re.fullmatch(r"[A-Za-z0-9]+(?:[/_.\-][A-Za-z0-9]+)+", candidate) and re.search(
+                r"\d", candidate
+            ):
+                return candidate
+        return None
 
     def _subject_from_lines(self, lines: list[str]) -> Optional[str]:
         for index, line in enumerate(lines):
@@ -873,6 +976,9 @@ class DocumentProcessor:
         document_id: Optional[str],
         parsed_metadata: ParsedDocumentMetadata,
         skip_embeddings: bool = False,
+        *,
+        metadata_quality: Optional[Dict[str, Any]] = None,
+        source_text_status: Optional[str] = None,
     ) -> int:
         """Save processing results to file system and database"""
         try:
@@ -881,9 +987,23 @@ class DocumentProcessor:
                 extracted_content, original_path, path_structure, upload_type
             )
 
-            # Determine text to use for different purposes
+            # Determine text to use for different purposes. `ocrText` keeps its
+            # historical content (the report when there was no source text) and
+            # is labelled, so no reader mistakes the report for the letter.
+            has_source = bool(raw_ocr_text and raw_ocr_text.strip())
             text_for_db = raw_ocr_text or extracted_content
+            # Vectors are the letter: source text, else the report's validated
+            # Item 25. Failing both, the report is passed on so the payload
+            # guard refuses it visibly (sync `error`) rather than it vanishing.
             text_for_embedding = raw_ocr_text or parsed_metadata.full_content or extracted_content
+            source_provenance: Dict[str, Any] = {
+                "source_text_status": source_text_status
+                or (SOURCE_TEXT_UNVERIFIED if has_source else SOURCE_TEXT_ABSENT),
+            }
+            if has_source:
+                source_provenance["ocr_text_kind"] = OCR_TEXT_KIND_SOURCE
+            elif text_for_db:
+                source_provenance["ocr_text_kind"] = OCR_TEXT_KIND_REPORT
 
             # Save to database and create embeddings
             chunks_created = await self.database_service.save_document_data(
@@ -893,6 +1013,8 @@ class DocumentProcessor:
                 full_text=text_for_db,
                 embedding_text=text_for_embedding,
                 skip_embeddings=skip_embeddings,
+                metadata_quality=metadata_quality,
+                source_provenance=source_provenance,
             )
 
             return chunks_created
@@ -928,6 +1050,14 @@ class DocumentProcessor:
             partial_failures: Dict[str, Any] = {}
             extracted_content = ""
             metadata_source = "legacy_regex"
+            # Complete source text makes report Item 25 redundant: the model
+            # would only retype the text it was given. Unknown completeness
+            # (legacy_v0) keeps Item 25 requested.
+            source_complete = source_text_is_complete(raw_ocr_text, extraction)
+            #: Item numbers a cut-off reply finished; None when not cut off.
+            salvaged_items: Optional[List[int]] = None
+            #: The report is the deterministic one, whose Item 25 is raw OCR.
+            used_ocr_fallback = False
 
             if raw_ocr_text and raw_ocr_text.strip():
                 logger.info(
@@ -936,11 +1066,38 @@ class DocumentProcessor:
                     len(raw_ocr_text),
                 )
                 try:
+                    # The keyword travels only when Item 25 is dropped, so the
+                    # call on every other path is exactly what it always was.
+                    omit_item_25: Dict[str, Any] = (
+                        {"include_full_content": False} if source_complete else {}
+                    )
                     extracted_content = await self.openai_service.process_text(
                         raw_ocr_text,
                         filename=input_path.name,
+                        **omit_item_25,
                     )
                     metadata_source = "openai_text_legacy_regex"
+                except ModelOutputIncompleteError as exc:
+                    # Fail visible, keep what is provably whole: the items the
+                    # reply finished before it was cut off. Never the cut item.
+                    logger.warning(
+                        "[document_pipeline] OCR-text extraction for %s was cut off "
+                        "(%s); keeping only the items it completed",
+                        input_path.name,
+                        exc.reason,
+                    )
+                    partial_failures["ai_extraction"] = exc.failure_record()
+                    extracted_content, salvaged_items = self._salvage_incomplete_report(exc)
+                    if extracted_content:
+                        metadata_source = "openai_text_legacy_regex"
+                    else:
+                        extracted_content = self._build_ocr_fallback_report(
+                            raw_ocr_text,
+                            filename=input_path.name,
+                        )
+                        metadata_source = "ocr_fallback_regex"
+                        salvaged_items = None
+                        used_ocr_fallback = True
                 except Exception as exc:
                     logger.warning(
                         "[document_pipeline] OpenAI OCR-text extraction failed for %s; "
@@ -957,6 +1114,7 @@ class DocumentProcessor:
                         filename=input_path.name,
                     )
                     metadata_source = "ocr_fallback_regex"
+                    used_ocr_fallback = True
             elif extraction is not None and getattr(extraction, "withheld_pages", None):
                 # Nothing publishable, because the text layer itself was judged
                 # unusable. Uploading the whole PDF would only have it read the
@@ -984,7 +1142,19 @@ class DocumentProcessor:
 
                 # Step 3: Extract content using OpenAI
                 logger.info("[document_pipeline] Requesting content extraction for %s", input_path.name)
-                extracted_content = await self.openai_service.process_document(file_id)
+                try:
+                    extracted_content = await self.openai_service.process_document(file_id)
+                except ModelOutputIncompleteError as exc:
+                    # No source text exists here, so a cut-off Item 25 would be
+                    # the only body: it is dropped, never stored as complete.
+                    logger.warning(
+                        "[document_pipeline] Whole-file extraction for %s was cut off "
+                        "(%s); keeping only the items it completed",
+                        input_path.name,
+                        exc.reason,
+                    )
+                    partial_failures["ai_extraction"] = exc.failure_record()
+                    extracted_content, salvaged_items = self._salvage_incomplete_report(exc)
                 # The reply is judged by the same canonical policy as every
                 # other text surface before it can become the document's text.
                 extracted_content, unusable_reply = withhold_unusable(
@@ -1015,6 +1185,10 @@ class DocumentProcessor:
                         context={"filename": input_path.name, "upload_type": upload_type},
                     )
                 except PydanticAIMetadataError as exc:
+                    if isinstance(exc, ModelOutputIncompleteError):
+                        # Visible even though the report parse below takes
+                        # over: a truncated agent reply is never silent.
+                        partial_failures["pydantic_ai"] = exc.failure_record()
                     logger.warning(f"PydanticAI metadata extraction failed for {input_path}: {exc}")
                     logger.info("[document_pipeline] [%s] Falling back to legacy regex metadata parser", input_path.name)
                 else:
@@ -1040,6 +1214,24 @@ class DocumentProcessor:
                     metadata_source = "legacy_regex"
 
 
+
+            parsed_metadata = self._settle_body(
+                parsed_metadata,
+                raw_ocr_text=raw_ocr_text,
+                extracted_content=extracted_content,
+                source_complete=source_complete,
+                metadata_source=metadata_source,
+                salvaged_items=salvaged_items,
+                used_ocr_fallback=used_ocr_fallback,
+            )
+
+            # Degraded extraction must be visible on every path that persists
+            # it, including bulk upload, which never reaches DocumentService.
+            metadata_quality = assess_metadata_quality(
+                parsed_metadata,
+                metadata_source=metadata_source,
+                partial_failures=partial_failures,
+            )
 
             # The publication barrier. Decided once, here, BEFORE any
             # publishing side effect runs, and carried on the result so every
@@ -1067,6 +1259,14 @@ class DocumentProcessor:
                 extracted_content, raw_ocr_text, original_path, path_structure,
                 upload_type, document_id, parsed_metadata,
                 skip_embeddings=skip_embeddings or blocked_for_review,
+                metadata_quality=metadata_quality,
+                source_text_status=(
+                    SOURCE_TEXT_COMPLETE
+                    if source_complete
+                    else SOURCE_TEXT_UNVERIFIED
+                    if raw_ocr_text and raw_ocr_text.strip()
+                    else SOURCE_TEXT_ABSENT
+                ),
             )
             partial_failures.update(dict(getattr(self.database_service, "partial_failures", {}) or {}))
 

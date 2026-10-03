@@ -435,6 +435,35 @@ class Settings(BaseSettings):
         validation_alias="LOGIN_EMAIL_RATE_LIMIT_WINDOW",
         description="Login email rate-limit window in seconds",
     )
+    # Tags keeps separate read and write budgets: browsing (list, search,
+    # subtag expansion, the Documents page tag dropdown) must never exhaust the
+    # budget that creating or renaming a tag needs, or the other way round.
+    TAGS_READ_RATE_LIMIT_REQUESTS: int = Field(
+        default=300,
+        gt=0,
+        validation_alias="TAGS_READ_RATE_LIMIT_REQUESTS",
+        description="Max Tags read requests per user in the read window",
+    )
+    TAGS_READ_RATE_LIMIT_WINDOW: int = Field(
+        default=600,
+        gt=0,
+        validation_alias="TAGS_READ_RATE_LIMIT_WINDOW",
+        description="Tags read rate-limit window in seconds",
+    )
+    TAGS_WRITE_RATE_LIMIT_REQUESTS: int = Field(
+        default=120,
+        # Must cover the dearest single write (delete tag costs 5), or that
+        # operation could never succeed; tests pin the costs to this floor.
+        ge=5,
+        validation_alias="TAGS_WRITE_RATE_LIMIT_REQUESTS",
+        description="Max Tags write cost units per user in the write window",
+    )
+    TAGS_WRITE_RATE_LIMIT_WINDOW: int = Field(
+        default=3600,
+        gt=0,
+        validation_alias="TAGS_WRITE_RATE_LIMIT_WINDOW",
+        description="Tags write rate-limit window in seconds",
+    )
 
     # Explicit toggle for legacy dev header authentication (disabled by default)
     ALLOW_DEV_HEADERS: bool = Field(default=False, validation_alias="ALLOW_DEV_HEADERS")
@@ -468,6 +497,15 @@ class Settings(BaseSettings):
         default=False, validation_alias="START_DOCUMENT_EXTRACTION_WORKERS"
     )
     START_CONTRACT_QUEUE_WORKERS: bool = Field(default=True, validation_alias="START_CONTRACT_QUEUE_WORKERS")
+    # Contract Master reprojection (promotion/correction -> CURRENT projection).
+    # Read only by rbac_backend.worker; set it on exactly one service - the
+    # contract-worker. The web process never starts it, whatever this says.
+    START_CONTRACT_REPROJECTION_WORKERS: bool = Field(
+        default=False, validation_alias="START_CONTRACT_REPROJECTION_WORKERS"
+    )
+    CONTRACT_REPROJECTION_POLL_SECONDS: float = Field(
+        default=15.0, ge=1.0, validation_alias="CONTRACT_REPROJECTION_POLL_SECONDS"
+    )
     START_DRAFTING_QUEUE_WORKERS: bool = Field(default=False, validation_alias="START_DRAFTING_QUEUE_WORKERS")
     DRAFTING_QUEUE_ENABLED: bool = Field(default=False, validation_alias="DRAFTING_QUEUE_ENABLED")
     DRAFTING_QUEUE_REDIS_URL: Optional[str] = Field(default=None, validation_alias="DRAFTING_QUEUE_REDIS_URL")

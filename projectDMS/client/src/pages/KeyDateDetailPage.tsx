@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -41,6 +41,11 @@ import { formatDate } from "@/utils/dateFormat";
 import EntityDocumentLinks from "@/components/document-links/EntityDocumentLinks";
 import { KEY_DATE_ACHIEVEMENT_RELATIONSHIP_ROLES } from "@/services/document-relationships-api";
 import useHasPermission from "@/hooks/useHasPermission";
+import { scopeRefusalMessage } from "@/services/active-scope";
+
+/** A string `detail` from the API; a structured one (scope refusal) is handled above. */
+const apiDetail = (e: any): string | null =>
+  typeof e?.response?.data?.detail === "string" ? e.response.data.detail : null;
 
 const fmt = (d?: string | null) => (d ? formatDate(d) : "—");
 const toISO = (d: string) => (d ? new Date(d).toISOString() : undefined);
@@ -54,6 +59,10 @@ const Field: React.FC<{ label: string; value: React.ReactNode }> = ({ label, val
 
 const KeyDateDetailPage: React.FC = () => {
   const { id = "" } = useParams<{ id: string }>();
+  // Deep link from a Document's Linked Records: /key-dates/{id}?achievement_id=...
+  const [searchParams] = useSearchParams();
+  const focusAchievementId = searchParams.get("achievement_id");
+  const achievementEvidenceRef = useRef<HTMLDivElement | null>(null);
   const [m, setM] = useState<MilestoneDTO | null>(null);
   const [eots, setEots] = useState<EOTDTO[]>([]);
   const [history, setHistory] = useState<ExtensionHistoryDTO[]>([]);
@@ -84,14 +93,19 @@ const KeyDateDetailPage: React.FC = () => {
       setEots(es);
       setHistory(hs);
       setWorkflow(wf);
-    } catch {
-      toast.error("Failed to load milestone");
+    } catch (error) {
+      toast.error(scopeRefusalMessage(error, "key date") || "Failed to load milestone");
     } finally {
       setLoading(false);
     }
   }, [id]);
 
   useEffect(() => { void load(); }, [load]);
+
+  const achievementFocused = Boolean(m && focusAchievementId && focusAchievementId === `${m.id}:ach`);
+  useEffect(() => {
+    if (achievementFocused) achievementEvidenceRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+  }, [achievementFocused]);
 
   const onSubmitEot = async () => {
     if (!eotForm.requested_extension_days || !eotForm.eot_letter_reference.trim()) {
@@ -112,7 +126,7 @@ const KeyDateDetailPage: React.FC = () => {
       setEotForm({ requested_extension_days: "", eot_letter_reference: "", requested_revised_key_date: "", reason: "" });
       await load();
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || "Failed to submit EOT");
+      toast.error(scopeRefusalMessage(e, "key date") || apiDetail(e) || "Failed to submit EOT");
     } finally {
       setBusy(false);
     }
@@ -137,7 +151,7 @@ const KeyDateDetailPage: React.FC = () => {
       setReviewEot(null);
       await load();
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || "Failed to review EOT");
+      toast.error(scopeRefusalMessage(e, "key date") || apiDetail(e) || "Failed to review EOT");
     } finally {
       setBusy(false);
     }
@@ -165,7 +179,7 @@ const KeyDateDetailPage: React.FC = () => {
       setAchOpen(false);
       await load();
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || "Failed to record achievement");
+      toast.error(scopeRefusalMessage(e, "key date") || apiDetail(e) || "Failed to record achievement");
     } finally {
       setBusy(false);
     }
@@ -238,7 +252,9 @@ const KeyDateDetailPage: React.FC = () => {
       </Card>
 
       {achieved && (
-        <Card>
+        <Card ref={achievementEvidenceRef} id="achievement-evidence"
+          data-focused={achievementFocused ? "true" : undefined}
+          className={achievementFocused ? "ring-2 ring-primary" : undefined}>
           <CardHeader>
             <CardTitle className="text-base">Achievement evidence</CardTitle>
             <CardDescription>

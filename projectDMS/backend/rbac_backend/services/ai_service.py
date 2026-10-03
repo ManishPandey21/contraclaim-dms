@@ -4,7 +4,7 @@ import re
 from datetime import datetime
 from difflib import SequenceMatcher
 from textwrap import shorten
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 
 from bson.objectid import ObjectId
 
@@ -23,6 +23,8 @@ from ..models.ai_models import (
     VectorSearchResponse,
 )
 from ..ai_workflows.langgraph import LetterDraftGraph
+from ..core.security import _expand_object_ids, build_scope_query
+from ..utils.error_handler import LetterError
 from .letter_service import LetterService
 
 
@@ -67,6 +69,102 @@ class AIService:
         if not scope_terms:
             return base_query
         return {"$and": [base_query, *scope_terms]}
+
+    @staticmethod
+    def _letter_scope(
+        current_user: Any,
+        *,
+        organization_id: Optional[Any] = None,
+        project_id: Optional[Any] = None,
+    ) -> dict:
+        """The actor's canonical row visibility over `letters`.
+
+        Authority comes from `build_scope_query` (the actor's entitlement); a
+        supplied organisation/project only NARROWS inside it. The policy gate
+        answers membership of the requested scope, not whether a letter id
+        belongs to it, so every langgraph letter read and write must carry this
+        predicate. `current_user` has no default: without an actor there is no
+        scope, and the answer is "no letter", not "any letter".
+        """
+        if current_user is None:
+            raise LetterError("Letter not found", 404)
+        scope = build_scope_query(
+            current_user,
+            organization_id=str(organization_id) if organization_id else None,
+            project_id=str(project_id) if project_id else None,
+        )
+        if not organization_id:
+            return scope
+        # The letter must also sit in the organisation the policy gate just
+        # authorised. `build_scope_query` bounds the ContraClaim expert roles
+        # by `projects` alone and ignores the organisation by design, so an
+        # expert whose `projects` still lists another tenant's project could
+        # otherwise act on that tenant's letter while subscription, entitlement,
+        # allocation and metering were all evaluated for this one.
+        org_clause = {"organization_id": {"$in": _expand_object_ids([str(organization_id)])}}
+        return {"$and": [scope, org_clause]} if scope else org_clause
+
+    @staticmethod
+    async def _require_letter_in_scope(db: Any, letter_id: Any, scope: dict) -> None:
+        """404 unless `letter_id` names a letter inside `scope`.
+
+        Malformed, nonexistent and out-of-scope ids answer identically so the
+        route cannot be used to probe for another tenant's letter ids.
+        """
+        try:
+            letter_oid = ObjectId(str(letter_id))
+        except Exception:
+            raise LetterError("Letter not found", 404) from None
+        id_clause = {"_id": letter_oid}
+        query = {"$and": [id_clause, scope]} if scope else id_clause
+        if not await db.letters.find_one(query, {"_id": 1}):
+            raise LetterError("Letter not found", 404)
+
+    async def resolve_letter_scope(
+        self,
+        letter_id: Any,
+        current_user: Any,
+        *,
+        organization_id: Optional[Any] = None,
+        project_id: Optional[Any] = None,
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """The TARGET letter's own organisation/project, for authorisation.
+
+        The letter is located only inside the actor's canonical visibility
+        (`_letter_scope`: entitlement, narrowed by any selected org / named
+        project), and what comes back is the letter's stored scope - the only
+        scope a policy decision about this letter may be made against. A
+        requested, defaulted or `None` organisation is never a substitute: an
+        expert with no organisation and a stale foreign project in `projects`
+        otherwise had the policy evaluated for no organisation at all.
+
+        A letter with no organisation cannot be attributed to a tenant, so only
+        Super Admin may act on it. Every refusal is the same 404.
+        """
+        db = await get_database()
+        scope = self._letter_scope(
+            current_user, organization_id=organization_id, project_id=project_id
+        )
+        try:
+            letter_oid = ObjectId(str(letter_id))
+        except Exception:
+            raise LetterError("Letter not found", 404) from None
+        id_clause = {"_id": letter_oid}
+        query = {"$and": [id_clause, scope]} if scope else id_clause
+        letter = await db.letters.find_one(
+            query, {"organization_id": 1, "project_id": 1}
+        )
+        if not letter:
+            raise LetterError("Letter not found", 404)
+        letter_org = letter.get("organization_id")
+        letter_project = letter.get("project_id")
+        roles = {str(r).lower() for r in (getattr(current_user, "roles", None) or [])}
+        if not letter_org and "superadmin" not in roles:
+            raise LetterError("Letter not found", 404)
+        return (
+            str(letter_org) if letter_org else None,
+            str(letter_project) if letter_project else None,
+        )
 
     async def _fetch_documents_by_ids(
         self,
@@ -268,14 +366,28 @@ class AIService:
         self,
         request: LangGraphDraftRequest,
         current_user: Any,
+        *,
+        requested_project_id: Optional[str] = None,
     ) -> LangGraphDraftResponse:
+        """`requested_project_id` is the project the CALLER named, if any. It
+        narrows which letter is reachable; `request.project_id` may be a
+        controller default (the actor's first project) and must not."""
+        db = await get_database()
+        scope = self._letter_scope(
+            current_user,
+            organization_id=request.organization_id,
+            project_id=requested_project_id,
+        )
+        # The letter is authorised BEFORE the graph reads it: `load_state`
+        # fetches by bare id and feeds subject/content into the prompt.
+        await self._require_letter_in_scope(db, request.letter_id, scope)
+
         graph = LetterDraftGraph(self.generate_draft)
         graph_result = await graph.run(request, current_user)
 
-        db = await get_database()
         letter_service = LetterService(db)
         await letter_service.record_langgraph_result(
-            request.letter_id, graph_result, created_by=current_user
+            request.letter_id, graph_result, created_by=current_user, scope=scope
         )
 
         trace_payload = [
@@ -319,23 +431,19 @@ class AIService:
     async def get_latest_langgraph_run(
         self,
         letter_id: str,
+        current_user: Any,
         *,
         organization_id: Optional[Any] = None,
         project_id: Optional[Any] = None,
     ) -> Optional[LangGraphDraftResponse]:
         db = await get_database()
-        if organization_id or project_id:
-            try:
-                letter_oid = ObjectId(letter_id)
-            except Exception:
-                return None
-            scoped_query = self._scoped_query(
-                {"_id": letter_oid},
-                organization_id=organization_id,
-                project_id=project_id,
-            )
-            if not await db.letters.find_one(scoped_query, {"_id": 1}):
-                return None
+        scope = self._letter_scope(
+            current_user, organization_id=organization_id, project_id=project_id
+        )
+        try:
+            await self._require_letter_in_scope(db, letter_id, scope)
+        except LetterError:
+            return None
         letter_service = LetterService(db)
         snapshot = await letter_service.get_langgraph_snapshot(letter_id)
         if not snapshot:
@@ -347,8 +455,18 @@ class AIService:
         self,
         request: StrategyPlanRequest,
         current_user: Any,
+        *,
+        requested_project_id: Optional[str] = None,
     ) -> StrategyPlanResponse:
         """Run LangGraph in analysis-only mode to produce a structured strategy plan."""
+        db = await get_database()
+        scope = self._letter_scope(
+            current_user,
+            organization_id=request.organization_id,
+            project_id=requested_project_id,
+        )
+        await self._require_letter_in_scope(db, request.letter_id, scope)
+
         composed_context = self._compose_role_context(request)
         langgraph_request = LangGraphDraftRequest(
             letter_id=request.letter_id,
@@ -365,10 +483,9 @@ class AIService:
         graph = LetterDraftGraph(self.generate_draft)
         graph_result = await graph.run(langgraph_request, current_user)
 
-        db = await get_database()
         letter_service = LetterService(db)
         await letter_service.record_langgraph_result(
-            request.letter_id, graph_result, created_by=current_user
+            request.letter_id, graph_result, created_by=current_user, scope=scope
         )
 
         trace_payload = [

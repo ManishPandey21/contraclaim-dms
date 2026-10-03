@@ -90,7 +90,7 @@ class FakeCollection:
             self.docs.append(dict(doc))
         return SimpleNamespace(inserted_ids=[doc.get("_id") for doc in docs])
 
-    async def find_one(self, criteria: Dict[str, Any]):
+    async def find_one(self, criteria: Dict[str, Any], *_args, **_kwargs):
         for doc in self.docs:
             if _matches(doc, criteria):
                 return dict(doc)
@@ -164,6 +164,7 @@ class FakeDB:
         self.agent_conversations = FakeCollection()
         self.agent_messages = FakeCollection()
         self.vector_sync_status = FakeCollection()
+        self.contract_documents = FakeCollection()
 
 
 class StubEmbedding:
@@ -184,6 +185,7 @@ class StubVector:
         vectors: List[List[float]],
         chunks: List[Dict[str, Any]],
         namespace: Optional[str] = None,
+        point_id_for: Any = None,
     ) -> int:
         for vector, chunk in zip(vectors, chunks):
             self.writes.append({"vector": vector, "chunk": chunk})
@@ -206,7 +208,10 @@ class StubVector:
         ]
 
     async def delete(
-        self, chunk_ids: List[str], namespace: Optional[str] = None
+        self,
+        chunk_ids: List[str],
+        namespace: Optional[str] = None,
+        point_id_for: Any = None,
     ) -> int:
         before = len(self.writes)
         self.writes = [
@@ -256,7 +261,12 @@ async def test_ingestion_pipeline_deduplication():
     )  # type: ignore[arg-type]
 
     fake_db.documents.docs.append(
-        {"_id": "doc-123", "full_text": "Alpha Beta Gamma" * 5}
+        {
+            "_id": "doc-123",
+            "organization_id": "org-1",
+            "project_id": "proj-1",
+            "full_text": "Alpha Beta Gamma" * 5,
+        }
     )
 
     job = await pipeline.create_job(

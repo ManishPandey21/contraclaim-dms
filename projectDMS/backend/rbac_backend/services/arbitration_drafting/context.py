@@ -164,8 +164,8 @@ def _money(value: Any, currency: Optional[str] = None) -> Optional[str]:
 
 
 from ..publication_policy import (
+    authoritative_fact_text,
     authoritative_summary,
-    authoritative_text,
     consumable_derived_text,
     document_id_candidates,
     is_consumable,
@@ -722,12 +722,14 @@ class ArbitrationContextBuilder:
             if not decision_ok:
                 snippet = label
             else:
+                # Source fields first - a chunk row's own `text` included; the
+                # LLM summary only when the record carries nothing else.
                 snippet = (
-                    authoritative_summary(record)
-                    or authoritative_text(record)
+                    authoritative_fact_text(record)
                     or record.get("text")
                     or record.get("text_enriched")
                     or record.get("description")
+                    or authoritative_summary(record)
                     or label
                 )
             return {
@@ -1059,9 +1061,9 @@ class ArbitrationContextBuilder:
                 # that would hand back exactly what they withheld. It is gated by
                 # the same authority; document_type is metadata and stays.
                 "snippet": condense(
-                    authoritative_summary(authoritative)
-                    or authoritative_text(authoritative)
+                    authoritative_fact_text(authoritative)
                     or await consumable_derived_text(self.db, row, "relevance_note")
+                    or authoritative_summary(authoritative)
                     or row.get("document_type"),
                     650,
                 ),

@@ -885,3 +885,91 @@ def test_the_workflow_can_neither_push_an_image_nor_deploy() -> None:
             if any(name in str(step.get("uses", "")) for name in forbidden_uses):
                 offenders.append(f"{job_name}: uses {step.get('uses')}")
     assert not offenders, "the CI workflow - which now also runs unattended every week - could publish or deploy:\n  " + "\n  ".join(offenders)
+
+
+# --------------------------------------------------------------------------- #
+# the frontend dependency scan: one time-bound braces exception (R3)
+# --------------------------------------------------------------------------- #
+
+NPM_AUDIT_GATE = GIT_ROOT / ".github" / "scripts" / "npm_audit_gate.py"
+NPM_AUDIT_GATE_TESTS = GIT_ROOT / ".github" / "scripts" / "test_npm_audit_gate.py"
+
+
+def _frontend_scan_command() -> str:
+    return str(_named_step("dependency-scan", "Scan frontend dependencies")["run"])
+
+
+def test_the_frontend_scan_runs_the_audit_gate_and_its_tests() -> None:
+    command = _frontend_scan_command()
+
+    assert "npm ci" in command
+    assert "git diff --exit-code -- package-lock.json" in command
+    assert "python -m pytest -q ../../.github/scripts/test_npm_audit_gate.py" in command, (
+        "the gate's own tests must run in the job that relies on it"
+    )
+    assert "python ../../.github/scripts/npm_audit_gate.py" in command
+    assert NPM_AUDIT_GATE.is_file() and NPM_AUDIT_GATE_TESTS.is_file()
+
+
+def test_the_frontend_scan_cannot_be_weakened_or_swallowed() -> None:
+    step = _named_step("dependency-scan", "Scan frontend dependencies")
+    command = _frontend_scan_command()
+
+    assert step.get("continue-on-error") is not True
+    for form in FAILURE_SWALLOWING:
+        assert form not in command, f"{form!r} swallows the frontend gate's exit code"
+    for weakening in ("--audit-level=critical", "--audit-level=moderate", "--omit", "--production"):
+        assert weakening not in command, f"{weakening} changes what npm audit reports"
+    # The gate replaced the bare audit; it is not run beside a failing one.
+    assert "npm audit --audit-level=high" not in command
+
+
+def _audit_gate():
+    spec = importlib.util.spec_from_file_location("_npm_audit_gate", NPM_AUDIT_GATE)
+    assert spec and spec.loader
+    gate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate)
+    return gate
+
+
+def test_the_audit_gate_excepts_exactly_one_advisory_until_its_expiry() -> None:
+    """One advisory, hard-coded - never a list that a second id can join."""
+    source = NPM_AUDIT_GATE.read_text(encoding="utf-8")
+    gate = _audit_gate()
+
+    ids = {m.lower() for m in re.findall(r"GHSA(?:-[0-9a-z]{4}){3}", source, re.IGNORECASE)}
+    assert ids == {"ghsa-vfj7-8cjw-p6xm"}, f"the gate names {sorted(ids)}"
+    assert (gate.GHSA, gate.CVE, gate.PACKAGE) == ("GHSA-vfj7-8cjw-p6xm", "CVE-2026-93687", "braces")
+    assert (gate.NPM_SOURCE_ID, gate.AFFECTED_RANGE, gate.INSTALLED_VERSION) == (1240992, "<=3.0.3", "3.0.3")
+    assert gate.EXPIRES.isoformat() == "2026-10-10"
+    assert tuple(gate.AUDIT_COMMAND) == ("npm", "audit", "--json"), (
+        "the gate must audit the whole tree, unfiltered"
+    )
+    assert gate.EXPECTED_DEPENDENTS == frozenset(
+        {
+            "braces", "chokidar", "fast-glob", "micromatch", "tailwindcss",
+            "tailwindcss-animate", "@tailwindcss/typography", "lovable-tagger",
+            "typescript-eslint", "@typescript-eslint/eslint-plugin",
+            "@typescript-eslint/parser", "@typescript-eslint/type-utils",
+            "@typescript-eslint/typescript-estree", "@typescript-eslint/utils",
+            "@types/jest", "expect", "jest-message-util",
+        }
+    ), "a new package reaching braces needs a new owner decision, not a longer list"
+    for general in ("ALLOWED_ADVISORIES", "allowed_advisories", "IGNORE", "ignore_list"):
+        assert general not in source, f"{general} reads like a general ignore framework"
+
+
+def test_the_audit_gate_identity_check_rejects_every_variant() -> None:
+    gate = _audit_gate()
+    exact = {
+        "source": 1240992, "name": "braces", "dependency": "braces",
+        "url": "https://github.com/advisories/GHSA-vfj7-8cjw-p6xm",
+        "severity": "high", "range": "<=3.0.3",
+    }
+    assert gate._is_exception_advisory(exact)
+    for field, value in (
+        ("source", 1240993), ("name", "minimatch"), ("dependency", "micromatch"),
+        ("url", "https://github.com/advisories/GHSA-vfj7-8cjw-p6xx"),
+        ("url", "https://example.com/GHSA-vfj7-8cjw-p6xm-other"), ("range", "*"),
+    ):
+        assert not gate._is_exception_advisory({**exact, field: value}), (field, value)

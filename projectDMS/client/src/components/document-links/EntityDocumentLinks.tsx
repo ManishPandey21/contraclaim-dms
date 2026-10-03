@@ -4,10 +4,12 @@ import { FileText, Loader2, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { isCorrespondenceRole, relationshipRoleLabel, targetTypeLabel } from "@/lib/relationship-roles";
 import type { DocumentItem } from "@/services/documents-api";
 import {
   batchLinkDocuments,
   type DocumentRelationship,
+  type LinkableUploadType,
   listEntityDocumentLinks,
   removeDocumentLink,
   searchLinkableDocuments,
@@ -15,19 +17,47 @@ import {
 
 export interface RelationshipRoleOption { value: string; label: string }
 
+type Direction = "" | "incoming" | "outgoing" | "contract";
+
+const PAGE_SIZE = 25;
+
 function documentName(document?: DocumentItem | null, fallback?: string) {
   return document?.filename || document?.name || document?.subject || fallback || "Document";
 }
 
-function documentMetadata(document?: DocumentItem | null) {
+function formatDate(value?: string | null) {
+  if (!value) return "";
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime())
+    ? ""
+    : new Intl.DateTimeFormat("en-GB", { dateStyle: "medium" }).format(parsed);
+}
+
+function directionLabel(document?: DocumentItem | null) {
+  const value = String(document?.uploadType || "").toLowerCase();
+  if (value === "incoming") return "Incoming";
+  if (value === "outgoing") return "Outgoing";
+  if (value === "contract") return "Contract";
+  return "";
+}
+
+/**
+ * Letter number, subject, direction, party, status/categories and date - the
+ * fields a user picks a letter by.
+ */
+function correspondenceDetails(document?: DocumentItem | null) {
   if (!document) return "";
-  const parts = [document.status, ...(document.categories || [])].filter(Boolean) as string[];
-  if (document.createdAt) {
-    const created = new Date(document.createdAt);
-    if (!Number.isNaN(created.getTime())) {
-      parts.push(new Intl.DateTimeFormat("en-GB", { dateStyle: "medium" }).format(created));
-    }
-  }
+  const name = documentName(document);
+  const party = [document.from, document.to].filter(Boolean).join(" → ");
+  const parts = [
+    document.letterNo,
+    document.subject && document.subject !== name ? document.subject : "",
+    directionLabel(document),
+    party,
+    document.status,
+    ...(document.categories || []),
+    formatDate(document.date) || formatDate(document.createdAt),
+  ].filter(Boolean) as string[];
   return parts.join(" · ");
 }
 
@@ -43,6 +73,11 @@ export default function EntityDocumentLinks({
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [query, setQuery] = useState("");
+  const [letterNo, setLetterNo] = useState("");
+  const [subject, setSubject] = useState("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [direction, setDirection] = useState<Direction>("");
   const [results, setResults] = useState<DocumentItem[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [hasMore, setHasMore] = useState(false);
@@ -52,6 +87,11 @@ export default function EntityDocumentLinks({
   const searchTimer = useRef<number | undefined>(undefined);
   const loadSequence = useRef(0);
   const searchSequence = useRef(0);
+
+  const correspondenceOnly = isCorrespondenceRole(role);
+  const roleLabels = useMemo(
+    () => new Map(roles.map((item) => [item.value, item.label])), [roles],
+  );
 
   useEffect(() => {
     targetGeneration.current += 1;
@@ -64,6 +104,12 @@ export default function EntityDocumentLinks({
     setHasMore(false);
     setBusy(false);
   }, [targetType, targetId]);
+
+  // A correspondence role never offers contract Documents: the server would
+  // refuse them with 422.
+  useEffect(() => {
+    if (correspondenceOnly && direction === "contract") setDirection("");
+  }, [correspondenceOnly, direction]);
 
   const load = useCallback(async () => {
     const generation = targetGeneration.current;
@@ -94,10 +140,16 @@ export default function EntityDocumentLinks({
     () => new Set(links.map((link) => link.document_id)), [links],
   );
 
+  // A chosen direction narrows further; a correspondence role alone already
+  // restricts the selector to incoming | outgoing.
+  const uploadType: LinkableUploadType | undefined =
+    direction || (correspondenceOnly ? "correspondence" : undefined);
+  const hasCriteria = Boolean(query.trim() || letterNo.trim() || subject.trim() || dateFrom || dateTo);
+
   const search = useCallback(async (skip = 0, append = false) => {
     const generation = targetGeneration.current;
     const sequence = ++searchSequence.current;
-    if (!canManage || frozen || !query.trim()) {
+    if (!canManage || frozen || !hasCriteria) {
       setResults([]);
       setHasMore(false);
       setBusy(false);
@@ -106,12 +158,19 @@ export default function EntityDocumentLinks({
     setBusy(true);
     try {
       const found = await searchLinkableDocuments({
-        q: query.trim(), organization_id: organizationId || undefined,
-        project_id: projectId || undefined, limit: 25, skip,
+        ...(query.trim() ? { q: query.trim() } : {}),
+        organization_id: organizationId || undefined,
+        project_id: projectId || undefined,
+        ...(uploadType ? { uploadType } : {}),
+        ...(letterNo.trim() ? { letterNo: letterNo.trim() } : {}),
+        ...(subject.trim() ? { subject: subject.trim() } : {}),
+        ...(dateFrom ? { date_from: dateFrom } : {}),
+        ...(dateTo ? { date_to: dateTo } : {}),
+        limit: PAGE_SIZE, skip,
       });
       if (generation === targetGeneration.current && sequence === searchSequence.current) {
         setResults((current) => append ? [...current, ...found] : found);
-        setHasMore(found.length === 25);
+        setHasMore(found.length === PAGE_SIZE);
       }
     } catch {
       if (generation === targetGeneration.current && sequence === searchSequence.current) {
@@ -123,10 +182,10 @@ export default function EntityDocumentLinks({
         setBusy(false);
       }
     }
-  }, [canManage, frozen, organizationId, projectId, query]);
+  }, [canManage, dateFrom, dateTo, frozen, hasCriteria, letterNo, organizationId, projectId, query, subject, uploadType]);
 
   useEffect(() => {
-    if (!query.trim()) {
+    if (!hasCriteria) {
       searchSequence.current += 1;
       setResults([]);
       setHasMore(false);
@@ -135,7 +194,7 @@ export default function EntityDocumentLinks({
     }
     searchTimer.current = window.setTimeout(() => void search(0, false), 300);
     return () => window.clearTimeout(searchTimer.current);
-  }, [query, search]);
+  }, [hasCriteria, search]);
 
   const searchNow = () => {
     window.clearTimeout(searchTimer.current);
@@ -176,8 +235,7 @@ export default function EntityDocumentLinks({
     setBusy(true);
     const generation = targetGeneration.current;
     try {
-      const targetLabel = targetType.charAt(0).toUpperCase() + targetType.slice(1);
-      await removeDocumentLink(link._id, link._revision, `Removed from ${targetLabel}`);
+      await removeDocumentLink(link._id, link._revision, `Removed from ${targetTypeLabel(targetType)}`);
       if (generation !== targetGeneration.current) return;
       setLinks((current) => current.filter((item) => item._id !== link._id));
       toast.success("Document unlinked");
@@ -190,6 +248,9 @@ export default function EntityDocumentLinks({
       if (generation === targetGeneration.current) setBusy(false);
     }
   };
+
+  const inputClass = "h-9 rounded-md border border-input bg-background px-3 text-sm";
+  const fieldId = (name: string) => `${targetType}-document-${name}`;
 
   return (
     <div className="space-y-3">
@@ -207,15 +268,19 @@ export default function EntityDocumentLinks({
         <p className="text-sm text-muted-foreground">No linked Documents yet.</p>
       ) : links.map((link) => {
         const name = documentName(link.document, link.document_id);
+        const details = correspondenceDetails(link.document);
         return (
-          <div key={link._id} className="flex items-center gap-2 rounded-md border p-2 text-sm">
-            <Link to={`/documentviewer/${link.document_id}`} className="flex min-w-0 flex-1 items-center gap-2 hover:underline">
+          <div key={link._id} data-testid="linked-document" className="flex items-center gap-2 rounded-md border p-2 text-sm">
+            <Link to={`/documentviewer/${link.document_id}`}
+              className="flex min-w-0 flex-1 items-center gap-2 hover:underline">
               <FileText className="h-4 w-4 shrink-0" />
-              <span className="truncate">{name}</span>
-              <span className="text-xs text-muted-foreground">{link.relationship_role}</span>
-              {documentMetadata(link.document) && (
-                <span className="text-xs text-muted-foreground">{documentMetadata(link.document)}</span>
-              )}
+              <span className="min-w-0">
+                <span className="block truncate">{name}</span>
+                {details && <span className="block truncate text-xs text-muted-foreground">{details}</span>}
+              </span>
+              <span className="ml-auto shrink-0 text-xs text-muted-foreground">
+                {roleLabels.get(link.relationship_role) || relationshipRoleLabel(link.relationship_role)}
+              </span>
             </Link>
             {canManage && !frozen && link.source !== "legacy_read_through" && (
               <Button type="button" variant="ghost" size="sm" aria-label={`Unlink ${name}`}
@@ -233,26 +298,65 @@ export default function EntityDocumentLinks({
         <p className="text-xs text-muted-foreground">You have view-only access to document links.</p>
       ) : (
         <div className="space-y-2 border-t pt-3">
-          <div className="flex gap-2">
-            <label className="sr-only" htmlFor={`${targetType}-document-search`}>Search Documents</label>
-            <input id={`${targetType}-document-search`}
-              className="h-9 flex-1 rounded-md border border-input bg-background px-3 text-sm"
-              value={query} onChange={(event) => setQuery(event.target.value)} />
-            <Button type="button" variant="outline" size="sm" disabled={busy} onClick={searchNow}>Search</Button>
-          </div>
-          <label className="flex items-center gap-2 text-xs" htmlFor={`${targetType}-document-role`}>
+          <label className="flex items-center gap-2 text-xs" htmlFor={fieldId("role")}>
             Relationship role
-            <select id={`${targetType}-document-role`}
+            <select id={fieldId("role")}
               className="h-9 rounded-md border border-input bg-background px-2 text-sm"
               value={role} onChange={(event) => setRole(event.target.value)}>
               {roles.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
             </select>
           </label>
+          <div className="flex gap-2">
+            <label className="sr-only" htmlFor={fieldId("search")}>Search Documents</label>
+            <input id={fieldId("search")} className={`${inputClass} flex-1`}
+              placeholder={correspondenceOnly ? "Letter number, subject or party" : "Search Documents"}
+              value={query} onChange={(event) => setQuery(event.target.value)} />
+            <Button type="button" variant="outline" size="sm" disabled={busy} onClick={searchNow}>Search</Button>
+          </div>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+            <label className="flex flex-col gap-1 text-xs" htmlFor={fieldId("direction")}>
+              Direction
+              <select id={fieldId("direction")} className={inputClass} value={direction}
+                onChange={(event) => setDirection(event.target.value as Direction)}>
+                <option value="">{correspondenceOnly ? "Incoming or outgoing" : "Any type"}</option>
+                <option value="incoming">Incoming</option>
+                <option value="outgoing">Outgoing</option>
+                {!correspondenceOnly && <option value="contract">Contract</option>}
+              </select>
+            </label>
+            <label className="flex flex-col gap-1 text-xs" htmlFor={fieldId("letter-no")}>
+              Letter number
+              <input id={fieldId("letter-no")} className={inputClass} value={letterNo}
+                onChange={(event) => setLetterNo(event.target.value)} />
+            </label>
+            <label className="flex flex-col gap-1 text-xs" htmlFor={fieldId("subject")}>
+              Subject
+              <input id={fieldId("subject")} className={inputClass} value={subject}
+                onChange={(event) => setSubject(event.target.value)} />
+            </label>
+            <label className="flex flex-col gap-1 text-xs" htmlFor={fieldId("date-from")}>
+              Date from
+              <input id={fieldId("date-from")} type="date" className={inputClass} value={dateFrom}
+                onChange={(event) => setDateFrom(event.target.value)} />
+            </label>
+            <label className="flex flex-col gap-1 text-xs" htmlFor={fieldId("date-to")}>
+              Date to
+              <input id={fieldId("date-to")} type="date" className={inputClass} value={dateTo}
+                onChange={(event) => setDateTo(event.target.value)} />
+            </label>
+          </div>
+          {correspondenceOnly && (
+            <p className="text-xs text-muted-foreground">
+              Only incoming and outgoing correspondence can be linked under this role.
+            </p>
+          )}
           {results.map((document) => {
             const name = documentName(document, document._id);
+            const details = correspondenceDetails(document);
             const alreadyLinked = linkedDocumentIds.has(document._id);
             return (
-              <div key={document._id} className="flex items-center justify-between gap-2 rounded-md border p-2 text-sm">
+              <div key={document._id} data-testid="document-search-result"
+                className="flex items-center justify-between gap-2 rounded-md border p-2 text-sm">
                 <label className="flex items-center gap-2">
                   <input type="checkbox" aria-label={`Select ${name}`} disabled={alreadyLinked || busy}
                     checked={selected.has(document._id)} onChange={(event) => setSelected((current) => {
@@ -262,9 +366,7 @@ export default function EntityDocumentLinks({
                     })} />
                   <span>
                     <span className="block">{name}</span>
-                    {documentMetadata(document) && (
-                      <span className="block text-xs text-muted-foreground">{documentMetadata(document)}</span>
-                    )}
+                    {details && <span className="block text-xs text-muted-foreground">{details}</span>}
                   </span>
                 </label>
                 <div className="flex items-center gap-2">

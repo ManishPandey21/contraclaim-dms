@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Download, FileCheck2, Gavel, History, Loader2, LockKeyhole, PlusCircle, Upload } from "lucide-react";
 import { toast } from "sonner";
 import EntityDocumentLinks from "@/components/document-links/EntityDocumentLinks";
@@ -114,10 +114,25 @@ interface Props {
   milestones: MilestoneDTO[];
   onChanged: () => Promise<void> | void;
   onBaselineStatusChange?: (frozen: boolean) => void;
+  /** Deep-linked evidence section to highlight and scroll to. */
+  focusSubmissionId?: string | null;
+  focusDeterminationId?: string | null;
 }
 
-const KeyDateRevisionWorkflow: React.FC<Props> = ({ projectId, milestones, onChanged, onBaselineStatusChange }) => {
+const KeyDateRevisionWorkflow: React.FC<Props> = ({
+  projectId, milestones, onChanged, onBaselineStatusChange, focusSubmissionId, focusDeterminationId,
+}) => {
   const [workflow, setWorkflow] = useState<KeyDateWorkflowSummaryDTO | null>(null);
+  const focusedSectionRef = useRef<HTMLElement | null>(null);
+  const focusKey = focusSubmissionId ? `submission-evidence-${focusSubmissionId}`
+    : focusDeterminationId ? `determination-evidence-${focusDeterminationId}` : null;
+  const focusFound = Boolean(workflow && focusKey && (
+    workflow.submissions.some((row) => row.id === focusSubmissionId)
+    || workflow.determinations.some((row) => row.id === focusDeterminationId)
+  ));
+  useEffect(() => {
+    if (focusFound) focusedSectionRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+  }, [focusFound]);
   const [busy, setBusy] = useState(false);
   const [submissionOpen, setSubmissionOpen] = useState(false);
   const [editingSubmission, setEditingSubmission] = useState<EOTSubmissionRevisionDTO | null>(null);
@@ -524,7 +539,10 @@ const KeyDateRevisionWorkflow: React.FC<Props> = ({ projectId, milestones, onCha
           </Table>
           <div className="space-y-5 border-t pt-4">
             {workflow.submissions.map((submission) => (
-              <section key={`submission-evidence-${submission.id}`} className="space-y-2 rounded-md border p-4">
+              <section key={`submission-evidence-${submission.id}`} id={`submission-evidence-${submission.id}`}
+                ref={submission.id === focusSubmissionId ? focusedSectionRef : undefined}
+                data-focused={submission.id === focusSubmissionId ? "true" : undefined}
+                className={`space-y-2 rounded-md border p-4 ${submission.id === focusSubmissionId ? "ring-2 ring-primary" : ""}`}>
                 <div>
                   <h4 className="font-semibold">{submission.revision_label} evidence</h4>
                   <p className="text-xs text-muted-foreground">Documents remain attached to this exact Contractor submission.</p>
@@ -542,7 +560,10 @@ const KeyDateRevisionWorkflow: React.FC<Props> = ({ projectId, milestones, onCha
               </section>
             ))}
             {workflow.determinations.map((determination) => (
-              <section key={`determination-evidence-${determination.id}`} className="space-y-2 rounded-md border p-4">
+              <section key={`determination-evidence-${determination.id}`} id={`determination-evidence-${determination.id}`}
+                ref={determination.id === focusDeterminationId ? focusedSectionRef : undefined}
+                data-focused={determination.id === focusDeterminationId ? "true" : undefined}
+                className={`space-y-2 rounded-md border p-4 ${determination.id === focusDeterminationId ? "ring-2 ring-primary" : ""}`}>
                 <div>
                   <h4 className="font-semibold">{determination.determination_reference || "EOT determination"} evidence</h4>
                   <p className="text-xs text-muted-foreground">Documents remain attached to this exact Engineer/Employer determination.</p>

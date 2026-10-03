@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 from ..models.processing_state import ProcessingState
+from .source_text import select_body_text
 
 #: The terminal verdicts AGAINST the latest run. These are the only states that
 #: deny consumption.
@@ -94,13 +95,40 @@ KNOWN_STATES = (
 #: Retained for callers that still import it; equal to the adverse set.
 BLOCKED_STATES = ADVERSE_STATES
 
-#: Fields that carry document body text, in precedence order.
+#: The ``processing_error.source`` of a ``human_review_required`` verdict that
+#: contract extraction placed because pages of the contract could not be read.
+#: Only such a hold may be lifted, and only by a later extraction of the same
+#: contract that settles every page; no other writer may overwrite it.
+CONTRACT_EXTRACTION_HOLD = "contract_extraction"
+
+
+def held_by_contract_extraction(document: Optional[Mapping[str, Any]]) -> bool:
+    """Is this document held out of consumption by its own contract extraction?"""
+    if not document:
+        return False
+    if str(document.get("processing_status") or "") != ProcessingState.HUMAN_REVIEW_REQUIRED.value:
+        return False
+    error = document.get("processing_error")
+    return isinstance(error, Mapping) and error.get("source") == CONTRACT_EXTRACTION_HOLD
+
+
+#: Fields that carry document body text.
 #:
 #: `summary` is included. It is *derived from* the extracted text by the same
 #: pipeline pass, so withholding `ocrText` while serving `summary` withholds
 #: nothing - an adversarial review found exactly that bypass in three consumers,
 #: including two this policy had supposedly already fixed.
+#:
+#: Precedence is NOT this tuple's order: it is decided by source authority in
+#: `services/source_text.select_body_text` - body, then native/OCR source
+#: text, then the LLM's Item 25 only as a fallback, then summary; the
+#: extraction report is never a body. The old order put the LLM's retyped
+#: `full_text` ahead of the source `ocrText` it was retyped from.
 _TEXT_FIELDS = ("body", "full_text", "ocrText", "summary")
+
+#: Provenance a model-object caller must carry through `_as_mapping`, or the
+#: source-authority rule falls back to classifying `ocrText` by its shape.
+_TEXT_PROVENANCE_FIELDS = ("ocr_text_kind", "full_text_source")
 
 #: Derived fields that must be withheld alongside the body text.
 _DERIVED_FIELDS = ("summary",)
@@ -178,11 +206,7 @@ def authoritative_text(document: Optional[Mapping[str, Any]]) -> str:
     if not is_consumable(document):
         return ""
 
-    for field in _TEXT_FIELDS:
-        value = (document or {}).get(field)
-        if value:
-            return str(value)
-    return ""
+    return select_body_text(document)
 
 
 async def has_consumable_supporter(db: Any, norm_code: str) -> bool:
@@ -242,21 +266,34 @@ async def has_consumable_supporter(db: Any, norm_code: str) -> bool:
     return False
 
 
+def authoritative_fact_text(document: Optional[Mapping[str, Any]]) -> str:
+    """Text a consumer may present as factual/source evidence for a document.
+
+    The source body only: human body, native/OCR text, then the LLM's Item 25
+    as a fallback. NEVER the summary - a caller that has nothing else may fall
+    back to :func:`authoritative_summary` itself, after its own source fields
+    (a chunk row's ``text``, for one), so the summary can never outrank any
+    source text the record carries. Empty when the document may not be
+    consumed.
+    """
+    if not is_consumable(document):
+        return ""
+    return select_body_text(document, include_summary=False)
+
+
 def authoritative_summary(document: Optional[Mapping[str, Any]]) -> str:
     """The document summary, or empty when the document may not be consumed.
 
-    A separate accessor because callers legitimately want the summary *instead
-    of* the body - a short citation snippet, a planning hint. They must not get
-    it for a blocked document: the summary is generated from the same extracted
-    text and leaks the same unverified content in condensed form.
+    A separate accessor because callers legitimately want the summary as
+    context - a planning hint, a navigation label. They must not get it for a
+    blocked document: the summary is generated from the same extracted text
+    and leaks the same unverified content in condensed form.
 
-    Note for callers: prefer
-
-        authoritative_summary(doc) or authoritative_text(doc)
-
-    over ``doc.get("summary") or authoritative_text(doc)``. The latter
-    short-circuits on a truthy summary and never evaluates the guard at all,
-    which is how this bypass survived its first fix.
+    It is LLM-derived context, never fact. A slot that presents text as
+    factual/source evidence reads :func:`authoritative_fact_text`, which ranks
+    the document's own body first; putting the summary ahead of the body there
+    cited the model's paraphrase as the letter
+    (``tests/test_correspondence_fact_vs_summary.py`` guards the shape).
     """
     if not is_consumable(document):
         return ""
@@ -588,6 +625,7 @@ def _as_mapping(document: Any) -> Optional[Mapping[str, Any]]:
             "duplicate_status",
             "lifecycle_state",
             *_TEXT_FIELDS,
+            *_TEXT_PROVENANCE_FIELDS,
         )
     }
 
@@ -595,6 +633,11 @@ def _as_mapping(document: Any) -> Optional[Mapping[str, Any]]:
 def consumable_text(document: Any) -> str:
     """authoritative_text for callers holding a model object rather than a dict."""
     return authoritative_text(_as_mapping(document))
+
+
+def consumable_fact_text(document: Any) -> str:
+    """authoritative_fact_text for callers holding a model object."""
+    return authoritative_fact_text(_as_mapping(document))
 
 
 def consumable_summary(document: Any) -> str:

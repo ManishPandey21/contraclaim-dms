@@ -26,6 +26,11 @@ const MOCKED_SUITES = [
   "**/contract-workflows.spec.ts",
   "**/contract-master.spec.ts",
   "**/security-terms-acceptance.spec.ts",
+  "**/correspondence-linking.spec.ts",
+  "**/hindrance-register.spec.ts",
+  "**/cl3a-cross-register-scope.spec.ts",
+  "**/cl3b-programme-chronology.spec.ts",
+  "**/cl4a-core-active-scope.spec.ts",
 ];
 
 export default defineConfig({

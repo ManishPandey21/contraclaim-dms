@@ -231,6 +231,48 @@ name before calling `user_has_permission` - that re-creates the second hop
 (R-A9B: it let `billing.plan.manage` reach `dms.admin`).
 `test_permission_alias_contract.py` holds the matrix over every shared alias.
 
+## The authorised scope must bind the record you then load (Contract Master v1)
+
+Authorising against a scope *the caller names* and then loading a record *by id
+alone* is an IDOR: the gate answers "may this user act in X?" and the load acts on
+whatever the id points at. The Contract Master reconciliation routes
+(`/contract-master/reconciliation/candidates/{id}/claim|adjudicate|promote`) did
+exactly this until the policy-scope fix; a manager of X could claim, adjudicate and
+promote a candidate of Y.
+
+- The organisation passed to the service is the one the route authorised, and the
+  service loads - and updates - with it:
+  `scoped_candidate_filter(candidate_id, organization_id)` in
+  `services/contract_migration_reconciliation.py`. Never load by id and compare the
+  organisation afterwards, and never take the organisation from the body or the row.
+- A record in another organisation is **404, identical to a missing one**
+  (`CandidateNotFound`, "reconciliation candidate not found"), not a 403 that
+  confirms it exists.
+- Derived authority tokens are minted only by their helper:
+  `AuthorizedContractScope` comes from `authorize_contract_scope(...)`, which runs
+  `PolicyService.authorize` and then proves the (organisation, project) pair.
+  `AuthorizedContractScope.for_tests` is test-only and a static guard
+  (`tests/test_contract_master_evidence_scope.py`) fails on any production use.
+- Contract evidence search is project-specific: it needs the CL-4A selection
+  (`Depends(active_scope)`), the body's project must BE the selected one, and nothing
+  is inferred from the body or the account (400 `selection_required` / 403
+  `context_forbidden`, superadmin included); never `str(None)`.
+- **Organisation membership is not authority over another project's record.**
+  `PolicyService.authorize(..., project_id=None)` is true for any member of the
+  organisation, a Project Admin included, so a record with a project must be
+  authorised at that project. For reconciliation candidates the trustworthy anchor is
+  `candidate.project_id` or the canonical Document's own `project_id` (they must
+  agree, and the project must be in the organisation);
+  `session_evidence` and `scope_hint` are evidence, never authority
+  (`services/contract_candidate_authority.py`). No anchor, or an act that creates
+  organisation-wide authority, needs `ScopeService.has_organization_wide_scope` -
+  the same rule `is_client_scope_allowed` uses for unassigned project reach.
+- **A permission cannot express organisation tier here.** Project Admin's seeded role
+  carries `dms.admin`, which `PolicyService.has_permission` accepts for every
+  `dms.*` check, and legacy aliases give `dms.contract.catalogue.browse` to Project
+  User - so `ORG_TIER_ONLY_PERMISSIONS` does not survive to the policy. Measured
+  against the real seeds on 2026-09-24.
+
 ## Removed / forbidden
 
 These were removed in the Week-1 consolidation and are blocked by a pre-commit hook

@@ -193,6 +193,11 @@ Production is `contraclaim.com` (SSH alias `contraclaim`), checkout
   `get_*_controller` factories, so a broken factory ships past 1000+ passing tests.
   `git add -A` once swept an unreviewed orphaned-`return` factory into production and took
   `GET /api/organizations` down. Diff files you did not personally edit before staging.
+  Same class, 2026-09-23: `contract_master_api.get_policy` imported the nonexistent
+  `core.policy` inside the function, so every `/api/contract-master/*` route raised `ModuleNotFoundError` while its
+  only route suite (which overrides `get_policy`) stayed green. Every router needs one test
+  that resolves its real dependencies; `test_every_package_import_names_a_module_that_exists`
+  now guards deferred imports.
 - **Backend async tests each get their own `asyncio.run` loop** (`backend/conftest.py`, no
   pytest-asyncio). Module-level Motor globals must be cleared between tests or a test passes
   alone and fails in the suite with "Event loop is closed". Async *fixtures* are unsupported —
@@ -212,6 +217,14 @@ Production is `contraclaim.com` (SSH alias `contraclaim`), checkout
   deleted; FalkorDB keeps `GRAPH.*` use only (letter/clause references).
 - Contract retrieval is **clause-first**: structured `contract_clauses` records + the
   `contract_clauses` Qdrant namespace. Legacy `document_vectors`/token chunks are fallback only.
+- Contract Master projection becomes CURRENT **only** through the contract-worker's
+  reprojection runtime (`services/contract_reprojection_runtime.py`, flag
+  `START_CONTRACT_REPROJECTION_WORKERS` on `contract-worker` only): claim `(instrument,
+  revision)`, rebuild, then rows + CURRENT in one fenced transaction. Never call
+  `mark_projection_current()` from production code or set `projection_status` by hand to
+  make a gate green — that is exactly what hid the 2026-09-25 staging NO-GO. An applicable
+  instrument that is not projection-current answers evidence `409 projection_not_current`,
+  never `valid_empty`.
 - Arbitration LangGraph engine is code-complete but intentionally **not primary**:
   `ARBITRATION_ENGINE_DEFAULT=arbitration_v2`, `ROLLOUT_MODE=off`,
   `PRODUCTION_ACCEPTED=false`. Flipping to primary requires the acceptance receipt chain.

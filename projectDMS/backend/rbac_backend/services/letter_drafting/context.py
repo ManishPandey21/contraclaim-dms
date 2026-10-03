@@ -28,7 +28,7 @@ def condense_text(value: Optional[str], width: int = 600) -> Optional[str]:
     return shorten(normalized, width=width, placeholder="...")
 
 
-from ..publication_policy import consumable_summary, consumable_text
+from ..publication_policy import consumable_fact_text, consumable_summary
 
 
 class DraftContextBuilder:
@@ -186,12 +186,15 @@ class DraftContextBuilder:
             # its unverified OCR text injected straight into the drafting
             # prompt. `subject` stays ungated - it is filing metadata, not
             # extracted body text, so a blocked document remains identifiable.
+            # A fact slot: the document's own text, never the LLM summary
+            # ahead of it. The summary travels beside it as context.
             text = condense_text(
-                consumable_summary(doc)
-                or consumable_text(doc)
+                consumable_fact_text(doc)
+                or consumable_summary(doc)
                 or getattr(doc, "subject", None),
                 1000,
             )
+            summary = condense_text(consumable_summary(doc), 600)
             sources.append(
                 SourceEvidence(
                     source_id=f"document:{doc_id}",
@@ -206,6 +209,7 @@ class DraftContextBuilder:
                     metadata={
                         "letter_no": getattr(doc, "letterNo", None),
                         "upload_type": getattr(doc, "uploadType", None),
+                        **({"summary": summary} if summary else {}),
                     },
                 )
             )

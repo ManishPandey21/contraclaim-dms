@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from ..utils.bson_presentation import present_bson
 
 
 class DocumentRelationshipInput(BaseModel):
@@ -50,9 +53,26 @@ class DocumentRelationship(BaseModel):
 
 
 class DocumentRelationshipView(DocumentRelationship):
+    """The presentation of one relationship, with its resolved Document embedded.
+
+    This is the one presentation boundary for relationship responses. Every view
+    is built from raw Mongo rows - the stored link and the canonical Document -
+    and production Documents are ObjectId-keyed, so the input is normalised to
+    JSON-safe values here, on the way in, rather than at each call site. Without
+    it the view validated and then failed at response serialization, after the
+    write had already committed.
+    """
+
     document: Optional[Dict[str, Any]] = None
     target_label: Optional[str] = None
     target_route: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _present_raw_mongo_values(cls, data: Any) -> Any:
+        if isinstance(data, Mapping):
+            return present_bson(data)
+        return data
 
 
 class DocumentRelationshipListResponse(BaseModel):

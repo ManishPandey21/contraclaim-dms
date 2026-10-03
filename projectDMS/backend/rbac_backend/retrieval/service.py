@@ -30,9 +30,10 @@ from .models import (
     SearchResult,
     SearchStrategy,
 )
+from .authority import user_metadata_filters
 from .reranker import RerankerService
 from .source_metadata import normalize_source_payload
-from .vector_client import VectorClient
+from .vector_client import IS_NULL, VectorClient
 
 # One publication decision, shared with the drafting/planning/arbitration
 # consumers, so a stale vector cannot be served for a document whose current
@@ -40,6 +41,9 @@ from .vector_client import VectorClient
 from ..services.publication_policy import is_consumable
 
 logger = logging.getLogger(__name__)
+
+#: `_project_constraint` result: the actor may not see this scope's rows.
+_NO_ROWS = object()
 
 
 def _restrict_to_grounding(
@@ -87,6 +91,12 @@ class RetrievalService:
         strategy = request.strategy
         start_total = time.perf_counter()
 
+        project_scope = await self._project_constraint(request, current_user)
+        if project_scope is _NO_ROWS:
+            return SearchResponse(
+                results=[], strategy_used=strategy, backend_used=request.backend
+            )
+
         query_vectors: List[List[float]] = []
         queries: List[str] = []
         retrievals: List[Tuple[str, List[Dict[str, Any]]]] = []
@@ -129,14 +139,17 @@ class RetrievalService:
                         # collection below stays as compatibility fallback.
                         results = await self._search_contract_clauses(q_vector, request)
                     if not results:
+                        # Authority LAST, after caller metadata stripped of
+                        # authority keys: `metadata.org_id` once replaced the
+                        # authorised org here (see `retrieval/authority.py`).
                         results = await self.vector_client.search(
                             q_vector,
                             filters={
-                                "org_id": request.filters.org_id,
-                                "project_id": request.filters.project_id,
                                 "document_id": request.filters.document_id,
                                 "tags": request.filters.tags,
-                                **(request.filters.metadata or {}),
+                                **user_metadata_filters(request.filters.metadata),
+                                "org_id": request.filters.org_id,
+                                "project_id": project_scope,
                             },
                             limit=request.limit,
                         )
@@ -510,18 +523,54 @@ class RetrievalService:
             else SearchBackend.MONGO
         )
 
+    async def _project_constraint(
+        self, request: SearchRequest, current_user: Optional[CurrentUser]
+    ) -> Any:
+        """The project condition every store filters on, decided server-side.
+
+        A project id is the project scope, unchanged. ``None`` asks for the
+        ORGANISATION-LEVEL documents (no project) and becomes ``IS_NULL`` - but
+        only for an actor with organisation-wide scope in that organisation
+        (``ScopeService.has_organization_wide_scope``, the rule the rest of the
+        codebase uses). Anyone else, or no actor at all, gets ``_NO_ROWS``:
+        the gate answered membership, and row visibility is decided here, so a
+        caller-sent ``null`` cannot reach organisation-level letters and can
+        never reach "every project" (a plain ``None`` would drop the project
+        condition from every filter builder).
+        """
+        project_id = request.filters.project_id
+        if project_id is not None:
+            return project_id
+        if self._is_contract_request(request):
+            # Contract retrieval (clauses, graph expansion) has no
+            # organisation-level semantics; refuse rather than guess.
+            raise ValueError("contract retrieval requires a project scope")
+        if current_user is None or getattr(self, "db", None) is None:
+            return _NO_ROWS
+        from ..services.scope_service import ScopeService
+
+        if await ScopeService(self.db).has_organization_wide_scope(
+            current_user, organization_id=request.filters.org_id
+        ):
+            return IS_NULL
+        return _NO_ROWS
+
     async def _search_mongo(self, request: SearchRequest) -> List[Dict[str, Any]]:
+        # `search` has already refused a null project the actor may not use;
+        # a null that reaches here is organisation-level scope.
+        project: Any = request.filters.project_id
+        if project is None:
+            project = {"$in": [None, ""]}
         query = {
             "org_id": request.filters.org_id,
-            "project_id": request.filters.project_id,
+            "project_id": project,
         }
         if request.filters.document_id:
             query["document_id"] = request.filters.document_id
         if request.filters.tags:
             query["tags"] = {"$in": request.filters.tags}
-        if request.filters.metadata:
-            for key, value in request.filters.metadata.items():
-                query[f"metadata.{key}"] = value
+        for key, value in user_metadata_filters(request.filters.metadata).items():
+            query[f"metadata.{key}"] = value
         cursor = self.db.chunks.find(query).limit(request.limit * 3)
         docs = [doc async for doc in cursor]
         scored: List[Dict[str, Any]] = []
@@ -603,10 +652,14 @@ class RetrievalService:
             ]
         if request.filters.tags:
             query["tags"] = {"$all": request.filters.tags}
-        for key, value in (request.filters.metadata or {}).items():
+        for key, value in user_metadata_filters(request.filters.metadata).items():
             if key in {"uploadType", "document_type"}:
                 continue
             query[key] = value
+        # Authority last; the metadata above can no longer name these keys,
+        # and this keeps a future edit to the loop from reopening the override.
+        query["organization_id"] = request.filters.org_id
+        query["project_id"] = request.filters.project_id
 
         cursor = self.db.document_vectors.find(query).limit(
             self._contract_mongo_scan_limit(request)

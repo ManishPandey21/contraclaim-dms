@@ -265,3 +265,35 @@ describe("LetterSummaryPage summary metadata editing", () => {
     expect(mockToast.success).toHaveBeenCalledWith("Letter summary metadata saved");
   });
 });
+
+describe("LetterSummaryPage extraction quality", () => {
+  it("warns when the stored metadata is a partial extraction", async () => {
+    currentDoc = {
+      ...makeDocument(),
+      metadata_quality: { status: "partial_extraction", degraded: true },
+    };
+    renderAt();
+
+    await screen.findByText(currentDoc.subject);
+    expect(
+      screen.getByRole("status", { name: "" })
+    ).toHaveTextContent(/only partially extracted/i);
+  });
+
+  it("shows no warning for a complete extraction", async () => {
+    currentDoc = { ...makeDocument(), metadata_quality: { status: "complete" } };
+    renderAt();
+
+    await screen.findByText(currentDoc.subject);
+    expect(screen.queryByText(/only partially extracted/i)).not.toBeInTheDocument();
+  });
+
+  it("labels key reply points as AI advice, not letter content", async () => {
+    const user = userEvent.setup();
+    renderAt();
+
+    await screen.findByText(currentDoc.subject);
+    await user.click(screen.getByRole("tab", { name: /key reply points/i }));
+    expect(screen.getAllByText(/not statements made in this letter/i).length).toBeGreaterThan(0);
+  });
+});

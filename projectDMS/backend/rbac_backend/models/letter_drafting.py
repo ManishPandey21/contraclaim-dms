@@ -111,6 +111,10 @@ DraftNextAction = Literal[
     "cancelled",
 ]
 ReplyMatrixStatus = Literal["supported", "needs_confirmation", "unsupported"]
+#: Where a reply-matrix point came from. ``ai_reply_consideration`` is advice
+#: generated at extraction time ("key reply points"); it is not something the
+#: incoming letter says and carries no source evidence of its own (DI-N6).
+ReplyPointOrigin = Literal["incoming_letter", "ai_reply_consideration", "user_direction"]
 RevisionAction = Literal[
     "make_firmer",
     "make_more_polite",
@@ -353,7 +357,11 @@ class IncomingLetterAnalysis(BaseModel):
     main_request: Optional[str] = None
     # Points the AI metadata pipeline extracted as "to be addressed while
     # responding" on the incoming document — seeds the reply matrix.
+    #: AI reply advice generated at extraction time; not letter content.
     key_reply_points: List[str] = Field(default_factory=list)
+    #: ``metadata_quality.status`` of the stored incoming document, when known.
+    #: ``partial_extraction`` means its stored metadata may be incomplete.
+    source_metadata_quality: Optional[str] = None
     # Reference letters linked on the incoming document's stored metadata.
     linked_references: List[str] = Field(default_factory=list)
     clauses_cited: List[str] = Field(default_factory=list)
@@ -410,6 +418,8 @@ class ReplyMatrixRow(BaseModel):
     clause_refs: List[str] = Field(default_factory=list)
     risk_note: Optional[str] = None
     status: ReplyMatrixStatus = "needs_confirmation"
+    #: None on rows stored before the origin was recorded.
+    point_origin: Optional[ReplyPointOrigin] = None
 
 
 class SourceIntegritySummary(BaseModel):

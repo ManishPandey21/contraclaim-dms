@@ -30,6 +30,7 @@ from rbac_backend.services.bank_guarantee_service import (
 )
 from rbac_backend.services.document_relationship_service import DocumentRelationshipService
 from rbac_backend.routers.bank_guarantees import get_policy, router as bank_guarantee_router
+from rbac_backend.tests.selection_fixtures import pin_selection
 from rbac_backend.tests.integration.test_claim_document_relationships_mongo import (
     InjectedFailure,
     _AllowPolicy,
@@ -66,6 +67,8 @@ def _bg_app(database: Any, policy: Any) -> FastAPI:
     app.dependency_overrides[get_db] = lambda: database
     app.dependency_overrides[get_current_user] = _actor
     app.dependency_overrides[get_policy] = lambda: policy
+    # The selection the browser sends for the seeded BG: its own project.
+    pin_selection(app, database, "org-1", "project-1")
     return app
 
 

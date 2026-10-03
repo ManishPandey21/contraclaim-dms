@@ -38,6 +38,14 @@ from ..utils.notification_service import NotificationService
 from ..models.notification import NotificationContext, NotificationType
 from ..utils.pipeline_logging import configure_pipeline_logger
 from .reference_sync_service import ReferenceSyncService, ReferenceSyncError
+from .metadata_integrity import (
+    assess_metadata_quality,
+    keep_stored_values_on_degraded_source,
+    merge_degraded_snapshot,
+    merge_human_edited_fields,
+    metadata_for_publication,
+    protect_human_edited_fields,
+)
 from .duplicate_detection_service import (
     CLASSIFICATION_DUPLICATE,
     DuplicateDetectionService,
@@ -45,6 +53,7 @@ from .duplicate_detection_service import (
 from .falkor_graph_service import normalize_letter_code
 from .evidence_graph_service import EvidenceGraphService
 from .reference_parser import parse_legacy_reference_text
+from .source_text import full_text_updates
 
 logger = logging.getLogger(__name__)
 configure_pipeline_logger(logger)
@@ -124,7 +133,12 @@ class DocumentService:
         extracted_payload: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
         """Merge extracted fields with the current canonical authority axes."""
-        from .publication_policy import is_consumable, resolve_canonical_document
+        from .publication_policy import (
+            _TEXT_FIELDS,
+            _TEXT_PROVENANCE_FIELDS,
+            is_consumable,
+            resolve_canonical_document,
+        )
 
         db = await self._get_db()
         current = await resolve_canonical_document(db, document_id)
@@ -141,6 +155,13 @@ class DocumentService:
         # from the full current Mongo row rather than the earlier Pydantic dump.
         payload = dict(current)
         payload.update(extracted_payload)
+        # The body and its provenance come from the row as written, too: the
+        # extracted payload starts from a Document dumped BEFORE processing,
+        # whose stale `ocrText`/markers would otherwise hide the source text
+        # this run stored and hand Item 25 to evidence derivation.
+        for field in (*_TEXT_FIELDS, *_TEXT_PROVENANCE_FIELDS):
+            if field in current:
+                payload[field] = current[field]
         for field in ("processing_status", "duplicate_status", "lifecycle_state"):
             if field in current:
                 payload[field] = current[field]
@@ -1155,6 +1176,39 @@ class DocumentService:
 
         document_id = str(job["document_id"])
         now = datetime.utcnow()
+        from .contract_source import is_contract_source
+        from .publication_policy import resolve_canonical_document
+
+        entry_document = await resolve_canonical_document(db, document_id)
+        if await is_contract_source(db, document_id, entry_document):
+            # Refused before anything is written: marking the document
+            # `processing` would make the projection builder see an ingest in
+            # flight, and a retried refusal would walk the job to dead-letter
+            # while holding it there. Closed once, terminally; the contract
+            # reindex is the path that re-reads a contract, promoted or not.
+            message = (
+                "Document is a contract source (a contract upload, or governed by a "
+                "Contract Master instrument); reprocess it through the contract reindex"
+            )
+            logger.warning("Document %s: %s", document_id, message)
+            await db.document_processing_jobs.update_one(
+                {"_id": job_id},
+                {
+                    "$set": {
+                        "status": "dead_lettered",
+                        "stage": "skipped_governed_contract",
+                        "error": {"message": message, "timestamp": now, "terminal": True},
+                        "updated_at": now,
+                    }
+                },
+            )
+            return False
+        # What this run is about to overwrite, so a run that turns out to be
+        # on a contract source can hand the document back as it found it.
+        await db.document_processing_jobs.update_one(
+            {"_id": job_id},
+            {"$set": {"previous_processing_status": (entry_document or {}).get("processing_status")}},
+        )
         await db.documents.update_one(
             {"_id": self._validate_document_id(document_id)},
             {
@@ -1167,6 +1221,7 @@ class DocumentService:
             },
         )
         heartbeat_task = asyncio.create_task(self._heartbeat_processing_job(job_id))
+        failure: Optional[str] = None
         try:
             ok = await self.process_document_async(
                 document_id=document_id,
@@ -1179,11 +1234,22 @@ class DocumentService:
         except Exception as exc:
             logger.exception("Document processing job failed document_id=%s job_id=%s", document_id, job_id)
             ok = False
-            await self._mark_processing_failure(job, str(exc))
+            failure = str(exc)
         finally:
             heartbeat_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await heartbeat_task
+
+        # Every status this run writes from here on - completed, retrying,
+        # failed, resumed, stored-only, human review - is decided by a check
+        # made minutes ago. The document may have become a contract source
+        # since (promotion, an upload-type edit); its status then belongs to
+        # the contract writers, and a contract extraction hold must not be
+        # lifted by this run's verdict.
+        if await self._release_run_for_contract_source(db, job_id, document_id):
+            return False
+        if failure is not None:
+            await self._mark_processing_failure(job, failure)
 
         if ok:
             # A successful processor return may still carry deferred, failed,
@@ -1286,6 +1352,115 @@ class DocumentService:
             await self._mark_processing_failure(latest, failure_message)
         return False
 
+    async def _release_run_for_contract_source(
+        self, db: Any, job_id: str, document_id: str
+    ) -> bool:
+        """End a run whose document became a contract source while it worked.
+
+        Asks ``services.contract_source`` with the document read now. If it is
+        a contract source, the job is closed the way the entry check closes it
+        and the document gets back the status this run found - only while it
+        still carries this run's own ``processing`` marker, so a status a
+        contract writer set meanwhile (an extraction hold, a reindex) is never
+        overwritten. Returns whether the run was ended. Raises like the entry
+        check if governance cannot be read: nothing is written then.
+        """
+        from .contract_source import is_contract_source
+        from .publication_policy import resolve_canonical_document
+
+        document = await resolve_canonical_document(db, document_id)
+        if not await is_contract_source(db, document_id, document):
+            return False
+        now = datetime.utcnow()
+        job = await db.document_processing_jobs.find_one({"_id": job_id}) or {}
+        await db.document_processing_jobs.update_one(
+            {"_id": job_id},
+            {
+                "$set": {
+                    "status": "dead_lettered",
+                    "stage": "skipped_governed_contract",
+                    "error": {
+                        "message": (
+                            "Document became a contract source (a contract upload, or "
+                            "governed by a Contract Master instrument) during processing; "
+                            "reprocess it through the contract reindex"
+                        ),
+                        "timestamp": now,
+                        "terminal": True,
+                    },
+                    "updated_at": now,
+                }
+            },
+        )
+        if document is not None:
+            # "processing" is what the contract projection reads as an ingest
+            # in flight; left behind by a dead-lettered run it would block the
+            # projection with nothing ever clearing it.
+            await db.documents.update_one(
+                {
+                    "_id": document["_id"],
+                    "processing_status": "processing",
+                    "processing_job_id": job_id,
+                },
+                {
+                    "$set": {
+                        "processing_status": job.get("previous_processing_status") or "queued",
+                        "updatedAt": now,
+                    }
+                },
+            )
+        logger.warning(
+            "[document_pipeline] Document %s became a contract source during "
+            "processing; the run was closed without writing its verdict",
+            document_id,
+        )
+        return True
+
+    async def _verdict_withheld_for_contract_source(
+        self,
+        db: Any,
+        document_id: str,
+        doc_oid: Any,
+        job_id: Optional[str],
+        run_marker_job_id: Optional[str],
+        status_before_run: Optional[str],
+    ) -> bool:
+        """Should process_document_async write no verdict onto this document?
+
+        Asked immediately before its terminal document write: the run's entry
+        check is minutes old, and a document that became a contract source
+        since (promotion, an upload-type edit) has its status and error owned
+        by the contract writers - a contract extraction hold must survive.
+        True means nothing was written; on the no-job path the document gets
+        back the status this run found, only while it still carries this
+        run's "processing" marker. A job's own end-of-run step
+        (``_release_run_for_contract_source``) does that for the job path.
+        """
+        from .contract_source import is_contract_source
+        from .publication_policy import resolve_canonical_document
+
+        document = await resolve_canonical_document(db, document_id)
+        if not await is_contract_source(db, document_id, document):
+            return False
+        logger.warning(
+            "[document_pipeline] Document %s became a contract source during "
+            "processing; its verdict was not written",
+            document_id,
+        )
+        if not job_id:
+            marker = {"_id": doc_oid, "processing_status": "processing"}
+            marker["processing_job_id"] = run_marker_job_id
+            await db.documents.update_one(
+                marker,
+                {
+                    "$set": {
+                        "processing_status": status_before_run or "completed",
+                        "updatedAt": datetime.utcnow(),
+                    }
+                },
+            )
+        return True
+
     async def _schedule_page_resume(
         self, job_id: str, document_id: str, checkpoint: Dict[str, Any]
     ) -> None:
@@ -1353,6 +1528,20 @@ class DocumentService:
                 {"_id": self._validate_document_id(document_id)}
             )
             if not raw_doc:
+                return
+            from .contract_source import is_contract_source
+
+            if await is_contract_source(db, str(document_id), raw_doc):
+                # Asked again here, not trusted from the run's start: the
+                # document became a contract (or was promoted) while this run
+                # extracted, and its points and clause rows are the contract
+                # writers' - never this pipeline's to purge. An unreadable
+                # instrument collection raises, and the except below then
+                # leaves everything in place too.
+                logger.warning(
+                    "[document_pipeline] Not purging %s: it is a contract source",
+                    document_id,
+                )
                 return
             await self._delete_qdrant_vectors(raw_doc, str(document_id))
             await db.document_vectors.delete_many({"document_id": str(document_id)})
@@ -1426,6 +1615,10 @@ class DocumentService:
         """Terminal, non-success state: automated recovery cannot finish this."""
         db = await self._get_db()
         now = datetime.utcnow()
+        if await self._release_run_for_contract_source(db, job_id, document_id):
+            # Its status and evidence belong to the contract writers: not
+            # marked for review, not purged.
+            return
         remaining = list(checkpoint.get("remaining_page_numbers") or [])
         await db.document_processing_jobs.update_one(
             {"_id": job_id},
@@ -1642,6 +1835,16 @@ class DocumentService:
         except Exception:
             logger.debug("Failed to emit processing failure audit for %s", job.get("document_id"), exc_info=True)
 
+    async def is_governed_contract(self, document_id: str) -> bool:
+        """True for a contract source: a contract upload, or a document a
+        Contract Master instrument names (``services.contract_source``)."""
+        from .contract_source import is_contract_source
+        from .publication_policy import resolve_canonical_document
+
+        db = await self._get_db()
+        document = await resolve_canonical_document(db, document_id)
+        return await is_contract_source(db, document_id, document)
+
     async def process_document_async(
         self,
         document_id: str,
@@ -1663,17 +1866,51 @@ class DocumentService:
         metadata = None
         metadata_source: Optional[str] = None
         metadata_references: List[Dict[str, Any]] = []
+        references_authoritative = False
+        # The extraction result as published to graph/evidence stores: the
+        # parsed metadata with human-edited and kept stored values put back.
+        publication_metadata: Any = None
         derived_publication_authorized = False
         initial_publication_source: Optional[Dict[str, Any]] = None
         initial_publication_authorized = False
         db: Optional[Database] = None
         doc_oid: Optional[ObjectId] = None
+        status_before_run: Optional[str] = None
+        run_marker_job_id: Optional[str] = None
         try:
             db = await self._get_db()
             doc_oid = self._validate_document_id(document_id)
             stored = await db.documents.find_one({"_id": doc_oid})
             if not stored:
                 logger.warning("Document %s not found for processing", document_id)
+                return False
+            from .publication_policy import held_by_contract_extraction
+
+            if held_by_contract_extraction(stored):
+                # The general pipeline would write `processing` and then a
+                # settled state over the hold, making a contract with unread
+                # pages consumable. Only the contract path's own extraction may
+                # lift that hold. Nothing is written here, deliberately.
+                logger.warning(
+                    "Document %s is held by contract extraction; the general "
+                    "pipeline will not reprocess it",
+                    document_id,
+                )
+                return False
+            from .contract_source import is_contract_source
+
+            if await is_contract_source(db, document_id, stored):
+                # The general pipeline would replace the clause rows evidence
+                # reads with token chunks - while the instrument stays CURRENT
+                # (evidence answering empty from a "current" projection), or,
+                # before promotion, deleting the clause points and their page
+                # provenance. A contract is re-read by the contract reindex,
+                # whose completion re-opens the reprojection.
+                logger.warning(
+                    "Document %s is a contract source; the general pipeline will "
+                    "not reprocess it",
+                    document_id,
+                )
                 return False
             if stored.get("lifecycle_state") == "deleted":
                 now = datetime.utcnow()
@@ -1733,12 +1970,17 @@ class DocumentService:
                 upload,
             )
             now = datetime.utcnow()
+            # Handed back if the document turns out to be a contract source by
+            # the time this run would write its verdict (no-job path only; a
+            # job hands back what it recorded at claim).
+            status_before_run = getattr(document, "processing_status", None)
+            run_marker_job_id = job_id or getattr(document, "processing_job_id", None)
             await db.documents.update_one(
                 {"_id": doc_oid},
                 {
                     "$set": {
                         "processing_status": "processing",
-                        "processing_job_id": job_id or getattr(document, "processing_job_id", None),
+                        "processing_job_id": run_marker_job_id,
                         "updatedAt": now,
                     }
                 },
@@ -1883,6 +2125,27 @@ class DocumentService:
                     update_fields["processing_metadata"]["partial_failures"] = partial_failures
 
             if metadata:
+                metadata_quality = assess_metadata_quality(
+                    metadata,
+                    metadata_source=metadata_source,
+                    partial_failures=getattr(result, "partial_failures", None),
+                )
+                references_authoritative = metadata_quality["references_authoritative"]
+                update_fields["metadata_quality"] = metadata_quality
+                if metadata_quality["degraded"]:
+                    logger.warning(
+                        "[document_pipeline] Metadata for %s is degraded (%s); "
+                        "existing reference links are kept unless references were authoritative",
+                        document_id,
+                        ", ".join(metadata_quality["warnings"]),
+                    )
+                    processing_metadata = update_fields.get("processing_metadata")
+                    if isinstance(processing_metadata, dict):
+                        processing_metadata.setdefault("partial_failures", {})["metadata_parse"] = {
+                            "status": metadata_quality["status"],
+                            "warnings": metadata_quality["warnings"],
+                            "field_failures": metadata_quality["field_failures"],
+                        }
                 if getattr(metadata, "summary", None):
                     update_fields["summary"] = metadata.summary
                 if getattr(metadata, "keywords", None):
@@ -1894,10 +2157,14 @@ class DocumentService:
                     normalized_refs = self._normalize_metadata_references(
                         metadata_reference_values
                     )
-                    update_fields["reference"] = normalized_refs
-                    metadata_references = normalized_refs
-                if getattr(metadata, "full_content", None):
-                    update_fields["full_text"] = metadata.full_content
+                    # A degraded extraction's references are "unknown", not
+                    # "cites nothing": the stored list and links stay as-is.
+                    if references_authoritative:
+                        update_fields["reference"] = normalized_refs
+                        metadata_references = normalized_refs
+                # Source text when it was complete, the report's Item 25 only
+                # as the fallback - one rule shared with DatabaseService.
+                update_fields.update(full_text_updates(metadata))
                 if getattr(metadata, "subject", None):
                     update_fields["subject"] = metadata.subject
                 if getattr(metadata, "letter_no", None):
@@ -1913,6 +2180,28 @@ class DocumentService:
                     except Exception:
                         logger.debug("Unable to parse metadata date for %s", document_id)
                 update_fields.update(extracted_metadata_updates(metadata))
+                # Re-read: OCR and LLM work takes minutes, and a person may have
+                # edited the document meanwhile. Protection must see that edit.
+                current_stored = await db.documents.find_one({"_id": doc_oid}) or stored
+                kept_keys: List[str] = []
+                merge_degraded_snapshot(update_fields, current_stored, metadata_quality)
+                kept_human_fields = protect_human_edited_fields(
+                    update_fields, current_stored, dropped_keys=kept_keys
+                )
+                kept_on_degraded = keep_stored_values_on_degraded_source(
+                    update_fields, current_stored, metadata_quality, dropped_keys=kept_keys
+                )
+                publication_metadata = metadata_for_publication(
+                    metadata, current_stored, kept_keys
+                )
+                if kept_human_fields or kept_on_degraded:
+                    logger.info(
+                        "[document_pipeline] Kept stored values for %s: human-edited=%s, "
+                        "degraded-source=%s",
+                        document_id,
+                        ", ".join(kept_human_fields) or "-",
+                        ", ".join(kept_on_degraded) or "-",
+                    )
 
                 graph_document_payload = document.model_dump(by_alias=True)
                 graph_document_payload.update(update_fields)
@@ -1937,7 +2226,7 @@ class DocumentService:
                         await self._publish_graph_and_evidence_from_current(
                             document_id=document_id,
                             extracted_payload=graph_document_payload,
-                            metadata=metadata,
+                            metadata=publication_metadata or metadata,
                             metadata_source=metadata_source,
                             upload_type=upload,
                         )
@@ -1980,6 +2269,10 @@ class DocumentService:
                         else:
                             update_fields.pop(field, None)
 
+            if await self._verdict_withheld_for_contract_source(
+                db, document_id, doc_oid, job_id, run_marker_job_id, status_before_run
+            ):
+                return False
             await db.documents.update_one({"_id": doc_oid}, {"$set": update_fields})
             logger.info("[document_pipeline] Database record updated for %s", document_id)
             if job_id:
@@ -2034,7 +2327,7 @@ class DocumentService:
                         await self._publish_graph_and_evidence_from_current(
                             document_id=document_id,
                             extracted_payload=graph_document_payload,
-                            metadata=metadata,
+                            metadata=publication_metadata or metadata,
                             metadata_source=metadata_source,
                             upload_type=upload,
                         )
@@ -2047,13 +2340,22 @@ class DocumentService:
                             {"_id": job_id},
                             {"$set": {"stage": "syncing_references", "updated_at": datetime.utcnow()}},
                         )
-                    await self.reference_sync_service.sync_bidirectional(
-                        document_id=document_id,
-                        references=metadata_references,
-                        source="parser",
-                        default_link_type="indirect",
-                        clear_existing=True,
-                    )
+                    if references_authoritative:
+                        # Bucket-replace: only an authoritative result may
+                        # remove or clear existing parser links.
+                        await self.reference_sync_service.sync_bidirectional(
+                            document_id=document_id,
+                            references=metadata_references,
+                            source="parser",
+                            default_link_type="indirect",
+                            clear_existing=True,
+                        )
+                    else:
+                        logger.warning(
+                            "[document_pipeline] Reference extraction for %s was not "
+                            "authoritative; existing reference links kept",
+                            document_id,
+                        )
                 except ReferenceSyncError as exc:
                     raise DocumentProcessingError(
                         "Metadata was saved, but the extracted references could not be linked. "
@@ -2076,7 +2378,7 @@ class DocumentService:
                     )
                 await self._sync_current_document_to_falkor(
                     document_id,
-                    metadata=metadata,
+                    metadata=publication_metadata or metadata,
                     upload_type=upload,
                     raise_on_error=True,
                 )
@@ -2088,7 +2390,18 @@ class DocumentService:
                 "timestamp": datetime.utcnow(),
             }
             try:
-                if db is not None and doc_oid is not None:
+                if (
+                    db is not None
+                    and doc_oid is not None
+                    and not await self._verdict_withheld_for_contract_source(
+                        db,
+                        document_id,
+                        doc_oid,
+                        job_id,
+                        run_marker_job_id,
+                        status_before_run,
+                    )
+                ):
                     await db.documents.update_one(
                         {"_id": doc_oid},
                         {
@@ -2833,6 +3146,14 @@ class DocumentService:
             except Exception:
                 pass
 
+            db = await self._get_db()
+            existing: Dict[str, Any] = {}
+            for candidate in candidates:
+                found = await db.documents.find_one({"_id": candidate})
+                if found:
+                    existing = found
+                    break
+
             now = datetime.utcnow()
             set_payload: Dict[str, Any] = {
                 **update_fields,
@@ -2840,12 +3161,15 @@ class DocumentService:
                 "updated_at": now,
                 "summary_metadata_updated_at": now,
                 "manual_summary_metadata_override": True,
+                # Per-field marker: reprocessing keeps exactly these fields.
+                "human_edited_fields": merge_human_edited_fields(
+                    existing, update_fields.keys()
+                ),
             }
             if updated_by:
                 set_payload["updated_by"] = updated_by
                 set_payload["summary_metadata_updated_by"] = updated_by
 
-            db = await self._get_db()
             result = await db.documents.update_one(
                 {"_id": {"$in": candidates}, "lifecycle_state": {"$ne": "deleted"}},
                 {"$set": set_payload, "$inc": {"_revision": 1}},
@@ -2912,6 +3236,8 @@ class DocumentService:
                     and project_id
                 ):
                     for adapter in EntityAdapterRegistry().adapters():
+                        if not adapter.legacy_blocks_document_deletion:
+                            continue
                         count += len(
                             await adapter.legacy_targets_for_document(
                                 db,
@@ -3304,3 +3630,28 @@ class DocumentService:
 def create_document_service(db: Database) -> DocumentService:
     """Create document service instance"""
     return DocumentService(db)
+
+
+async def governed_by_contract_master(db: Any, document_id: Any, stored_id: Any = None) -> bool:
+    """Whether a Contract Master instrument names this document.
+
+    Such a document's derived rows and vectors have one writer: the
+    contract-worker's reprojection (fed by the contract ingest). Any other
+    pipeline that rewrites them leaves a CURRENT projection describing rows that
+    no longer exist.
+    """
+    from .contract_document_store import CONTRACT_DOCUMENTS_COLLECTION
+    from .publication_policy import _collection
+
+    ids = sorted({str(value) for value in (document_id, stored_id) if value is not None})
+    if not ids:
+        return False
+    instruments = _collection(db, CONTRACT_DOCUMENTS_COLLECTION)
+    if instruments is None:
+        # Unknown is not "ungoverned": answering False here would hand a
+        # governed contract to a pipeline that rewrites its evidence.
+        raise RuntimeError("Contract Master instruments are not readable; governance unknown")
+    return (
+        await instruments.find_one({"document_id": {"$in": ids}}, {"_id": 1})
+        is not None
+    )

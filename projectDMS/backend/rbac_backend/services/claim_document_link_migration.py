@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .entity_adapter_registry import ClaimEntityAdapter
+from .entity_adapter_registry import ClaimEntityAdapter, is_correspondence_document
 from .publication_policy import (
     document_id_candidates,
     is_consumable,
@@ -57,6 +57,10 @@ LETTER_CLASSIFICATIONS = CLASSIFICATIONS + (
     "letter_register_record",
     "ambiguous_identity",
     "missing_identity",
+    # Resolves to a canonical Document that is not incoming/outgoing
+    # correspondence: the correspondence role would be refused (CL-1), so the
+    # dry run must not report it as valid.
+    "non_correspondence",
 )
 
 # A letter-sourced Document is correspondence, which is a first-class role in
@@ -251,6 +255,9 @@ async def classify_legacy_claim_letter_links(db: Any) -> dict[str, Any]:
                 ):
                     findings.append("cross_project")
                     classification = "cross_project"
+                elif not is_correspondence_document(document):
+                    findings.append("non_correspondence")
+                    classification = "non_correspondence"
                 else:
                     findings.append("valid")
                     classification = "valid"

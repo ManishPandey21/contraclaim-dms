@@ -695,6 +695,14 @@ def _foreign_scoped_rows(db: _Database) -> list[dict[str, Any]]:
     return foreign
 
 
+def _selected(db: _Database, user: Any) -> Any:
+    """The navbar selection the chronology routes take since CL-3B: the authorized
+    chronology's own project, so these G31 assertions stay exactly what they were."""
+    from rbac_backend.core.tenant_context import ActiveScope
+
+    return ActiveScope(db, user, "org-A", "proj-A")
+
+
 async def _create_through_route(
     db: _Database,
     chronology_id: str,
@@ -711,6 +719,7 @@ async def _create_through_route(
         db=db,
         current_user=user,
         policy=policy,
+        selection=_selected(db, user),
     )
     return created.model_dump(by_alias=True)
 
@@ -727,6 +736,7 @@ async def _verify_through_route(
         db=db,
         current_user=user,
         policy=policy,
+        selection=_selected(db, user),
     )
     return verified.model_dump(by_alias=True)
 

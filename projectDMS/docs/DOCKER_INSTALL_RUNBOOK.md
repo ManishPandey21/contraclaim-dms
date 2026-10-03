@@ -243,9 +243,30 @@ Must end with `0 failure(s)`. Common fails and fixes:
 
 ```bash
 docker compose $COMPOSE_FILES pull
-docker compose $COMPOSE_FILES up -d --build
+RELEASE="$(git rev-parse HEAD)"; MANIFESTS=/opt/contraclaim-release-manifests; mkdir -p "$MANIFESTS"
+PROJECT="$(docker compose $COMPOSE_FILES config --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["name"])')"
+RELEASE_SHA="$(git rev-parse HEAD)" docker compose $COMPOSE_FILES build backend contract-worker document-worker client
+# scan the exact images just built (CI policy; certify reads the JSON reports):
+for svc in backend contract-worker document-worker client; do
+  trivy image --format json --severity HIGH,CRITICAL --ignore-unfixed \
+    --output "$MANIFESTS/scan-$svc-$RELEASE.json" "$PROJECT-$svc:latest"
+done
+python3 scripts/release_manifest.py certify --out "$MANIFESTS/certified-$RELEASE.json" --scan backend="$MANIFESTS/scan-backend-$RELEASE.json" --scan contract-worker="$MANIFESTS/scan-contract-worker-$RELEASE.json" --scan document-worker="$MANIFESTS/scan-document-worker-$RELEASE.json" --scan client="$MANIFESTS/scan-client-$RELEASE.json" \
+  --image backend="$PROJECT-backend:latest" --image contract-worker="$PROJECT-contract-worker:latest" \
+  --image document-worker="$PROJECT-document-worker:latest" --image client="$PROJECT-client:latest"
+python3 scripts/release_manifest.py target --scope FULL --out "$MANIFESTS/$RELEASE.json" \
+  --certified "$MANIFESTS/certified-$RELEASE.json" \
+  --image backend="$PROJECT-backend:latest" --image contract-worker="$PROJECT-contract-worker:latest" \
+  --image document-worker="$PROJECT-document-worker:latest" --image client="$PROJECT-client:latest"
+docker compose $COMPOSE_FILES up -d --no-build
 docker compose $COMPOSE_FILES ps      # all services healthy?
 ```
+
+A fresh install is a `FULL` release: its images are built with `RELEASE_SHA`,
+certified, and recorded in a release manifest of exact image ids
+(`scripts/release_manifest.py`) before they start. Keep `$MANIFESTS` outside the
+checkout, writable only by operators (production uses
+`/opt/contraclaim-dms/release-manifests`; see the deployment guide, 5a-7a).
 
 Services that come up: `backend` (API, no queue workers), `contract-worker`
 (OCR/ingest + leader-locked scheduler), `client`, `qdrant`, `falkordb`,
@@ -287,8 +308,14 @@ unbuffered large uploads.
 
 ## 11. Post-deploy verification
 
+Every app service is verified against the release manifest written in section 9
+(same shell: `$MANIFESTS` and `$RELEASE`). Only a fully green run writes the
+receipt that lets `promote` make it the approved state:
+
 ```bash
-bash scripts/post_deploy_verify.sh          # or:
+DEPLOY_SCOPE=FULL RELEASE_MANIFEST="$MANIFESTS/$RELEASE.json" bash scripts/post_deploy_verify.sh \
+  && python3 scripts/release_manifest.py promote --manifest "$MANIFESTS/$RELEASE.json" \
+       --current "$MANIFESTS/current.json"
 python3 scripts/smoke_health.py
 
 # from your laptop:
@@ -383,20 +410,44 @@ Log rotation is already configured (json-file, 10 MB × 5) in the compose files.
 cd /opt/contraclaim
 git fetch --tags
 git checkout <new-tag>
+RELEASE="$(git rev-parse HEAD)"; MANIFESTS=/opt/contraclaim-release-manifests; mkdir -p "$MANIFESTS"
+PROJECT="$(docker compose $COMPOSE_FILES config --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["name"])')"
+RELEASE_SHA="$(git rev-parse HEAD)" docker compose $COMPOSE_FILES build backend contract-worker document-worker client
+# scan the exact images just built (CI policy; certify reads the JSON reports):
+for svc in backend contract-worker document-worker client; do
+  trivy image --format json --severity HIGH,CRITICAL --ignore-unfixed \
+    --output "$MANIFESTS/scan-$svc-$RELEASE.json" "$PROJECT-$svc:latest"
+done
+python3 scripts/release_manifest.py certify --out "$MANIFESTS/certified-$RELEASE.json" --scan backend="$MANIFESTS/scan-backend-$RELEASE.json" --scan contract-worker="$MANIFESTS/scan-contract-worker-$RELEASE.json" --scan document-worker="$MANIFESTS/scan-document-worker-$RELEASE.json" --scan client="$MANIFESTS/scan-client-$RELEASE.json" \
+  --image backend="$PROJECT-backend:latest" --image contract-worker="$PROJECT-contract-worker:latest" \
+  --image document-worker="$PROJECT-document-worker:latest" --image client="$PROJECT-client:latest"
+python3 scripts/release_manifest.py target --scope FULL --out "$MANIFESTS/$RELEASE.json" \
+  --certified "$MANIFESTS/certified-$RELEASE.json" \
+  --image backend="$PROJECT-backend:latest" --image contract-worker="$PROJECT-contract-worker:latest" \
+  --image document-worker="$PROJECT-document-worker:latest" --image client="$PROJECT-client:latest"
 docker compose $COMPOSE_FILES run --rm backend \
   python -m rbac_backend.scripts.migrate_database --fail-on-warning
-docker compose $COMPOSE_FILES up -d --build
-bash scripts/post_deploy_verify.sh
+docker compose $COMPOSE_FILES up -d --no-build
+DEPLOY_SCOPE=FULL RELEASE_MANIFEST="$MANIFESTS/$RELEASE.json" bash scripts/post_deploy_verify.sh \
+  && python3 scripts/release_manifest.py promote --manifest "$MANIFESTS/$RELEASE.json" \
+       --current "$MANIFESTS/current.json"
 ```
+
+This rebuilds every service, so it is a `FULL` deploy. To replace only the client
+or only the backend services, follow the scoped flow in
+`CONTRACLAIM_DOCKER_DEPLOYMENT_UPDATE_GUIDE.md` (sections 5a-7a).
 
 **Rollback:**
 
 ```bash
 git checkout <previous-tag>
-docker compose $COMPOSE_FILES up -d --build
+# then the same build / certify / manifest / start / verify / promote as above
 ```
 
 Because images are rebuilt from a pinned commit, rollback is deterministic.
+`RELEASE_SHA` bakes that commit into every app image (OPERATIONS 7a); without it
+the image says `unknown` and certification refuses it. A rollback is a `FULL`
+release like any other.
 Take a fresh Mongo dump before any deploy that includes a migration.
 
 ---

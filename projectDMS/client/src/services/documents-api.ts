@@ -11,6 +11,11 @@ export interface DocumentItem {
   name?: string;
   filename?: string;
   subject?: string | null;
+  /** Correspondence metadata (Document model: letterNo, date, from, to). */
+  letterNo?: string | null;
+  date?: string | null;
+  from?: string | null;
+  to?: string | null;
   upload_id?: string;
   organization_id?: string;
   project_id?: string | null;

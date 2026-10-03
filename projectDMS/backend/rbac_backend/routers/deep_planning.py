@@ -421,7 +421,9 @@ async def extract_document_content(db, document_ids: List[str]) -> str:
                     max_ocr_length = 4000
                     if len(ocr_text) > max_ocr_length:
                         ocr_text = ocr_text[:max_ocr_length] + "... [truncated]"
-                    doc_info += f"OCR Text: {ocr_text}\n"
+                    # Source text when the document has it, else the LLM's
+                    # Item 25 fallback - so it is not labelled "OCR".
+                    doc_info += f"Document Text: {ocr_text}\n"
 
                 # Add references if available
                 if document.get('references'):

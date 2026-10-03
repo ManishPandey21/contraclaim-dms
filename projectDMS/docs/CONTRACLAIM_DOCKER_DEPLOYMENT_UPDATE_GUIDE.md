@@ -137,7 +137,44 @@ Record the deployed commit hash:
 git rev-parse HEAD
 ```
 
+This commit is the release identity. Every image build below passes it as
+`RELEASE_SHA`, which bakes it into the image (the `org.opencontainers.image.revision`
+label; backend images also carry it as the process's `RELEASE_SHA`).
+
 If `git pull --ff-only` fails, stop and inspect the cause. Do not use force reset or overwrite local files unless the impact is reviewed and approved.
+
+### 5a. Declare the deployment scope
+
+Every deploy declares exactly one scope. It decides which app services this deploy
+replaces; `scripts/post_deploy_verify.sh` holds **every** app service to an exact image
+either way (owner decision 2026-10-02 - strict, service-scoped):
+
+| Scope | Deploys | Every other app service must |
+|---|---|---|
+| `FULL` | `backend`, `contract-worker`, `document-worker`, `client` | (none) |
+| `BACKEND_ONLY` | `backend`, `contract-worker`, `document-worker` | run its approved image; `./client` unchanged since it was built |
+| `CLIENT_ONLY` | `client` | run its approved image; `./backend` unchanged since it was built |
+| `UNCHANGED` | nothing (maintenance, cutovers, restarts) | run its approved image |
+
+There is no other value and no bypass. If the release changed `./backend`, it is not
+`CLIENT_ONLY` - the verifier fails a scope that leaves changed code undeployed. The first
+deploy under this contract is `FULL` (the running images predate their identity labels).
+
+```bash
+DEPLOY_SCOPE=CLIENT_ONLY            # or FULL, or BACKEND_ONLY
+MANIFESTS=/opt/contraclaim-dms/release-manifests
+RELEASE="$(git rev-parse HEAD)"
+# compose names images <project>-<service>; production's project is `contraclaim`
+PROJECT="$(docker compose -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml config --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["name"])')"
+mkdir -p "$MANIFESTS"
+```
+
+`$MANIFESTS/current.json` is the approved manifest: the exact images production runs now.
+Only `release_manifest.py promote` writes it, and only from a manifest whose verification
+receipt (written by a fully green `post_deploy_verify.sh`) matches its bytes - a hand-edited
+`current.json` fails every later check. Keep the directory outside the checkout and writable
+only by the release operators. A manifest records each image's local image id
+(`docker image inspect .Id`, which a retag keeps), not a registry digest.
 
 ## 6. Rebuild the Required Docker Images
 
@@ -146,62 +183,186 @@ If `git pull --ff-only` fails, stop and inspect the cause. Do not use force rese
 > start with `--no-build`; a rebuild yields a different, uncertified image:
 >
 > ```bash
-> docker tag <certified-backend-id> contraclaim-backend:latest
-> docker tag <certified-backend-id> contraclaim-contract-worker:latest
-> docker tag <certified-backend-id> contraclaim-document-worker:latest
-> docker tag <certified-client-id>  contraclaim-client:latest
+> docker tag <certified-backend-id> "$PROJECT-backend:latest"
+> docker tag <certified-backend-id> "$PROJECT-contract-worker:latest"
+> docker tag <certified-backend-id> "$PROJECT-document-worker:latest"
+> docker tag <certified-client-id>  "$PROJECT-client:latest"
 > docker compose --env-file .env -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml \
 >   up -d --no-deps --no-build backend contract-worker document-worker client
 > ```
 >
-> The build path below is for ad-hoc fixes outside a certified release. Wherever it lists
-> `backend contract-worker`, **add `document-worker`**: it runs the same backend image and
-> owns document extraction. Leaving it out is how R-A9G reached `post_deploy_verify.sh` with
-> no extraction owner.
+> Retag only the services your scope deploys. **A certified image must carry the certified
+> commit as its identity:** certify it from `docker build --pull --no-cache --build-arg
+> RELEASE_SHA=<certified commit> ...`; a retag keeps the label. The release programme hands
+> over the certification record (`certified-<commit>.json`, from `release_manifest.py
+> certify`, with the Trivy reports of those exact image ids); put both in `$MANIFESTS`. The certified commit must be the
+> deployed checkout's HEAD. **Images certified before this contract are labelled `unknown`:
+> certification refuses them.** Re-certify (rebuild with the argument, rescan) rather than
+> overriding the result.
+>
+> The build path below is for ad-hoc fixes outside a certified release.
 
-Rebuild only the services affected by the release.
+Rebuild only the services your scope deploys.
 
-For a standard frontend and backend application update:
+`FULL`:
 
 ```bash
-docker compose --env-file .env \
+RELEASE_SHA="$(git rev-parse HEAD)" docker compose --env-file .env \
   -f docker-compose.prod.yml \
   -f docker-compose.mongo-replicaset.yml \
-  build backend contract-worker client
+  build backend contract-worker document-worker client
 ```
 
-For frontend-only changes:
+`CLIENT_ONLY`:
 
 ```bash
-docker compose --env-file .env \
+RELEASE_SHA="$(git rev-parse HEAD)" docker compose --env-file .env \
   -f docker-compose.prod.yml \
   -f docker-compose.mongo-replicaset.yml \
   build client
 ```
 
-For backend or worker-only changes:
+`BACKEND_ONLY`:
 
 ```bash
-docker compose --env-file .env \
+RELEASE_SHA="$(git rev-parse HEAD)" docker compose --env-file .env \
   -f docker-compose.prod.yml \
   -f docker-compose.mongo-replicaset.yml \
-  build backend contract-worker
+  build backend contract-worker document-worker
 ```
+
+`RELEASE_SHA` is read at **build** time only; `up` neither needs it nor can change it. An
+image built without it is labelled `unknown`, and the manifest step refuses it.
 
 If Docker Compose or infrastructure service definitions changed, review the diff first and include only the affected services.
 
+### 6a. Certify the images
+
+The manifest accepts only images certified for this commit, and a certification needs a scan
+of **that exact image id**. CI builds, scans and discards its own image of the commit, so its
+scan is no evidence for an image built here: scan the images you just built on this host with
+Trivy under the CI policy (HIGH/CRITICAL with a fix fails), as JSON. `certify` reads each
+report, refuses one of another image id or with a fixable HIGH/CRITICAL finding, and records
+the report's path and hash. Run Trivy against the host's Docker daemon (the default image
+source), so the report's `Metadata.ImageID` is the id `docker image inspect` gives; capture
+one such report on staging before the first certified production release. Scan and certify
+only the services your scope deploys:
+
+`FULL`:
+
+```bash
+for svc in backend contract-worker document-worker client; do
+  trivy image --format json --severity HIGH,CRITICAL --ignore-unfixed \
+    --output "$MANIFESTS/scan-$svc-$RELEASE.json" "$PROJECT-$svc:latest"
+done
+python3 scripts/release_manifest.py certify --out "$MANIFESTS/certified-$RELEASE.json" --scan backend="$MANIFESTS/scan-backend-$RELEASE.json" --scan contract-worker="$MANIFESTS/scan-contract-worker-$RELEASE.json" --scan document-worker="$MANIFESTS/scan-document-worker-$RELEASE.json" --scan client="$MANIFESTS/scan-client-$RELEASE.json" \
+  --image backend="$PROJECT-backend:latest" \
+  --image contract-worker="$PROJECT-contract-worker:latest" \
+  --image document-worker="$PROJECT-document-worker:latest" \
+  --image client="$PROJECT-client:latest"
+```
+
+`CLIENT_ONLY`:
+
+```bash
+for svc in client; do
+  trivy image --format json --severity HIGH,CRITICAL --ignore-unfixed \
+    --output "$MANIFESTS/scan-$svc-$RELEASE.json" "$PROJECT-$svc:latest"
+done
+python3 scripts/release_manifest.py certify --out "$MANIFESTS/certified-$RELEASE.json" --scan client="$MANIFESTS/scan-client-$RELEASE.json" \
+  --image client="$PROJECT-client:latest"
+```
+
+`BACKEND_ONLY`:
+
+```bash
+for svc in backend contract-worker document-worker; do
+  trivy image --format json --severity HIGH,CRITICAL --ignore-unfixed \
+    --output "$MANIFESTS/scan-$svc-$RELEASE.json" "$PROJECT-$svc:latest"
+done
+python3 scripts/release_manifest.py certify --out "$MANIFESTS/certified-$RELEASE.json" --scan backend="$MANIFESTS/scan-backend-$RELEASE.json" --scan contract-worker="$MANIFESTS/scan-contract-worker-$RELEASE.json" --scan document-worker="$MANIFESTS/scan-document-worker-$RELEASE.json" \
+  --image backend="$PROJECT-backend:latest" \
+  --image contract-worker="$PROJECT-contract-worker:latest" \
+  --image document-worker="$PROJECT-document-worker:latest"
+```
+
+### 6b. Write the release manifest
+
+Before restarting anything, record the exact images this deploy will run. Services the
+scope deploys come from the images just built or retagged (each must be labelled with
+`$RELEASE`); every other service is copied unchanged from the approved manifest.
+
+`FULL`:
+
+```bash
+python3 scripts/release_manifest.py target --scope FULL --out "$MANIFESTS/$RELEASE.json" \
+  --certified "$MANIFESTS/certified-$RELEASE.json" \
+  --image backend="$PROJECT-backend:latest" \
+  --image contract-worker="$PROJECT-contract-worker:latest" \
+  --image document-worker="$PROJECT-document-worker:latest" \
+  --image client="$PROJECT-client:latest"
+```
+
+`CLIENT_ONLY`:
+
+```bash
+python3 scripts/release_manifest.py target --scope CLIENT_ONLY --out "$MANIFESTS/$RELEASE.json" \
+  --certified "$MANIFESTS/certified-$RELEASE.json" \
+  --approved "$MANIFESTS/current.json" \
+  --image client="$PROJECT-client:latest"
+```
+
+`BACKEND_ONLY`:
+
+```bash
+python3 scripts/release_manifest.py target --scope BACKEND_ONLY --out "$MANIFESTS/$RELEASE.json" \
+  --certified "$MANIFESTS/certified-$RELEASE.json" \
+  --approved "$MANIFESTS/current.json" \
+  --image backend="$PROJECT-backend:latest" \
+  --image contract-worker="$PROJECT-contract-worker:latest" \
+  --image document-worker="$PROJECT-document-worker:latest"
+```
+
+The command refuses an image that is not the certified one, a dirty checkout (modified,
+untracked or ignored files the image would contain), an image built from another commit or
+labelled `unknown`, a service the scope does not deploy, and a scoped manifest without an
+approved manifest that verified green.
+
+### 6c. Preflight before any restart
+
+Still nothing has been restarted. The preflight is read-only and must pass first:
+
+```bash
+DEPLOY_SCOPE="$DEPLOY_SCOPE" RELEASE_MANIFEST="$MANIFESTS/$RELEASE.json" \
+  scripts/release_preflight.sh
+```
+
+It fails a `FULL` or `BACKEND_ONLY` deploy while a `document-worker-canary` is running
+that the release manifest does not declare. Such a canary is held to the
+`document-worker` image, which these scopes replace while no step here recreates the
+canary, so post-deploy verification could only fail once production had changed. Either
+stop the canary first - set `DOCUMENT_WORKER_CANARY_REPLICAS=0` in `.env` and run
+`docker compose --env-file .env -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml up -d --no-deps --no-build document-worker-canary`
+(0 replicas, as outside an authorised canary) - or declare it: build, scan and certify its image with the others, pass
+`--image document-worker-canary="$PROJECT-document-worker-canary:latest"` to `target`, and
+recreate it with the scope's services. There is no override. Under `CLIENT_ONLY` (and `UNCHANGED`) an undeclared canary
+must already run the approved `document-worker` image; the preflight refuses one on any
+other image, which is what a plain `up` of the canary builds.
+
 ## 7. Restart the Updated Containers
 
-Restart the rebuilt application containers without recreating dependencies:
+Recreate exactly the services your scope deploys, without recreating dependencies.
+
+`FULL`:
 
 ```bash
 docker compose --env-file .env \
   -f docker-compose.prod.yml \
   -f docker-compose.mongo-replicaset.yml \
-  up -d --no-deps backend contract-worker client
+  up -d --no-deps backend contract-worker document-worker client
 ```
 
-For frontend-only changes:
+`CLIENT_ONLY`:
 
 ```bash
 docker compose --env-file .env \
@@ -210,16 +371,71 @@ docker compose --env-file .env \
   up -d --no-deps client
 ```
 
-For backend or worker-only changes:
+`BACKEND_ONLY`:
 
 ```bash
 docker compose --env-file .env \
   -f docker-compose.prod.yml \
   -f docker-compose.mongo-replicaset.yml \
-  up -d --no-deps backend contract-worker
+  up -d --no-deps backend contract-worker document-worker
 ```
 
 Avoid recreating database or data services unless the release explicitly requires it and a verified backup exists.
+
+### 7a. Verify every service against the manifest
+
+`post_deploy_verify.sh` reads the scope and both manifests. A missing scope or manifest is
+a failure, not a skip.
+
+`FULL`:
+
+```bash
+DEPLOY_SCOPE=FULL RELEASE_MANIFEST="$MANIFESTS/$RELEASE.json" \
+  COMPOSE_FILES="-f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml" \
+  scripts/post_deploy_verify.sh
+```
+
+`CLIENT_ONLY`:
+
+```bash
+DEPLOY_SCOPE=CLIENT_ONLY RELEASE_MANIFEST="$MANIFESTS/$RELEASE.json" \
+  APPROVED_MANIFEST="$MANIFESTS/current.json" \
+  COMPOSE_FILES="-f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml" \
+  scripts/post_deploy_verify.sh
+```
+
+`BACKEND_ONLY`:
+
+```bash
+DEPLOY_SCOPE=BACKEND_ONLY RELEASE_MANIFEST="$MANIFESTS/$RELEASE.json" \
+  APPROVED_MANIFEST="$MANIFESTS/current.json" \
+  COMPOSE_FILES="-f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml" \
+  scripts/post_deploy_verify.sh
+```
+
+A fully green run writes a receipt next to the manifest (`$RELEASE.json.verified`). Then,
+and only then, make this release the approved state for the next deploy:
+
+```bash
+python3 scripts/release_manifest.py promote --manifest "$MANIFESTS/$RELEASE.json" \
+  --current "$MANIFESTS/current.json"
+```
+
+`promote` refuses a manifest without a receipt matching its bytes.
+
+**Maintenance with no app deploy** (a data-service cutover, a restart, a scheduled check) is
+`UNCHANGED`: every app service must still run exactly its approved image. Point it at
+`current.json`: `UNCHANGED` accepts any manifest that verified green, so naming an older one
+would verify an older state without making it the approved one.
+
+```bash
+DEPLOY_SCOPE=UNCHANGED RELEASE_MANIFEST="$MANIFESTS/current.json" \
+  COMPOSE_FILES="-f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml" \
+  scripts/post_deploy_verify.sh
+```
+
+A failure here means a service runs an image the release did not approve. Do not promote
+the manifest; fix the deployment (or roll back, section 13) and verify again.
 
 ## 8. Confirm Container Health
 
@@ -343,6 +559,8 @@ Deployment notes should include:
 ```text
 Repository: ManishPandey21/contraclaim-dms
 Deployed commit: <commit hash>
+Deployment scope: FULL / CLIENT_ONLY / BACKEND_ONLY
+Release manifest: release-manifests/<commit>.json (promoted to current.json: yes/no)
 Backup status: verified / not required, with reason
 Rebuilt services: backend, contract-worker, client, etc.
 Restarted services: backend, contract-worker, client, etc.
@@ -359,7 +577,10 @@ If the deployment fails and the issue cannot be fixed quickly:
 2. Confirm that the previous good commit is known.
 3. Confirm that no migration or data change prevents rollback.
 4. Checkout the previous good commit only after the data impact is reviewed.
-5. Rebuild and restart the same services using the steps above.
+5. Rebuild and restart the same services using the steps above. A rollback is a deploy like
+   any other: declare its scope, certify and write its manifest against `current.json`,
+   verify and promote it (sections 5a-7a). The previous release's manifest and
+   certification in `$MANIFESTS` name the images to return to.
 6. Recheck logs, readiness, and the public application.
 
 Do not restore a database backup unless the release changed data and rollback requires restoring data to a previous state.

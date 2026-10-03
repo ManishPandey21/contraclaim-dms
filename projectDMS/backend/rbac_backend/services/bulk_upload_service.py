@@ -203,11 +203,16 @@ class BulkUploadService:
         # Replace common problematic characters
         for col in df.select_dtypes(include=['object']).columns:
             if df[col].dtype == 'object':
-                df[col] = df[col].astype(str).str.replace('\xa0', ' ', regex=False)  # Replace NBSP with regular space
-                df[col] = df[col].str.replace('\ufffd', '', regex=False)  # Remove replacement characters
-                df[col] = df[col].str.replace('\x96', '-', regex=False)  # Replace en-dash
-                df[col] = df[col].str.replace('\x97', '--', regex=False)  # Replace em-dash
-                df[col] = df[col].str.strip()  # Remove leading/trailing whitespace
+                # Only cells that hold a value. `astype(str)` over a blank cell
+                # (NaN) produces the text "nan", which downstream reads as a
+                # real subject, sender, tag or folder path.
+                present = df[col].notna()
+                cleaned = df.loc[present, col].astype(str).str.replace('\xa0', ' ', regex=False)  # Replace NBSP with regular space
+                cleaned = cleaned.str.replace('\ufffd', '', regex=False)  # Remove replacement characters
+                cleaned = cleaned.str.replace('\x96', '-', regex=False)  # Replace en-dash
+                cleaned = cleaned.str.replace('\x97', '--', regex=False)  # Replace em-dash
+                cleaned = cleaned.str.strip()  # Remove leading/trailing whitespace
+                df.loc[present, col] = cleaned
 
         return df
 

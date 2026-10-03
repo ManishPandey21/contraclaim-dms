@@ -22,6 +22,7 @@ from ..retrieval.dependencies import (
     get_llm_generator,
     get_vector_client,
 )
+from ..retrieval.namespaces import UnsupportedVectorNamespace
 from ..retrieval.models import (
     ContractQARequest,
     ContractQAResponse,
@@ -93,22 +94,50 @@ async def get_policy_service(db=Depends(get_db)) -> PolicyService:
 
 
 def _require_scope_values(
-    org_id: Optional[str], project_id: Optional[str]
-) -> tuple[str, str]:
+    org_id: Optional[str],
+    project_id: Optional[str],
+    *,
+    allow_organization_level: bool = False,
+) -> tuple[str, Optional[str]]:
     """Reject blank/missing scope before it reaches the deny-by-default policy.
 
-    SearchFilters types ``org_id``/``project_id`` as required strings, but empty
-    strings would otherwise pass straight through scope evaluation and return
-    unfiltered (cross-tenant) results.
+    Empty strings would otherwise pass straight through scope evaluation and
+    return unfiltered (cross-tenant) results, so a blank organisation or a
+    blank/whitespace project is always a 400.
+
+    With ``allow_organization_level`` an explicit ``null`` project is accepted:
+    it asks for organisation-level documents only. The policy still checks
+    membership of the organisation, and ``RetrievalService`` decides whether
+    this actor may see organisation-level rows at all.
     """
     org = (org_id or "").strip()
+    if not org:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A non-empty organization and project scope is required",
+        )
+    if project_id is None and allow_organization_level:
+        return org, None
     project = (project_id or "").strip()
-    if not org or not project:
+    if not project:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="A non-empty organization and project scope is required",
         )
     return org, project
+
+
+def _refuse_org_level_contract(
+    request: SearchRequest, retrieval_service: RetrievalService
+) -> None:
+    """Contract retrieval has no organisation-level scope: a 400, not a 500."""
+    if request.filters.project_id is None and retrieval_service._is_contract_request(
+        request
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Contract retrieval requires a project scope",
+        )
 
 
 async def _authorize_scope(
@@ -118,6 +147,7 @@ async def _authorize_scope(
     *,
     permission: str = Permissions.DOCUMENT_VIEW,
     policy: Optional[PolicyService] = None,
+    allow_organization_level: bool = False,
 ) -> None:
     """Deny-by-default scope enforcement for the retrieval engine.
 
@@ -129,7 +159,9 @@ async def _authorize_scope(
     and tenant membership (``ScopeService.is_client_scope_allowed``) and emits an
     audit event, matching the documents router.
     """
-    org, project = _require_scope_values(org_id, project_id)
+    org, project = _require_scope_values(
+        org_id, project_id, allow_organization_level=allow_organization_level
+    )
     policy = policy or PolicyService()
     await policy.authorize(
         current_user,
@@ -154,7 +186,47 @@ async def create_ingestion_job(
         permission=Permissions.DOCUMENT_UPLOAD,
         policy=policy,
     )
-    job = await ingestion_service.create_job(payload)
+    # The payload scope is the caller's claim; the document must live in it and
+    # the caller must be allowed the document itself. Absent, foreign and
+    # forbidden all answer the same 404, so nothing about another tenant's
+    # documents - including whether one is a governed contract - is disclosed.
+    document = await ingestion_service.document_in_scope(
+        payload.document_id, payload.org_id, payload.project_id
+    )
+    if document is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Document not found"
+        )
+    try:
+        await policy.authorize_document(
+            current_user, Permissions.DOCUMENT_UPLOAD, document
+        )
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_403_FORBIDDEN:
+            # Same answer as absent or foreign: a refusal specific to this
+            # document must not reveal that it exists.
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Document not found"
+            ) from None
+        raise
+    # A contract source's evidence (a contract upload, or a document Contract
+    # Master governs) is rebuilt by the contract reindex and reprojection; this
+    # pipeline would prune it.
+    if await ingestion_service.is_governed_contract(payload.document_id):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "This document is a contract source (a contract upload, or governed "
+                "by a Contract Master instrument); reindex it through the contract "
+                "reindex, which rebuilds its evidence"
+            ),
+        )
+    try:
+        job = await ingestion_service.create_job(payload)
+    except UnsupportedVectorNamespace as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from None
     return job
 
 
@@ -182,8 +254,13 @@ async def search(
     policy: PolicyService = Depends(get_policy_service),
 ) -> SearchResponse:
     await _authorize_scope(
-        current_user, request.filters.org_id, request.filters.project_id, policy=policy
+        current_user,
+        request.filters.org_id,
+        request.filters.project_id,
+        policy=policy,
+        allow_organization_level=True,
     )
+    _refuse_org_level_contract(request, retrieval_service)
     return await retrieval_service.search(request, current_user)
 
 
@@ -195,8 +272,13 @@ async def rag(
     policy: PolicyService = Depends(get_policy_service),
 ) -> RagResponse:
     await _authorize_scope(
-        current_user, request.filters.org_id, request.filters.project_id, policy=policy
+        current_user,
+        request.filters.org_id,
+        request.filters.project_id,
+        policy=policy,
+        allow_organization_level=True,
     )
+    _refuse_org_level_contract(request, retrieval_service)
     return await retrieval_service.rag(request, current_user)
 
 
@@ -330,9 +412,14 @@ async def reconcile_vectors(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Superadmin required for reconciliation",
         )
-    return await reconciler.reconcile_document(
-        document_id=document_id,
-        org_id=org_id,
-        project_id=project_id,
-        namespace=namespace,
-    )
+    try:
+        return await reconciler.reconcile_document(
+            document_id=document_id,
+            org_id=org_id,
+            project_id=project_id,
+            namespace=namespace,
+        )
+    except UnsupportedVectorNamespace as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from None

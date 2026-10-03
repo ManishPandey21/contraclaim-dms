@@ -15,6 +15,12 @@ from .services.background_jobs import (
     stop_document_extraction_workers,
 )
 from .services.contract_ingest_queue import start_contract_ingest_queue, stop_contract_ingest_queue
+from .services.contract_reprojection_runtime import (
+    ContractReprojectionRuntime,
+    ReprojectionPassReport,
+    start_contract_reprojection_runtime,
+    stop_contract_reprojection_runtime,
+)
 from .services.letter_drafting.drafting_queue import start_drafting_queue, stop_drafting_queue
 from .services.arbitration_drafting.filing_export_queue import (
     start_filing_export_queue,
@@ -24,6 +30,17 @@ from .services.runtime_state import get_runtime_state
 from .services.scheduler import start_scheduler, stop_scheduler
 
 logger = logging.getLogger(__name__)
+
+
+async def run_contract_reprojection_pass(db, *, runtime=None) -> ReprojectionPassReport:
+    """One pass of the contract-worker's Contract Master reprojection owner.
+
+    The loop started below calls exactly this; exposed so a test drives the same
+    code path the deployed process runs, instead of marking a projection current
+    by hand.
+    """
+    runtime = runtime or ContractReprojectionRuntime(db)
+    return await runtime.run_once()
 
 
 async def _run() -> None:
@@ -50,6 +67,13 @@ async def _run() -> None:
         await start_drafting_queue()
     if settings.START_FILING_EXPORT_QUEUE_WORKERS:
         await start_filing_export_queue()
+    if settings.START_CONTRACT_REPROJECTION_WORKERS:
+        from .core.database import get_database
+
+        await start_contract_reprojection_runtime(
+            await get_database(),
+            interval_seconds=float(settings.CONTRACT_REPROJECTION_POLL_SECONDS),
+        )
     # H2: run the leader-locked cron scheduler here (set RUN_SCHEDULER=true on
     # the worker, false on the web tier, for a clean single-owner setup).
     scheduler = await start_scheduler()
@@ -58,6 +82,10 @@ async def _run() -> None:
     try:
         await stop_event.wait()
     finally:
+        # Reprojection first: releasing an in-flight claim must not wait behind
+        # the scheduler inside Docker's stop grace period.
+        if settings.START_CONTRACT_REPROJECTION_WORKERS:
+            await stop_contract_reprojection_runtime()
         await stop_scheduler(scheduler)
         if settings.START_CONTRACT_QUEUE_WORKERS:
             await stop_contract_ingest_queue()

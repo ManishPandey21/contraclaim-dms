@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from ..core.database import get_database
 from ..core.security import get_current_user
+from ..core.tenant_context import ActiveScope, active_scope
 from ..models.user import User
 from ..services.policy_service import PolicyService
 from ..services.scope_service import ScopeService
@@ -15,6 +16,23 @@ from ..utils.error_handler import BaseDomainError
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["search"])
+
+
+async def _selection_pins(
+    selection: ActiveScope, organizations: List[str], projects: List[str]
+) -> tuple[Optional[str], Optional[str]]:
+    """CL-4A: validate the org/project filters against the navbar selection.
+
+    Every filter value may narrow the selection, never leave it (403
+    ``context_forbidden``). Returns the ``(organization_id, project_id)`` the search
+    is pinned to; ``(None, None)`` when nothing is selected.
+    """
+    for organization_id in organizations:
+        await selection.list_filters(organization_id, None)
+    for project_id in projects:
+        await selection.list_filters(None, project_id)
+    return await selection.list_filters(None, None)
+
 
 @router.get("/search/documents")
 async def search_documents(
@@ -34,15 +52,25 @@ async def search_documents(
     include_facets: bool = Query(False, description="Include search facets"),
     include_content: bool = Query(False, description="Include document content"),
     db: AsyncIOMotorDatabase = Depends(get_database),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """
     Advanced document search with filtering, sorting, and faceting
     """
     try:
         start_time = datetime.now()
-        requested_org = str(organizations[0]) if organizations else getattr(current_user, "organization_id", None)
-        requested_project = str(projects[0]) if projects else None
+        pinned_org, pinned_project = await _selection_pins(selection, organizations, projects)
+        if pinned_org:
+            # The filters were validated against the selection; the pin replaces them.
+            organizations = []
+            if pinned_project:
+                projects = []
+        requested_org = (
+            pinned_org
+            or (str(organizations[0]) if organizations else getattr(current_user, "organization_id", None))
+        )
+        requested_project = pinned_project or (str(projects[0]) if projects else None)
         await PolicyService().authorize(
             current_user,
             "dms.document.view",
@@ -54,7 +82,7 @@ async def search_documents(
 
         # Build search pipeline
         pipeline = []
-        match_conditions = {}
+        match_conditions: Dict[str, Any] = {}
 
         # RBAC scoping
         roles = set(current_user.roles or [])
@@ -131,6 +159,13 @@ async def search_documents(
                     return {"results": [], "total": 0, "page": page, "limit": limit, "time_ms": 0}
                 project_ids = sorted(permitted)
             match_conditions["project_id"] = {"$in": project_ids}
+
+        # Navbar selection (CL-4A): validated against the principal's scope by
+        # resolve_active_scope, so the pin only narrows the role scoping above.
+        if pinned_org:
+            match_conditions["organization_id"] = pinned_org
+        if pinned_project:
+            match_conditions["project_id"] = pinned_project
 
         # Category filter
         if categories:
@@ -260,7 +295,8 @@ async def get_search_suggestions(
     q: str = Query(..., min_length=2, description="Partial search query"),
     limit: int = Query(5, ge=1, le=20, description="Number of suggestions"),
     db: AsyncIOMotorDatabase = Depends(get_database),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """
     Get search suggestions based on partial query
@@ -290,6 +326,11 @@ async def get_search_suggestions(
                 match_condition["project_id"] = {"$in": sorted(allowed_projects)}
             else:
                 return {"suggestions": []}
+        pinned_org, pinned_project = await selection.list_filters(None, None)
+        if pinned_org:
+            match_condition["organization_id"] = pinned_org
+        if pinned_project:
+            match_condition["project_id"] = pinned_project
 
         # Get suggestions from document names
         name_pipeline = [
@@ -314,6 +355,8 @@ async def get_search_suggestions(
 
         return {"suggestions": unique_suggestions}
 
+    except (BaseDomainError, HTTPException):
+        raise
     except Exception as e:
         logger.error(f"Suggestions error: {str(e)}")
         return {"suggestions": []}
@@ -466,7 +509,8 @@ async def get_search_analytics(
 async def semantic_search(
     search_data: Dict[str, Any] = Body(...),
     db: AsyncIOMotorDatabase = Depends(get_database),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """
     Perform semantic search using AI/vector similarity
@@ -477,12 +521,27 @@ async def semantic_search(
         threshold = search_data.get("threshold", 0.7)
 
         # This would require vector embeddings and similarity search
-        # For now, fall back to text search
+        # For now, fall back to text search. A direct call gets no FastAPI
+        # defaults: every parameter is passed, or its Query(...) sentinel leaks in.
         return await search_documents(
             q=query,
+            page=1,
             limit=limit,
+            sort_by="relevance",
+            sort_order="desc",
+            date_from=None,
+            date_to=None,
+            file_types=[],
+            organizations=[],
+            projects=[],
+            categories=[],
+            tags=[],
+            upload_type=None,
+            include_facets=False,
+            include_content=False,
             db=db,
-            current_user=current_user
+            current_user=current_user,
+            selection=selection,
         )
 
     except (BaseDomainError, HTTPException):

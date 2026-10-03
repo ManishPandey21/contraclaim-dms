@@ -97,6 +97,8 @@ async def _seed(
     }
     document.update(document_overrides or {})
     await db["documents"].insert_one(document)
+    # A project-scope candidate is anchored to a real project of its organisation.
+    await db["projects"].insert_one({"_id": PROJECT, "organization_id": ORG})
 
     candidate = {
         "_id": CANDIDATE,
@@ -137,7 +139,7 @@ def test_project_scope_promotion_creates_its_first_applicability_atomically():
             service = ContractPromotionService(db, client)
 
             receipt = await service.promote(
-                CANDIDATE, actor_id="alice", contract_id=CONTRACT, effective_from="2021-04-01"
+                CANDIDATE, organization_id=ORG, actor_id="alice", contract_id=CONTRACT, effective_from="2021-04-01"
             )
 
             instrument = await db[CONTRACT_DOCUMENTS_COLLECTION].find_one(
@@ -168,7 +170,7 @@ def test_organisation_scope_promotion_succeeds_with_zero_applicability():
             )
             service = ContractPromotionService(db, client)
 
-            receipt = await service.promote(CANDIDATE, actor_id="alice")
+            receipt = await service.promote(CANDIDATE, organization_id=ORG, actor_id="alice")
 
             assert receipt.scope_level == "organization"
             assert receipt.project_id is None
@@ -189,7 +191,7 @@ def test_organisation_promotion_manufactures_no_project_applicability():
                 scope_state=ScopeClassificationState.ORG_SCOPE_CONFIRMED,
                 candidate_overrides={"project_id": None},
             )
-            await ContractPromotionService(db, client).promote(CANDIDATE, actor_id="alice")
+            await ContractPromotionService(db, client).promote(CANDIDATE, organization_id=ORG, actor_id="alice")
 
             instrument = await db[CONTRACT_DOCUMENTS_COLLECTION].find_one({})
             assert instrument["project_id"] is None
@@ -203,7 +205,7 @@ def test_project_scope_promotion_without_a_contract_is_refused():
         async with _database() as (db, client):
             await _seed(db)
             with pytest.raises(NotPromotable) as excinfo:
-                await ContractPromotionService(db, client).promote(CANDIDATE, actor_id="alice")
+                await ContractPromotionService(db, client).promote(CANDIDATE, organization_id=ORG, actor_id="alice")
             assert "governs nothing" in str(excinfo.value)
             assert await _legal_counts(db) == {
                 name: 0 for name in list(LEGAL_COLLECTIONS) + [PROMOTION_RECEIPTS_COLLECTION]
@@ -226,7 +228,7 @@ def test_ambiguous_scope_performs_zero_authoritative_writes():
             service = ContractPromotionService(db, client)
 
             with pytest.raises(NotPromotable):
-                await service.promote(CANDIDATE, actor_id="alice", contract_id=CONTRACT)
+                await service.promote(CANDIDATE, organization_id=ORG, actor_id="alice", contract_id=CONTRACT)
 
             for name in LEGAL_COLLECTIONS:
                 assert await db[name].count_documents({}) == 0
@@ -241,7 +243,7 @@ def test_an_unresolved_type_performs_zero_authoritative_writes():
             await _seed(db, type_state=TypeClassificationState.TYPE_SUGGESTED)
             with pytest.raises(NotPromotable) as excinfo:
                 await ContractPromotionService(db, client).promote(
-                    CANDIDATE, actor_id="alice", contract_id=CONTRACT
+                    CANDIDATE, organization_id=ORG, actor_id="alice", contract_id=CONTRACT
                 )
             assert "suggestion is not a classification" in str(excinfo.value)
             for name in LEGAL_COLLECTIONS:
@@ -256,7 +258,7 @@ def test_an_invalid_candidate_never_promotes():
             await _seed(db, scope_state=ScopeClassificationState.INVALID)
             with pytest.raises(NotPromotable) as excinfo:
                 await ContractPromotionService(db, client).promote(
-                    CANDIDATE, actor_id="alice", contract_id=CONTRACT
+                    CANDIDATE, organization_id=ORG, actor_id="alice", contract_id=CONTRACT
                 )
             assert "terminal" in str(excinfo.value)
 
@@ -287,7 +289,7 @@ def test_a_failure_midway_leaves_nothing_behind():
 
             with pytest.raises(RuntimeError):
                 await Failing(db, client).promote(
-                    CANDIDATE, actor_id="alice", contract_id=CONTRACT
+                    CANDIDATE, organization_id=ORG, actor_id="alice", contract_id=CONTRACT
                 )
 
             # The instrument and the fact were written inside the transaction
@@ -310,7 +312,7 @@ def test_a_receipt_cannot_survive_a_rollback():
 
             with pytest.raises(RuntimeError):
                 await FailingAfterReceipt(db, client).promote(
-                    CANDIDATE, actor_id="alice", contract_id=CONTRACT
+                    CANDIDATE, organization_id=ORG, actor_id="alice", contract_id=CONTRACT
                 )
 
             assert await db[PROMOTION_RECEIPTS_COLLECTION].count_documents({}) == 0
@@ -324,7 +326,7 @@ def test_promotion_without_a_transactional_session_is_refused():
             await _seed(db)
             with pytest.raises(NotPromotable) as excinfo:
                 await ContractPromotionService(db, None).promote(
-                    CANDIDATE, actor_id="alice", contract_id=CONTRACT
+                    CANDIDATE, organization_id=ORG, actor_id="alice", contract_id=CONTRACT
                 )
             assert "atomic" in str(excinfo.value)
             for name in LEGAL_COLLECTIONS:
@@ -348,7 +350,7 @@ def test_two_concurrent_identical_promotions_converge_on_one_record():
 
             results = await asyncio.gather(
                 *(
-                    service.promote(CANDIDATE, actor_id=f"op-{i}", contract_id=CONTRACT)
+                    service.promote(CANDIDATE, organization_id=ORG, actor_id=f"op-{i}", contract_id=CONTRACT)
                     for i in range(4)
                 ),
                 return_exceptions=True,
@@ -375,7 +377,7 @@ def test_an_unknown_effective_from_stays_null():
         async with _database() as (db, client):
             await _seed(db)
             await ContractPromotionService(db, client).promote(
-                CANDIDATE, actor_id="alice", contract_id=CONTRACT, effective_from=None
+                CANDIDATE, organization_id=ORG, actor_id="alice", contract_id=CONTRACT, effective_from=None
             )
 
             event = await db[APPLICABILITY_EVENTS_COLLECTION].find_one({})
@@ -394,7 +396,7 @@ def test_a_stale_snapshot_is_revalidated_before_promotion():
 
             with pytest.raises(RevalidationRequired):
                 await ContractPromotionService(db, client).promote(
-                    CANDIDATE, actor_id="alice", contract_id=CONTRACT
+                    CANDIDATE, organization_id=ORG, actor_id="alice", contract_id=CONTRACT
                 )
 
             for name in LEGAL_COLLECTIONS:
@@ -412,7 +414,7 @@ def test_a_quarantined_document_cannot_become_readable_through_promotion():
 
             with pytest.raises(NotPromotable) as excinfo:
                 await ContractPromotionService(db, client).promote(
-                    CANDIDATE, actor_id="alice", contract_id=CONTRACT
+                    CANDIDATE, organization_id=ORG, actor_id="alice", contract_id=CONTRACT
                 )
             assert "quarantined" in str(excinfo.value)
             assert await db[CONTRACT_DOCUMENTS_COLLECTION].count_documents({}) == 0
@@ -426,7 +428,7 @@ def test_a_deleted_document_never_promotes():
             await _seed(db, document_overrides={"lifecycle_state": "deleted"})
             with pytest.raises(NotPromotable):
                 await ContractPromotionService(db, client).promote(
-                    CANDIDATE, actor_id="alice", contract_id=CONTRACT
+                    CANDIDATE, organization_id=ORG, actor_id="alice", contract_id=CONTRACT
                 )
 
     asyncio.run(scenario())
@@ -440,7 +442,7 @@ def test_an_adverse_quality_document_promotes_with_evidence_denied_elsewhere():
             await _seed(db, document_overrides={"processing_status": "human_review_required"})
 
             receipt = await ContractPromotionService(db, client).promote(
-                CANDIDATE, actor_id="alice", contract_id=CONTRACT
+                CANDIDATE, organization_id=ORG, actor_id="alice", contract_id=CONTRACT
             )
 
             # It is catalogued. Evidence is denied by the publication gate, not
@@ -465,7 +467,7 @@ def test_legacy_source_fields_remain_untouched():
             before = await db["documents"].find_one({"_id": "doc-1"})
 
             await ContractPromotionService(db, client).promote(
-                CANDIDATE, actor_id="alice", contract_id=CONTRACT
+                CANDIDATE, organization_id=ORG, actor_id="alice", contract_id=CONTRACT
             )
 
             after = await db["documents"].find_one({"_id": "doc-1"})
@@ -481,7 +483,7 @@ def test_the_receipt_links_candidate_to_record_deterministically():
         async with _database() as (db, client):
             await _seed(db)
             receipt = await ContractPromotionService(db, client).promote(
-                CANDIDATE, actor_id="alice", contract_id=CONTRACT
+                CANDIDATE, organization_id=ORG, actor_id="alice", contract_id=CONTRACT
             )
 
             stored = await db[PROMOTION_RECEIPTS_COLLECTION].find_one({})

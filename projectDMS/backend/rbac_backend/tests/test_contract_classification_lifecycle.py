@@ -495,3 +495,17 @@ def test_marking_the_projection_failed_does_not_roll_back_classification() -> No
     assert _record(db)["contract_document_type"] == ContractDocumentType.AMENDMENT.value
     assert _record(db)["projection_status"] == ProjectionStatus.FAILED.value
     assert _eligible(db) == frozenset()
+
+
+def test_a_late_failure_for_a_superseded_revision_changes_nothing() -> None:
+    """``revision`` fences the write: a report about revision 1 arriving after
+    revision 2 was confirmed must not stamp FAILED over revision 2's state."""
+    db = _fixture()
+    service = ContractClassificationService(db)
+    _run(service.confirm(CD, contract_document_type=ContractDocumentType.AMENDMENT, expected_revision=1, actor_id="u"))
+    before = _record(db)["projection_status"]
+
+    _run(service.mark_projection_failed(CD, revision=1, reason="late revision-1 worker"))
+
+    assert _record(db)["classification_revision"] == 2
+    assert _record(db)["projection_status"] == before

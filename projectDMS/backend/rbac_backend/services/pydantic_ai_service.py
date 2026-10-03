@@ -7,16 +7,35 @@ from ..config.document_processing_config import DocumentProcessingConfig
 from ..models.document_metadata import (
     EXTRACTED_SUBTAG_OPTIONS,
     EXTRACTED_TAG_OPTIONS,
+    KEY_REPLY_POINTS_EXTRACTION_INSTRUCTION,
+    SUMMARY_EXTRACTION_INSTRUCTION,
     ParsedDocumentMetadata,
 )
 from ..utils.date_parser import format_date_ddmmyyyy
-from ..utils.exceptions import DocumentProcessingError
+from ..utils.exceptions import (
+    TRUNCATION_REASON_MAX_OUTPUT_TOKENS,
+    DocumentProcessingError,
+    ModelOutputIncompleteError,
+)
 from .ai_guardrails import UNTRUSTED_DOCUMENT_GUARD, scan_document_text_for_injection
 
 logger = logging.getLogger(__name__)
 
 class PydanticAIMetadataError(DocumentProcessingError):
     """Raised when the PydanticAI agent fails to extract metadata."""
+
+
+class PydanticAIOutputIncompleteError(PydanticAIMetadataError, ModelOutputIncompleteError):
+    """The agent's reply was cut off: the canonical incomplete-output signal.
+
+    Still a :class:`PydanticAIMetadataError`, so every caller that falls back
+    on agent failure keeps doing so; the processor also records it.
+    """
+
+
+#: The signal PydanticAI keeps: ``ModelResponse.finish_reason`` (normalised by
+#: the OpenAI model adapter; ``length`` <- ``length``/``max_output_tokens``).
+_INCOMPLETE_FINISH_REASONS = {"length": TRUNCATION_REASON_MAX_OUTPUT_TOKENS, "content_filter": "content_filter"}
 
 @dataclass
 class MetadataAgentResult:
@@ -99,15 +118,31 @@ class PydanticAIService:
             claim_category: Optional[str] = Field(default=None, alias="claimCategory")
             alleged_responsibility: Optional[str] = Field(default=None, alias="allegedResponsibility")
             priority: Optional[str] = None
-            summary_points: List[str] = Field(default_factory=list)
-            summary_text: Optional[str] = Field(default=None, alias="summary")
+            # The descriptions are part of the output schema the model reads,
+            # so they carry the same definitions as the prompt.
+            summary_points: List[str] = Field(
+                default_factory=list,
+                description=SUMMARY_EXTRACTION_INSTRUCTION + " One event or development per list item.",
+            )
+            summary_text: Optional[str] = Field(
+                default=None,
+                alias="summary",
+                description="Used only when summary_points is empty. " + SUMMARY_EXTRACTION_INSTRUCTION,
+            )
             keywords: List[str] = Field(default_factory=list)
             linked_event_suggested: Optional[str] = Field(default=None, alias="linkedEventSuggested")
             reference_chain: Optional[str] = Field(default=None, alias="referenceChain")
             additional_keywords: List[str] = Field(default_factory=list, alias="additionalKeywords")
             contractual_clauses: List[str] = Field(default_factory=list, alias="clauses")
-            key_reply_points: List[str] = Field(default_factory=list, alias="keyReplyPoints")
-            full_content: Optional[str] = Field(default=None, alias="fullContent")
+            key_reply_points: List[str] = Field(
+                default_factory=list,
+                alias="keyReplyPoints",
+                description=KEY_REPLY_POINTS_EXTRACTION_INSTRUCTION + " One point per list item.",
+            )
+            # No full_content: the agent never retypes the letter. When source
+            # text exists it is the body; when it does not, the numbered
+            # report's Item 25 is the fallback (see DocumentProcessor), and a
+            # second LLM copy of that copy would add only cost and drift.
             tags: List[str] = Field(
                 default_factory=list,
                 alias="extracted_tags",
@@ -199,14 +234,36 @@ class PydanticAIService:
 
         prompt = self._build_prompt(trimmed_text, context or {})
 
+        max_output_tokens = max(getattr(self.config, "max_output_tokens", 4096) or 4096, 4096)
         try:
             run_result = await self._agent.run(prompt)
+        except PydanticAIMetadataError:
+            raise
         except self._agent_exceptions as exc:
+            incomplete_reason = self._incomplete_reason(exc)
+            if incomplete_reason is not None:
+                logger.error("PydanticAI agent reply incomplete (%s)", incomplete_reason)
+                raise PydanticAIOutputIncompleteError(
+                    provider="pydantic_ai",
+                    stage="pydantic_ai_extraction",
+                    reason=incomplete_reason,
+                    max_output_tokens=max_output_tokens,
+                ) from exc
             logger.error("PydanticAI agent run failed: %s", exc, exc_info=True)
             raise PydanticAIMetadataError(str(exc)) from exc
         except Exception as exc:  # pragma: no cover - guard against unknown issues
             logger.error("Unexpected error during PydanticAI agent run: %s", exc, exc_info=True)
             raise PydanticAIMetadataError(str(exc)) from exc
+
+        finish_reason = self._finish_reason(run_result)
+        if finish_reason in _INCOMPLETE_FINISH_REASONS:
+            logger.error("PydanticAI agent reply incomplete (finish_reason=%s)", finish_reason)
+            raise PydanticAIOutputIncompleteError(
+                provider="pydantic_ai",
+                stage="pydantic_ai_extraction",
+                reason=_INCOMPLETE_FINISH_REASONS[finish_reason],
+                max_output_tokens=max_output_tokens,
+            )
 
         # FIXED: Use run_result.output instead of run_result.data for v1.0+
         model_result = run_result.output
@@ -233,6 +290,35 @@ class PydanticAIService:
 
         raw_dict = model_result.model_dump(by_alias=True)
         return MetadataAgentResult(metadata=metadata, raw_result=raw_dict, debug=debug)
+
+    @staticmethod
+    def _incomplete_reason(exc: BaseException) -> Optional[str]:
+        """PydanticAI's incomplete-reply exceptions, as a canonical reason.
+
+        pydantic-ai 1.106 raises ``IncompleteToolCall`` when the cap cuts an
+        output tool call, ``ContentFilterError`` on an empty filtered reply,
+        and a plain ``UnexpectedModelBehavior`` whose message names the token
+        limit when the cap is hit before any output. The last carries no
+        structured field, so its library message is the only signal.
+        """
+        name = type(exc).__name__
+        if name == "IncompleteToolCall":
+            return TRUNCATION_REASON_MAX_OUTPUT_TOKENS
+        if name == "ContentFilterError":
+            return "content_filter"
+        if name == "UnexpectedModelBehavior" and "token limit" in str(exc).lower():
+            return TRUNCATION_REASON_MAX_OUTPUT_TOKENS
+        return None
+
+    @staticmethod
+    def _finish_reason(run_result: Any) -> Optional[str]:
+        """The last model response's ``finish_reason``, when it is a string."""
+        try:
+            response = run_result.response
+        except Exception:
+            return None
+        reason = getattr(response, "finish_reason", None)
+        return reason if isinstance(reason, str) else None
 
     def _build_prompt(self, text: str, context: Dict[str, Any]) -> str:
         return self._build_expanded_prompt(text, context)
@@ -266,10 +352,9 @@ class PydanticAIService:
             "19) Linked Event Suggested: short event title useful for chronology/claim matrix",
             "20) Reference Chain: original notice/reply/reminder/response to previous letter/follow-up",
             "21) Additional Keywords: concise search/RAG tags including location, issue, claim, clause, delay, payment, authority, and topic tags",
-            "22) Summary: 4-6 line contractual/legal summary suitable for vector search/RAG, mentioning issue, location, alleged responsibility, contractual implication, and required action where available",
+            f"22) Summary: {SUMMARY_EXTRACTION_INSTRUCTION} Return each event or development as one summary_points item.",
             "23) Contractual Clauses: clauses, Employer's Requirements, GCC/SCC provisions, specifications, drawings, approved proposals, or prior records relied upon",
-            "24) Key Reply Points: concise contractual/legal points that must be addressed in a future reply, claim defence, Statement of Defence, rejoinder, variation/payment dispute, or delay response",
-            "25) Full Content: cleaned text of the full letter",
+            f"24) Key Reply Points: {KEY_REPLY_POINTS_EXTRACTION_INSTRUCTION} Return each point as one key_reply_points item.",
             f"26) extracted_tags: select one or more from: {tag_options}; otherwise empty",
             f"27) extracted_subTags: select one or more from: {subtag_options}; otherwise empty",
         ]
@@ -328,7 +413,10 @@ class PydanticAIService:
 
         clauses = getattr(data, "contractual_clauses", None) or []
         key_reply_points = getattr(data, "key_reply_points", None) or []
-        full_content = getattr(data, "full_content", None) or fallback_text
+        # Never the input text: that was the (possibly 12 000-char-trimmed)
+        # OCR text or extraction report, and storing it as the letter's full
+        # content published a truncated body as if complete.
+        full_content = getattr(data, "full_content", None)
 
         formatted_date = format_date_ddmmyyyy(getattr(data, "date", None))
 

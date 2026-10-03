@@ -36,6 +36,8 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from fastapi import HTTPException, status
+
 from ..models.contract_document import (
     ApplicabilityLifecycleKind,
     ApplicabilityQueryMode,
@@ -135,19 +137,37 @@ async def authorize_contract_scope(
     organization_id: str,
     project_id: str,
     contract_id: str,
+    audit: bool = True,
 ) -> AuthorizedContractScope:
     """Run the generic authorisation check, then mint the scope token.
 
     Denial propagates untouched — a generic refusal keeps its own status rather
     than being translated into an empty catalogue or a not-found, which would
     tell the caller the wrong thing about why they saw nothing.
+
+    The token claims an authorised (organisation, project) *pair*, so the pair is
+    proven here as well. ``PolicyService`` proves it for a tenant-bound caller
+    (``ScopeService.is_client_scope_allowed``) but returns early for superadmin
+    without asking where the project lives; checking it once more, against the
+    same database the policy reads, makes a token for org X naming a project of
+    Y impossible whoever the caller is. The refusal has the policy's own
+    ``scope_denied`` 403 shape and names neither organisation.
     """
+    # Proven first: were it after an audited authorize, a refused pair would sit
+    # in the audit trail as "allow".
+    if not await policy.scope_service.project_belongs_to_organization(
+        project_id=str(project_id), organization_id=str(organization_id)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized: scope_denied"
+        )
     await policy.authorize(
         current_user,
         permission,
         resource_type="contract",
         organization_id=organization_id,
         project_id=project_id,
+        audit=audit,
     )
     return AuthorizedContractScope(
         organization_id=organization_id,
@@ -165,6 +185,12 @@ class ResolvedContractScope:
     instruments: Tuple[ApplicableInstrument, ...]
     eligible_document_ids: frozenset
     legal_effects: Tuple[Dict[str, Any], ...] = ()
+    #: Instruments that DO apply and whose document may publish, but whose
+    #: projection is not current for their live revision. They are excluded from
+    #: the eligible set like before; they are also named here, because "nothing
+    #: applies" and "something applies and cannot be searched yet" are different
+    #: answers, and the evidence path must not report the second as the first.
+    projection_not_current: Tuple[Dict[str, Any], ...] = ()
 
 
 def _parse_date(value: Any) -> Optional[date]:
@@ -277,6 +303,7 @@ class ContractScopeResolver:
 
             instruments: List[ApplicableInstrument] = []
             eligible: List[str] = []
+            not_current: List[Dict[str, Any]] = []
 
             for aggregate in aggregates:
                 events = await self._db[APPLICABILITY_EVENTS_COLLECTION].find(
@@ -295,11 +322,19 @@ class ContractScopeResolver:
                 )
                 if record is None:
                     continue
-                if not _projection_is_current(record):
-                    continue
 
                 document_id = str(record.get("document_id") or "")
                 if not await self._document_is_positively_authorised(document_id):
+                    continue
+                if not _projection_is_current(record):
+                    not_current.append(
+                        {
+                            "contract_document_id": str(record.get("_id")),
+                            "classification_revision": record.get("classification_revision"),
+                            "projection_revision": record.get("projection_revision"),
+                            "projection_status": record.get("projection_status"),
+                        }
+                    )
                     continue
 
                 basis = next(
@@ -348,6 +383,7 @@ class ContractScopeResolver:
             instruments=tuple(instruments),
             eligible_document_ids=frozenset(eligible),
             legal_effects=tuple(effects),
+            projection_not_current=tuple(not_current),
         )
 
     async def browse_catalogue(

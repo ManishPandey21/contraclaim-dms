@@ -47,6 +47,7 @@ import enhancedApi, {
   Organization as OrgModel,
   UploadPolicy,
 } from "@/services/enhanced-api";
+import { useRegisterProjectScope } from "@/hooks/useRegisterProjectScope";
 
 interface DuplicateBlock {
   message: string;
@@ -196,6 +197,24 @@ const UploadPage: React.FC = () => {
     string[]
   >([]);
   const [isFolderDragOver, setIsFolderDragOver] = useState(false);
+  // CL-4A: an upload is filed in the navbar project - the server refuses any
+  // other (403 context_forbidden) - so the pickers follow and are locked to it.
+  const { selectedProjectId, selectedOrganizationId, projectLocked } = useRegisterProjectScope();
+  useEffect(() => {
+    if (!projectLocked) return;
+    if (organizationId !== selectedOrganizationId) setOrganizationId(selectedOrganizationId);
+    if (projectId !== selectedProjectId) setProjectId(selectedProjectId);
+    if (bulkOrganizationId !== selectedOrganizationId) setBulkOrganizationId(selectedOrganizationId);
+    if (bulkProjectId !== selectedProjectId) setBulkProjectId(selectedProjectId);
+  }, [
+    projectLocked,
+    selectedOrganizationId,
+    selectedProjectId,
+    organizationId,
+    projectId,
+    bulkOrganizationId,
+    bulkProjectId,
+  ]);
 
   // Controls
   const [uploading, setUploading] = useState<boolean>(false);
@@ -975,6 +994,7 @@ const UploadPage: React.FC = () => {
                   <Label htmlFor="organization">Organization</Label>
                   <Select
                     onValueChange={setOrganizationId}
+                    disabled={projectLocked}
                     value={organizationId || ""}
                   >
                     <SelectTrigger id="organization">
@@ -995,7 +1015,7 @@ const UploadPage: React.FC = () => {
                   <Select
                     onValueChange={setProjectId}
                     value={projectId || ""}
-                    disabled={!organizationId}
+                    disabled={!organizationId || projectLocked}
                   >
                     <SelectTrigger id="project">
                       <SelectValue placeholder="Select project" />
@@ -1262,6 +1282,7 @@ const UploadPage: React.FC = () => {
                       <Select
                         onValueChange={handleBulkOrganizationChange}
                         value={bulkOrganizationId || ""}
+                        disabled={projectLocked}
                       >
                         <SelectTrigger id="bulkOrganization">
                           <SelectValue placeholder="Select organization" />
@@ -1280,7 +1301,7 @@ const UploadPage: React.FC = () => {
                       <Select
                         onValueChange={setBulkProjectId}
                         value={bulkProjectId || ""}
-                        disabled={!bulkOrganizationId}
+                        disabled={!bulkOrganizationId || projectLocked}
                       >
                         <SelectTrigger id="bulkProject">
                           <SelectValue placeholder="Select project" />

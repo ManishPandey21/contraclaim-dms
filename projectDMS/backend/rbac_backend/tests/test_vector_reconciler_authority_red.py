@@ -7,6 +7,7 @@ Qdrant boundary state after the request completes.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Dict, Iterable, Optional
 
 import pytest
@@ -96,12 +97,12 @@ class _QdrantBoundary:
             and point.get("document_id") == filters.get("document_id")
         )
 
-    async def upsert(self, _vectors, chunks, namespace=None):
+    async def upsert(self, _vectors, chunks, namespace=None, point_id_for=None):
         for chunk in chunks:
             self.points[str(chunk["chunk_id"])] = dict(chunk)
         return len(chunks)
 
-    async def delete(self, chunk_ids, namespace=None):
+    async def delete(self, chunk_ids, namespace=None, point_id_for=None):
         removed = 0
         for chunk_id in chunk_ids:
             if self.points.pop(str(chunk_id), None) is not None:
@@ -193,3 +194,37 @@ def test_public_vector_reconciliation_obeys_canonical_publication_authority(
     assert marker_present is (expected_qdrant_chunks == 1)
     assert response.json()["repaired"] == expected_qdrant_chunks
     assert embedding.calls == expected_qdrant_chunks
+
+
+class _Instruments:
+    def __init__(self, governed: bool) -> None:
+        self._governed = governed
+
+    async def find_one(self, _query, _projection=None):
+        return {"_id": "instrument-1"} if self._governed else None
+
+
+@pytest.mark.parametrize(
+    ("document", "governed"),
+    [
+        pytest.param({**_document(), "uploadType": "contract"}, False, id="contract-upload"),
+        pytest.param(_document(), True, id="contract-master-instrument"),
+    ],
+)
+def test_reconciliation_never_rewrites_a_contract_projection(
+    document: Dict[str, Any], governed: bool
+) -> None:
+    """Contract vectors have no ``chunks`` rows: reconciling them would delete
+    every point of a CURRENT Contract Master projection as "missing in Mongo"."""
+    embedding = _EmbeddingBoundary()
+    qdrant = _QdrantBoundary()
+    db = _Database(document)
+    db.contract_documents = _Instruments(governed)  # type: ignore[attr-defined]
+    result = asyncio.run(
+        VectorReconciler(db=db, embedding_client=embedding, vector_client=qdrant).reconcile_document(
+            DOCUMENT_ID, ORG_ID, PROJECT_ID
+        )
+    )
+    assert result["skipped_contract"] == 1
+    assert (result["removed"], result["repaired"]) == (0, 0)
+    assert qdrant.points == {} and embedding.calls == 0

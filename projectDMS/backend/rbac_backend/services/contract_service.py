@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import re
 import tempfile
@@ -26,6 +28,7 @@ from ..models.contract_models import (
     StatusResponse,
 )
 from ..models.document import Document
+from ..models.processing_state import _UNRESOLVED_PAGE_STATUSES, ProcessingState
 from ..models.storage_architecture import ContractAggregate, ContractVersion
 from ..retrieval.embeddings import EmbeddingClient
 from ..retrieval.vector_client import VectorClient
@@ -40,6 +43,9 @@ from .document_audit_service import DocumentAuditService
 from .document_service import DocumentService, DocumentServiceError
 from .file_object_service import FileObjectService
 from .contract_graph_service import ContractGraphService
+from .extraction.engine import OCR_RETURNED_NO_TEXT
+from .extraction.models import PageClass, PageStatus
+from .publication_policy import resolve_canonical_document
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +61,12 @@ class ContractEvidenceAuthorityFailure(Exception):
     fails rather than returning something a caller could mistake for
     "nothing applies".
     """
+
+
+def _retrieve_outcome(task: "asyncio.Future[Any]") -> None:
+    """Consume a background attempt's outcome so it is never reported unretrieved."""
+    if not task.cancelled():
+        task.exception()
 
 
 class ContractService:
@@ -424,10 +436,50 @@ class ContractService:
             update_fields["contract_categories"] = categories
         if tags is not None:
             update_fields["tags"] = tags
+        # The one identity resolver: a legacy string-keyed contract whose id
+        # looks like an ObjectId matched nothing here, so its ingest never
+        # showed ``processing`` to the projection builder.
+        document = await resolve_canonical_document(await self._get_db(), document_id)
+        lookup = document["_id"] if document else self._as_lookup_id(document_id)
         await (await self._get_documents()).update_one(
-            {"_id": self._as_lookup_id(document_id)},
+            {"_id": lookup},
             {"$set": update_fields},
         )
+        await self._update_contract_version_status(document_id, status_value)
+
+    async def _settle_processing_status(self, document_id: str, *, completed: bool) -> None:
+        """Record the ingest outcome on the canonical publication axis.
+
+        ``processing_status`` is what ``is_consumable`` reads. Only an ingest
+        that published a complete contract may write ``completed``; an
+        operational failure writes ``failed`` only over the ``processing`` a
+        released extraction hold left behind. Neither may overwrite a
+        ``human_review_required`` verdict, whoever wrote it.
+        """
+        documents = await self._get_documents()
+        # The one identity resolver, so a legacy string-keyed contract that
+        # happens to look like an ObjectId is still found.
+        document = await resolve_canonical_document(await self._get_db(), document_id)
+        if document is None:
+            return
+        if completed:
+            await documents.update_one(
+                {
+                    "_id": document["_id"],
+                    "processing_status": {"$ne": ProcessingState.HUMAN_REVIEW_REQUIRED.value},
+                },
+                {"$set": {"processing_status": ProcessingState.COMPLETED.value, "processing_error": None}},
+            )
+            return
+        await documents.update_one(
+            {
+                "_id": document["_id"],
+                "processing_status": ProcessingState.PROCESSING.value,
+            },
+            {"$set": {"processing_status": ProcessingState.FAILED.value}},
+        )
+
+    async def _update_contract_version_status(self, document_id: str, status_value: str) -> None:
         try:
             await (await self._get_db()).contract_versions.update_one(
                 {"document_id": document_id},
@@ -522,6 +574,291 @@ class ContractService:
         processing_path_value = str(payload.get("processing_path") or "")
         if not upload_id or not document_id or not organization_id or not filename:
             raise ContractError("Invalid contract ingest payload", status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        from . import contract_source_lease as source_lease
+
+        # One writer of this document's source at a time, taken before anything
+        # is written. A second ingest (a redelivered job, another upload's job)
+        # is refused here with nothing written (ContractSourceBusy).
+        db = await self._get_db()
+        source_key = await source_lease.canonical_source_key(db, document_id)
+        lease = await source_lease.acquire(db, source_key, owner=f"ingest:{upload_id}")
+        state: Dict[str, Any] = {"source_written": False, "stop": None, "holder": None}
+        # The ingest runs in its own task, so the renewal can stop exactly the
+        # ingest - never the queue's worker loop that awaits it.
+        work = asyncio.create_task(
+            self._process_owned_ingest_job(
+                state=state,
+                lease=lease,
+                upload_id=upload_id,
+                document_id=document_id,
+                organization_id=organization_id,
+                project_id=project_id,
+                filename=filename,
+                tags=tags,
+                retry_ocr_pages=retry_ocr_pages,
+                file_object_id=file_object_id,
+                processing_path_value=processing_path_value,
+            )
+        )
+        renewal = asyncio.create_task(self._keep_source_lease(db, lease, work, state))
+
+        async def quiesce() -> None:
+            # The renewal stops BEFORE the lease is settled, failed or released:
+            # a tick after the release would find the lease no longer mutating,
+            # read that as "lost" and stop an ingest that had finished.
+            await self._stop_renewal(renewal, state)
+
+        state["quiesce"] = quiesce
+        try:
+            try:
+                # asyncio.wait never raises the ingest's own outcome, so a
+                # CancelledError here is always THIS task being cancelled (the
+                # process stopping) - on every Python version, with no need to
+                # ask the task how it was cancelled.
+                await asyncio.wait({work})
+            except asyncio.CancelledError:
+                await self._stop_renewal(renewal, state)
+                if not work.done():
+                    work.cancel()
+                    await asyncio.wait({work})
+                # The source may be half-written: it is failed if this ingest can
+                # still say so, else left to lapse - never settled. The job stays
+                # on the processing list and is redelivered.
+                await self._release_after_stop(db, lease, document_id, state)
+                raise
+            if work.cancelled():
+                # Stopped by the renewal ("lost" / "fenced"), or by nobody we
+                # know of (None) - never by a shutdown, handled above.
+                await self._stop_renewal(renewal, state)
+                stop = state["stop"]
+                if stop == "lost":
+                    # The lease was taken. This ingest may have written into the
+                    # source after losing it: taint, so no settle vouches for
+                    # mixed text.
+                    if state["source_written"]:
+                        await self._taint_source(db, lease, document_id, "lease lost mid-ingest")
+                    if state["holder"]:
+                        # A live owner is writing it now and will report.
+                        raise source_lease.LostSourceLease(
+                            f"ingest {upload_id} of {document_id} lost its source lease",
+                            holder=state["holder"],
+                        )
+                # Fenced, lost with no live owner left to re-ingest the tainted
+                # source, or stopped unexpectedly: an ordinary failed attempt,
+                # recorded before the lease is released and retried by the queue.
+                reason = "the source lease could not be held; the ingest stopped itself"
+                await self._record_ingest_failure(upload_id, document_id, filename, tags, reason)
+                if stop != "lost":
+                    await self._release_after_stop(db, lease, document_id, state)
+                raise source_lease.SourceLeaseFenced(
+                    f"ingest {upload_id} of {document_id} stopped itself: {reason}"
+                )
+            work.result()  # the ingest's own exception, if it raised one
+        except Exception:
+            # Escaped the owned handler (a missing file, a status write, or a
+            # failure of the handler's own release). The renewal stops first.
+            # Only a source nothing was written to is put back as it was; a
+            # touched one is failed, and if even that cannot be recorded it
+            # lapses as a crashed ingest.
+            await self._stop_renewal(renewal, state)
+            with contextlib.suppress(Exception):
+                if state["source_written"]:
+                    # A cancelled ingest (self-fenced, or stopped by nobody we
+                    # know of) did not finish its awaits: hold the source as the
+                    # stop path does - its release may have failed and left the
+                    # lease to this one.
+                    await source_lease.fail(
+                        db,
+                        lease,
+                        error="ingest stopped part-way",
+                        stopped=bool(state["stop"]) or work.cancelled(),
+                    )
+                else:
+                    await source_lease.release_untouched(db, lease)
+            raise
+        finally:
+            await self._stop_renewal(renewal, state)
+            if not work.done():
+                work.cancel()
+                await asyncio.gather(work, return_exceptions=True)
+
+    @staticmethod
+    async def _stop_renewal(
+        renewal: "asyncio.Task[Any]", state: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Return only once the renewal task has actually terminated.
+
+        The stop flag ends the loop at its next check; the cancellation ends it
+        at its current await. A cancellation the task happens to absorb is
+        simply delivered again. A cancellation of the caller arriving here
+        propagates (``asyncio.wait`` never swallows it).
+        """
+        if state is not None:
+            state["renewal_stopping"] = True
+        while not renewal.done():
+            renewal.cancel()
+            await asyncio.wait({renewal}, timeout=1.0)
+        if not renewal.cancelled():
+            renewal.exception()  # retrieved: never "exception was never retrieved"
+
+    async def _record_ingest_failure(
+        self, upload_id: str, document_id: str, filename: str, tags: List[str], reason: str
+    ) -> None:
+        try:
+            await self.update_job_status(
+                upload_id,
+                "failed",
+                error=reason,
+                metadata={
+                    "document_id": document_id,
+                    "filename": filename,
+                    "processing_stage": "failed",
+                    "stage_label": "Processing failed",
+                },
+            )
+            await self.update_contract_document(document_id, status_value="failed", error=reason, tags=tags)
+            await self._settle_processing_status(document_id, completed=False)
+        except Exception:
+            logger.warning("could not record the failure of contract ingest %s", upload_id, exc_info=True)
+
+    async def _release_after_stop(
+        self, db: Any, lease: Any, document_id: str, state: Dict[str, Any]
+    ) -> None:
+        from . import contract_source_lease as source_lease
+
+        try:
+            if state["source_written"]:
+                try:
+                    # Cancelled mid-write: a write already sent may still land,
+                    # so the source is held before anyone can take it.
+                    await source_lease.fail(db, lease, error="ingest stopped part-way", stopped=True)
+                except source_lease.LostSourceLease:
+                    # Already taken: this ingest may have written into the new
+                    # owner's source, so no settle may vouch for it.
+                    await self._taint_source(db, lease, document_id, "stopped after losing the lease")
+                    return
+                await self._invalidate_contract_master_projection(document_id)
+            else:
+                await source_lease.release_untouched(db, lease)
+        except Exception:
+            logger.warning(
+                "could not release the contract source lease of %s after the ingest "
+                "stopped; it lapses as a crashed ingest",
+                lease.key,
+                exc_info=True,
+            )
+
+    async def _taint_source(self, db: Any, lease: Any, document_id: str, reason: str) -> None:
+        """Mark the source not projectable; retried, since a lost taint lets
+        another owner settle text this ingest wrote into."""
+        from . import contract_source_lease as source_lease
+
+        for attempt in range(1, 4):
+            try:
+                await source_lease.taint(
+                    db, lease.key, reason=f"superseded ingest wrote after losing its lease: {reason}"
+                )
+                break
+            except Exception:
+                if attempt == 3:
+                    raise
+                logger.warning("taint of contract source %s failed; retrying", lease.key, exc_info=True)
+                await asyncio.sleep(attempt)
+        await self._invalidate_contract_master_projection(document_id)
+
+    @staticmethod
+    async def _keep_source_lease(
+        db: Any, lease: Any, work: "asyncio.Task[Any]", state: Dict[str, Any]
+    ) -> None:
+        """Renew the source lease, and stop the ingest before it could lapse.
+
+        An ingest that cannot prove it still owns the source (the lease was
+        taken, or renewals have failed for long enough that it soon could be)
+        cancels itself: its page and row writes are not fenced one by one, so
+        stopping first is what keeps two writers from ever overlapping.
+        """
+        import time
+
+        from . import contract_source_lease as source_lease
+
+        interval = source_lease.SOURCE_LEASE_RENEW_EVERY.total_seconds()
+        fence_after = source_lease.SOURCE_LEASE_SELF_FENCE.total_seconds()
+        last_renewed = time.monotonic()
+
+        def stopping() -> bool:
+            return bool(state.get("renewal_stopping"))
+
+        while not stopping():
+            await asyncio.sleep(interval)
+            if stopping():
+                return
+            # Each renewal is its own task, bounded with asyncio.wait rather than
+            # asyncio.wait_for: a cancellation arriving as the renewal completes
+            # must stop this loop, never be absorbed by the wait.
+            # The lease is extended from the moment the renew starts, so that is
+            # the moment a successful renew proves.
+            started = time.monotonic()
+            attempt = asyncio.ensure_future(source_lease.renew(db, lease))
+            # Whatever happens to this loop, the attempt's outcome is retrieved.
+            attempt.add_done_callback(_retrieve_outcome)
+            try:
+                await asyncio.wait({attempt}, timeout=interval)
+            finally:
+                if not attempt.done():
+                    attempt.cancel()
+                    await asyncio.wait({attempt}, timeout=interval)
+            if stopping():
+                return
+            try:
+                # Decided by the attempt itself: one that completed in the same
+                # step as the timeout still reports its real outcome (a lost
+                # lease included). A renew that has not finished is not proof.
+                if not attempt.done() or attempt.cancelled():
+                    raise TimeoutError("source lease renewal did not complete in time")
+                attempt.result()
+                last_renewed = started
+                continue
+            except source_lease.LostSourceLease as lost:
+                logger.error("contract source lease of %s was lost mid-ingest", lease.key)
+                state["stop"] = "lost"
+                state["holder"] = lost.holder
+            except Exception:
+                logger.warning("could not renew the contract source lease of %s", lease.key, exc_info=True)
+                # One more failing round (sleep, bounded renew, bounded cancel)
+                # can take three intervals: fence now if waiting for it could
+                # carry this ingest past the fence point.
+                if time.monotonic() - last_renewed + 3 * interval < fence_after:
+                    continue
+                logger.error(
+                    "contract source lease of %s not renewed for %.0fs; stopping the ingest",
+                    lease.key,
+                    time.monotonic() - last_renewed,
+                )
+                state["stop"] = "fenced"
+            if stopping():
+                return
+            work.cancel()
+            return
+
+    async def _process_owned_ingest_job(
+        self,
+        *,
+        state: Dict[str, Any],
+        lease: Any,
+        upload_id: str,
+        document_id: str,
+        organization_id: str,
+        project_id: Optional[str],
+        filename: str,
+        tags: List[str],
+        retry_ocr_pages: List[int],
+        file_object_id: str,
+        processing_path_value: str,
+    ) -> None:
+        from . import contract_source_lease as source_lease
+
+        db = await self._get_db()
         materialized_temp = False
         if file_object_id:
             processing_path = await self._file_object_service.materialize_to_temp(
@@ -558,6 +895,11 @@ class ContractService:
                     "progress": 20,
                 },
             )
+            # Before a single row is rewritten: a promoted instrument's CURRENT
+            # projection stops answering now, not after the new rows landed (or
+            # failed to). If that cannot be recorded, the rows are not touched.
+            await self._invalidate_contract_master_projection(document_id, strict=True)
+            state["source_written"] = True
             result = await self.ingest_contract(
                 processing_path,
                 organization_id,
@@ -568,6 +910,38 @@ class ContractService:
                 document_id,
                 retry_ocr_pages=retry_ocr_pages,
             )
+            if result.get("human_review_required"):
+                # Extraction left pages unresolved. That is a verdict about the
+                # content, not a pipeline failure: nothing was published, the
+                # Document is held out of every consumer, and the contract waits
+                # for an OCR retry or a reviewer. Not raised, so a queue retry
+                # cannot spend OCR re-reaching the same verdict.
+                unresolved_pages = list(result.get("unresolved_pages") or [])
+                await self.update_job_status(
+                    upload_id,
+                    ProcessingState.HUMAN_REVIEW_REQUIRED.value,
+                    error=result.get("error"),
+                    metadata={
+                        "document_id": document_id,
+                        "filename": filename,
+                        "unresolved_pages": unresolved_pages,
+                        "withheld_pages": list(result.get("withheld_pages") or []),
+                        "processing_stage": ProcessingState.HUMAN_REVIEW_REQUIRED.value,
+                        "stage_label": f"{len(unresolved_pages)} page(s) need OCR retry or review",
+                        "progress": 100,
+                    },
+                )
+                # Coherent, and held out of publication by the review hold.
+                # Settled before the status is written, like the success path.
+                await state["quiesce"]()
+                await source_lease.settle(db, lease)
+                await self.update_contract_document(
+                    document_id,
+                    status_value=ProcessingState.HUMAN_REVIEW_REQUIRED.value,
+                    error=result.get("error"),
+                    tags=tags,
+                )
+                return
             # ingest_file reports failures via {"ok": False} rather than raising,
             # so a failed ingest must not fall through to marking the contract
             # "completed" (that is how unsearchable documents ended up completed).
@@ -584,6 +958,12 @@ class ContractService:
             # the Clause Index tab can re-run it via the trigger.
             await self._run_clause_indexing_safe(document_id)
 
+            # Settle first: an ingest whose lease was taken over learns it here,
+            # before it could write "completed" over the ingest now writing, and
+            # a source a superseded writer touched is reported as a failure
+            # (SourceTainted) instead of a completed contract.
+            await state["quiesce"]()
+            await source_lease.settle(db, lease)
             await self.update_job_status(
                 upload_id,
                 "completed",
@@ -594,10 +974,48 @@ class ContractService:
                     "processing_stage": "completed",
                     "stage_label": "Processing complete",
                     "progress": 100,
+                    "unresolved_pages": [],
+                    "withheld_pages": [],
                 },
             )
             await self.update_contract_document(document_id, status_value="completed", categories=categories, tags=tags)
+            await self._settle_processing_status(document_id, completed=True)
+            await self._invalidate_contract_master_projection(document_id)
+        except source_lease.LostSourceLease as lost:
+            # This one may have written pages after losing the lease, so the
+            # source is marked not projectable until a clean ingest. A live
+            # owner reports its own outcome; with none left, this is a failed
+            # attempt the queue retries (the retry is the clean ingest).
+            logger.error(
+                "contract ingest %s of %s lost its source lease; its outcome is discarded",
+                upload_id,
+                document_id,
+            )
+            await self._taint_source(db, lease, document_id, str(lost))
+            if not lost.holder:
+                await self._record_ingest_failure(upload_id, document_id, filename, tags, str(lost))
+            raise
         except Exception as exc:
+            await state["quiesce"]()
+            try:
+                if isinstance(exc, source_lease.SourceTainted):
+                    pass  # already released as failed by settle()
+                elif state["source_written"]:
+                    # A failed ingest may have deleted or half-written the rows:
+                    # not projectable until an ingest settles it.
+                    await source_lease.fail(db, lease, error=str(exc))
+                else:
+                    await source_lease.release_untouched(db, lease)
+            except source_lease.LostSourceLease as lost:
+                logger.error("contract ingest %s of %s lost its source lease", upload_id, document_id)
+                await self._taint_source(db, lease, document_id, str(lost))
+                if not lost.holder:
+                    # No live owner will report; this attempt's failure is the
+                    # record (the retry is the clean ingest).
+                    await self._record_ingest_failure(upload_id, document_id, filename, tags, str(exc))
+                raise lost from exc
+            # A failed ingest may have deleted or half-written the rows.
+            await self._invalidate_contract_master_projection(document_id)
             await self.update_job_status(
                 upload_id,
                 "failed",
@@ -610,10 +1028,56 @@ class ContractService:
                 },
             )
             await self.update_contract_document(document_id, status_value="failed", error=str(exc), tags=tags)
+            await self._settle_processing_status(document_id, completed=False)
             raise
         finally:
             if materialized_temp or processing_path_value:
                 self._cleanup_tmp_file(processing_path)
+
+    async def _invalidate_contract_master_projection(
+        self, document_id: str, *, strict: bool = False
+    ) -> None:
+        """An ingest is rewriting this document's rows: re-project its instrument.
+
+        Called before the rows are touched (``strict``: a failure aborts the
+        ingest, so no row changes under a CURRENT projection), again once they
+        landed (revoking any build that read the old text meanwhile), and on
+        failure (the rows may be half-written).
+
+        Upload, OCR retry and reindex all replace ``document_vectors`` for the
+        document with untagged rows built from the new text. If a Contract Master
+        instrument governs it, its CURRENT projection no longer describes what is
+        stored, so it goes back to PENDING and the contract-worker rebuilds it.
+        A failure here is logged loudly: the instrument would keep answering from
+        a projection the ingest has just overwritten.
+        """
+        try:
+            from .contract_document_store import CONTRACT_DOCUMENTS_COLLECTION
+            from .contract_reprojection_worker import ContractReprojectionWorker
+
+            db = await self._get_db()
+            instruments = db[CONTRACT_DOCUMENTS_COLLECTION]
+            instrument = await instruments.find_one({"document_id": str(document_id)}, {"_id": 1})
+            if instrument is None:
+                # The other spelling of the canonical id, like every other
+                # governance check: the instrument stores the string form.
+                canonical = await resolve_canonical_document(db, document_id)
+                if canonical is not None and str(canonical["_id"]) != str(document_id):
+                    instrument = await instruments.find_one(
+                        {"document_id": str(canonical["_id"])}, {"_id": 1}
+                    )
+            if instrument is None:
+                return
+            await ContractReprojectionWorker(db).request_retry(
+                str(instrument["_id"]), reason="source re-ingested"
+            )
+        except Exception:
+            logger.exception(
+                "could not invalidate the Contract Master projection of %s around ingest",
+                document_id,
+            )
+            if strict:
+                raise
 
     async def get_job_status(self, upload_id: str, current_user: CurrentUser) -> StatusResponse:
         doc = await (await self._get_jobs()).find_one({"upload_id": upload_id})
@@ -645,7 +1109,7 @@ class ContractService:
         return ContractListResponse(uploads=[self._normalize_contract_record(row) for row in rows], count=total)
 
     async def get_contract_document(self, document_id: str, current_user: CurrentUser) -> Dict[str, Any]:
-        document = await (await self._get_documents()).find_one({"_id": self._as_lookup_id(document_id)})
+        document = await resolve_canonical_document(await self._get_db(), document_id)
         if (
             not document
             or str(document.get("uploadType") or "").lower() != "contract"
@@ -656,14 +1120,39 @@ class ContractService:
         return document
 
     async def get_failed_ocr_pages(self, document_id: str) -> List[int]:
+        """Pages an OCR retry of this contract still has work on.
+
+        The same predicate the extraction run uses (`_UNRESOLVED_PAGE_STATUSES`,
+        or published text that was withheld), minus pages that cannot be
+        rendered - OCR cannot read those either. A narrower list left a
+        withheld ``ocr_pending`` page with no way to be retried.
+        """
+        retryable = sorted(
+            status.value
+            for status in _UNRESOLVED_PAGE_STATUSES
+            if status not in (PageStatus.UNRENDERABLE, PageStatus.OCR_EMPTY)
+        )
         rows = await (
             (await self._get_db())
             .contract_ocr_pages.find(
                 {
                     "document_id": str(document_id),
-                    "status": {"$in": ["ocr_failed", "ocr_empty", "ocr_disabled"]},
+                    "$or": [
+                        {"status": {"$in": retryable}},
+                        # Only a blank page OCR read as having no text at all
+                        # is settled (see contracts_ingest._settled_blank_pages).
+                        {
+                            "status": PageStatus.OCR_EMPTY.value,
+                            "page_class": {"$ne": PageClass.BLANK.value},
+                        },
+                        {
+                            "status": PageStatus.OCR_EMPTY.value,
+                            "error": {"$ne": OCR_RETURNED_NO_TEXT},
+                        },
+                        {"text_withheld": True},
+                    ],
                 },
-                {"page_number": 1},
+                {"page_number": 1, "status": 1},
             )
             .sort("page_number", 1)
             .to_list(length=5000)
@@ -673,6 +1162,30 @@ class ContractService:
             for row in rows
             if isinstance(row.get("page_number"), int) or str(row.get("page_number")).isdigit()
         ]
+
+    async def resolve_ocr_retry_pages(self, document_id: str, requested: Sequence[int]) -> List[int]:
+        """The pages an OCR retry will rework, or a 422 naming why it cannot.
+
+        A retry continues the contract's recorded run, so a page that run has
+        already resolved is carried, not re-read. An explicit request for such
+        a page - or for one the contract does not have - is refused here rather
+        than accepted and silently ignored; re-extracting a resolved page is a
+        reindex.
+        """
+        retryable = await self.get_failed_ocr_pages(document_id)
+        wanted = sorted({int(page) for page in requested if int(page) > 0})
+        if not wanted:
+            if not retryable:
+                raise ContractError("No failed OCR pages found for this contract", status.HTTP_422_UNPROCESSABLE_ENTITY)
+            return retryable
+        refused = [page for page in wanted if page not in set(retryable)]
+        if refused:
+            raise ContractError(
+                f"Pages {refused} have no unresolved OCR work (already resolved or not in this "
+                "contract); reindex the contract to re-extract resolved pages",
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+        return wanted
 
     def _hybrid_enabled(self, request: ContractSearchRequest) -> bool:
         return bool((request.query or "").strip() and self._processing_config.qdrant_enabled and self._vector_client.enabled)
@@ -781,6 +1294,29 @@ class ContractService:
                 "fails rather than returning something a caller could mistake for "
                 "an answer: {0}".format(exc)
             ) from exc
+        pending = tuple(getattr(resolved, "projection_not_current", ()) or ())
+        if pending:
+            # An applicable instrument whose projection is not current is not
+            # "zero applicable instruments": answering valid_empty (or answering
+            # from the other instruments as if complete) is how a promoted
+            # contract read as having no evidence while its projection never
+            # ran. Stale projection is the hard-fail class, never degraded.
+            raise ContractEvidenceAuthorityFailure(
+                "projection_not_current: {0} applicable instrument(s) have no current "
+                "projection, so this contract's evidence cannot be answered yet: {1}".format(
+                    len(pending),
+                    ", ".join(
+                        "{0} (status={1}, projection_revision={2}, "
+                        "classification_revision={3})".format(
+                            item.get("contract_document_id"),
+                            item.get("projection_status"),
+                            item.get("projection_revision"),
+                            item.get("classification_revision"),
+                        )
+                        for item in pending
+                    ),
+                )
+            )
         return sorted(str(item) for item in resolved.eligible_document_ids)
 
     def _evidence_match_stage(self, request, effective_org, effective_project):
@@ -794,8 +1330,12 @@ class ContractService:
         match_stage = {"uploadType": "contract"}
         if effective_org:
             match_stage["organization_id"] = effective_org
-        if effective_project:
-            match_stage["project_id"] = effective_project
+        # No project predicate. A row's project_id is ingest provenance, never
+        # authority (v1_02): an organisation-scoped instrument applied to this
+        # project has rows with no project at all, and filtering on it made a
+        # CURRENT projection unreadable. The eligible set - resolved for this
+        # (organisation, project, contract) - is what constrains evidence.
+        del effective_project
         if request.document_id:
             match_stage["$or"] = [
                 {"document_id": request.document_id},
@@ -850,7 +1390,7 @@ class ContractService:
             query_vector=query_vector,
             filters={
                 "org_id": effective_org,
-                "project_id": effective_project,
+                # No project filter: see _evidence_match_stage.
                 "document_id": [request.document_id] if request.document_id else None,
                 "tags": request.tags or None,
                 "uploadType": "contract",

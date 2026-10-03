@@ -57,6 +57,9 @@ const ClaimDetailPage = lazyWithRetry(() => import("./pages/ClaimDetailPage"));
 const SLATrackerPage = lazyWithRetry(() => import("./pages/SLATrackerPage"));
 const KeyDateRegisterPage = lazyWithRetry(() => import("./pages/KeyDateRegisterPage"));
 const KeyDateDetailPage = lazyWithRetry(() => import("./pages/KeyDateDetailPage"));
+const HindranceRegisterPage = lazyWithRetry(() => import("./pages/HindranceRegisterPage"));
+const HindranceDetailPage = lazyWithRetry(() => import("./pages/HindranceDetailPage"));
+const ProgrammeMilestoneDetailPage = lazyWithRetry(() => import("./pages/ProgrammeMilestoneDetailPage"));
 const VariationRegisterPage = lazyWithRetry(() => import("./pages/VariationRegisterPage"));
 const BankGuaranteeRegisterPage = lazyWithRetry(() => import("./pages/BankGuaranteeRegisterPage"));
 const InsuranceRegisterPage = lazyWithRetry(() => import("./pages/InsuranceRegisterPage"));
@@ -242,6 +245,30 @@ const AppRoutes = () => (
           element={
             <RoleGuard path="/key-dates" fallback="/overview">
               <KeyDateDetailPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="hindrances"
+          element={
+            <RoleGuard path="/hindrances" fallback="/overview">
+              <HindranceRegisterPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="hindrances/:id"
+          element={
+            <RoleGuard path="/hindrances" fallback="/overview">
+              <HindranceDetailPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="programme-milestones/:id"
+          element={
+            <RoleGuard path="/programme-milestones" fallback="/overview">
+              <ProgrammeMilestoneDetailPage />
             </RoleGuard>
           }
         />

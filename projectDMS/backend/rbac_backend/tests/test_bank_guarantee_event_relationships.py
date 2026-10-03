@@ -21,6 +21,7 @@ from rbac_backend.routers.document_relationships import (
 )
 from rbac_backend.services.document_relationship_service import DocumentRelationshipService
 from rbac_backend.models.document_relationship import DocumentRelationshipInput
+from rbac_backend.tests.selection_fixtures import pin_selection
 from rbac_backend.tests.test_claim_document_relationships import (
     _Collection,
     _Database,
@@ -81,6 +82,8 @@ def _app(
     app.dependency_overrides[get_document_relationship_service] = lambda: DocumentRelationshipService(
         db, policy=relationship_policy or _AllowPolicy()
     )
+    # The selection the browser sends for the fixture BG: its own project.
+    pin_selection(app, db, "org-1", "project-1")
     return app
 
 

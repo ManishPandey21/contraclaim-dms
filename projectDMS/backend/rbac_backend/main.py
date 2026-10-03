@@ -33,6 +33,7 @@ from .routers import (
     ipc_bills,
     evidence_graph,
     evidence_registers,
+    hindrances,
     ipc_categories,
     sla,
     dashboard,
@@ -162,8 +163,11 @@ app.add_middleware(
         "X-Requested-With",
         "X-Step-Up-Token",
         "Idempotency-Key",
+        # Active organisation / project selection (core/tenant_context.py).
+        "X-Org-Id",
+        "X-Proj-Id",
     ],
-    expose_headers=["X-Request-ID", "Content-Disposition"],
+    expose_headers=["X-Request-ID", "Content-Disposition", "Retry-After"],
 )
 
 
@@ -263,6 +267,7 @@ app.include_router(insurance.router, prefix="/api", tags=["insurance"])
 app.include_router(ipc_bills.router, prefix="/api", tags=["ipc-bills"])
 app.include_router(evidence_graph.router, prefix="/api", tags=["evidence-graph"])
 app.include_router(evidence_registers.router, prefix="/api", tags=["evidence-registers"])
+app.include_router(hindrances.router, prefix="/api", tags=["hindrances"])
 app.include_router(arbitration_drafting.router, prefix="/api", tags=["arbitration-drafting"])
 app.include_router(chronology.router, prefix="/api", tags=["chronology"])
 app.include_router(ipc_categories.router, prefix="/api", tags=["ipc-categories"])

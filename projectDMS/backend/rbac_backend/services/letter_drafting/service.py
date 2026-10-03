@@ -113,7 +113,7 @@ _ACTIVE_STATUSES = frozenset(["completed", "needs_attention", "blocked"])
 _EXPORTED_ISSUED_STATUSES = frozenset(["exported", "issued"])
 
 
-from ..publication_policy import authoritative_summary, authoritative_text
+from ..publication_policy import authoritative_fact_text, authoritative_summary
 
 
 class DraftRunService:
@@ -1233,8 +1233,8 @@ class DraftRunService:
             # citable fact, so it obeys the publication policy like any other
             # authoritative-content consumer.
             text = (
-                authoritative_summary(doc)
-                or authoritative_text(doc)
+                authoritative_fact_text(doc)
+                or authoritative_summary(doc)
                 or doc.get("subject")
             )
             sources.append(

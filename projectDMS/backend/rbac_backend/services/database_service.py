@@ -1,6 +1,5 @@
 # services/database_service.py
 
-import hashlib
 import logging
 import os
 from datetime import datetime
@@ -21,10 +20,21 @@ except ImportError:  # pragma: no cover - optional dependency
         def __init__(self, *args, **kwargs):
             raise ImportError("llama_index is not installed; enable it or switch to LangChain vector service.")
 from .langchain_vector_service import LangChainVectorService
+from .contract_source import ContractSourceWriteRefused, refuse_contract_source_write
 from .publication_policy import is_publication_blocked, resolve_canonical_document
 from .reference_parser import parse_legacy_reference_text
+from .falkor_graph_service import normalize_letter_code
+from .source_text import OCR_TEXT_KIND_SOURCE, full_text_updates, select_body_text
+from .metadata_integrity import (
+    keep_stored_values_on_degraded_source,
+    merge_degraded_snapshot,
+    protect_human_edited_fields,
+)
 from ..utils.pipeline_logging import configure_pipeline_logger
-from ..ingestion.chunk_ids import deterministic_chunk_id
+from ..retrieval.correspondence_payload import (
+    build_correspondence_chunks,
+    refuse_report_derived_text,
+)
 
 
 class DocumentProcessingError(Exception):
@@ -166,9 +176,15 @@ class DatabaseService:
         full_text: str,
         embedding_text: str,
         skip_embeddings: bool = False,
+        metadata_quality: Optional[Dict[str, Any]] = None,
+        source_provenance: Optional[Dict[str, Any]] = None,
     ) -> int:
         """
         Save document data to database and create embeddings.
+
+        ``source_provenance`` labels what ``full_text`` (the ``ocrText`` write)
+        is: ``ocr_text_kind`` and ``source_text_status`` from
+        ``services/source_text.py``.
 
         Returns:
             Number of embedding chunks created
@@ -181,9 +197,22 @@ class DatabaseService:
             )
             db = await self.get_database()
 
+            # This run's start-of-run check is long past (OCR, extraction): a
+            # promotion may have committed, or the upload type been edited,
+            # since. A contract source's text and evidence are not ours to write.
+            if document_id:
+                await refuse_contract_source_write(
+                    db,
+                    document_id,
+                    await resolve_canonical_document(db, document_id),
+                    step="the general pipeline's metadata write",
+                )
+
             # Save document metadata
             doc = await self._upsert_document_metadata(
-                db, document_id, file_path, parsed_metadata, full_text
+                db, document_id, file_path, parsed_metadata, full_text,
+                metadata_quality=metadata_quality,
+                source_provenance=source_provenance,
             )
 
             # Deferred while a duplicate check is pending: metadata is saved,
@@ -207,6 +236,8 @@ class DatabaseService:
             # successful OCR/metadata extraction; record them as partial failures.
             try:
                 chunks_created = await self._create_and_store_embeddings(db, doc, embedding_text)
+            except ContractSourceWriteRefused:
+                raise
             except Exception as exc:
                 chunks_created = 0
                 self.partial_failures["embeddings"] = {
@@ -226,6 +257,8 @@ class DatabaseService:
             )
             return chunks_created
 
+        except ContractSourceWriteRefused:
+            raise
         except Exception as exc:
             logger.error("Failed to save document data: %s", exc)
             raise DocumentProcessingError(f"Database save failed: {exc}") from exc
@@ -253,9 +286,21 @@ class DatabaseService:
             )
             return 0
 
-        text = doc.get("full_text") or doc.get("ocrText") or ""
+        # The same source-authority rule as every reader: source text first,
+        # Item 25 only as the fallback, never the extraction report.
+        text = select_body_text(doc, include_summary=False)
         if not str(text).strip():
             logger.warning("Cannot create deferred embeddings; document %s has no text", document_id)
+            # Visible, not left `deferred` for ever: there is no source text
+            # and no complete Item 25 to index (the report is never indexed).
+            await self._update_vector_sync_status(
+                db,
+                str(doc.get("_id")),
+                status="empty",
+                mongo_chunks=0,
+                qdrant_chunks=None,
+                details="No source text or complete Full Content to index",
+            )
             return 0
         return await self._create_and_store_embeddings(db, doc, str(text))
 
@@ -266,6 +311,9 @@ class DatabaseService:
         file_path: str,
         parsed_metadata: Any,
         full_text: str,
+        *,
+        metadata_quality: Optional[Dict[str, Any]] = None,
+        source_provenance: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Upsert document metadata to documents collection"""
         try:
@@ -277,24 +325,39 @@ class DatabaseService:
                 "ocrText": full_text,
                 "updatedAt": datetime.utcnow(),
             }
+            for key in ("ocr_text_kind", "source_text_status"):
+                value = (source_provenance or {}).get(key)
+                if value:
+                    updates[key] = value
 
             # Add parsed metadata fields (assuming dataclass or dict)
             if hasattr(parsed_metadata, "subject") and parsed_metadata.subject:
                 updates["subject"] = parsed_metadata.subject
             if hasattr(parsed_metadata, "letter_no") and parsed_metadata.letter_no:
                 updates["letterNo"] = parsed_metadata.letter_no
+                # Kept in step: reference resolution matches on the normalized
+                # form, so a stale one points links at the old number.
+                updates["letterNoNormalized"] = normalize_letter_code(str(parsed_metadata.letter_no))
             if hasattr(parsed_metadata, "from_company") and parsed_metadata.from_company:
                 updates["from"] = parsed_metadata.from_company
             if hasattr(parsed_metadata, "to_company") and parsed_metadata.to_company:
                 updates["to"] = parsed_metadata.to_company
             if hasattr(parsed_metadata, "summary") and parsed_metadata.summary:
                 updates["summary"] = parsed_metadata.summary
-            if hasattr(parsed_metadata, "references") and parsed_metadata.references:
+            references_authoritative = (
+                metadata_quality is None or bool(metadata_quality.get("references_authoritative"))
+            )
+            if (
+                references_authoritative
+                and hasattr(parsed_metadata, "references")
+                and parsed_metadata.references
+            ):
+                # A non-authoritative list is partial; storing it would let a
+                # later "sync references" bucket-replace the links it missed.
                 normalized_refs = self._normalize_metadata_references(parsed_metadata.references)
                 if normalized_refs:
                     updates["reference"] = normalized_refs
-            if hasattr(parsed_metadata, "full_content") and parsed_metadata.full_content:
-                updates["full_text"] = parsed_metadata.full_content
+            updates.update(full_text_updates(parsed_metadata))
             if hasattr(parsed_metadata, "keywords") and parsed_metadata.keywords:
                 updates["keywords"] = parsed_metadata.keywords
             if hasattr(parsed_metadata, "contractual_clauses") and parsed_metadata.contractual_clauses:
@@ -302,6 +365,8 @@ class DatabaseService:
             if hasattr(parsed_metadata, "key_reply_points") and parsed_metadata.key_reply_points:
                 updates["key_reply_points"] = parsed_metadata.key_reply_points
             updates.update(extracted_metadata_updates(parsed_metadata))
+            if metadata_quality is not None:
+                updates["metadata_quality"] = metadata_quality
 
             # Parse date if available
             if hasattr(parsed_metadata, "date") and parsed_metadata.date:
@@ -316,6 +381,11 @@ class DatabaseService:
                     logger.warning("Date parsing failed: %s", exc)
 
             if doc:
+                # A degraded run never erases the stored extraction record,
+                # and never overwrites a field a person edited.
+                merge_degraded_snapshot(updates, doc, metadata_quality)
+                protect_human_edited_fields(updates, doc)
+                keep_stored_values_on_degraded_source(updates, doc, metadata_quality)
                 await db.documents.update_one({"_id": doc["_id"]}, {"$set": updates})
                 doc.update(updates)
             else:
@@ -394,6 +464,20 @@ class DatabaseService:
             from .text_processing_service import TextProcessingService
 
             text_service = TextProcessingService(self.config)
+            # With no OCR text and no parsed full content, the text is the LLM
+            # extraction report itself - reply advice included - not the
+            # letter. It is refused here, visibly, rather than indexed.
+            # Text the extractor itself recorded as the source is not judged
+            # by the report's shape (a letter may number its own particulars);
+            # the reply-advice heading is still refused whatever the label.
+            refuse_report_derived_text(
+                document_id,
+                text,
+                recorded_source=(
+                    doc.get("ocr_text_kind") == OCR_TEXT_KIND_SOURCE
+                    and text == doc.get("ocrText")
+                ),
+            )
             chunks = text_service.chunk_text(text)
             if not chunks:
                 logger.warning("No text chunks to embed")
@@ -407,70 +491,18 @@ class DatabaseService:
                 )
                 return 0
 
+            # One builder for the Qdrant payload and the Mongo row (DI-B1). It
+            # raises on a document with no organisation: an unscoped vector is
+            # refused here, and the except below marks the sync `error`.
+            payloads: List[Dict[str, Any]] = build_correspondence_chunks(
+                doc,
+                chunks,
+                embedding_model=self.config.openai_embedding_model,
+                embedding_version=getattr(self.config, "embedding_version", "v1"),
+                chunking_version=getattr(self.config, "chunking_version", "v1"),
+            )
+
             vector_service = self._get_vector_service()
-
-            organization_id = doc.get("organization_id")
-            project_id = doc.get("project_id")
-
-            def _maybe_str(value: Any) -> Optional[str]:
-                if value is None:
-                    return None
-                return str(value)
-
-            payloads: List[Dict[str, Any]] = []
-            for index, chunk_text in enumerate(chunks):
-                checksum = hashlib.sha256(chunk_text.encode("utf-8")).hexdigest()
-                chunk_id = deterministic_chunk_id(document_id, index, text=chunk_text[:50])
-                metadata = {
-                    "document_id": document_id,
-                    "organization_id": _maybe_str(organization_id) or "",
-                    "project_id": _maybe_str(project_id) or "",
-                    "uploadType": str(doc.get("uploadType", "incoming")),
-                    "letterNo": doc.get("letterNo"),
-                    "filepath_local": doc.get("filepath_local"),
-                    "filepath_s3": doc.get("filepath_s3"),
-                    "chunk_index": index,
-                    "source": "document_processing",
-                    "chunk_id": chunk_id,
-                    "embedding_model": self.config.openai_embedding_model,
-                    "embedding_provider": "openai",
-                    "embedding_version": getattr(self.config, "embedding_version", "v1"),
-                    "chunking_version": getattr(self.config, "chunking_version", "v1"),
-                }
-                for field in (
-                    "subject",
-                    "summary",
-                    "keywords",
-                    "additional_keywords",
-                    "contractual_clauses",
-                    "key_reply_points",
-                    "asset_type",
-                    "location",
-                    "specific_area",
-                    "chainage_from",
-                    "chainage_to",
-                    "work_type",
-                    "issue_nature",
-                    "claim_category",
-                    "alleged_responsibility",
-                    "priority",
-                    "linked_event_suggested",
-                    "reference_chain",
-                    "extracted_tags",
-                    "extracted_subTags",
-                ):
-                    value = doc.get(field)
-                    if value not in (None, "", [], {}):
-                        metadata[field] = value
-                metadata["checksum_sha256"] = checksum
-                payloads.append(
-                    {
-                        "text": chunk_text,
-                        "metadata": metadata,
-                        "checksum": checksum,
-                        "chunk_id": chunk_id,
-                    }
-                )
 
             langchain_service = self._get_langchain_vector_service()
             expected_chunks = len(payloads)
@@ -496,6 +528,14 @@ class DatabaseService:
             )
 
             if qdrant_enabled:
+                # Re-read immediately before the first destructive step:
+                # replace_document deletes every point of the document.
+                await refuse_contract_source_write(
+                    db,
+                    document_id,
+                    await resolve_canonical_document(db, doc.get("_id")),
+                    step="vector replacement",
+                )
                 qdrant_chunks = await langchain_service.replace_document(payloads)
                 if qdrant_chunks is None:
                     qdrant_chunks = 0
@@ -519,6 +559,14 @@ class DatabaseService:
                     bool(langchain_service and langchain_service.enabled),
                 )
 
+            # And before the Mongo rows go: they include a contract's clause
+            # rows, which its evidence projection is built from.
+            await refuse_contract_source_write(
+                db,
+                document_id,
+                await resolve_canonical_document(db, doc.get("_id")),
+                step="the document_vectors replacement",
+            )
             filter_query = {"document_id": document_id}
             existing_refs = await db.document_vectors.find(filter_query, {"vector_ref": 1, "_id": 0}).to_list(length=None)
             vector_refs = [item.get("vector_ref") for item in existing_refs if item.get("vector_ref")]
@@ -597,6 +645,11 @@ class DatabaseService:
 
             return mongo_chunks
 
+        except ContractSourceWriteRefused:
+            # No evidence of the contract's was replaced or deleted. No error
+            # status is recorded over its sync row either; a "pending" written
+            # just before a late refusal is left for its own writers.
+            raise
         except DocumentProcessingError:
             await self._update_vector_sync_status(
                 db,

@@ -14,6 +14,8 @@ from pathlib import Path
 import uuid
 import csv
 import io
+import numbers
+import numpy as np
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor
 import asyncio
@@ -23,8 +25,10 @@ import tempfile
 from ..core.database import get_db, get_database
 from ..core.permissions import Permissions
 from ..core.security import get_current_user, CurrentUser
+from ..core.tenant_context import ActiveScope, active_scope
 from ..core.config import settings
 from ..config.document_processing_config import DocumentProcessingConfig
+from ..services.publication_policy import held_by_contract_extraction
 from ..services.archive_policy import ArchiveIntakePolicy
 from ..services.document_service import (
     DocumentConflictError,
@@ -37,8 +41,13 @@ from ..services.export_service import ExportService
 from ..services.authorization_service import AuthorizationService
 from ..services.bulk_upload_service import BulkUploadService
 from ..services.langchain_vector_service import LangChainVectorService
+from ..retrieval.vector_client import VectorStoreUnavailableError
 from ..dependencies import get_notification_service
 from ..services.reference_sync_service import ReferenceSyncError
+from ..services.metadata_integrity import (
+    merge_human_edited_fields,
+    stored_references_authoritative,
+)
 from ..services.storage_settings_service import StorageSettingsService
 from ..services.s3_service import S3Service
 from ..services.storage_key_builder import StorageKeyBuilder
@@ -73,7 +82,7 @@ from ..utils.validation import sanitize_filename
 from ..utils.error_handler import BaseDomainError, handle_exceptions, DocumentError
 from ..utils.date_parser import parse_date_safely
 from ..utils.csv_validator import validate_csv_structure, parse_csv_row
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -109,21 +118,74 @@ def _current_user_policy_scope(current_user: CurrentUser) -> tuple[Optional[str]
     )
 
 
-async def _ensure_document_access(
-    current_user: CurrentUser,
-    document_id: str,
-    permission: str,
-) -> None:
-    db = await get_database()
+async def _find_raw_document(db: Any, document_id: str) -> Optional[Dict[str, Any]]:
     candidates: list[Any] = [document_id]
     try:
         candidates.append(ObjectId(document_id))
     except Exception:
         pass
-    document = await db.documents.find_one({"_id": {"$in": candidates}})
+    return await db.documents.find_one({"_id": {"$in": candidates}})
+
+
+async def _ensure_document_access(
+    current_user: CurrentUser,
+    document_id: str,
+    permission: str,
+    selection: Optional[ActiveScope] = None,
+) -> None:
+    """Load the raw Document and authorize ``permission`` on it.
+
+    With ``selection`` (CL-4A) the Document is first held to the navbar selection:
+    400 ``selection_required`` before the load, 403 ``context_forbidden`` for a
+    Document in another project. An organisation-level Document (no project) is held
+    to the selected organisation only.
+    """
+    if selection is not None:
+        selection.require_selection()
+    db = await get_database()
+    document = await _find_raw_document(db, document_id)
     if not document:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    if selection is not None:
+        await selection.require_record(document, allow_unscoped=True)
     await PolicyService(db).authorize_document(current_user, permission, document)
+
+
+async def _hold_document(selection: ActiveScope, document_id: str) -> None:
+    """Hold a Document to the selection before a route's own load/authorize (CL-4A).
+
+    A missing Document is left to the route's existing 404.
+    """
+    selection.require_selection()
+    document = await _find_raw_document(await get_database(), document_id)
+    if document:
+        await selection.require_record(document, allow_unscoped=True)
+
+
+async def _linked_within_selection(selection: ActiveScope, linked: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Drop linked references whose target Document is outside the selection (CL-4A).
+
+    A reference is kept when its target is in the selected project, or is an
+    organisation-level Document of the selected organisation. A target that no
+    longer exists carries no metadata and is kept, so it can still be removed.
+    """
+    if not linked:
+        return linked
+    db = await get_database()
+    kept: List[Dict[str, Any]] = []
+    for entry in linked:
+        target = await _find_raw_document(db, str(entry.get("documentId") or entry.get("id") or ""))
+        if not target:
+            kept.append(entry)
+            continue
+        project = str(target.get("project_id") or target.get("projectId") or "")
+        organization = str(target.get("organization_id") or target.get("organizationId") or "")
+        if organization and selection.organization_id and organization != selection.organization_id:
+            continue
+        if project and project != selection.project_id:
+            continue
+        kept.append(entry)
+    return kept
 
 
 def _parse_revision_header(
@@ -189,6 +251,28 @@ def _normalize_summary_list(values: Optional[List[str]]) -> List[str]:
             seen.add(key)
             normalized.append(text)
     return normalized
+
+
+#: DocumentUpdate field -> stored document key recorded as human-edited.
+_HUMAN_EDIT_TRACKED_UPDATE_FIELDS: Dict[str, str] = {
+    "letterNo": "letterNo",
+    "date": "date",
+    "subject": "subject",
+    "from_": "from",
+    "to": "to",
+}
+
+def _edit_value(value: Any) -> Any:
+    """Comparable form of a tracked field, so a resubmitted value is no edit.
+
+    Dates compare by calendar day (the form may send a tz-aware timestamp for
+    a stored naive one); text compares with surrounding whitespace trimmed.
+    """
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, str):
+        return value.strip()
+    return value
 
 
 SUMMARY_METADATA_UPDATE_PATHS: Dict[str, tuple[str, ...]] = {
@@ -549,47 +633,41 @@ class DocumentController:
             filters,
         )
 
-        must_conditions: List[Dict[str, Any]] = []
+        def _scope_values(value: Any) -> List[str]:
+            if isinstance(value, dict):
+                value = value.get("$in", [])
+            if isinstance(value, (list, tuple, set)):
+                return [str(item) for item in value if item not in (None, "")]
+            return [str(value)] if value not in (None, "") else []
 
-        def _add_match(key: str, value: Any) -> None:
-            if value in (None, ""):
-                return
-            must_conditions.append(
-                {"key": key, "match": {"value": str(value)}}
-            )
-
-        def _add_any(key: str, values: Any) -> None:
-            try:
-                candidates = [str(item) for item in values if item not in (None, "")]
-            except TypeError:
-                candidates = []
-            if candidates:
-                must_conditions.append(
-                    {"key": key, "match": {"any": candidates}}
-                )
-
-        for key in ("organization_id", "project_id"):
-            value = validated_filters.get(key)
-            if isinstance(value, dict) and "$in" in value:
-                _add_any(key, value.get("$in", []))
-            elif isinstance(value, (list, tuple, set)):
-                _add_any(key, value)
-            elif value:
-                _add_match(key, value)
-
-        upload_type = filters.get("uploadType") or validated_filters.get("uploadType")
-        if upload_type:
-            _add_match("uploadType", upload_type)
-
-        qdrant_filter: Optional[Dict[str, Any]] = None
-        if must_conditions:
-            qdrant_filter = {"must": must_conditions}
-
-        search_results = await vector_service.similarity_search(
-            query_text=query,
-            top_k=limit,
-            filters=qdrant_filter,
+        # The canonical correspondence payload is flat `org_id`/`project_id`
+        # (DI-B1). The organisation bound is mandatory: a superadmin with no
+        # selection gets a 400, never a cross-tenant vector search.
+        org_ids = _scope_values(validated_filters.get("organization_id")) or _scope_values(
+            scope_org
         )
+        if not org_ids:
+            raise DocumentError(
+                "Vector search requires an organisation scope",
+                status.HTTP_400_BAD_REQUEST,
+            )
+        project_ids = _scope_values(validated_filters.get("project_id"))
+        upload_type = filters.get("uploadType") or validated_filters.get("uploadType")
+
+        try:
+            search_results = await vector_service.similarity_search(
+                query_text=query,
+                org_ids=org_ids,
+                project_ids=project_ids or None,
+                upload_type=str(upload_type) if upload_type else None,
+                top_k=limit,
+            )
+        except VectorStoreUnavailableError as exc:
+            logger.warning("Document vector search failed: %s", exc)
+            raise DocumentError(
+                "Vector search is currently unavailable",
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
 
         ordered_ids: List[str] = []
         seen_ids: set[str] = set()
@@ -600,36 +678,43 @@ class DocumentController:
                 seen_ids.add(doc_id)
                 ordered_ids.append(doc_id)
 
-        documents = await self.document_service.get_documents_by_ids(ordered_ids)
+        # A vector hit is only a candidate. It is served only when its document
+        # resolves through the actor's scope AND current publication authority;
+        # a hit whose row is missing, withheld, deleted or out of scope is
+        # dropped - text included - because a stale point outlives a failed
+        # purge and must not outlive the policy that withdrew it.
+        documents = await self.document_service.get_documents_by_ids_in_scope(
+            ordered_ids,
+            current_user,
+            organization_id=filters.get("organization_id"),
+            project_id=filters.get("project_id"),
+        )
         doc_lookup = {str(doc.id): doc for doc in documents}
 
         response_results: List[Dict[str, Any]] = []
         for item in search_results:
             metadata = item.get("metadata") or {}
             doc_id = str(metadata.get("document_id") or "").strip()
-            if not doc_id:
+            document = doc_lookup.get(doc_id) if doc_id else None
+            if document is None:
                 continue
-
-            document = doc_lookup.get(doc_id)
-            doc_summary: Optional[Dict[str, Any]] = None
-            if document:
-                await self.policy_service.authorize_document(
-                    current_user, Permissions.DOCUMENT_VIEW, document
-                )
-                doc_summary = {
-                    "id": doc_id,
-                    "filename": document.filename,
-                    "letterNo": document.letterNo,
-                    "subject": document.subject,
-                    "uploadType": document.uploadType,
-                    "organization_id": document.organization_id,
-                    "project_id": document.project_id,
-                    "date": document.date.isoformat() if document.date else None,
-                    "tags": document.tags or [],
-                    "subTags": document.subTags or [],
-                    "summary": document.summary,
-                    "keywords": document.keywords or [],
-                }
+            await self.policy_service.authorize_document(
+                current_user, Permissions.DOCUMENT_VIEW, document
+            )
+            doc_summary: Dict[str, Any] = {
+                "id": doc_id,
+                "filename": document.filename,
+                "letterNo": document.letterNo,
+                "subject": document.subject,
+                "uploadType": document.uploadType,
+                "organization_id": document.organization_id,
+                "project_id": document.project_id,
+                "date": document.date.isoformat() if document.date else None,
+                "tags": document.tags or [],
+                "subTags": document.subTags or [],
+                "summary": document.summary,
+                "keywords": document.keywords or [],
+            }
 
             response_results.append(
                 {
@@ -997,11 +1082,7 @@ class DocumentController:
                     csv_data.append(validated_row)
                 except Exception as e:
                     logger.error(f"CSV row {idx + 1} validation failed: {str(e)}")
-                    csv_data.append({
-                        **row_dict,
-                        '_validation_error': str(e),
-                        '_row_number': idx + 1
-                    })
+                    csv_data.append(self._csv_refused_row(row_dict, str(e), idx + 1))
 
             # Persist uploaded files so background processing can safely re-open them
             stored_files = await self.bulk_upload_service.persist_upload_files(files)
@@ -1125,11 +1206,7 @@ class DocumentController:
                 except Exception as e:
                     logger.error(f"Row {idx} validation failed: {str(e)}")
                     # Continue processing other rows
-                    validated_data.append({
-                        **row,
-                        '_validation_error': str(e),
-                        '_row_number': idx
-                    })
+                    validated_data.append(self._csv_refused_row(row, str(e), idx))
 
             return validated_data
 
@@ -1146,28 +1223,28 @@ class DocumentController:
 
     async def _validate_csv_row(self, row: Dict[str, Any], row_number: int) -> Dict[str, Any]:
         """Validate individual CSV row."""
+        # A blank CSV cell arrives as NaN (pandas' missing marker). It is truthy,
+        # so it would win every `or` chain below, and `str()` of it is "nan" -
+        # which then passes "is required" and persists as data. Every cell is
+        # read through `_csv_value` / `_csv_text`, which treat it as absent.
         # Clean and validate filename
-        filename = str(row.get('filename', '')).strip()
+        filename = self._csv_text(row.get('filename'))
         if not filename:
             raise ValueError(f"Row {row_number}: filename is required")
 
         # Validate upload type
-        upload_type_value = (
-            row.get('upload_type')
-            or row.get('uploadtype')
-            or row.get('uploadType')
-        )
-        upload_type = str(upload_type_value or '').strip().lower()
+        upload_type_value = self._csv_value(row, 'upload_type', 'uploadtype', 'uploadType')
+        upload_type = self._csv_text(upload_type_value).lower()
         if upload_type not in ['incoming', 'outgoing']:
             raise ValueError(f"Row {row_number}: upload_type must be 'incoming' or 'outgoing'")
 
         # Validate letter number
-        letter_no = str(row.get('letter_no') or row.get('letterNo') or '').strip()
+        letter_no = self._csv_text(self._csv_value(row, 'letter_no', 'letterNo'))
         if not letter_no:
             raise ValueError(f"Row {row_number}: letter_no is required")
 
         # Validate and parse date
-        date_str = str(row.get('date', '')).strip()
+        date_str = self._csv_text(row.get('date'))
         if not date_str:
             raise ValueError(f"Row {row_number}: date is required")
 
@@ -1176,20 +1253,32 @@ class DocumentController:
             raise ValueError(f"Row {row_number}: invalid date format '{date_str}'")
 
         # Subject is optional for bulk upload; default to empty string
-        subject = str(row.get('subject', '') or '').strip()
+        subject = self._csv_text(self._csv_value(row, 'subject'))
 
         # Optional fields with defaults
-        from_company = str(row.get('from_') or row.get('from') or '').strip() or None
-        to_company = str(row.get('to', '')).strip() or None
+        from_company = self._csv_text(self._csv_value(row, 'from_', 'from')) or None
+        to_company = self._csv_text(row.get('to')) or None
         tags = self._parse_list_field(row.get('tags', ''))
-        sub_tags = self._parse_list_field(row.get('sub_tags') or row.get('subTags') or '')
-        status = str(row.get('status', 'draft')).strip()
-        ocr_enabled = self._parse_boolean_field(row.get('ocr_enabled') or row.get('ocrEnabled') or 'true')
-        compression_enabled = self._parse_boolean_field(
-            row.get('compression_enabled') or row.get('compressionEnabled') or 'false'
+        sub_tags = self._parse_list_field(self._csv_value(row, 'sub_tags', 'subTags'))
+        # A blank status cell means the same as no status column: the default.
+        status_value = row.get('status', 'draft')
+        status = 'draft' if self._is_blank_csv_value(status_value) else str(status_value).strip()
+        # First PRESENT value, not first truthy: pandas reads "false" as False
+        # and "0" as 0, and an `a or b or 'true'` chain turned both into true.
+        ocr_enabled = self._parse_boolean_field(
+            self._first_present(row, 'ocr_enabled', 'ocrEnabled'),
+            field='ocr_enabled',
+            default=True,
+            row_number=row_number,
         )
-        path_structure = str(row.get('path_structure') or row.get('pathStructure') or '').strip() or None
-        path_structure1 = str(row.get('path_structure1') or row.get('pathStructure1') or '').strip() or None
+        compression_enabled = self._parse_boolean_field(
+            self._first_present(row, 'compression_enabled', 'compressionEnabled'),
+            field='compression_enabled',
+            default=False,
+            row_number=row_number,
+        )
+        path_structure = self._csv_text(self._csv_value(row, 'path_structure', 'pathStructure')) or None
+        path_structure1 = self._csv_text(self._csv_value(row, 'path_structure1', 'pathStructure1')) or None
 
         return {
             'filename': filename,
@@ -1209,9 +1298,51 @@ class DocumentController:
             '_row_number': row_number
         }
 
+    @staticmethod
+    def _is_blank_csv_value(value: Any) -> bool:
+        """True for a CSV cell that holds nothing: None, NaN, pd.NA or NaT.
+
+        Asked explicitly because truthiness cannot: ``bool(float('nan'))`` is
+        True and ``bool(pd.NA)`` raises.
+        """
+        return value is None or (pd.api.types.is_scalar(value) and bool(pd.isna(value)))
+
+    @classmethod
+    def _csv_value(cls, row: Dict[str, Any], *keys: str) -> Any:
+        """The first of ``keys`` whose cell is present and non-empty, else None.
+
+        The ``row.get(a) or row.get(b)`` chain this replaces, except that a
+        blank (NaN) cell no longer wins it.
+        """
+        for key in keys:
+            value = row.get(key)
+            if not cls._is_blank_csv_value(value) and value:
+                return value
+        return None
+
+    @classmethod
+    def _csv_text(cls, value: Any) -> str:
+        """A cell as stripped text; ``''`` for a blank cell, never ``'nan'``."""
+        return '' if cls._is_blank_csv_value(value) else str(value).strip()
+
+    @classmethod
+    def _csv_refused_row(cls, row: Dict[str, Any], error: str, row_number: int) -> Dict[str, Any]:
+        """A row `_validate_csv_row` refused, carried to the job as a per-row failure.
+
+        The raw cells ride along for the report, but ``filename`` is made text:
+        a blank one is NaN, which ``DocumentProcessingResult`` rejects - and that
+        rejection, raised inside the background job, failed the whole job.
+        """
+        return {
+            **row,
+            'filename': cls._csv_text(row.get('filename')),
+            '_validation_error': error,
+            '_row_number': row_number,
+        }
+
     def _parse_list_field(self, value: Any) -> List[str]:
         """Parse comma-separated string into list."""
-        if not value or pd.isna(value):
+        if self._is_blank_csv_value(value) or not value:
             return []
 
         if isinstance(value, str):
@@ -1219,18 +1350,60 @@ class DocumentController:
 
         return []
 
-    def _parse_boolean_field(self, value: Any) -> bool:
-        """Parse boolean field from various formats."""
-        if pd.isna(value):
+    @staticmethod
+    def _is_blank_cell(value: Any) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, str):
+            # `read_csv_from_upload_file` casts text columns with astype(str),
+            # which turns a blank cell into the literal string "nan".
+            return value.strip().lower() in ('', 'nan')
+        try:
+            return bool(pd.isna(value))
+        except (TypeError, ValueError):
             return False
 
-        if isinstance(value, bool):
-            return value
+    def _first_present(self, row: Dict[str, Any], *keys: str) -> Any:
+        """The first of ``keys`` whose cell is not blank (``False``/``0`` count)."""
+        for key in keys:
+            value = row.get(key)
+            if not self._is_blank_cell(value):
+                return value
+        return None
 
-        if isinstance(value, str):
-            return value.lower() in ['true', '1', 't', 'y', 'yes', 'on']
+    _TRUE_TOKENS = frozenset({'true', '1', 't', 'y', 'yes', 'on'})
+    _FALSE_TOKENS = frozenset({'false', '0', 'f', 'n', 'no', 'off'})
 
-        return bool(value)
+    def _parse_boolean_field(
+        self, value: Any, *, field: str, default: bool, row_number: Any
+    ) -> bool:
+        """Parse a CSV boolean cell as pandas delivers it.
+
+        pandas yields ``bool``/``numpy.bool_`` for a true/false column, ``int``
+        or ``float`` for 0/1 (``float`` with ``NaN`` when a cell is blank), and
+        ``str`` otherwise. A blank cell means "not specified" and takes the
+        field's default. A value that is neither true nor false is a row error:
+        guessing ``False`` for "maybe" or ``2`` would silently change what the
+        upload does.
+        """
+        if self._is_blank_cell(value):
+            return default
+        if isinstance(value, (bool, np.bool_)):
+            return bool(value)
+        if isinstance(value, numbers.Number):
+            if value == 1:
+                return True
+            if value == 0:
+                return False
+        elif isinstance(value, str):
+            token = value.strip().lower()
+            if token in self._TRUE_TOKENS:
+                return True
+            if token in self._FALSE_TOKENS:
+                return False
+        raise ValueError(
+            f"Row {row_number}: {field} must be true or false, not {value!r}"
+        )
 
     async def _emit_bulk_upload_notification(
         self,
@@ -1334,7 +1507,7 @@ class DocumentController:
                     logger.error(f"Failed to process file {row_data.get('filename')}: {str(e)}")
 
                     failed_result = DocumentProcessingResult(
-                        filename=row_data.get('filename', 'unknown'),
+                        filename=self._csv_text(row_data.get('filename')) or 'unknown',
                         success=False,
                         error=str(e),
                         row_number=row_data.get('_row_number', 0)
@@ -1403,7 +1576,8 @@ class DocumentController:
         current_user: CurrentUser
     ) -> DocumentProcessingResult:
         """Process a single file from bulk upload."""
-        filename = row_data['filename']
+        # A refused row may still carry the raw cell; the result model needs text.
+        filename = self._csv_text(row_data['filename'])
         row_number = row_data.get('_row_number', 0)
 
         try:
@@ -1490,6 +1664,26 @@ class DocumentController:
                     raise DocumentError("Unauthorized", status.HTTP_401_UNAUTHORIZED)
                 await self.policy_service.authorize_document(
                     current_user, Permissions.DOCUMENT_EDIT_METADATA, document
+                )
+
+            if held_by_contract_extraction(
+                {
+                    "processing_status": getattr(document, "processing_status", None),
+                    "processing_error": getattr(document, "processing_error", None),
+                }
+            ):
+                raise DocumentError(
+                    "This contract has pages that could not be read. Use the contract's "
+                    "OCR retry or reindex; general reprocessing would mark it complete.",
+                    status.HTTP_409_CONFLICT,
+                )
+
+            if await self.document_service.is_governed_contract(document_id):
+                raise DocumentError(
+                    "This is a contract (a contract upload, or governed by Contract "
+                    "Master). Use the contract reindex; general reprocessing would "
+                    "replace its clause rows and the evidence built from them.",
+                    status.HTTP_409_CONFLICT,
                 )
 
             file_path = await self._materialize_for_processing(document)
@@ -1658,6 +1852,10 @@ async def controller_list_documents(
         )
         if filters.get("linkable_only"):
             authorized_query = _apply_linkable_document_constraints(authorized_query)
+        elif filters.get("include_organization_level") and isinstance(authorized_query.get("project_id"), str):
+            # CL-4A: the selected project, plus the selected organisation's
+            # organisation-level Documents (no project) - not another project's.
+            authorized_query["project_id"] = {"$in": [authorized_query["project_id"], "", None]}
 
         documents, total_count = await self.document_service.list_documents(
             authorized_query, pagination
@@ -1726,7 +1924,25 @@ async def controller_update_document(
         update_payload = validated_update.model_dump(
             exclude_unset=True, exclude_none=True
         )
-        updated_document_model = document.model_copy(update=update_payload)
+        # Record which correspondence facts a person changed, so reprocessing
+        # never silently overwrites them. Unchanged resubmitted values are not
+        # edits.
+        edited_keys = [
+            stored_key
+            for field_name, stored_key in _HUMAN_EDIT_TRACKED_UPDATE_FIELDS.items()
+            if field_name in update_payload
+            and _edit_value(update_payload[field_name]) != _edit_value(getattr(document, field_name, None))
+        ]
+        model_update = dict(update_payload)
+        if edited_keys:
+            model_update["human_edited_fields"] = merge_human_edited_fields(
+                {
+                    "human_edited_fields": document.human_edited_fields,
+                    "manual_summary_metadata_override": document.manual_summary_metadata_override,
+                },
+                edited_keys,
+            )
+        updated_document_model = document.model_copy(update=model_update)
 
         updated_document = await self.document_service.update_document(
             document_id,
@@ -2125,11 +2341,17 @@ async def controller_sync_references(
                     {k: v for k, v in item.items() if v not in (None, "", [], {})}
                 )
 
+        # The stored list is only a complete answer when the extraction that
+        # wrote it was authoritative; an empty list from a degraded run must
+        # not clear the links it failed to re-read.
+        references_authoritative = stored_references_authoritative(
+            {"metadata_quality": document.metadata_quality}
+        )
         sync_result = await self.document_service.reference_sync_service.sync_bidirectional(
             document_id=document_id,
             references=references_payload,
             source="parser",
-            clear_existing=True,
+            clear_existing=references_authoritative,
         )
 
         # Reload inside the service so Falkor receives the relationships that
@@ -2141,6 +2363,8 @@ async def controller_sync_references(
                 "Reference synchronisation completed"
                 if references_payload
                 else "No extracted references found; automatic links were cleared"
+                if references_authoritative
+                else "Reference extraction was incomplete; existing links were kept"
             ),
             "sync": sync_result,
         }
@@ -2264,7 +2488,9 @@ async def vector_search_documents_endpoint(
     uploadType: Optional[str] = Query(None),
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ) -> Dict[str, Any]:
+    organization_id, project_id = await selection.list_filters(organization_id, project_id)
     filters = {
         "organization_id": organization_id,
         "project_id": project_id,
@@ -2291,12 +2517,15 @@ async def export_documents(
     date_to: Optional[date] = Query(None),
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """
     Export documents with filtering. Returns a downloadable file.
     Note: Uses enrichment so Tag/Sub-Tag names and project_name are included.
     """
     from fastapi.responses import StreamingResponse
+
+    organization_id, project_id = await selection.list_filters(organization_id, project_id)
 
     # Build filters consistent with list endpoint
     filters: Dict[str, Any] = {
@@ -2561,8 +2790,11 @@ async def create_document(
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy_service),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Create a new document."""
+    # The form's project must BE the selection: refused, never rewritten.
+    await selection.require_project(project_id, organization_id)
     await policy.authorize(
         current_user,
         "dms.document.upload",
@@ -2600,9 +2832,10 @@ async def get_document(
     response: Response,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Get a specific document."""
-    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_VIEW)
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_VIEW, selection)
     document = await controller_get_document(controller, id, current_user)
     await PolicyService().authorize_document(current_user, Permissions.DOCUMENT_VIEW, document)
     await _set_document_revision_headers(response, controller, id)
@@ -2615,9 +2848,10 @@ async def process_document_endpoint(
     id: str,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ) -> DocumentProcessingResult:
     """Trigger OCR/AI processing for an existing document."""
-    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_EDIT_METADATA)
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_EDIT_METADATA, selection)
     return await controller.process_document(id, current_user)
 
 
@@ -2643,6 +2877,7 @@ async def download_all_project_documents(
     document_id: Optional[str] = Query(None, min_length=1),
     service: DocumentBulkDownloadService = Depends(get_document_bulk_download_service),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """
     Download all project letters/documents, contract documents, or both as a zip.
@@ -2652,7 +2887,12 @@ async def download_all_project_documents(
     - orgadmin: projects in their organization
     - projectadmin: assigned projects
     - other users: assigned project plus dms.document.bulk_download
+
+    CL-4A: the archived project must BE the navbar selection. ``GET /documents/{id}``
+    is registered first and matches this path, so the route is currently unreachable
+    over HTTP (recorded debt; routes deliberately not reordered).
     """
+    await selection.require_project(project_id)
     result = await service.create_project_archive(
         project_id=project_id,
         download_type=type,  # type: ignore[arg-type]
@@ -2683,6 +2923,15 @@ async def download_document(
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy_service),
+    selection: ActiveScope = Depends(active_scope),
+    redirect: bool = Query(
+        True,
+        description=(
+            "False: answer an S3-stored file with {\"url\": presigned} instead of a 307. The "
+            "browser follows a 307 with the request's own headers - the navbar selection "
+            "included - which turns a presigned GET into a CORS preflight against storage."
+        ),
+    ),
 ):
     """
     Securely download/stream the original document bytes.
@@ -2691,6 +2940,7 @@ async def download_document(
     - Prefers local file path (filepath_local) if available
     - Falls back to redirect to presigned_url if provided
     """
+    await _hold_document(selection, id)
     # Load document
     document = await controller.document_service.get_document_by_id(id)
     if not document:
@@ -2741,6 +2991,8 @@ async def download_document(
                 project_id=document.project_id,
                 metadata={"provider": "s3"},
             )
+            if not redirect and presigned.get("url"):
+                return JSONResponse({"url": presigned.get("url")})
             return Response(status_code=307, headers={"Location": presigned.get("url")})
         except Exception:
             # continue to presigned_url below
@@ -2767,6 +3019,24 @@ def _resolve_document_search_term(
             detail="q and search must match when both are supplied",
         )
     return normalized_q or normalized_search
+
+
+#: Pseudo upload type accepted by the listing: "incoming OR outgoing".
+CORRESPONDENCE_UPLOAD_TYPE_FILTER = "correspondence"
+
+
+def _resolve_upload_type_filter(upload_type: Optional[str]) -> Any:
+    """Map ``uploadType=correspondence`` onto the stored taxonomy.
+
+    Stored values are ``incoming | outgoing | contract`` and the Document model
+    accepts them case-insensitively, so the match is case-insensitive too. The
+    relationship service enforces the same definition server-side
+    (``is_correspondence_document``); this filter only keeps the link selector
+    from offering Documents the server would refuse.
+    """
+    if upload_type and upload_type.strip().lower() == CORRESPONDENCE_UPLOAD_TYPE_FILTER:
+        return {"$regex": "^(incoming|outgoing)$", "$options": "i"}
+    return upload_type
 
 
 def _apply_linkable_document_constraints(query: Dict[str, Any]) -> Dict[str, Any]:
@@ -2801,14 +3071,25 @@ async def list_documents(
     limit: int = Query(100, ge=1, le=1000),
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    """List documents with filtering and pagination."""
+    """List documents with filtering and pagination.
+
+    CL-4A: with a project selected the list is pinned to it; a filter may narrow
+    the selection, never leave it. The navbar always selects a project when the
+    organisation has one, so the register also lists the selected organisation's
+    organisation-level Documents (no project) - to the roles that listed them
+    before (organisation roles, superadmin), never to a project-tier user. The
+    link picker (``/document-search``) offers only project Documents, as before.
+    """
+    organization_id, project_id = await selection.list_filters(organization_id, project_id)
+    roles = {str(role).lower() for role in (getattr(current_user, "roles", None) or [])}
     filters = {
         "organization_id": organization_id,
         "project_id": project_id,
         "tags": tags,
         "subTags": subTags,
-        "uploadType": uploadType,
+        "uploadType": _resolve_upload_type_filter(uploadType),
         "status": status,
         "search": _resolve_document_search_term(q, search),
         "date_from": date_from,
@@ -2816,6 +3097,8 @@ async def list_documents(
         "letterNo": letterNo,
         "subject": subject,
         "linkable_only": request.url.path.rstrip("/").endswith("/document-search"),
+        "include_organization_level": selection.has_project
+        and bool(roles & {"orgadmin", "orguser", "superadmin"}),
     }
     pagination = {"skip": skip, "limit": limit}
 
@@ -2841,8 +3124,10 @@ async def update_document(
     x_document_revision: Optional[str] = Header(default=None, alias="X-Document-Revision"),
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Update a document."""
+    await _hold_document(selection, id)
     existing = await controller.document_service.get_document_by_id(id)
     if not existing:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
@@ -2868,8 +3153,10 @@ async def update_document_summary_metadata(
     response: Response,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Update manually curated Letter Summary metadata and keyword fields."""
+    await _hold_document(selection, id)
     existing = await controller.document_service.get_document_by_id(id)
     if not existing:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
@@ -2908,9 +3195,11 @@ async def delete_document(
     x_document_revision: Optional[str] = Header(default=None, alias="X-Document-Revision"),
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Delete a document."""
     await require_step_up(request, current_user, action="documents.delete")
+    await _hold_document(selection, id)
     existing = await controller.document_service.get_document_by_id(id)
     if not existing:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
@@ -2933,9 +3222,10 @@ async def list_document_audit_events(
     limit: int = Query(100, ge=1, le=500),
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Return immutable audit events for a document."""
-    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_VIEW)
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_VIEW, selection)
     document = await controller.document_service.get_document_by_id(id)
     if not document:
         raise DocumentError("Document not found", status.HTTP_404_NOT_FOUND)
@@ -2953,9 +3243,10 @@ async def list_enclosures(
     id: str,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """List all enclosures for a document."""
-    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_VIEW)
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_VIEW, selection)
     return await controller_list_enclosures(controller, id, current_user)
 
 
@@ -2966,9 +3257,10 @@ async def add_enclosure(
     file: UploadFile = File(...),
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Add an enclosure to a document."""
-    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_EDIT_METADATA)
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_EDIT_METADATA, selection)
     return await controller_add_enclosure(controller, id, file, current_user)
 
 
@@ -2979,9 +3271,10 @@ async def remove_enclosure(
     enclosure_id: str,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Remove an enclosure from a document."""
-    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_EDIT_METADATA)
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_EDIT_METADATA, selection)
     await controller_remove_enclosure(controller, id, enclosure_id, current_user)
 
 
@@ -2991,10 +3284,13 @@ async def get_document_references(
     id: str,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Retrieve parsed and linked references for a document."""
-    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_VIEW)
-    return await controller_list_references(controller, id, current_user)
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_VIEW, selection)
+    references = await controller_list_references(controller, id, current_user)
+    references["linked"] = await _linked_within_selection(selection, list(references.get("linked") or []))
+    return references
 
 
 @router.post("/documents/{id}/references", response_model=Document)
@@ -3004,9 +3300,12 @@ async def add_document_reference(
     reference_data: ReferenceCreate,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Add or update a linked reference for a document."""
-    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_LINK_REFERENCE)
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_LINK_REFERENCE, selection)
+    # The referenced Document is written too (its backlink): hold it as well.
+    await _hold_document(selection, str(reference_data.referenced_document_id))
     return await controller_add_reference(controller, id, reference_data, current_user)
 
 
@@ -3017,9 +3316,12 @@ async def delete_document_reference(
     reference_id: str,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Remove a linked reference from a document."""
-    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_LINK_REFERENCE)
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_LINK_REFERENCE, selection)
+    # Removing a reference also rewrites the referenced Document's backlink.
+    await _hold_document(selection, reference_id)
     return await controller_remove_reference(controller, id, reference_id, current_user)
 
 
@@ -3029,9 +3331,10 @@ async def trigger_reference_sync(
     id: str,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Manually trigger bidirectional reference synchronisation for a document."""
-    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_LINK_REFERENCE)
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_LINK_REFERENCE, selection)
     return await controller_sync_references(controller, id, current_user)
 
 
@@ -3041,10 +3344,13 @@ async def link_documents_endpoint(
     payload: LinkDocumentsRequest,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    """Link two documents together."""
-    await _ensure_document_access(current_user, payload.source_document_id, Permissions.DOCUMENT_LINK_REFERENCE)
-    await _ensure_document_access(current_user, payload.target_document_id, Permissions.DOCUMENT_VIEW)
+    """Link two documents together. Both Documents are held to the selection (CL-4A)."""
+    await _ensure_document_access(
+        current_user, payload.source_document_id, Permissions.DOCUMENT_LINK_REFERENCE, selection
+    )
+    await _ensure_document_access(current_user, payload.target_document_id, Permissions.DOCUMENT_VIEW, selection)
     return await controller_link_documents(controller, payload, current_user)
 
 
@@ -3054,10 +3360,13 @@ async def get_linked_documents(
     id: str,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Return documents linked to the given document."""
-    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_VIEW)
-    return await controller_list_linked_documents(controller, id, current_user)
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_VIEW, selection)
+    return await _linked_within_selection(
+        selection, await controller_list_linked_documents(controller, id, current_user)
+    )
 
 # ---------------------------------------------
 # Comments endpoints used by LetterSummaryPage
@@ -3068,10 +3377,12 @@ async def get_document_comments(
     id: str,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """
     Return comments for a document: [{ id, text, author, createdAt }, ...]
     """
+    await _hold_document(selection, id)
     # Load document for auth context
     document = await controller.document_service.get_document_by_id(id)
     if not document:
@@ -3088,10 +3399,12 @@ async def add_document_comment(
     text: str = Body(..., embed=True),
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """
     Add a comment to a document. Body shape: { "text": "..." }
     """
+    await _hold_document(selection, id)
     document = await controller.document_service.get_document_by_id(id)
     if not document:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
@@ -3123,6 +3436,7 @@ async def bulk_upload_documents(
     # Add validation for bulk upload limits
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """
     Bulk upload documents with CSV metadata.
@@ -3130,6 +3444,7 @@ async def bulk_upload_documents(
     The CSV file should contain metadata for each document file.
     File names in CSV must match the uploaded file names.
     """
+    await selection.require_project(project_id, organization_id)
     await PolicyService().authorize(
         current_user,
         Permissions.DOCUMENT_UPLOAD,
@@ -3222,11 +3537,13 @@ async def request_draft_for_document(
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy_service),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """
     Initialize a draft letter request for a document.
     Returns document details to prefill the letter initiation form.
     """
+    await _hold_document(selection, id)
     try:
         # Get the document
         document = await controller.document_service.get_document_by_id(id)

@@ -890,10 +890,20 @@ sudo nginx -t
 
 ```bash
 cd /opt/contraclaim-dms/projectDMS
-docker compose --env-file .env -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml build --pull
+RELEASE_SHA="$(git rev-parse HEAD)" docker compose --env-file .env -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml build --pull
+# A FULL release: certify the scanned images and write the release manifest
+# before anything restarts (deployment guide, 6a-6b).
+RELEASE="$(git rev-parse HEAD)"; MANIFESTS=/opt/contraclaim-dms/release-manifests; mkdir -p "$MANIFESTS"
+PROJECT="$(docker compose --env-file .env -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml config --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["name"])')"
+for svc in backend contract-worker document-worker client; do
+  trivy image --format json --severity HIGH,CRITICAL --ignore-unfixed \
+    --output "$MANIFESTS/scan-$svc-$RELEASE.json" "$PROJECT-$svc:latest"
+done
+python3 scripts/release_manifest.py certify --out "$MANIFESTS/certified-$RELEASE.json" --image backend="$PROJECT-backend:latest" --image contract-worker="$PROJECT-contract-worker:latest" --image document-worker="$PROJECT-document-worker:latest" --image client="$PROJECT-client:latest" --scan backend="$MANIFESTS/scan-backend-$RELEASE.json" --scan contract-worker="$MANIFESTS/scan-contract-worker-$RELEASE.json" --scan document-worker="$MANIFESTS/scan-document-worker-$RELEASE.json" --scan client="$MANIFESTS/scan-client-$RELEASE.json"
+python3 scripts/release_manifest.py target --scope FULL --out "$MANIFESTS/$RELEASE.json" --certified "$MANIFESTS/certified-$RELEASE.json" --image backend="$PROJECT-backend:latest" --image contract-worker="$PROJECT-contract-worker:latest" --image document-worker="$PROJECT-document-worker:latest" --image client="$PROJECT-client:latest"
 docker compose --env-file .env -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml run --rm backend python -m rbac_backend.scripts.migrate_database --fail-on-warning
 docker compose --env-file .env -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml run --rm backend python -m rbac_backend.scripts.migrate_database --apply --fail-on-warning
-docker compose --env-file .env -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml up -d --build --remove-orphans
+docker compose --env-file .env -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml up -d --no-build --remove-orphans
 docker compose --env-file .env -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml ps
 ```
 
@@ -911,12 +921,16 @@ curl -ksSI https://web.contraclaim.com/ | grep -i "content-security-policy"
 
 ```bash
 cd /opt/contraclaim-dms/projectDMS
+# a new shell after the restore drill: the release and its manifests again
+RELEASE="$(git rev-parse HEAD)"; MANIFESTS=/opt/contraclaim-dms/release-manifests
 backend_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{"\n"}}{{end}}' contraclaim-backend-1 | sed -n '1p')"
 COMPOSE_FILES="-f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml" \
 BACKEND_BASE_URL="http://$backend_ip:8000" \
 PUBLIC_BASE_URL="https://web.contraclaim.com" \
 REQUIRE_FRESH_BACKUP=true \
-bash scripts/post_deploy_verify.sh
+DEPLOY_SCOPE=FULL RELEASE_MANIFEST="$MANIFESTS/$RELEASE.json" \
+bash scripts/post_deploy_verify.sh \
+  && python3 scripts/release_manifest.py promote --manifest "$MANIFESTS/$RELEASE.json" --current "$MANIFESTS/current.json"
 ```
 
 If host `mongosh` is installed but cannot resolve Docker service names from `DATABASE_URL`, use a constrained PATH for the verification run and rely on `/health/ready` for MongoDB readiness, as recorded in the 2026-07-09 evidence above.

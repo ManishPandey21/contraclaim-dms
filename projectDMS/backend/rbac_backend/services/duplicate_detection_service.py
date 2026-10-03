@@ -29,6 +29,7 @@ from bson.objectid import ObjectId
 from pymongo.database import Database
 
 from .falkor_graph_service import normalize_letter_code
+from .source_text import select_body_text
 
 logger = logging.getLogger(__name__)
 
@@ -310,8 +311,10 @@ class DuplicateDetectionService:
         uploaded: Dict[str, Any],
         existing: Dict[str, Any],
     ) -> Dict[str, Any]:
-        uploaded_text = uploaded.get("full_text") or uploaded.get("ocrText")
-        existing_text = existing.get("full_text") or existing.get("ocrText")
+        # Fingerprint the letter's source text: two uploads of one letter get
+        # two different LLM paraphrases, so Item 25 would hide the match.
+        uploaded_text = select_body_text(uploaded, include_summary=False) or None
+        existing_text = select_body_text(existing, include_summary=False) or None
 
         uploaded_fp = text_fingerprint(uploaded_text)
         existing_fp = text_fingerprint(existing_text)

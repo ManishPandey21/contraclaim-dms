@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional, Tuple, List, Set
@@ -23,7 +24,17 @@ from ..services.step_up_service import require_step_up
 from ..services.falkor_graph_service import FalkorGraphService, FalkorGraphError
 from ..services.langchain_vector_service import LangChainVectorService
 from ..retrieval.embeddings import EmbeddingClient
+from ..retrieval.correspondence_payload import (
+    CORRESPONDENCE_PAYLOAD_SCHEMA_VERSION,
+    PAYLOAD_SCHEMA_VERSION_FIELD,
+    CorrespondencePayloadError,
+    build_correspondence_chunks,
+    canonical_scope_id,
+    refuse_unpublishable_stored_rows,
+)
+from ..retrieval.point_ids import generic_chunk_point_id
 from ..retrieval.vector_client import VectorClient
+from ..services.contract_source import CONTRACT_UPLOAD_TYPE, is_contract_upload
 from ..services.publication_policy import is_consumable
 from ..utils.error_handler import BaseDomainError
 
@@ -230,12 +241,23 @@ async def _fetch_qdrant_document_count(
 
 
 def _qdrant_document_filter(qmodels: Any, document_id: str):
-    """Match native and LangChain Qdrant payload layouts without double-counting."""
-    match = qmodels.MatchValue(value=document_id)
+    """Count only this document's CANONICAL correspondence points.
+
+    This count decides "synced" for correspondence (``document_vectors``)
+    documents. It used to count the LangChain ``metadata.*`` layout as well, so a
+    document whose only points were pre-DI-B1 legacy points - stored, but
+    unreachable by every tenant-scoped reader - reported in sync. Counting
+    canonical points only makes such a document a visible repair candidate.
+    """
     return qmodels.Filter(
-        should=[
-            qmodels.FieldCondition(key="document_id", match=match),
-            qmodels.FieldCondition(key="metadata.document_id", match=match),
+        must=[
+            qmodels.FieldCondition(
+                key="document_id", match=qmodels.MatchValue(value=document_id)
+            ),
+            qmodels.FieldCondition(
+                key=PAYLOAD_SCHEMA_VERSION_FIELD,
+                match=qmodels.MatchValue(value=CORRESPONDENCE_PAYLOAD_SCHEMA_VERSION),
+            ),
         ]
     )
 def _candidate_field_filters(field: str, raw_id: str) -> List[Dict[str, Any]]:
@@ -442,6 +464,170 @@ async def _fetch_database_status(db) -> Dict[str, Any]:
     return payload
 
 
+async def _governed_document_ids(db) -> List[Any]:
+    """Every Contract Master instrument's document, in both id spellings."""
+    from ..services.contract_document_store import CONTRACT_DOCUMENTS_COLLECTION
+
+    ids: List[Any] = []
+    for value in await db[CONTRACT_DOCUMENTS_COLLECTION].distinct("document_id"):
+        if not value:
+            continue
+        ids.append(str(value))
+        if ObjectId.is_valid(str(value)):
+            ids.append(ObjectId(str(value)))
+    return ids
+
+
+#: Query form of ``services.contract_source.is_contract_upload``, in any casing
+#: the document model accepts, so a contract cannot take a slot of a candidate
+#: window. A missing uploadType still matches.
+_NOT_A_CONTRACT_UPLOAD = {
+    "$not": re.compile(rf"^\s*{CONTRACT_UPLOAD_TYPE}\s*$", re.IGNORECASE)
+}
+
+
+async def _verify_current_projection(
+    db, instrument: Dict[str, Any], doc: Dict[str, Any], store: Any
+) -> Dict[str, Any]:
+    """Is the CURRENT generation exactly the points it was published with?
+
+    Compared by POINT id (the builder writes point id = chunk id), because that
+    is what evidence search returns; a payload that merely names a chunk is not
+    the published point. Missing points and extra points both mean the stored
+    projection is not the published one. A store that is disabled or cannot be
+    listed proves nothing and is never acted on.
+    """
+    from ..services.contract_reprojection_worker import ContractReprojectionWorker
+
+    if not getattr(store, "enabled", False):
+        return {"action": "unverified", "error": "vector_store_disabled"}
+    document_id = str(instrument.get("document_id") or doc.get("_id"))
+    revision = int(instrument.get("classification_revision") or 0)
+    first = await _compare_projection_points(db, store, instrument, doc, document_id, revision)
+    if first["final"]:
+        return first["result"]
+    # A rebuild of the same revision that published in between replaces rows
+    # and points together; reading both again separates that from real damage
+    # before a healthy, freshly published generation is withdrawn.
+    second = await _compare_projection_points(db, store, instrument, doc, document_id, revision)
+    if second["final"]:
+        return second["result"]
+    expected, missing, extra = second["expected"], second["missing"], second["extra"]
+    # Re-opened only if it is still CURRENT at the revision just verified: a
+    # newer generation committing meanwhile is never withdrawn by this check.
+    retry = await ContractReprojectionWorker(db).request_retry(
+        str(instrument["_id"]),
+        reason="stored projection points differ from the published generation",
+        only_if_current_at=revision,
+    )
+    return {
+        "action": "reprojection_required" if retry["retry_scheduled"] else "superseded",
+        "expected_points": len(expected),
+        "missing_points": len(missing),
+        "extra_points": len(extra),
+    }
+
+
+async def _compare_projection_points(
+    db, store: Any, instrument: Dict[str, Any], doc: Dict[str, Any], document_id: str, revision: int
+) -> Dict[str, Any]:
+    """One read of the published rows and the stored points.
+
+    ``final`` results (verified current, or unverifiable) end the check; a
+    mismatch carries the three id sets.
+    """
+    from ..services.contract_projection_builder import EVIDENCE_VECTOR_NAMESPACE
+
+    expected = {
+        str(row.get("chunk_id"))
+        async for row in db.document_vectors.find(
+            {
+                "uploadType": "contract",
+                "document_id": document_id,
+                "source_classification_revision": revision,
+            },
+            {"chunk_id": 1},
+        )
+        if row.get("chunk_id")
+    }
+    scope = {
+        "org_id": str(doc.get("organization_id") or instrument.get("organization_id") or ""),
+        "document_id": document_id,
+    }
+    try:
+        list_points = getattr(store, "list_points", None)
+        if list_points is not None:
+            present = {
+                str(point["id"])
+                for point in await list_points(
+                    scope, namespace=EVIDENCE_VECTOR_NAMESPACE, limit=100000
+                )
+            }
+        else:
+            present = {
+                str(point)
+                for point in await store.list_chunk_ids(
+                    scope, namespace=EVIDENCE_VECTOR_NAMESPACE, limit=100000
+                )
+            }
+    except Exception as exc:
+        # Includes a collection that no longer exists: reported, never acted on
+        # (recreating a wiped collection is an operator step, OPERATIONS 7a).
+        logger.warning("could not verify the projection points of %s: %s", document_id, exc)
+        return {"final": True, "result": {"action": "unverified", "error": type(exc).__name__}}
+    missing = expected - present
+    extra = present - expected
+    if expected and not missing and not extra:
+        return {"final": True, "result": {"action": "current", "points": len(expected)}}
+    return {"final": False, "expected": expected, "missing": missing, "extra": extra}
+
+
+#: A document whose stored rows are the extraction report: repair refuses it
+#: (``refuse_unpublishable_stored_rows``) and only reprocessing helps. Not
+#: "synced" or "delegated", so the status page counts it as stale.
+REPROCESS_REQUIRED = "reprocess_required"
+
+
+async def _record_reprocess_required(db, document_id: str, reason: str) -> None:
+    await db.vector_sync_status.update_one(
+        {"document_id": document_id},
+        {
+            "$set": {
+                "document_id": document_id,
+                "sync_status": REPROCESS_REQUIRED,
+                "details": reason,
+                "updatedAt": datetime.utcnow(),
+            },
+            "$unset": {"mongo_chunks": "", "qdrant_chunks": ""},
+            "$setOnInsert": {"createdAt": datetime.utcnow()},
+        },
+        upsert=True,
+    )
+
+
+async def _reprocess_required_ids(db) -> List[Any]:
+    """Documents repair already refused, in both id spellings, for a ``$nin``."""
+    ids: List[Any] = []
+    async for row in db.vector_sync_status.find(
+        {"sync_status": REPROCESS_REQUIRED}, {"document_id": 1}
+    ):
+        value = row.get("document_id")
+        if not value:
+            continue
+        ids.append(str(value))
+        if ObjectId.is_valid(str(value)):
+            ids.append(ObjectId(str(value)))
+    return ids
+
+
+def _chunk_order(row: Dict[str, Any]) -> int:
+    """Row order for a rebuild; a malformed index sorts last instead of raising."""
+    try:
+        return int(row.get("chunk_index") or 0)
+    except (TypeError, ValueError):
+        return 1 << 30
+
+
 async def _resync_document_vectors(
     document_id: str,
     db,
@@ -475,11 +661,166 @@ async def _resync_document_vectors(
             "reason": "document_not_consumable",
         }
 
+    # A document governed by a Contract Master instrument has ONE projection
+    # writer: the contract-worker's reprojection. Repairing its points here (a
+    # different payload shape, non-strict embeddings, no revision stamp) would
+    # rewrite a CURRENT projection behind its fence, so the repair is delegated.
+    # Delegation never withdraws a healthy projection: a CURRENT generation is
+    # left alone, a PENDING/IN_PROGRESS one is already due, and only a FAILED
+    # one is re-opened. A bulk resync therefore cannot move an organisation's
+    # evidence to 409 by re-running.
+    from ..models.contract_document import ProjectionStatus
+    from ..services.contract_document_store import CONTRACT_DOCUMENTS_COLLECTION
+    from ..services.contract_reprojection_worker import ContractReprojectionWorker
+
+    instruments = await db[CONTRACT_DOCUMENTS_COLLECTION].find(
+        {"document_id": {"$in": sorted({str(document_id), str(doc.get("_id"))})}},
+        {"_id": 1, "classification_revision": 1, "projection_status": 1, "projection_revision": 1},
+    ).to_list(length=None)
+    if instruments:
+        projections: List[Dict[str, Any]] = []
+        for instrument in instruments:
+            revision = int(instrument.get("classification_revision") or 0)
+            state = str(instrument.get("projection_status") or "")
+            entry: Dict[str, Any] = {"contract_document_id": str(instrument["_id"]), "revision": revision}
+            if revision < 1:
+                entry["action"] = "not_promoted"
+            elif state == ProjectionStatus.CURRENT.value and int(
+                instrument.get("projection_revision") or 0
+            ) == revision:
+                # CURRENT is a claim about points that must physically exist. A
+                # Qdrant wipe or a stray prune leaves it describing nothing, and
+                # evidence would answer empty from it. Verified, and a missing
+                # point hands the generation back to reprojection (a derived
+                # field only); an unreachable store is reported, never acted on.
+                entry.update(
+                    await _verify_current_projection(
+                        db, instrument, doc, vector_client or VectorClient(config)
+                    )
+                )
+            elif state == ProjectionStatus.FAILED.value:
+                # Re-opened only if still FAILED when the retry commits: a
+                # generation that became CURRENT meanwhile is never withdrawn.
+                retry = await ContractReprojectionWorker(db).request_retry(
+                    str(instrument["_id"]),
+                    reason="storage vector repair requested",
+                    only_if_failed=True,
+                )
+                entry["action"] = "retry_scheduled" if retry["retry_scheduled"] else "already_due"
+            else:
+                entry["action"] = "already_due"
+            projections.append(entry)
+        attention = any(
+            entry.get("action") in {"unverified", "reprojection_required"} for entry in projections
+        )
+        await db.vector_sync_status.update_one(
+            {"document_id": document_id},
+            {
+                "$set": {
+                    "document_id": document_id,
+                    # Delegated and healthy is not a backlog; delegated with a
+                    # damaged or unverifiable projection is, and stays counted.
+                    "sync_status": "mismatch" if attention else "delegated",
+                    "updatedAt": datetime.utcnow(),
+                    "delegated_to": "contract_master_reprojection",
+                    "projections": projections,
+                },
+                "$setOnInsert": {"createdAt": datetime.utcnow()},
+            },
+            upsert=True,
+        )
+        return {
+            "document_id": document_id,
+            "mongo_chunks": 0,
+            "qdrant_chunks": 0,
+            "status": "delegated",
+            "reason": "contract_master_reprojection",
+            "projections": projections,
+        }
+
+    if is_contract_upload(doc):
+        # A contract no instrument names yet (not promoted). Its points are not
+        # in correspondence shape, so the canonical count below reads 0 and the
+        # rebuild replaced every clause point - and its clause and page
+        # provenance - with correspondence chunks, then reported "synced".
+        # Delegated to the contract reindex instead; nothing is written.
+        await db.vector_sync_status.update_one(
+            {"document_id": document_id},
+            {
+                "$set": {
+                    "document_id": document_id,
+                    "sync_status": "delegated",
+                    "updatedAt": datetime.utcnow(),
+                    "delegated_to": "contract_reindex",
+                },
+                # Counts a correspondence pass recorded belong to that pass; left
+                # beside "delegated" they would still read as indexed chunks.
+                "$unset": {"mongo_chunks": "", "qdrant_chunks": ""},
+                "$setOnInsert": {"createdAt": datetime.utcnow()},
+            },
+            upsert=True,
+        )
+        return {
+            "document_id": document_id,
+            "mongo_chunks": 0,
+            "qdrant_chunks": 0,
+            "status": "delegated",
+            "reason": "contract_reindex",
+        }
+
     document_ref_query = _candidate_field_query("document_id", document_id)
     chunks = [c async for c in db.chunks.find(document_ref_query)]
     vector_client = vector_client or VectorClient(config)
+    superseded_chunk_ids: List[str] = []
 
     if chunks:
+        # Rows an older pipeline chunked may be the extraction report, reply
+        # advice included; re-embedding them republished it as evidence.
+        try:
+            refuse_unpublishable_stored_rows(
+                doc, [c.get("text_original") or c.get("text") or "" for c in chunks]
+            )
+        except CorrespondencePayloadError as exc:
+            canonical_rows = await db.document_vectors.count_documents(
+                {
+                    **document_ref_query,
+                    PAYLOAD_SCHEMA_VERSION_FIELD: CORRESPONDENCE_PAYLOAD_SCHEMA_VERSION,
+                }
+            )
+            if not canonical_rows:
+                # Recorded, so the document is visible (stale, not synced) and
+                # the bulk and reconcile windows exclude it: repair cannot help
+                # it, reprocessing it can.
+                await _record_reprocess_required(db, document_id, str(exc))
+                raise HTTPException(
+                    status_code=409,
+                    detail="Stored chunks are extraction-report text, not the letter; reprocess the document",
+                ) from exc
+            # Reprocessing wrote canonical rows but leaves an older pipeline's
+            # chunks behind; the canonical rows are the document now. Repair
+            # from them, and retire the superseded chunks (below) so neither
+            # their points nor their rows outlive this repair.
+            logger.info(
+                "Repairing %s from its canonical rows; its stored chunks are not the letter",
+                document_id,
+            )
+            superseded_chunk_ids = [str(c["chunk_id"]) for c in chunks if c.get("chunk_id")]
+            chunks = []
+
+    if chunks:
+        try:
+            org_id = canonical_scope_id(doc.get("organization_id"), "organization_id")
+            project_id = canonical_scope_id(doc.get("project_id"), "project_id")
+        except CorrespondencePayloadError as exc:
+            raise HTTPException(
+                status_code=409, detail=f"Document scope is not an id: {exc}"
+            ) from exc
+        if not org_id:
+            # The legacy branch's builder refuses an unscoped point; so does this.
+            raise HTTPException(
+                status_code=409,
+                detail="Document has no organisation; its vectors cannot be scoped",
+            )
         embedding_client = embedding_client or EmbeddingClient(config)
         texts = [c.get("text_enriched") or c.get("text_original") or c.get("text") or "" for c in chunks]
         vectors = await embedding_client.embed(texts)
@@ -489,8 +830,11 @@ async def _resync_document_vectors(
                 {
                     "chunk_id": c.get("chunk_id"),
                     "document_id": c.get("document_id"),
-                    "org_id": c.get("org_id") or c.get("organization_id") or doc.get("organization_id"),
-                    "project_id": c.get("project_id") or doc.get("project_id"),
+                    # Authority is the canonical document's, never the stored
+                    # row's: a row stamped with another scope would otherwise
+                    # publish this text to that tenant.
+                    "org_id": org_id,
+                    "project_id": project_id,
                     "page_start": c.get("page_start"),
                     "text": c.get("text_original") or c.get("text"),
                     "text_enriched": c.get("text_enriched"),
@@ -504,13 +848,11 @@ async def _resync_document_vectors(
                 for c in chunks
             ],
             namespace=None,
+            point_id_for=generic_chunk_point_id,
         )
         qdrant_ids = await vector_client.list_chunk_ids(
-            {
-                "org_id": doc.get("organization_id"),
-                "project_id": doc.get("project_id"),
-                "document_id": document_id,
-            },
+            # The same canonical form the points were just written with.
+            {"org_id": org_id, "project_id": project_id, "document_id": document_id},
             namespace=None,
         )
         mongo_chunks = len(chunks)
@@ -518,48 +860,77 @@ async def _resync_document_vectors(
         status = "synced" if qdrant_chunks == mongo_chunks else "mismatch"
     else:
         legacy_vectors = [v async for v in db.document_vectors.find(document_ref_query)]
-        payloads: List[Dict[str, Any]] = []
-        for index, chunk in enumerate(legacy_vectors):
+        legacy_vectors.sort(key=_chunk_order)
+        legacy_texts: List[str] = []
+        for chunk in legacy_vectors:
             text = chunk.get("text") or chunk.get("text_enriched") or chunk.get("text_original") or ""
-            if not isinstance(text, str) or not text.strip():
-                continue
-            organization_id = chunk.get("organization_id") or doc.get("organization_id")
-            project_id = chunk.get("project_id") or doc.get("project_id")
-            payloads.append(
-                {
-                    "text": text,
-                    "metadata": {
-                        "document_id": document_id,
-                        "organization_id": organization_id,
-                        "org_id": organization_id,
-                        "project_id": project_id,
-                        "uploadType": chunk.get("uploadType"),
-                        "letterNo": chunk.get("letterNo"),
-                        "filepath_local": chunk.get("filepath_local"),
-                        "filepath_s3": chunk.get("filepath_s3"),
-                        "chunk_index": chunk.get("chunk_index", index),
-                        "chunk_id": chunk.get("chunk_id") or str(chunk.get("_id") or index),
-                        "source": chunk.get("source", "legacy_vector_repair"),
-                        "embedding_model": chunk.get("embedding_model"),
-                        "embedding_provider": chunk.get("embedding_provider"),
-                        "embedding_version": chunk.get("embedding_version"),
-                        "chunking_version": chunk.get("chunking_version"),
-                    },
-                    "checksum": chunk.get("checksum_sha256"),
-                }
-            )
+            if isinstance(text, str) and text.strip():
+                legacy_texts.append(text)
 
-        if not payloads:
+        if not legacy_texts:
             raise HTTPException(status_code=404, detail="No chunks or legacy vector rows found for document")
+        written_canonically = bool(legacy_vectors) and all(
+            row.get(PAYLOAD_SCHEMA_VERSION_FIELD) == CORRESPONDENCE_PAYLOAD_SCHEMA_VERSION
+            for row in legacy_vectors
+        )
+        try:
+            # These rows may have been chunked from the LLM extraction report,
+            # reply advice included, and a row boundary can split that item;
+            # they cannot be cleaned row by row. Reprocess the document instead.
+            refuse_unpublishable_stored_rows(
+                doc, legacy_texts, canonically_written=written_canonically
+            )
+        except CorrespondencePayloadError as exc:
+            await _record_reprocess_required(db, document_id, str(exc))
+            raise HTTPException(
+                status_code=409,
+                detail="Stored vector rows carry extraction-report reply advice; reprocess the document",
+            ) from exc
+
+        # Authority comes from the canonical document row, never from the
+        # stored vector rows; the payload from the one correspondence builder.
+        try:
+            payloads = build_correspondence_chunks(
+                doc,
+                legacy_texts,
+                embedding_model=config.openai_embedding_model,
+                embedding_version=getattr(config, "embedding_version", "v1"),
+                chunking_version=getattr(config, "chunking_version", "v1"),
+            )
+        except CorrespondencePayloadError as exc:
+            raise HTTPException(status_code=409, detail=f"Document cannot be indexed: {exc}") from exc
 
         legacy_service = LangChainVectorService(config)
         if not legacy_service.enabled:
             raise HTTPException(status_code=503, detail="Qdrant vector service is not available")
         await legacy_service.replace_document(payloads)
+        superseded_remaining = 0
+        if superseded_chunk_ids:
+            # Not left to replace_document's best-effort, scope-filtered delete:
+            # these points may carry the report text that made the rows
+            # unpublishable, under any scope. Deleted by payload, and confirmed.
+            try:
+                superseded_remaining = await vector_client.delete_document_chunks(
+                    document_id, superseded_chunk_ids, namespace=None
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not remove the superseded chunk points of %s: %s", document_id, exc
+                )
+                superseded_remaining = len(superseded_chunk_ids)
+            if not superseded_remaining:
+                # Only now: the rows are the record of those points, and
+                # without them every reconcile would find their ids missing in
+                # Qdrant and rebuild the document again.
+                await db.chunks.delete_many({"chunk_id": {"$in": superseded_chunk_ids}})
         mongo_chunks = len(payloads)
         qdrant_count = await _fetch_qdrant_document_count(config, document_id)
         qdrant_chunks = int(qdrant_count or 0)
-        status = "synced" if qdrant_chunks == mongo_chunks else "mismatch"
+        status = (
+            "synced"
+            if qdrant_chunks == mongo_chunks and not superseded_remaining
+            else "mismatch"
+        )
 
     await db.vector_sync_status.update_one(
         {"document_id": document_id},
@@ -601,7 +972,8 @@ async def _gather_storage_status(method: str = "approx") -> Dict[str, Any]:
     stale_entries = await status_collection.count_documents(
         {
             "updatedAt": {"$lt": stale_threshold},
-            "sync_status": {"$ne": "synced"},
+            # Delegated documents are the contract-worker's, not a sync backlog.
+            "sync_status": {"$nin": ["synced", "delegated"]},
         }
     )
 
@@ -808,6 +1180,20 @@ async def resync_bulk_vectors(
         doc_filter["organization_id"] = org_id
     if project_id:
         doc_filter["project_id"] = project_id
+    # Governed contracts belong to the contract-worker's reprojection, and a
+    # bulk pass has nothing to repair in them. Selected, each one spent a slot
+    # of the limit on every run (its status is never "synced") and a FAILED one
+    # had its reprojection backoff reset each time. Excluded in the query, so
+    # they cannot crowd repairable documents out of the candidate window either;
+    # the single-document repair still verifies and delegates them.
+    # Documents whose stored rows repair already refused are excluded the same
+    # way: skipped after the window was cut, they still crowded it.
+    excluded = await _governed_document_ids(db) + await _reprocess_required_ids(db)
+    if excluded:
+        doc_filter["_id"] = {"$nin": excluded}
+    # Contract uploads not yet promoted are the contract reindex's for the same
+    # reason; selected, the repair below only delegates them.
+    doc_filter["uploadType"] = _NOT_A_CONTRACT_UPLOAD
 
     # Containment: this backfill RE-UPSERTS vectors, so it can undo the
     # publication barrier's purge for a blocked or quarantined document. The
@@ -820,6 +1206,7 @@ async def resync_bulk_vectors(
             {
                 "_id": 1,
                 "updatedAt": 1,
+                "uploadType": 1,
                 "processing_status": 1,
                 "duplicate_status": 1,
                 "lifecycle_state": 1,
@@ -842,8 +1229,16 @@ async def resync_bulk_vectors(
         # re-upserts them silently undoes containment.
         if not is_consumable(doc):
             continue
+        # The query filter is exact-match; a contract stored in other casing is
+        # still a contract.
+        if is_contract_upload(doc):
+            continue
 
         status = await db.vector_sync_status.find_one({"document_id": doc_id})
+        if status and status.get("sync_status") == REPROCESS_REQUIRED:
+            # Repair already refused it; it would only fail again and take a
+            # slot of the limit from a repairable document.
+            continue
         if (
             not include_synced
             and status
@@ -935,6 +1330,17 @@ async def reconcile_vectors(
     vector_client = VectorClient(config)
 
     doc_filter: Dict[str, Any] = {"deleted": {"$ne": True}}
+    # As in bulk resync: governed contracts are the contract-worker's, and
+    # selecting them spent the limit and reset a FAILED generation's backoff on
+    # every run. The single-document repair still verifies and delegates them.
+    # And, as there, documents repair already refused (reprocess_required).
+    excluded = await _governed_document_ids(db) + await _reprocess_required_ids(db)
+    if excluded:
+        doc_filter["_id"] = {"$nin": excluded}
+    # And contract uploads not yet promoted: only correspondence points are
+    # counted below, so every contract read as missing vectors and was rebuilt
+    # as correspondence.
+    doc_filter["uploadType"] = _NOT_A_CONTRACT_UPLOAD
     # Some datasets may use is_deleted; keep them included unless explicitly true
     doc_filter["is_deleted"] = {"$ne": True}
     if org_id:
@@ -949,6 +1355,7 @@ async def reconcile_vectors(
                 "_id": 1,
                 "organization_id": 1,
                 "project_id": 1,
+                "uploadType": 1,
                 "processing_status": 1,
                 "duplicate_status": 1,
                 "lifecycle_state": 1,
@@ -970,6 +1377,15 @@ async def reconcile_vectors(
             continue
         # Same containment rule as the resync path above.
         if not is_consumable(doc):
+            continue
+        # As in bulk resync: the query filter is exact-match.
+        if is_contract_upload(doc):
+            continue
+        if await db.vector_sync_status.count_documents(
+            {"document_id": doc_id, "sync_status": REPROCESS_REQUIRED}
+        ):
+            # Repair refused its stored rows before; reprocessing clears this.
+            details.append({"document_id": doc_id, "status": REPROCESS_REQUIRED})
             continue
         scanned += 1
 
@@ -1045,11 +1461,15 @@ async def reconcile_vectors(
             result = await _resync_document_vectors(
                 doc_id, db, config, embedding_client, vector_client
             )
-            repaired += 1
+            delegated = result.get("status") == "delegated"
+            if not delegated:
+                repaired += 1
             details.append(
                 {
                     "document_id": doc_id,
-                    "status": "repaired",
+                    # A governed contract is not repaired here; its projection
+                    # is owned by the contract-worker's reprojection.
+                    "status": "delegated" if delegated else "repaired",
                     "mongo_chunks": result.get("mongo_chunks"),
                     "qdrant_chunks": result.get("qdrant_chunks"),
                     "missing_qdrant": len(missing_in_qdrant),

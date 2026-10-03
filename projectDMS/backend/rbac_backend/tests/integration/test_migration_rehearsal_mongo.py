@@ -151,9 +151,10 @@ async def _legal_counts(db) -> Dict[str, int]:
 async def _adjudicate(db, candidate_id: str, *, scope_state, document_type, operator="alice"):
     service = ContractMigrationAdjudication(db)
     await service.ensure_indexes()
-    claim = await service.claim(candidate_id, operator_id=operator)
+    claim = await service.claim(candidate_id, organization_id=ORG, operator_id=operator)
     await service.adjudicate(
         claim,
+        organization_id=ORG,
         scope_state=scope_state,
         contract_document_type=document_type,
         reason="rehearsal adjudication",
@@ -211,6 +212,7 @@ def test_the_full_operator_path_runs_end_to_end():
             promotion_started = time.perf_counter()
             receipt = await ContractPromotionService(db, client).promote(
                 clean.candidate_id,
+                organization_id=ORG,
                 actor_id="alice",
                 contract_id=CONTRACT,
                 effective_from="2021-04-01",
@@ -302,7 +304,7 @@ def test_an_ambiguous_candidate_cannot_be_promoted():
 
             with pytest.raises(NotPromotable):
                 await ContractPromotionService(db, client).promote(
-                    ambiguous.candidate_id, actor_id="alice", contract_id=CONTRACT
+                    ambiguous.candidate_id, organization_id=ORG, actor_id="alice", contract_id=CONTRACT
                 )
 
             for name in LEGAL_COLLECTIONS:
@@ -331,7 +333,7 @@ def test_a_quarantined_duplicate_never_promotes():
 
             with pytest.raises(NotPromotable) as excinfo:
                 await ContractPromotionService(db, client).promote(
-                    duplicate.candidate_id, actor_id="alice", contract_id=CONTRACT
+                    duplicate.candidate_id, organization_id=ORG, actor_id="alice", contract_id=CONTRACT
                 )
             assert "quarantined" in str(excinfo.value)
 
@@ -357,7 +359,7 @@ def test_a_deleted_document_never_promotes():
 
             with pytest.raises(NotPromotable):
                 await ContractPromotionService(db, client).promote(
-                    deleted.candidate_id, actor_id="alice", contract_id=CONTRACT
+                    deleted.candidate_id, organization_id=ORG, actor_id="alice", contract_id=CONTRACT
                 )
 
     asyncio.run(scenario())
@@ -381,7 +383,7 @@ def test_adverse_quality_promotes_but_evidence_is_denied():
             )
 
             await ContractPromotionService(db, client).promote(
-                adverse.candidate_id, actor_id="alice", contract_id=CONTRACT
+                adverse.candidate_id, organization_id=ORG, actor_id="alice", contract_id=CONTRACT
             )
             # Catalogued, because quality is not quarantine.
             assert await db[CONTRACT_DOCUMENTS_COLLECTION].count_documents({}) == 1
@@ -415,7 +417,7 @@ def test_a_drifted_fingerprint_requires_revalidation():
 
             with pytest.raises(RevalidationRequired):
                 await ContractPromotionService(db, client).promote(
-                    drifted.candidate_id, actor_id="alice", contract_id=CONTRACT
+                    drifted.candidate_id, organization_id=ORG, actor_id="alice", contract_id=CONTRACT
                 )
             for name in LEGAL_COLLECTIONS:
                 assert await db[name].count_documents({}) == 0
@@ -438,9 +440,9 @@ def test_two_operators_cannot_adjudicate_the_same_candidate():
 
             service = ContractMigrationAdjudication(db)
             await service.ensure_indexes()
-            await service.claim(target, operator_id="alice")
+            await service.claim(target, organization_id=ORG, operator_id="alice")
             with pytest.raises(ClaimUnavailable):
-                await service.claim(target, operator_id="bob")
+                await service.claim(target, organization_id=ORG, operator_id="bob")
 
     asyncio.run(scenario())
 
@@ -455,7 +457,7 @@ def test_an_expired_lease_is_reclaimable_and_changes_nothing_legal():
 
             service = ContractMigrationAdjudication(db)
             await service.ensure_indexes()
-            await service.claim(target, operator_id="alice")
+            await service.claim(target, organization_id=ORG, operator_id="alice")
             before = await _legal_counts(db)
 
             await db[ADJUDICATION_CLAIMS_COLLECTION].update_one(
@@ -464,7 +466,7 @@ def test_an_expired_lease_is_reclaimable_and_changes_nothing_legal():
             )
             await service.expire_stale_claims()
 
-            reclaimed = await service.claim(target, operator_id="bob")
+            reclaimed = await service.claim(target, organization_id=ORG, operator_id="bob")
             assert reclaimed.operator_id == "bob"
             assert await _legal_counts(db) == before
 
@@ -497,7 +499,7 @@ def test_a_rolled_back_promotion_leaves_nothing_behind():
 
             with pytest.raises(RuntimeError):
                 await Failing(db, client).promote(
-                    clean.candidate_id, actor_id="alice", contract_id=CONTRACT
+                    clean.candidate_id, organization_id=ORG, actor_id="alice", contract_id=CONTRACT
                 )
 
             for name in LEGAL_COLLECTIONS:
@@ -524,7 +526,7 @@ def test_a_derived_outage_after_promotion_does_not_roll_it_back():
                 {"_id": clean.candidate_id}, {"$set": {"project_id": PROJECT}}
             )
             receipt = await ContractPromotionService(db, client).promote(
-                clean.candidate_id, actor_id="alice", contract_id=CONTRACT
+                clean.candidate_id, organization_id=ORG, actor_id="alice", contract_id=CONTRACT
             )
 
             await PostPromotionSequencer(db).record_projection_outage(
@@ -553,14 +555,12 @@ def test_rerunning_inventory_and_materialise_converges():
             second = await reconciliation.inventory(organization_id=ORG)
             assert [c.candidate_id for c in second] == [c.candidate_id for c in first]
 
-            # A duplicate insert on the same identity is refused, not forked.
-            for candidate in second:
-                try:
-                    await reconciliation.materialise_inventory([candidate])
-                except Exception:
-                    pass
+            # Re-materialising converges: nothing forked, nothing raised, nothing new.
+            rows_before = await db[RECONCILIATION_COLLECTION].find({}).to_list(length=None)
+            assert await reconciliation.materialise_inventory(second) == 0
 
             assert await db[RECONCILIATION_COLLECTION].count_documents({}) == count_after_first
+            assert await db[RECONCILIATION_COLLECTION].find({}).to_list(length=None) == rows_before
 
     asyncio.run(scenario())
 
@@ -585,7 +585,7 @@ def test_legacy_source_fields_are_untouched_by_the_whole_rehearsal():
                 {"_id": clean.candidate_id}, {"$set": {"project_id": PROJECT}}
             )
             await ContractPromotionService(db, client).promote(
-                clean.candidate_id, actor_id="alice", contract_id=CONTRACT
+                clean.candidate_id, organization_id=ORG, actor_id="alice", contract_id=CONTRACT
             )
 
             after = {

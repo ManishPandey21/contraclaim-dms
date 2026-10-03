@@ -18,6 +18,7 @@ from rbac_backend.routers.document_relationships import get_document_relationshi
 from rbac_backend.routers.claims import router as claims_router
 from rbac_backend.core.permissions import Permissions
 from rbac_backend.services.document_relationship_service import DocumentRelationshipService
+from rbac_backend.tests.selection_fixtures import pin_selection
 
 
 def _matches(document: dict[str, Any], query: dict[str, Any]) -> bool:
@@ -34,6 +35,12 @@ def _matches(document: dict[str, Any], query: dict[str, Any]) -> bool:
             return False
         if "$exists" in condition and (value is not None) != bool(condition["$exists"]):
             return False
+        if "$regex" in condition:
+            import re as _re
+
+            flags = _re.IGNORECASE if "i" in str(condition.get("$options") or "") else 0
+            if not isinstance(value, str) or not _re.search(condition["$regex"], value, flags):
+                return False
         # Range operators. Mongo never matches a field it cannot compare, so a
         # missing value fails rather than passing.
         for operator, compare in (
@@ -55,6 +62,7 @@ def _matches(document: dict[str, Any], query: dict[str, Any]) -> bool:
         # unconditionally, so every test that depended on one was vacuous.
         unsupported = set(condition) - {
             "$in", "$nin", "$ne", "$exists", "$lt", "$lte", "$gt", "$gte",
+            "$regex", "$options",
         }
         if unsupported:
             raise NotImplementedError(
@@ -259,6 +267,9 @@ class _Database:
                     "_id": "doc-1",
                     "filename": "Notice.pdf",
                     "subject": "Notice of delay",
+                    # A received notice is incoming correspondence; the
+                    # correspondence roles are only accepted for such Documents.
+                    "uploadType": "incoming",
                     "organization_id": "org-1",
                     "project_id": "project-1",
                     "processing_status": "metadata_extracted",
@@ -359,6 +370,8 @@ def _relationship_app(db: _Database, *, policy: Any = None, user: Any = None) ->
     app.include_router(relationship_router, prefix="/api")
     app.dependency_overrides[get_db] = lambda: db
     app.dependency_overrides[get_current_user] = user or _user
+    # The selection the browser sends: the claim's own project (CL-4A).
+    pin_selection(app, db, "org-1", "project-1")
     if policy is not None:
         app.dependency_overrides[get_document_relationship_service] = lambda: DocumentRelationshipService(
             db, policy=policy
@@ -1027,7 +1040,15 @@ async def test_the_fake_collection_refuses_operators_it_cannot_evaluate() -> Non
     collection = _Collection("widgets", [{"_id": "w-1", "name": "abc"}])
 
     with pytest.raises(NotImplementedError):
-        await collection.find_one({"name": {"$regex": "^a"}})
+        await collection.find_one({"name": {"$elemMatch": {"$eq": "abc"}}})
+
+
+@pytest.mark.asyncio
+async def test_the_fake_collection_evaluates_regex_like_mongo() -> None:
+    collection = _Collection("widgets", [{"_id": "w-1", "name": "ABC"}, {"_id": "w-2", "name": None}])
+
+    assert (await collection.find_one({"name": {"$regex": "^a", "$options": "i"}}))["_id"] == "w-1"
+    assert await collection.find_one({"name": {"$regex": "^a"}}) is None
 
 
 @pytest.mark.asyncio

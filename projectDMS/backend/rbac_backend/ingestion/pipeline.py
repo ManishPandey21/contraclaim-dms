@@ -20,9 +20,15 @@ from .models import (
 )
 from ..observability.service import ObservabilityService
 from ..retrieval.embeddings import EmbeddingClient
+from ..retrieval.namespaces import selectable_vector_namespace
+from ..retrieval.point_ids import generic_chunk_point_id
 from ..retrieval.vector_client import VectorClient
 
 logger = logging.getLogger(__name__)
+
+
+class GovernedContractIngestionRefused(ValueError):
+    """Generic ingestion may not rewrite a governed contract's derived evidence."""
 
 
 class IngestionPipeline:
@@ -41,12 +47,27 @@ class IngestionPipeline:
         self.observability = observability_service
         self.enricher = ChunkEnricher(embedding_client)
 
+    def _selectable_namespace(self, requested: Optional[str]) -> Optional[str]:
+        """The request's namespace, if it may select it (``retrieval.namespaces``)."""
+        return selectable_vector_namespace(
+            requested, getattr(self.vector_client, "default_collection", None)
+        )
+
     async def create_job(self, payload: IngestionJobCreate) -> IngestionJob:
+        # Refused before the job exists: an unselectable namespace never reaches
+        # VectorClient, which would create the collection it names.
+        options = payload.options.model_copy(
+            update={
+                "vector_namespace": self._selectable_namespace(
+                    payload.options.vector_namespace
+                )
+            }
+        )
         job = IngestionJob(
             org_id=payload.org_id,
             project_id=payload.project_id,
             document_id=payload.document_id,
-            options=payload.options,
+            options=options,
             content_hash=payload.content_hash,
         )
         await self.db.ingestion_jobs.insert_one(
@@ -85,6 +106,11 @@ class IngestionPipeline:
             )
 
         try:
+            # A job stored before the allowlist, or around create_job, is refused
+            # here - before any vector work - and fails visibly.
+            job.options.vector_namespace = self._selectable_namespace(
+                job.options.vector_namespace
+            )
             existing_chunks: Dict[str, Dict[str, Any]] = {
                 chunk["chunk_id"]: chunk
                 async for chunk in self.db.chunks.find({"document_id": job.document_id})
@@ -94,6 +120,8 @@ class IngestionPipeline:
             extract_start = time.perf_counter()
             await _update_stage(IngestionStage.EXTRACTING, progress=0.05)
             document = await self._load_document(job.document_id)
+            self._refuse_foreign_scope(job, document)
+            await self._refuse_governed_contract(job.document_id, document)
             text = self._extract_text(document)
             if not text:
                 raise ValueError("Document has no text to ingest")
@@ -228,6 +256,9 @@ class IngestionPipeline:
                 raise ValueError(
                     f"Document {job.document_id} is no longer authoritative for publication"
                 )
+            # Re-read at the write boundary: a promotion that committed while
+            # this job was embedding makes the document governed from here on.
+            await self._refuse_governed_contract(job.document_id, current_document)
             await self._persist_chunks(chunks, job.content_hash, job.options)
 
             changed_chunks = [chunks[i] for i in embed_indices]
@@ -253,8 +284,15 @@ class IngestionPipeline:
                         for c in changed_chunks
                     ],
                     namespace=job.options.vector_namespace,
+                    point_id_for=generic_chunk_point_id,
                 )
 
+            # Last check before the one destructive step: a promotion committing,
+            # or an upload type edited, since the write-boundary check must still
+            # stop the prune - so the document is read again, too.
+            await self._refuse_governed_contract(
+                job.document_id, await self._load_document(job.document_id)
+            )
             await self._prune_stale_vectors(
                 job=job,
                 current_chunks=set(c.id for c in chunks),
@@ -321,6 +359,37 @@ class IngestionPipeline:
                 },
             )
 
+    @staticmethod
+    def _refuse_foreign_scope(job: IngestionJob, document: Dict[str, Any]) -> None:
+        """The job's scope is what its chunks are stamped with; it must be the
+        document's own, or another tenant's text is indexed under this one."""
+        if str(document.get("organization_id") or "") != str(job.org_id or "") or str(
+            document.get("project_id") or ""
+        ) != str(job.project_id or ""):
+            raise ValueError(f"Document {job.document_id} is not in the job's scope")
+
+    async def _refuse_governed_contract(
+        self, document_id: str, document: Dict[str, Any]
+    ) -> None:
+        """A contract source is not this pipeline's to write.
+
+        Its derived evidence has its own writers: contract ingest and the
+        contract reindex before promotion, the contract-worker's reprojection
+        after. This pipeline chunks differently and then prunes every point of
+        the document it did not just write - in the namespace evidence reads -
+        which deleted a CURRENT projection's vectors, and, for a contract upload
+        not yet promoted, its clause points and their page provenance.
+        Raised before any chunk, point or sync record is written.
+        """
+        from ..services.contract_source import is_contract_source
+
+        if await is_contract_source(self.db, document_id, document):
+            raise GovernedContractIngestionRefused(
+                f"Document {document_id} is a contract source (a contract upload, or "
+                "governed by a Contract Master instrument); its evidence is rebuilt by "
+                "the contract ingest, reindex and reprojection, not by generic ingestion"
+            )
+
     async def _load_document(self, document_id: str) -> Dict[str, Any]:
         # documents._id is ObjectId-keyed; the raw string never matched, so
         # this reindex path raised "Document not found" for every real
@@ -344,11 +413,15 @@ class IngestionPipeline:
         if not is_consumable(document):
             return ""
 
-        for key in ("full_text", "ocrText", "text"):
-            value = document.get(key)
-            if value:
-                return str(value)
-        return ""
+        # Source text outranks the LLM's retyped Item 25, and the extraction
+        # report is never indexed as the letter - the rule every writer shares.
+        from ..services.source_text import select_body_text
+
+        body = select_body_text(document, include_summary=False)
+        if body:
+            return body
+        value = document.get("text")
+        return str(value) if value else ""
 
     async def _persist_chunks(
         self,
@@ -409,7 +482,9 @@ class IngestionPipeline:
             return
         stale = [cid for cid in existing_ids if cid not in current_chunks]
         if stale:
-            await self.vector_client.delete(stale, namespace=namespace)
+            await self.vector_client.delete(
+                stale, namespace=namespace, point_id_for=generic_chunk_point_id
+            )
 
     async def _update_vector_sync(
         self, job: IngestionJob, expected: int, namespace: Optional[str]

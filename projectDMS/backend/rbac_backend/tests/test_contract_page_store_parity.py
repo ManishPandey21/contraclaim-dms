@@ -72,6 +72,8 @@ def test_record_shape_matches_the_legacy_contract_record() -> None:
         source_pdf_page_link="contract:doc-1#page=2",
     )
 
+    # Every legacy key is still written with its legacy meaning; the last three
+    # are additive, so an OCR retry can rebuild the run an earlier attempt left.
     assert set(record) == {
         "document_id",
         "upload_id",
@@ -86,7 +88,12 @@ def test_record_shape_matches_the_legacy_contract_record() -> None:
         "cleaned_text",
         "cleaned_text_length",
         "source_pdf_page_link",
+        "text_withheld",
+        "source",
+        "page_class",
     }
+    assert record["text_withheld"] is False
+    assert (record["source"], record["page_class"]) == ("ocr", "text_native")
     assert record["status"] == "ocr_completed"
     assert record["raw_text"] == "page two text"
     assert record["raw_text_length"] == len("page two text")

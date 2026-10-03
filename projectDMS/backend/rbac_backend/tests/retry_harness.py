@@ -42,6 +42,16 @@ from rbac_backend.tests.test_document_processing_jobs import (
 # --- In-memory Mongo double ---------------------------------------------
 
 
+def _field(document: Dict[str, Any], key: str) -> Any:
+    """Mongo's dotted-path read: ``a.b`` is ``document["a"]["b"]``."""
+    value: Any = document
+    for part in key.split("."):
+        if not isinstance(value, dict):
+            return None
+        value = value.get(part)
+    return value
+
+
 def _matches(document: Dict[str, Any], query: Dict[str, Any]) -> bool:
     for key, expected in (query or {}).items():
         if key == "$or":
@@ -52,7 +62,7 @@ def _matches(document: Dict[str, Any], query: Dict[str, Any]) -> bool:
             if not all(_matches(document, branch) for branch in expected):
                 return False
             continue
-        actual = document.get(key)
+        actual = _field(document, key)
         if isinstance(expected, dict):
             if "$in" in expected and actual not in expected["$in"]:
                 return False
@@ -170,12 +180,20 @@ class FakeCollection:
         update: Dict[str, Any],
         sort: Any = None,
         return_document: Any = None,
+        upsert: bool = False,
     ) -> Optional[Dict[str, Any]]:
+        # ``return_document`` follows pymongo: ReturnDocument.BEFORE is False.
+        after = return_document is None or bool(return_document)
         found = await self.find_one(query, sort=sort)
         if not found:
-            return None
+            if not upsert:
+                return None
+            await self.update_one(
+                {"_id": query["_id"]} if "_id" in query else {}, update, upsert=True
+            )
+            return await self.find_one({"_id": query["_id"]}) if after and "_id" in query else None
         await self.update_one({"_id": found["_id"]}, update)
-        return await self.find_one({"_id": found["_id"]})
+        return await self.find_one({"_id": found["_id"]}) if after else found
 
     async def delete_many(self, query: Dict[str, Any]) -> SimpleNamespace:
         removed = [key for key, doc in self.docs.items() if _matches(doc, query)]
@@ -301,7 +319,7 @@ class _OpenAI:
         self.texts: List[str] = []
         self.uploads: List[str] = []
 
-    async def process_text(self, text: str, *, filename: str) -> str:
+    async def process_text(self, text: str, *, filename: str, include_full_content: bool = True) -> str:
         self.texts.append(text)
         processor: DocumentProcessor = self.processor_ref["processor"]
         return processor._build_ocr_fallback_report(text, filename=filename)

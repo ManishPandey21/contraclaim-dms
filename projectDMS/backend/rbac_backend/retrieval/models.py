@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ..models.ai_guardrails import GuardrailReport
 from ..models.evidence_ledger import EvidenceLedgerEntry
+from .authority import user_metadata_filters
 
 
 class SearchStrategy(str, Enum):
@@ -23,7 +24,12 @@ class SearchBackend(str, Enum):
 
 class SearchFilters(BaseModel):
     org_id: str
-    project_id: str
+    #: Required, and nullable on purpose. A string is a project scope. ``None``
+    #: is ORGANISATION-LEVEL scope: documents that belong to no project, and
+    #: only those - never "all projects". Whether the actor may see them is
+    #: decided server-side (``RetrievalService._project_constraint``), not by
+    #: the value the caller sent.
+    project_id: Optional[str]
     document_id: Optional[str] = None
     date_range: Optional[List[str]] = None
     doc_type: Optional[str] = None
@@ -46,8 +52,12 @@ class SearchFilters(BaseModel):
             query["chain_id"] = self.chain_id
         if self.date_range and len(self.date_range) == 2:
             query["date"] = {"$gte": self.date_range[0], "$lte": self.date_range[1]}
-        if self.metadata:
-            query.update({f"metadata.{k}": v for k, v in self.metadata.items()})
+        query.update(
+            {
+                f"metadata.{k}": v
+                for k, v in user_metadata_filters(self.metadata).items()
+            }
+        )
         return query
 
 

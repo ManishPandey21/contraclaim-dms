@@ -211,6 +211,18 @@ PAGE_STATES: Dict[str, PageStates] = {
         empty=False,
         error="client/src/pages/__tests__/KeyDateDetailPage.achievement-evidence.test.tsx",
     ),
+    "HindranceRegisterPage": _fetching(
+        error="client/src/pages/__tests__/HindranceRegisterPage.test.tsx",
+    ),
+    "HindranceDetailPage": _fetching(
+        empty=False,
+        error="client/src/pages/__tests__/HindranceDetailPage.test.tsx",
+    ),
+    # CL-3B: reached by deep link (Linked Records, Hindrance affected activities).
+    "ProgrammeMilestoneDetailPage": _fetching(
+        empty=False,
+        error="client/src/pages/__tests__/ProgrammeMilestoneDetailPage.test.tsx",
+    ),
     "VariationRegisterPage": _fetching(),
     "BankGuaranteeRegisterPage": _fetching(
         error="client/src/pages/__tests__/BankGuaranteeRegisterPage.event-evidence.test.tsx"

@@ -4,7 +4,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import LinkedRecordsPanel from "@/components/document-viewer/LinkedRecordsPanel";
 
-const relationshipApi = vi.hoisted(() => ({ listDocumentEntityLinks: vi.fn() }));
+const relationshipApi = vi.hoisted(() => ({
+  listDocumentEntityLinks: vi.fn(),
+  listDocumentLinkTargetTypes: vi.fn(async () => [] as string[]),
+}));
 vi.mock("@/services/document-relationships-api", () => relationshipApi);
 
 describe("LinkedRecordsPanel", () => {
@@ -21,6 +24,21 @@ describe("LinkedRecordsPanel", () => {
     render(<MemoryRouter><LinkedRecordsPanel documentId="doc-1" /></MemoryRouter>);
     expect(await screen.findByText("CLM-001")).toBeInTheDocument();
     expect(screen.getByRole("link")).toHaveAttribute("href", "/claims/claim-1");
+  });
+
+  it("names a Hindrance & Constraint Register entry and links to it", async () => {
+    relationshipApi.listDocumentEntityLinks.mockResolvedValue([
+      {
+        _id: "link-2", target_type: "delay_event", target_id: "h-1",
+        target_label: "HIN-0001", target_route: "/hindrances/h-1",
+        relationship_role: "site_record",
+      },
+    ]);
+    render(<MemoryRouter><LinkedRecordsPanel documentId="doc-1" /></MemoryRouter>);
+    expect(await screen.findByText("HIN-0001")).toBeInTheDocument();
+    // CL-3A: labels come from the shared lib/relationship-roles helpers.
+    expect(screen.getByText(/Hindrance \/ Constraint · Site record/)).toBeInTheDocument();
+    expect(screen.getByRole("link")).toHaveAttribute("href", "/hindrances/h-1");
   });
 
   it("fails visibly and retries instead of claiming there are no links", async () => {

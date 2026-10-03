@@ -200,9 +200,18 @@ UNIFIED_EXTRACTION_CANARY_ORG_IDS=<demo-org-id>
 DOCUMENT_WORKER_PIPELINE_VERSIONS=legacy_v0   # existing worker: legacy only
 DOCUMENT_WORKER_CANARY_REPLICAS=1             # canary worker: unified_v1 only
 
+# The canary runs the approved document-worker image. It has no `image:` key,
+# so a plain `up` would build its own uncertified image, which release
+# verification refuses: retag the approved image and never build here.
+docker tag "<approved document-worker image id from current.json>" \
+  "<project>-document-worker-canary:latest"
 docker compose -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml \
-  up -d --no-deps document-worker document-worker-canary
+  up -d --no-deps --no-build document-worker document-worker-canary
 ```
+
+While the canary runs, every deploy runs `scripts/release_preflight.sh` (deployment
+guide step 6c) before restarting anything: it refuses a deploy the canary would make
+fail verification.
 
 The isolation is enforced by the claim predicate, not by convention: the canary
 worker's query filters on `pipeline_version`, so it cannot claim a legacy job
@@ -234,7 +243,7 @@ DOCUMENT_WORKER_CANARY_REPLICAS=0           # stop claiming unified jobs
 DOCUMENT_WORKER_PIPELINE_VERSIONS=          # existing worker: unrestricted
 
 docker compose -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml \
-  up -d --no-deps document-worker document-worker-canary
+  up -d --no-deps --no-build document-worker document-worker-canary
 ```
 
 Order matters. Clear the allowlist **first** so no further unified jobs are

@@ -548,6 +548,14 @@ async def ensure_indexes(db):
         [("chronology_id", 1), ("event_classification", 1), ("supports_party", 1), ("pleading_use", 1)],
         background=True,
     )
+    # CL-3B: the Document reverse lookup reads events by their source / related
+    # Document (legacy read-through of chronology_event relationships).
+    await db.matter_chronology_events.create_index(
+        [("source_document_id", 1), ("chronology_id", 1)], background=True
+    )
+    await db.matter_chronology_events.create_index(
+        [("related_document_ids", 1), ("chronology_id", 1)], background=True
+    )
     await db.matter_chronology_event_revisions.create_index(
         [("chronology_id", 1), ("event_id", 1), ("revision", 1)],
         unique=True,
@@ -769,6 +777,45 @@ async def ensure_indexes(db):
     )
     await db.delay_events.create_index(
         [("organization_id", 1), ("project_id", 1), ("location", 1)], background=True
+    )
+    # Hindrance & Constraint Register. The generated reference is unique within
+    # a project; rows that predate it carry none, so the index is partial.
+    await db.delay_events.create_index(
+        [("organization_id", 1), ("project_id", 1), ("hindrance_ref", 1)],
+        name="uq_delay_events_project_reference",
+        unique=True,
+        background=True,
+        partialFilterExpression={"hindrance_ref": {"$type": "string"}},
+    )
+    await db.delay_events.create_index(
+        [("organization_id", 1), ("project_id", 1), ("archived_at", 1), ("start_date", -1)],
+        name="ix_delay_events_register_listing",
+        background=True,
+    )
+    await db.delay_events.create_index(
+        [("organization_id", 1), ("project_id", 1), ("linked_document_ids", 1)],
+        name="ix_delay_events_document_reverse",
+        background=True,
+    )
+    # Structured hindrance -> activity / key date / EOT relationships. Active
+    # links carry removed_at=None; removal is soft so history survives.
+    await db.delay_event_links.create_index(
+        [
+            ("organization_id", 1),
+            ("project_id", 1),
+            ("delay_event_id", 1),
+            ("target_type", 1),
+            ("target_id", 1),
+        ],
+        name="uq_delay_event_links_active",
+        unique=True,
+        background=True,
+        partialFilterExpression={"removed_at": None},
+    )
+    await db.delay_event_links.create_index(
+        [("organization_id", 1), ("project_id", 1), ("target_type", 1), ("target_id", 1), ("removed_at", 1)],
+        name="ix_delay_event_links_reverse",
+        background=True,
     )
     await db.programme_milestones.create_index(
         [("organization_id", 1), ("project_id", 1), ("planned_date", -1)], background=True

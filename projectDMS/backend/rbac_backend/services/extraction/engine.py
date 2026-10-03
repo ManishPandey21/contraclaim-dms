@@ -69,6 +69,11 @@ def _run_loader(store: PageStore) -> Optional[ResumablePageStore]:
 
 ENGINE_VERSION = "1"
 
+#: The error an OCR_EMPTY page carries when OCR ran and returned no text at
+#: all - as opposed to OCR text judged unusable, which shares the status. A
+#: consumer that treats an empty read as meaningful keys on this, not the status.
+OCR_RETURNED_NO_TEXT = "OCR completed but no text was extracted"
+
 _NativePage = Tuple[str, PageClassification, List[List[List[str]]]]
 _PageState = Tuple[PageStatus, Optional[str], Optional[str]]
 
@@ -527,7 +532,7 @@ class PageExtractionEngine:
                 statuses[number] = (
                     PageStatus.OCR_EMPTY,
                     batch_id,
-                    "OCR completed but no text was extracted",
+                    OCR_RETURNED_NO_TEXT,
                 )
         await self.store.finish_batch(batch_id, status="completed")
 

@@ -97,6 +97,99 @@ jobs:
       - name: Run backend test suite
         working-directory: projectDMS
         run: python -m pytest backend/rbac_backend/tests -q
+      # The canonical-relationship suites need transactions, which the `mongo`
+      # service above (a standalone mongod) cannot give, so in the step above they
+      # skip. CL-2: a disposable single-node replica set, used by these suites
+      # only, turns that skip into real evidence - and the step fails if they
+      # skip anyway, so a green run can never mean "not exercised".
+      - name: Start a disposable single-node replica set
+        shell: bash
+        run: |
+          docker run -d --name mongo-rs -p 27018:27017 mongo:8.0 --replSet rs0 --bind_ip_all
+          for attempt in $(seq 1 30); do
+            if docker exec mongo-rs mongosh --quiet --eval 'try { rs.status().ok } catch (e) { rs.initiate({_id: "rs0", members: [{_id: 0, host: "localhost:27017"}]}).ok }' 2>/dev/null | grep -q 1; then
+              break
+            fi
+            sleep 2
+          done
+          for attempt in $(seq 1 30); do
+            if docker exec mongo-rs mongosh --quiet --eval 'db.hello().isWritablePrimary' 2>/dev/null | grep -q true; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "the replica set never elected a writable primary" >&2
+          exit 1
+      - name: Run the real-Mongo relationship suites (must run, not skip)
+        working-directory: projectDMS
+        shell: bash
+        env:
+          RELATIONSHIP_CL1_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          RELATIONSHIP_CL2_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          RELATIONSHIP_CL3A_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          RELATIONSHIP_CL3B_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          RELATIONSHIP_CL4A_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          # Contract Master v1. Until the policy-scope fix these suites ran in no
+          # CI job, and the one route suite overrides get_policy - which is how a
+          # dependency importing a nonexistent module shipped green.
+          CONTRACT_MASTER_POLICY_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          CONTRACT_ROUTES_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          CONTRACT_MIGRATION_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          CONTRACT_PROMOTION_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          CONTRACT_POST_PROMOTION_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          CONTRACT_REHEARSAL_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          CONTRACT_UPLOAD_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          CONTRACT_DURABILITY_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          # Reprojection runtime: the promotion -> PENDING -> worker -> CURRENT gate
+          # (2026-09-25 staging NO-GO) and the claim-lease fences it depends on.
+          CONTRACT_MASTER_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          CONTRACT_REPROJECTION_RUNTIME_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          # Contract Master evidence cutover and provenance: exported nowhere until
+          # the inverted coverage rule (test_ci_real_mongo_coverage.py) found them.
+          CONTRACT_EVIDENCE_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          CONTRACT_PROVENANCE_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          # Batched subtag lookup: caller-supplied tag ids must never reach a
+          # foreign tag's subtags (real HTTP, Mongo and RBAC).
+          TAGS_SUBTAG_BATCH_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+        # Every real-Mongo module is in this list or excused by name, with a
+        # reason, in test_ci_real_mongo_coverage.py: a module in neither is red.
+        # That is how the reprojection review, source-mutation and
+        # generic-ingestion suites shipped unexecuted.
+        run: |
+          suites=(
+            backend/rbac_backend/tests/integration/test_document_relationships_cl1_mongo.py
+            backend/rbac_backend/tests/integration/test_variation_relationships_cl2_mongo.py
+            backend/rbac_backend/tests/integration/test_cl3a_variation_hindrance_mongo.py
+            backend/rbac_backend/tests/integration/test_cl3b_programme_chronology_mongo.py
+            backend/rbac_backend/tests/integration/test_cl4a_core_active_scope_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_master_policy_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_master_routes_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_migration_claim_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_promotion_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_post_promotion_mongo.py
+            backend/rbac_backend/tests/integration/test_migration_rehearsal_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_upload_scope_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_upload_durability_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_document_persistence_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_lexical_containment_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_permission_seeding_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_evidence_cutover_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_provenance_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_reprojection_worker_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_reprojection_runtime_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_reprojection_review3_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_source_mutation_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_generic_ingestion_isolation_mongo.py
+            backend/rbac_backend/tests/integration/test_tags_subtag_batch_mongo.py
+          )
+          python -m pytest -q -rs --junitxml=real-mongo-relationships.xml "${suites[@]}" \
+            | tee real-mongo-relationships.log
+          if grep -qE "[0-9]+ skipped" real-mongo-relationships.log; then
+            echo "real-Mongo relationship suites skipped: no transaction evidence" >&2
+            exit 1
+          fi
+          # Per module: at least one test executed and none skipped.
+          python scripts/assert_suites_ran.py real-mongo-relationships.xml "${suites[@]}"
 
   frontend-checks:
     name: Frontend lint, tests, and build
@@ -167,11 +260,27 @@ jobs:
           cache-dependency-path: projectDMS/client/package-lock.json
       - name: Scan frontend dependencies
         working-directory: projectDMS/client
+        # `npm audit --audit-level=high`, plus ONE time-bound exception: R3,
+        # GHSA-vfj7-8cjw-p6xm (CVE-2026-93687), braces <=3.0.3 with no patched
+        # release, reached only through build/test tooling and absent from the
+        # client runtime image (projectDMS/docs/NOFIX_ADVISORY_ACCEPTANCE.md).
+        # The gate fails on any CRITICAL, on any HIGH not rooted in exactly that
+        # advisory, after 2026-10-10, when a patched braces is published, and
+        # on any npm or report failure. Its own tests run first.
         run: |
           node --version && npm --version
           npm ci
           git diff --exit-code -- package-lock.json
-          npm audit --audit-level=high
+          python -m pip install pytest
+          python -m pytest -q ../../.github/scripts/test_npm_audit_gate.py
+          python ../../.github/scripts/npm_audit_gate.py --client-dir . --raw-out npm-audit.json
+      - name: Keep the raw npm audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-audit-report
+          path: projectDMS/client/npm-audit.json
+          if-no-files-found: warn
 
   docker-build-and-scan:
     name: Docker build and image scan
@@ -212,7 +321,9 @@ jobs:
       # Python runtime is still built on every change so a 3.12 incompatibility
       # cannot stay hidden until an operator enables the profile.
       - name: Build the backend image
-        run: docker build --pull -t projectdms-backend:${{ github.sha }} projectDMS/backend
+        # The scanned image carries its release identity like a deployed one
+        # (backend/Dockerfile, OPERATIONS 7a).
+        run: docker build --pull --build-arg RELEASE_SHA=${{ github.sha }} -t projectdms-backend:${{ github.sha }} projectDMS/backend
       - name: Scan backend image
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -232,7 +343,7 @@ jobs:
       - name: Drop the backend image
         run: docker image rm projectdms-backend:${{ github.sha }}
       - name: Build the client image
-        run: docker build --pull -t projectdms-client:${{ github.sha }} projectDMS/client
+        run: docker build --pull --build-arg RELEASE_SHA=${{ github.sha }} -t projectdms-client:${{ github.sha }} projectDMS/client
       - name: Client runtime image carries no package manager
         # The client image serves static files with `node scripts/serve-dist.mjs`.
         # node:*-slim bundles npm, corepack and yarn, and npm's vendored

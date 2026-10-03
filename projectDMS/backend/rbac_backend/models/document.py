@@ -85,6 +85,12 @@ class Document(BaseModel):
     compressionEnabled: bool = Field(default=False)
     ocrText: Optional[str] = Field(None)
     full_text: Optional[str] = Field(default=None)
+    #: Source-text provenance (services/source_text.py). Declared so a model
+    #: object carries it to the publication policy; this model drops
+    #: undeclared fields.
+    ocr_text_kind: Optional[str] = Field(default=None)
+    full_text_source: Optional[str] = Field(default=None)
+    source_text_status: Optional[str] = Field(default=None)
     keywords: Optional[List[str]] = Field(default=None)
     additional_keywords: Optional[List[str]] = Field(default=None)
     contractual_clauses: Optional[List[str]] = Field(default=None)
@@ -112,6 +118,13 @@ class Document(BaseModel):
     processing_error: Optional[Dict[str, Any]] = Field(default=None)
     processed_path: Optional[str] = Field(default=None)
     metadata_source: Optional[str] = Field(default=None)
+    #: Extraction quality of the last metadata run (see
+    #: services/metadata_integrity.py). Declared, because this model drops
+    #: undeclared fields and a degraded extraction must stay visible.
+    metadata_quality: Optional[Dict[str, Any]] = Field(default=None)
+    #: Fields a person edited; reprocessing never overwrites them.
+    human_edited_fields: Optional[List[str]] = Field(default=None)
+    manual_summary_metadata_override: Optional[bool] = Field(default=None)
     processed_at: Optional[datetime] = Field(default=None)
     contract_upload_id: Optional[str] = Field(default=None)
     contract_categories: List[str] = Field(default_factory=list)

@@ -212,8 +212,12 @@ missing `client/.env.development`.
 ```bash
 docker compose $COMPOSE ps
 curl -fsS http://<backend-ip>:8000/health/ready
-scripts/post_deploy_verify.sh
+DEPLOY_SCOPE=UNCHANGED RELEASE_MANIFEST=/opt/contraclaim-dms/release-manifests/current.json \
+  scripts/post_deploy_verify.sh
 ```
+
+No app image changes here, so the scope is `UNCHANGED`: every app service must still run
+exactly its approved image (deployment guide, 5a-7a).
 
 Required: every container up, `rs0` 3/3 with exactly one PRIMARY, `/health/ready`
 ready, `post_deploy_verify.sh` 0 failures. **A cutover does not start on a
@@ -518,10 +522,11 @@ done
 
 ### 4.21 Re-verify graph and application
 
-Repeat 4.13, 4.14 and 4.15. Then:
+Repeat 4.13, 4.14 and 4.15. Then (`UNCHANGED`: the cutover changed no app image):
 
 ```bash
-scripts/post_deploy_verify.sh
+DEPLOY_SCOPE=UNCHANGED RELEASE_MANIFEST=/opt/contraclaim-dms/release-manifests/current.json \
+  scripts/post_deploy_verify.sh
 ```
 
 Required: 0 failures. In production mode the edge check is now mandatory
@@ -590,7 +595,9 @@ git -C /opt/contraclaim-dms/projectDMS checkout <previous ref>
 docker compose $COMPOSE up -d --no-deps --force-recreate backend contract-worker
 docker compose $COMPOSE start client gateway
 systemctl start nginx
-scripts/post_deploy_verify.sh
+# the reverted checkout must be the release current.json approves
+DEPLOY_SCOPE=UNCHANGED RELEASE_MANIFEST=/opt/contraclaim-dms/release-manifests/current.json \
+  scripts/post_deploy_verify.sh
 ```
 
 `REQUIRE_FRESH_BACKUP` stays unset on the rollback path: with persistence back at

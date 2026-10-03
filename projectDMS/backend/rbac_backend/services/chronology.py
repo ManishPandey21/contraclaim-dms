@@ -167,12 +167,47 @@ class ChronologyService:
         await self._emit("updated", before, current_user, before=before, after=updated)
         return dict(updated)
 
-    async def delete_chronology(self, chronology_id: str, current_user: Any) -> None:
+    async def delete_chronology(
+        self, chronology_id: str, current_user: Any, *, relationships: Any = None
+    ) -> None:
+        """Soft-delete a chronology.
+
+        With ``relationships`` (a ``DocumentRelationshipService``) the canonical
+        Document links of its events are retired in the same transaction, so no
+        active link is left pointing at an event of a deleted chronology (CL-3B).
+        The events and every Document stay untouched.
+        """
         doc = await self.get_chronology(chronology_id)
-        await self.db.matter_chronologies.update_one(
-            {"_id": chronology_id},
-            {"$set": {"deleted_at": datetime.utcnow(), "deleted_by": _actor_id(current_user), "updated_at": datetime.utcnow()}},
-        )
+
+        async def soft_delete(session: Any = None) -> None:
+            now = datetime.utcnow()
+            kwargs = {"session": session} if session is not None else {}
+            result = await self.db.matter_chronologies.update_one(
+                {"_id": chronology_id, "deleted_at": {"$exists": False}},
+                {"$set": {"deleted_at": now, "deleted_by": _actor_id(current_user), "updated_at": now}},
+                **kwargs,
+            )
+            if not getattr(result, "matched_count", 0):
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Chronology changed during deletion")
+
+        if relationships is None:
+            await soft_delete()
+        else:
+
+            async def event_ids(session: Any) -> List[str]:
+                kwargs = {"session": session} if session is not None else {}
+                cursor = self.db.matter_chronology_events.find({"chronology_id": chronology_id}, {"_id": 1}, **kwargs)
+                return [str(row.get("_id")) async for row in cursor if row.get("_id")]
+
+            await relationships.retire_target_links(
+                current_user,
+                "chronology_event",
+                organization_id=str(doc.get("organization_id") or ""),
+                project_id=str(doc.get("project_id") or ""),
+                target_ids=event_ids,
+                reason="Chronology deleted",
+                before=soft_delete,
+            )
         await self._emit("deleted", doc, current_user)
 
     async def list_events(
@@ -569,8 +604,23 @@ class ChronologyService:
         source_id = str(source_doc.get("_id"))
         if not await self._has_current_document_authority(source_id):
             return None
-        raw_text = self._document_text(source_doc)
-        content_hash = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
+        # `raw_text` keeps its historical shape only for the idempotency hash,
+        # so re-running extraction does not duplicate existing events. Every
+        # fact below - date, clauses, letter number, classification, span -
+        # is read from the document's own text; the LLM summary is used only
+        # when the document has no body at all.
+        hash_text = self._document_text(source_doc)
+        content_hash = hashlib.sha256(hash_text.encode("utf-8")).hexdigest()
+        fact_text = self._document_fact_text(source_doc)
+        raw_text = (
+            " ".join(
+                str(part)
+                for part in (source_doc.get("subject"), fact_text, source_doc.get("description"))
+                if part
+            )
+            if fact_text
+            else hash_text
+        )
         existing = await self.db.matter_chronology_events.find_one(
             {"chronology_id": chronology["_id"], "source_document_id": source_id, "metadata.content_hash": content_hash}
         )
@@ -596,7 +646,10 @@ class ChronologyService:
             ),
             current_user=current_user,
         )
-        span_text = _shorten(raw_text, 900)
+        # The span and description are presented as the document's own words,
+        # so they come from its body; the summary-led `raw_text` above only
+        # drives the (hash-stable) classification. No body -> previous text.
+        span_text = _shorten(fact_text or raw_text, 900)
         event = MatterChronologyEventCreate(
             chronology_id=chronology["_id"],
             organization_id=chronology.get("organization_id"),
@@ -643,19 +696,31 @@ class ChronologyService:
                 detail="Source document is not currently authoritative",
             )
 
+    def _document_fact_text(self, source_doc: Dict[str, Any]) -> str:
+        from .publication_policy import is_consumable
+        from .source_text import select_body_text
+
+        if not is_consumable(source_doc):
+            return ""
+        return select_body_text(source_doc, include_summary=False)
+
     def _document_text(self, source_doc: Dict[str, Any]) -> str:
         # Suggested chronology entries feed EOT and claim reasoning, so this is
         # an authoritative-content consumer. Metadata stays available so a
         # blocked document is still identifiable; only extracted body text and
         # its derived summary are withheld.
         from .publication_policy import is_consumable
+        from .source_text import select_body_text
 
         consumable = is_consumable(source_doc)
         parts = [
             source_doc.get("subject"),
             source_doc.get("summary") if consumable else None,
             source_doc.get("description"),
-            source_doc.get("ocrText") if consumable else None,
+            # The letter body by source authority. Raw `ocrText` is the whole
+            # extraction report - reply advice included - when the document
+            # had no source text, and that must not seed EOT/claim spans.
+            select_body_text(source_doc, include_summary=False) if consumable else None,
             source_doc.get("ocr_text") if consumable else None,
             source_doc.get("full_content") if consumable else None,
             source_doc.get("content") if consumable else None,
