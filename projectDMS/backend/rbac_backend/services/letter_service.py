@@ -1260,15 +1260,26 @@ class LetterService:
         letter_id: str,
         graph_result: "LetterGraphResult",
         created_by: Optional[Any] = None,
+        *,
+        scope: Dict[str, Any],
     ) -> None:
-        """Persist LangGraph output for the given letter."""
+        """Persist LangGraph output for the given letter.
+
+        `scope` is the actor's canonical letter predicate (`build_scope_query`)
+        and is required: it is repeated in both the read and the mutation
+        predicate, so this helper cannot write a letter outside it even if a
+        caller skipped the upfront check. Super Admin's scope is `{}`.
+        """
         letter_oid = self._validate_letter_id(letter_id)
         payload = graph_result.to_storage_dict()
         author_id = self._resolve_user_id(created_by)
         now = datetime.now(timezone.utc)
 
+        id_clause: Dict[str, Any] = {"_id": letter_oid}
+        predicate = {"$and": [id_clause, scope]} if scope else id_clause
+
         existing_doc = await self.db.letters.find_one(
-            {"_id": letter_oid},
+            predicate,
             {
                 "draft_versions": 1,
                 "draft_output": 1,
@@ -1276,9 +1287,9 @@ class LetterService:
                 "current_draft_version": 1,
             },
         )
-        existing_versions = (
-            existing_doc.get("draft_versions", []) if existing_doc else []
-        )
+        if not existing_doc:
+            raise LetterNotFoundError(f"Letter not found: {letter_id}")
+        existing_versions = existing_doc.get("draft_versions", [])
         last_version_number = 0
         for version in existing_versions:
             try:
@@ -1363,7 +1374,9 @@ class LetterService:
             operations.setdefault("$push", {})
             operations["$push"]["draft_versions"] = version_entry
 
-        await self.db.letters.update_one({"_id": letter_oid}, operations)
+        result = await self.db.letters.update_one(predicate, operations)
+        if getattr(result, "matched_count", None) == 0:
+            raise LetterNotFoundError(f"Letter not found: {letter_id}")
 
     async def get_langgraph_snapshot(self, letter_id: str) -> Optional[Dict[str, Any]]:
         """Return the latest LangGraph run snapshot for the letter."""
