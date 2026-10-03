@@ -167,7 +167,7 @@ app.add_middleware(
         "X-Org-Id",
         "X-Proj-Id",
     ],
-    expose_headers=["X-Request-ID", "Content-Disposition"],
+    expose_headers=["X-Request-ID", "Content-Disposition", "Retry-After"],
 )
 
 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   FileText,
   Search,
@@ -82,6 +82,7 @@ import {
   logoutAndRedirect,
 } from "@/services/auth";
 import { authenticatedFetch } from "@/services/http";
+import { listSubTagsBatch } from "@/services/tags-api";
 import enhancedApi from "@/services/enhanced-api";
 import {
   getEffectivePlanServices,
@@ -812,45 +813,8 @@ const DocumentsPage = () => {
             id: t._id || t.id || "",
             name: t.name || "",
           }));
+          // Subtag names are loaded for the displayed rows only (below).
           setAvailableTags(tags.filter((t) => t.id && t.name));
-
-          // Also load subtags for mapping
-          const allSubtags: Array<{ id: string; name: string }> = [];
-          for (const tag of tags) {
-            try {
-              const subtagRes = await authenticatedFetch(
-                joinApiUrl(`/tags/${tag.id}/subtags`),
-                { headers }
-              );
-              if (subtagRes.ok) {
-                const subtagData = await subtagRes.json();
-
-                // Handle different response formats
-                let subtagArray: any[] = [];
-                if (Array.isArray(subtagData)) {
-                  subtagArray = subtagData;
-                } else if (subtagData && Array.isArray(subtagData.subtags)) {
-                  subtagArray = subtagData.subtags;
-                } else if (subtagData && typeof subtagData === "object") {
-                  subtagArray = Object.values(subtagData)
-                    .filter(Array.isArray)
-                    .flat();
-                }
-
-                const subtags = subtagArray.map((st: any) => ({
-                  id: st._id || st.id || "",
-                  name: st.name || "",
-                }));
-                allSubtags.push(...subtags);
-              }
-            } catch (error) {
-              console.error(
-                `Failed to fetch subtags for tag ${tag.id}:`,
-                error
-              );
-            }
-          }
-          setAvailableSubtags(allSubtags);
         } else {
           console.error("Failed to fetch tags:", res.status, res.statusText);
           setAvailableTags([]);
@@ -860,8 +824,65 @@ const DocumentsPage = () => {
         setAvailableTags([]);
       }
     };
+    // Once per mount, after the navbar scope resolves: MainLayout remounts the
+    // page when it does, so an earlier read would be spent on no scope.
+    if (tenantLoading) return;
     loadTags();
-  }, [buildAuthHeaders]);
+  }, [buildAuthHeaders, tenantLoading]);
+
+  // Subtag names for the rows on screen only. Their tags are resolved to
+  // canonical ids (rows may store the tag id or, legacy, its name) and fetched
+  // in ONE batched request - never a request per tag, which used to exhaust
+  // the per-user Tags read budget on every visit and scope switch.
+  const displayedTagIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const doc of documents) {
+      const value = typeof doc.tag === "string" ? doc.tag.trim() : "";
+      if (!value) continue;
+      const match =
+        availableTags.find((tag) => String(tag.id) === value) ||
+        availableTags.find((tag) => tag.name === value);
+      if (match) ids.add(String(match.id));
+      // A tag beyond the loaded catalogue page still resolves by id; the
+      // server only answers for tags this user may see.
+      else if (/^[0-9a-f]{24}$/i.test(value)) ids.add(value);
+    }
+    return Array.from(ids).sort();
+  }, [documents, availableTags]);
+  const displayedTagKey = displayedTagIds.join("|");
+  const subtagLookupSequence = useRef(0);
+  // Tags whose subtags this mount already holds: paging back, re-sorting or a
+  // search that shows the same tags costs no further read.
+  const loadedSubtagTagIds = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    // Only the newest lookup may write: an older page's answer arriving late
+    // must not land after the current page's.
+    const current = ++subtagLookupSequence.current;
+    const missing = displayedTagKey
+      ? displayedTagKey.split("|").filter((id) => !loadedSubtagTagIds.current.has(id))
+      : [];
+    if (missing.length === 0) return;
+    const controller = new AbortController();
+    listSubTagsBatch(missing, { signal: controller.signal })
+      .then((subtags) => {
+        if (current !== subtagLookupSequence.current) return;
+        missing.forEach((id) => loadedSubtagTagIds.current.add(id));
+        const loaded = subtags
+          .map((subtag) => ({ id: subtag._id, name: subtag.name }))
+          .filter((subtag) => subtag.id && subtag.name);
+        setAvailableSubtags((previous) => {
+          const known = new Set(loaded.map((subtag) => subtag.id));
+          return [...previous.filter((subtag) => !known.has(subtag.id)), ...loaded];
+        });
+      })
+      .catch((error) => {
+        if (current !== subtagLookupSequence.current || controller.signal.aborted) return;
+        // Names fall back to the stored value; the table stays usable.
+        console.error("Error loading subtags:", error);
+      });
+    return () => controller.abort();
+  }, [displayedTagKey]);
 
   const getStatusColor = (status: Document["status"]) => {
     switch (status) {

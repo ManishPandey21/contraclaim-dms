@@ -148,6 +148,9 @@ jobs:
           # the inverted coverage rule (test_ci_real_mongo_coverage.py) found them.
           CONTRACT_EVIDENCE_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
           CONTRACT_PROVENANCE_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          # Batched subtag lookup: caller-supplied tag ids must never reach a
+          # foreign tag's subtags (real HTTP, Mongo and RBAC).
+          TAGS_SUBTAG_BATCH_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
         # Every real-Mongo module is in this list or excused by name, with a
         # reason, in test_ci_real_mongo_coverage.py: a module in neither is red.
         # That is how the reprojection review, source-mutation and
@@ -177,6 +180,7 @@ jobs:
             backend/rbac_backend/tests/integration/test_contract_reprojection_review3_mongo.py
             backend/rbac_backend/tests/integration/test_contract_source_mutation_mongo.py
             backend/rbac_backend/tests/integration/test_contract_generic_ingestion_isolation_mongo.py
+            backend/rbac_backend/tests/integration/test_tags_subtag_batch_mongo.py
           )
           python -m pytest -q -rs --junitxml=real-mongo-relationships.xml "${suites[@]}" \
             | tee real-mongo-relationships.log

@@ -435,6 +435,35 @@ class Settings(BaseSettings):
         validation_alias="LOGIN_EMAIL_RATE_LIMIT_WINDOW",
         description="Login email rate-limit window in seconds",
     )
+    # Tags keeps separate read and write budgets: browsing (list, search,
+    # subtag expansion, the Documents page tag dropdown) must never exhaust the
+    # budget that creating or renaming a tag needs, or the other way round.
+    TAGS_READ_RATE_LIMIT_REQUESTS: int = Field(
+        default=300,
+        gt=0,
+        validation_alias="TAGS_READ_RATE_LIMIT_REQUESTS",
+        description="Max Tags read requests per user in the read window",
+    )
+    TAGS_READ_RATE_LIMIT_WINDOW: int = Field(
+        default=600,
+        gt=0,
+        validation_alias="TAGS_READ_RATE_LIMIT_WINDOW",
+        description="Tags read rate-limit window in seconds",
+    )
+    TAGS_WRITE_RATE_LIMIT_REQUESTS: int = Field(
+        default=120,
+        # Must cover the dearest single write (delete tag costs 5), or that
+        # operation could never succeed; tests pin the costs to this floor.
+        ge=5,
+        validation_alias="TAGS_WRITE_RATE_LIMIT_REQUESTS",
+        description="Max Tags write cost units per user in the write window",
+    )
+    TAGS_WRITE_RATE_LIMIT_WINDOW: int = Field(
+        default=3600,
+        gt=0,
+        validation_alias="TAGS_WRITE_RATE_LIMIT_WINDOW",
+        description="Tags write rate-limit window in seconds",
+    )
 
     # Explicit toggle for legacy dev header authentication (disabled by default)
     ALLOW_DEV_HEADERS: bool = Field(default=False, validation_alias="ALLOW_DEV_HEADERS")
