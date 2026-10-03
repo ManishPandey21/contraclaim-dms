@@ -66,9 +66,14 @@ class IncomingLetterAnalyzer:
 
     Metadata-first: when the incoming document has AI-extracted metadata stored
     on it (subject, letter no., parties, contractual summary, contractual
-    clauses, key reply points, linked references) that is authoritative and the
-    regex extraction only fills the gaps. Regex remains the fallback for
-    ad-hoc/pasted text with no stored document.
+    clauses, linked references) that is authoritative and the regex extraction
+    only fills the gaps. Regex remains the fallback for ad-hoc/pasted text with
+    no stored document.
+
+    ``key_reply_points`` is carried through but is *not* a source fact: it is
+    AI advice about how to reply, generated at extraction time. Downstream it
+    is presented as an advisory reply consideration, never as what the
+    incoming letter says (DI-N6).
     """
 
     async def analyze(
@@ -135,6 +140,7 @@ class IncomingLetterAnalyzer:
             issue_type_source="manual" if request.issue_type else "ai",
             main_request=main_request,
             key_reply_points=meta.get("key_reply_points", []),
+            source_metadata_quality=meta.get("metadata_quality"),
             linked_references=meta.get("references", []),
             clauses_cited=clauses,
             cited_clause_evaluations=[
@@ -218,11 +224,17 @@ class IncomingLetterAnalyzer:
             "contractual_clauses": _clean_list(getattr(doc, "contractual_clauses", None)),
             "key_reply_points": _clean_list(getattr(doc, "key_reply_points", None)),
             "references": references[:12],
+            "metadata_quality": (
+                (getattr(doc, "metadata_quality", None) or {}).get("status")
+                if isinstance(getattr(doc, "metadata_quality", None), dict)
+                else None
+            ),
         }
         # Only treat it as metadata when something meaningful was stored.
+        # AI reply advice alone is not source metadata.
         has_signal = any(
             meta.get(key)
-            for key in ("subject", "letter_no", "summary", "key_reply_points", "contractual_clauses")
+            for key in ("subject", "letter_no", "summary", "contractual_clauses")
         )
         return meta if has_signal else {}
 
