@@ -41,6 +41,10 @@ from ..services.bulk_upload_service import BulkUploadService
 from ..services.langchain_vector_service import LangChainVectorService
 from ..dependencies import get_notification_service
 from ..services.reference_sync_service import ReferenceSyncError
+from ..services.metadata_integrity import (
+    merge_human_edited_fields,
+    stored_references_authoritative,
+)
 from ..services.storage_settings_service import StorageSettingsService
 from ..services.s3_service import S3Service
 from ..services.storage_key_builder import StorageKeyBuilder
@@ -244,6 +248,28 @@ def _normalize_summary_list(values: Optional[List[str]]) -> List[str]:
             seen.add(key)
             normalized.append(text)
     return normalized
+
+
+#: DocumentUpdate field -> stored document key recorded as human-edited.
+_HUMAN_EDIT_TRACKED_UPDATE_FIELDS: Dict[str, str] = {
+    "letterNo": "letterNo",
+    "date": "date",
+    "subject": "subject",
+    "from_": "from",
+    "to": "to",
+}
+
+def _edit_value(value: Any) -> Any:
+    """Comparable form of a tracked field, so a resubmitted value is no edit.
+
+    Dates compare by calendar day (the form may send a tz-aware timestamp for
+    a stored naive one); text compares with surrounding whitespace trimmed.
+    """
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, str):
+        return value.strip()
+    return value
 
 
 SUMMARY_METADATA_UPDATE_PATHS: Dict[str, tuple[str, ...]] = {
@@ -1559,6 +1585,14 @@ class DocumentController:
                     status.HTTP_409_CONFLICT,
                 )
 
+            if await self.document_service.is_governed_contract(document_id):
+                raise DocumentError(
+                    "This contract is governed by Contract Master. Use the contract "
+                    "reindex; general reprocessing would replace the clause rows its "
+                    "evidence projection is built from.",
+                    status.HTTP_409_CONFLICT,
+                )
+
             file_path = await self._materialize_for_processing(document)
 
             await self.document_service.process_document_async(
@@ -1797,7 +1831,25 @@ async def controller_update_document(
         update_payload = validated_update.model_dump(
             exclude_unset=True, exclude_none=True
         )
-        updated_document_model = document.model_copy(update=update_payload)
+        # Record which correspondence facts a person changed, so reprocessing
+        # never silently overwrites them. Unchanged resubmitted values are not
+        # edits.
+        edited_keys = [
+            stored_key
+            for field_name, stored_key in _HUMAN_EDIT_TRACKED_UPDATE_FIELDS.items()
+            if field_name in update_payload
+            and _edit_value(update_payload[field_name]) != _edit_value(getattr(document, field_name, None))
+        ]
+        model_update = dict(update_payload)
+        if edited_keys:
+            model_update["human_edited_fields"] = merge_human_edited_fields(
+                {
+                    "human_edited_fields": document.human_edited_fields,
+                    "manual_summary_metadata_override": document.manual_summary_metadata_override,
+                },
+                edited_keys,
+            )
+        updated_document_model = document.model_copy(update=model_update)
 
         updated_document = await self.document_service.update_document(
             document_id,
@@ -2196,11 +2248,17 @@ async def controller_sync_references(
                     {k: v for k, v in item.items() if v not in (None, "", [], {})}
                 )
 
+        # The stored list is only a complete answer when the extraction that
+        # wrote it was authoritative; an empty list from a degraded run must
+        # not clear the links it failed to re-read.
+        references_authoritative = stored_references_authoritative(
+            {"metadata_quality": document.metadata_quality}
+        )
         sync_result = await self.document_service.reference_sync_service.sync_bidirectional(
             document_id=document_id,
             references=references_payload,
             source="parser",
-            clear_existing=True,
+            clear_existing=references_authoritative,
         )
 
         # Reload inside the service so Falkor receives the relationships that
@@ -2212,6 +2270,8 @@ async def controller_sync_references(
                 "Reference synchronisation completed"
                 if references_payload
                 else "No extracted references found; automatic links were cleared"
+                if references_authoritative
+                else "Reference extraction was incomplete; existing links were kept"
             ),
             "sync": sync_result,
         }

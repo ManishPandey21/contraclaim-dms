@@ -200,8 +200,10 @@ class ContractClassificationService:
             revision,
             reason,
         )
+        # Fenced on the revision the failure describes: a late report about
+        # revision N must not stamp FAILED over revision N+1.
         await self._db[CONTRACT_DOCUMENTS_COLLECTION].update_one(
-            {"_id": contract_document_id},
+            {"_id": contract_document_id, "classification_revision": int(revision)},
             {"$set": {"projection_status": ProjectionStatus.FAILED.value}},
         )
 

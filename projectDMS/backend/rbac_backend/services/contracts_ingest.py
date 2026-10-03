@@ -1742,28 +1742,8 @@ class ContractIngestor:
                     },
                 )
 
-            clause_spans: List[ClauseSpan] = []
-            ai_confidence: Optional[float] = None
-            if (
-                self.processing_config.contract_ai_chunking_enabled
-                and self.clause_worker.enabled
-            ):
-                clause_spans = await self.clause_worker.extract_spans(markdown_text)
-                clause_spans, ai_confidence = self._validate_ai_clause_spans(clause_spans, markdown_text)
-
-            if clause_spans:
-                clauses = self._spans_to_clauses(
-                    clause_spans,
-                    markdown_text,
-                    ai_chunked=True,
-                    ai_confidence=ai_confidence,
-                )
-                clause_source = "contracts_ingest_ai_clause_chunks"
-                map_pages = True
-            else:
-                clauses = self.clause_extractor.extract_clauses(text)
-                clause_source = "contracts_ingest_regex"
-                map_pages = True
+            clauses, clause_source = await self.extract_clause_set(text, markdown_text)
+            map_pages = True
 
             logger.info("Extracted %s clauses from %s (source=%s)", len(clauses), filename, clause_source)
             await self.db_service.upsert_job_status(
@@ -2002,6 +1982,35 @@ class ContractIngestor:
                 "file": filename,
                 "error": str(e)
             }
+
+    async def extract_clause_set(
+        self, text: str, markdown_text: Optional[str] = None
+    ) -> Tuple[List[ClauseInfo], str]:
+        """The clause set for one contract text, and which chunker produced it.
+
+        Shared by upload ingestion and Contract Master reprojection, so the two
+        cannot drift into different parsers: AI clause spans when enabled and
+        they pass the coverage check, the deterministic extractor otherwise.
+        """
+        markdown_text = text if markdown_text is None else markdown_text
+        clause_spans: List[ClauseSpan] = []
+        ai_confidence: Optional[float] = None
+        if (
+            self.processing_config.contract_ai_chunking_enabled
+            and self.clause_worker.enabled
+        ):
+            clause_spans = await self.clause_worker.extract_spans(markdown_text)
+            clause_spans, ai_confidence = self._validate_ai_clause_spans(clause_spans, markdown_text)
+
+        if clause_spans:
+            clauses = self._spans_to_clauses(
+                clause_spans,
+                markdown_text,
+                ai_chunked=True,
+                ai_confidence=ai_confidence,
+            )
+            return clauses, "contracts_ingest_ai_clause_chunks"
+        return self.clause_extractor.extract_clauses(text), "contracts_ingest_regex"
 
     @staticmethod
     def _detect_section_type(filename: Optional[str]) -> tuple[Optional[str], int]:
@@ -2376,6 +2385,9 @@ class ContractIngestor:
             "organization_id": metadata.get("organization_id"),
             "project_id": metadata.get("project_id"),
             "checksum_sha256": checksum,
+            # Contract Master generation tag (reprojection only). A negative
+            # hint: it may drop a candidate, it never admits one.
+            "source_classification_revision": metadata.get("source_classification_revision"),
         }
 
         return {

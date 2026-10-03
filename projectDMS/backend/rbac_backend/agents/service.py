@@ -5,6 +5,7 @@ import time
 import uuid
 from typing import Any, List, Optional, Tuple
 
+from fastapi import HTTPException, status
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from ..core.security import CurrentUser
@@ -49,9 +50,17 @@ class DraftingAgentService:
         )
         issues, questions = self._analyze_incoming(incoming_text, request.user_goal)
 
-        filters = request.filters or SearchFilters(
-            org_id=request.org_id, project_id=request.project_id
-        )
+        # The route authorised `request.org_id` / `request.project_id`, and
+        # nothing else. `request.filters` is a second, caller-supplied scope that
+        # was searched as-is; keep its narrowing fields, never its authority.
+        if request.filters is not None:
+            filters = request.filters.model_copy(
+                update={"org_id": request.org_id, "project_id": request.project_id}
+            )
+        else:
+            filters = SearchFilters(
+                org_id=request.org_id, project_id=request.project_id
+            )
         retrieval_req = SearchRequest(
             query=request.user_goal or incoming_text or "draft reply",
             strategy=request.strategy,
@@ -80,7 +89,7 @@ class DraftingAgentService:
         ]
 
         message = AgentMessage(role="assistant", content=draft, citations=citations)
-        await self._persist_message(conversation_id, message)
+        await self._persist_message(conversation_id, message, request)
 
         timings = dict(search_resp.timings)
         timings["draft_ms"] = (time.perf_counter() - start) * 1000
@@ -112,11 +121,21 @@ class DraftingAgentService:
         request: AgentRequest,
         current_user: Optional[CurrentUser],
     ) -> AgentConversation:
+        # `conversation_id` is caller-supplied. Looked up by id alone, a foreign
+        # tenant's conversation was adopted and then appended to.
         existing = await self.db.agent_conversations.find_one(
-            {"conversation_id": conversation_id}
+            self._conversation_predicate(conversation_id, request)
         )
         if existing:
             return AgentConversation(**existing)
+        if await self.db.agent_conversations.find_one(
+            {"conversation_id": conversation_id}, {"_id": 1}
+        ):
+            # Same answer as a conversation that does not exist in this scope:
+            # the id is taken, and whose it is is not the caller's business.
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found"
+            )
         participants = [current_user.id] if current_user else []
         convo = AgentConversation(
             conversation_id=conversation_id,
@@ -129,14 +148,22 @@ class DraftingAgentService:
         )
         return convo
 
+    @staticmethod
+    def _conversation_predicate(conversation_id: str, request: AgentRequest) -> dict:
+        return {
+            "conversation_id": conversation_id,
+            "org_id": request.org_id,
+            "project_id": request.project_id,
+        }
+
     async def _persist_message(
-        self, conversation_id: str, message: AgentMessage
+        self, conversation_id: str, message: AgentMessage, request: AgentRequest
     ) -> None:
         payload = message.model_dump(exclude_none=True)
         payload["conversation_id"] = conversation_id
         await self.db.agent_messages.insert_one(payload)
         await self.db.agent_conversations.update_one(
-            {"conversation_id": conversation_id},
+            self._conversation_predicate(conversation_id, request),
             {
                 "$push": {"messages": payload},
                 "$set": {"updated_at": payload["created_at"]},

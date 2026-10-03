@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
 
 ReferenceValue = Union[str, Dict[str, Any]]
+
+#: Version of the numbered correspondence-metadata extraction prompt
+#: (services/openai_service.py). Bump it whenever that prompt text changes.
+#: v3: item 21 relabelled "Additional Key Words" - it duplicated item 18's
+#: "Key Words" label, so label-based parsing could not tell them apart (DI-L7).
+METADATA_EXTRACTION_PROMPT_VERSION = "existing_document_metadata.v3"
 
 NULLISH_VALUES = {"", "null", "'null'", '"null"', "not found", "none", "n/a", "na", "not applicable", "-", "--"}
 
@@ -145,6 +152,11 @@ class ParsedDocumentMetadata(BaseModel):
     full_content: Optional[str] = None
     tags: List[str] = Field(default_factory=list)
     sub_tags: List[str] = Field(default_factory=list, alias="subTags")
+    #: Fields the parser could not validate, keyed by field name. A failed
+    #: field is dropped and recorded here; every other field is kept. Excluded
+    #: from dumps so it never lands in the stored ``metadata`` snapshot as if
+    #: it were extracted content.
+    field_failures: Dict[str, str] = Field(default_factory=dict, exclude=True)
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -213,6 +225,36 @@ class ParsedDocumentMetadata(BaseModel):
         return self
 
 
+@lru_cache(maxsize=None)
+def _field_adapter(name: str) -> TypeAdapter:
+    """One cached validator per metadata field."""
+    return TypeAdapter(ParsedDocumentMetadata.model_fields[name].annotation)
+
+
+def build_parsed_metadata(
+    values: Dict[str, Any],
+    *,
+    field_failures: Optional[Dict[str, str]] = None,
+) -> ParsedDocumentMetadata:
+    """Validate each extracted field on its own and keep every valid one.
+
+    A value that does not fit its field is dropped and recorded in
+    ``field_failures``; it never takes the other fields down with it.
+    """
+    failures: Dict[str, str] = dict(field_failures or {})
+    valid: Dict[str, Any] = {}
+    for name, value in values.items():
+        field = ParsedDocumentMetadata.model_fields.get(name)
+        if field is None or name == "field_failures":
+            failures[name] = "unknown metadata field"
+            continue
+        try:
+            valid[name] = _field_adapter(name).validate_python(value)
+        except ValidationError as exc:
+            failures[name] = f"invalid value: {exc.errors()[0].get('msg', 'validation error')}"
+    return ParsedDocumentMetadata(**valid, field_failures=failures)
+
+
 class ProcessingResult(BaseModel):
     """Result of document processing"""
     success: bool
@@ -253,6 +295,8 @@ class ProcessingResult(BaseModel):
 __all__ = [
     "ParsedDocumentMetadata",
     "ProcessingResult",
+    "build_parsed_metadata",
+    "METADATA_EXTRACTION_PROMPT_VERSION",
     "ReferenceValue",
     "EXTRACTED_TAG_OPTIONS",
     "EXTRACTED_SUBTAG_OPTIONS",

@@ -9,6 +9,9 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      # Release identity baked into the image (backend/Dockerfile, OPERATIONS 7a).
+      args:
+        RELEASE_SHA: "${RELEASE_SHA:-unknown}"
     env_file:
       - path: ./backend/.env
         required: false
@@ -54,6 +57,9 @@ services:
     build:
       context: ./client
       dockerfile: Dockerfile
+      # Release identity baked into the image (client/Dockerfile).
+      args:
+        RELEASE_SHA: "${RELEASE_SHA:-unknown}"
     env_file:
       - ./client/.env.development
     depends_on:
@@ -70,6 +76,9 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      # Release identity baked into the image (backend/Dockerfile, OPERATIONS 7a).
+      args:
+        RELEASE_SHA: "${RELEASE_SHA:-unknown}"
     command: ["python", "-m", "rbac_backend.worker"]
     env_file:
       - path: ./backend/.env
@@ -89,6 +98,9 @@ services:
       LANGGRAPH_ENABLED: "false"
       START_BACKGROUND_SERVICES: "false"
       START_CONTRACT_QUEUE_WORKERS: "true"
+      # Contract Master reprojection (PENDING -> CURRENT). Exactly one service
+      # runs it; the claim lease keeps extra replicas safe, not useful.
+      START_CONTRACT_REPROJECTION_WORKERS: "true"
       # H2: single owner of the leader-locked cron jobs.
       RUN_SCHEDULER: "true"
     depends_on:

@@ -23,6 +23,12 @@ except ImportError:  # pragma: no cover - optional dependency
 from .langchain_vector_service import LangChainVectorService
 from .publication_policy import is_publication_blocked, resolve_canonical_document
 from .reference_parser import parse_legacy_reference_text
+from .falkor_graph_service import normalize_letter_code
+from .metadata_integrity import (
+    keep_stored_values_on_degraded_source,
+    merge_degraded_snapshot,
+    protect_human_edited_fields,
+)
 from ..utils.pipeline_logging import configure_pipeline_logger
 from ..ingestion.chunk_ids import deterministic_chunk_id
 
@@ -166,6 +172,7 @@ class DatabaseService:
         full_text: str,
         embedding_text: str,
         skip_embeddings: bool = False,
+        metadata_quality: Optional[Dict[str, Any]] = None,
     ) -> int:
         """
         Save document data to database and create embeddings.
@@ -183,7 +190,8 @@ class DatabaseService:
 
             # Save document metadata
             doc = await self._upsert_document_metadata(
-                db, document_id, file_path, parsed_metadata, full_text
+                db, document_id, file_path, parsed_metadata, full_text,
+                metadata_quality=metadata_quality,
             )
 
             # Deferred while a duplicate check is pending: metadata is saved,
@@ -266,6 +274,8 @@ class DatabaseService:
         file_path: str,
         parsed_metadata: Any,
         full_text: str,
+        *,
+        metadata_quality: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Upsert document metadata to documents collection"""
         try:
@@ -283,13 +293,25 @@ class DatabaseService:
                 updates["subject"] = parsed_metadata.subject
             if hasattr(parsed_metadata, "letter_no") and parsed_metadata.letter_no:
                 updates["letterNo"] = parsed_metadata.letter_no
+                # Kept in step: reference resolution matches on the normalized
+                # form, so a stale one points links at the old number.
+                updates["letterNoNormalized"] = normalize_letter_code(str(parsed_metadata.letter_no))
             if hasattr(parsed_metadata, "from_company") and parsed_metadata.from_company:
                 updates["from"] = parsed_metadata.from_company
             if hasattr(parsed_metadata, "to_company") and parsed_metadata.to_company:
                 updates["to"] = parsed_metadata.to_company
             if hasattr(parsed_metadata, "summary") and parsed_metadata.summary:
                 updates["summary"] = parsed_metadata.summary
-            if hasattr(parsed_metadata, "references") and parsed_metadata.references:
+            references_authoritative = (
+                metadata_quality is None or bool(metadata_quality.get("references_authoritative"))
+            )
+            if (
+                references_authoritative
+                and hasattr(parsed_metadata, "references")
+                and parsed_metadata.references
+            ):
+                # A non-authoritative list is partial; storing it would let a
+                # later "sync references" bucket-replace the links it missed.
                 normalized_refs = self._normalize_metadata_references(parsed_metadata.references)
                 if normalized_refs:
                     updates["reference"] = normalized_refs
@@ -302,6 +324,8 @@ class DatabaseService:
             if hasattr(parsed_metadata, "key_reply_points") and parsed_metadata.key_reply_points:
                 updates["key_reply_points"] = parsed_metadata.key_reply_points
             updates.update(extracted_metadata_updates(parsed_metadata))
+            if metadata_quality is not None:
+                updates["metadata_quality"] = metadata_quality
 
             # Parse date if available
             if hasattr(parsed_metadata, "date") and parsed_metadata.date:
@@ -316,6 +340,11 @@ class DatabaseService:
                     logger.warning("Date parsing failed: %s", exc)
 
             if doc:
+                # A degraded run never erases the stored extraction record,
+                # and never overwrites a field a person edited.
+                merge_degraded_snapshot(updates, doc, metadata_quality)
+                protect_human_edited_fields(updates, doc)
+                keep_stored_values_on_degraded_source(updates, doc, metadata_quality)
                 await db.documents.update_one({"_id": doc["_id"]}, {"$set": updates})
                 doc.update(updates)
             else:
@@ -443,7 +472,9 @@ class DatabaseService:
                     "keywords",
                     "additional_keywords",
                     "contractual_clauses",
-                    "key_reply_points",
+                    # key_reply_points is deliberately absent: it is AI reply
+                    # advice, not content of the letter, and must not travel
+                    # with evidence chunks as if it were (DI-N6).
                     "asset_type",
                     "location",
                     "specific_area",

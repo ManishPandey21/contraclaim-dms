@@ -154,6 +154,39 @@ async def create_ingestion_job(
         permission=Permissions.DOCUMENT_UPLOAD,
         policy=policy,
     )
+    # The payload scope is the caller's claim; the document must live in it and
+    # the caller must be allowed the document itself. Absent, foreign and
+    # forbidden all answer the same 404, so nothing about another tenant's
+    # documents - including whether one is a governed contract - is disclosed.
+    document = await ingestion_service.document_in_scope(
+        payload.document_id, payload.org_id, payload.project_id
+    )
+    if document is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Document not found"
+        )
+    try:
+        await policy.authorize_document(
+            current_user, Permissions.DOCUMENT_UPLOAD, document
+        )
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_403_FORBIDDEN:
+            # Same answer as absent or foreign: a refusal specific to this
+            # document must not reveal that it exists.
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Document not found"
+            ) from None
+        raise
+    # A governed contract's evidence is rebuilt by the contract reindex and
+    # reprojection; this pipeline would prune it.
+    if await ingestion_service.is_governed_contract(payload.document_id):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "This document is governed by a Contract Master instrument; reindex "
+                "it through the contract reindex, which rebuilds its projection"
+            ),
+        )
     job = await ingestion_service.create_job(payload)
     return job
 

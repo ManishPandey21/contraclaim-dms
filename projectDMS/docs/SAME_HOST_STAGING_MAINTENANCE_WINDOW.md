@@ -353,7 +353,9 @@ sudo systemctl start nginx && sudo systemctl start certbot.timer
 ### Post-restart verification
 
 ```bash
-bash scripts/post_deploy_verify.sh          # the copy on the server, not the release copy
+# the copy on the server, not the release copy; no app image changed, so UNCHANGED
+# against staging's own approved manifest (deployment guide, 5a-7a)
+DEPLOY_SCOPE=UNCHANGED RELEASE_MANIFEST="$MANIFESTS/current.json" bash scripts/post_deploy_verify.sh
 ```
 
 The **release** branch's `post_deploy_verify.sh` fails without a running

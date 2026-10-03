@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ..models.ai_guardrails import GuardrailReport
 from ..models.evidence_ledger import EvidenceLedgerEntry
+from .authority import user_metadata_filters
 
 
 class SearchStrategy(str, Enum):
@@ -46,8 +47,12 @@ class SearchFilters(BaseModel):
             query["chain_id"] = self.chain_id
         if self.date_range and len(self.date_range) == 2:
             query["date"] = {"$gte": self.date_range[0], "$lte": self.date_range[1]}
-        if self.metadata:
-            query.update({f"metadata.{k}": v for k, v in self.metadata.items()})
+        query.update(
+            {
+                f"metadata.{k}": v
+                for k, v in user_metadata_filters(self.metadata).items()
+            }
+        )
         return query
 
 

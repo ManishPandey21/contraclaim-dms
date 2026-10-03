@@ -442,6 +442,116 @@ async def _fetch_database_status(db) -> Dict[str, Any]:
     return payload
 
 
+async def _governed_document_ids(db) -> List[Any]:
+    """Every Contract Master instrument's document, in both id spellings."""
+    from ..services.contract_document_store import CONTRACT_DOCUMENTS_COLLECTION
+
+    ids: List[Any] = []
+    for value in await db[CONTRACT_DOCUMENTS_COLLECTION].distinct("document_id"):
+        if not value:
+            continue
+        ids.append(str(value))
+        if ObjectId.is_valid(str(value)):
+            ids.append(ObjectId(str(value)))
+    return ids
+
+
+async def _verify_current_projection(
+    db, instrument: Dict[str, Any], doc: Dict[str, Any], store: Any
+) -> Dict[str, Any]:
+    """Is the CURRENT generation exactly the points it was published with?
+
+    Compared by POINT id (the builder writes point id = chunk id), because that
+    is what evidence search returns; a payload that merely names a chunk is not
+    the published point. Missing points and extra points both mean the stored
+    projection is not the published one. A store that is disabled or cannot be
+    listed proves nothing and is never acted on.
+    """
+    from ..services.contract_reprojection_worker import ContractReprojectionWorker
+
+    if not getattr(store, "enabled", False):
+        return {"action": "unverified", "error": "vector_store_disabled"}
+    document_id = str(instrument.get("document_id") or doc.get("_id"))
+    revision = int(instrument.get("classification_revision") or 0)
+    first = await _compare_projection_points(db, store, instrument, doc, document_id, revision)
+    if first["final"]:
+        return first["result"]
+    # A rebuild of the same revision that published in between replaces rows
+    # and points together; reading both again separates that from real damage
+    # before a healthy, freshly published generation is withdrawn.
+    second = await _compare_projection_points(db, store, instrument, doc, document_id, revision)
+    if second["final"]:
+        return second["result"]
+    expected, missing, extra = second["expected"], second["missing"], second["extra"]
+    # Re-opened only if it is still CURRENT at the revision just verified: a
+    # newer generation committing meanwhile is never withdrawn by this check.
+    retry = await ContractReprojectionWorker(db).request_retry(
+        str(instrument["_id"]),
+        reason="stored projection points differ from the published generation",
+        only_if_current_at=revision,
+    )
+    return {
+        "action": "reprojection_required" if retry["retry_scheduled"] else "superseded",
+        "expected_points": len(expected),
+        "missing_points": len(missing),
+        "extra_points": len(extra),
+    }
+
+
+async def _compare_projection_points(
+    db, store: Any, instrument: Dict[str, Any], doc: Dict[str, Any], document_id: str, revision: int
+) -> Dict[str, Any]:
+    """One read of the published rows and the stored points.
+
+    ``final`` results (verified current, or unverifiable) end the check; a
+    mismatch carries the three id sets.
+    """
+    from ..services.contract_projection_builder import EVIDENCE_VECTOR_NAMESPACE
+
+    expected = {
+        str(row.get("chunk_id"))
+        async for row in db.document_vectors.find(
+            {
+                "uploadType": "contract",
+                "document_id": document_id,
+                "source_classification_revision": revision,
+            },
+            {"chunk_id": 1},
+        )
+        if row.get("chunk_id")
+    }
+    scope = {
+        "org_id": str(doc.get("organization_id") or instrument.get("organization_id") or ""),
+        "document_id": document_id,
+    }
+    try:
+        list_points = getattr(store, "list_points", None)
+        if list_points is not None:
+            present = {
+                str(point["id"])
+                for point in await list_points(
+                    scope, namespace=EVIDENCE_VECTOR_NAMESPACE, limit=100000
+                )
+            }
+        else:
+            present = {
+                str(point)
+                for point in await store.list_chunk_ids(
+                    scope, namespace=EVIDENCE_VECTOR_NAMESPACE, limit=100000
+                )
+            }
+    except Exception as exc:
+        # Includes a collection that no longer exists: reported, never acted on
+        # (recreating a wiped collection is an operator step, OPERATIONS 7a).
+        logger.warning("could not verify the projection points of %s: %s", document_id, exc)
+        return {"final": True, "result": {"action": "unverified", "error": type(exc).__name__}}
+    missing = expected - present
+    extra = present - expected
+    if expected and not missing and not extra:
+        return {"final": True, "result": {"action": "current", "points": len(expected)}}
+    return {"final": False, "expected": expected, "missing": missing, "extra": extra}
+
+
 async def _resync_document_vectors(
     document_id: str,
     db,
@@ -473,6 +583,83 @@ async def _resync_document_vectors(
             "qdrant_chunks": 0,
             "status": "skipped",
             "reason": "document_not_consumable",
+        }
+
+    # A document governed by a Contract Master instrument has ONE projection
+    # writer: the contract-worker's reprojection. Repairing its points here (a
+    # different payload shape, non-strict embeddings, no revision stamp) would
+    # rewrite a CURRENT projection behind its fence, so the repair is delegated.
+    # Delegation never withdraws a healthy projection: a CURRENT generation is
+    # left alone, a PENDING/IN_PROGRESS one is already due, and only a FAILED
+    # one is re-opened. A bulk resync therefore cannot move an organisation's
+    # evidence to 409 by re-running.
+    from ..models.contract_document import ProjectionStatus
+    from ..services.contract_document_store import CONTRACT_DOCUMENTS_COLLECTION
+    from ..services.contract_reprojection_worker import ContractReprojectionWorker
+
+    instruments = await db[CONTRACT_DOCUMENTS_COLLECTION].find(
+        {"document_id": {"$in": sorted({str(document_id), str(doc.get("_id"))})}},
+        {"_id": 1, "classification_revision": 1, "projection_status": 1, "projection_revision": 1},
+    ).to_list(length=None)
+    if instruments:
+        projections: List[Dict[str, Any]] = []
+        for instrument in instruments:
+            revision = int(instrument.get("classification_revision") or 0)
+            state = str(instrument.get("projection_status") or "")
+            entry: Dict[str, Any] = {"contract_document_id": str(instrument["_id"]), "revision": revision}
+            if revision < 1:
+                entry["action"] = "not_promoted"
+            elif state == ProjectionStatus.CURRENT.value and int(
+                instrument.get("projection_revision") or 0
+            ) == revision:
+                # CURRENT is a claim about points that must physically exist. A
+                # Qdrant wipe or a stray prune leaves it describing nothing, and
+                # evidence would answer empty from it. Verified, and a missing
+                # point hands the generation back to reprojection (a derived
+                # field only); an unreachable store is reported, never acted on.
+                entry.update(
+                    await _verify_current_projection(
+                        db, instrument, doc, vector_client or VectorClient(config)
+                    )
+                )
+            elif state == ProjectionStatus.FAILED.value:
+                # Re-opened only if still FAILED when the retry commits: a
+                # generation that became CURRENT meanwhile is never withdrawn.
+                retry = await ContractReprojectionWorker(db).request_retry(
+                    str(instrument["_id"]),
+                    reason="storage vector repair requested",
+                    only_if_failed=True,
+                )
+                entry["action"] = "retry_scheduled" if retry["retry_scheduled"] else "already_due"
+            else:
+                entry["action"] = "already_due"
+            projections.append(entry)
+        attention = any(
+            entry.get("action") in {"unverified", "reprojection_required"} for entry in projections
+        )
+        await db.vector_sync_status.update_one(
+            {"document_id": document_id},
+            {
+                "$set": {
+                    "document_id": document_id,
+                    # Delegated and healthy is not a backlog; delegated with a
+                    # damaged or unverifiable projection is, and stays counted.
+                    "sync_status": "mismatch" if attention else "delegated",
+                    "updatedAt": datetime.utcnow(),
+                    "delegated_to": "contract_master_reprojection",
+                    "projections": projections,
+                },
+                "$setOnInsert": {"createdAt": datetime.utcnow()},
+            },
+            upsert=True,
+        )
+        return {
+            "document_id": document_id,
+            "mongo_chunks": 0,
+            "qdrant_chunks": 0,
+            "status": "delegated",
+            "reason": "contract_master_reprojection",
+            "projections": projections,
         }
 
     document_ref_query = _candidate_field_query("document_id", document_id)
@@ -601,7 +788,8 @@ async def _gather_storage_status(method: str = "approx") -> Dict[str, Any]:
     stale_entries = await status_collection.count_documents(
         {
             "updatedAt": {"$lt": stale_threshold},
-            "sync_status": {"$ne": "synced"},
+            # Delegated documents are the contract-worker's, not a sync backlog.
+            "sync_status": {"$nin": ["synced", "delegated"]},
         }
     )
 
@@ -808,6 +996,15 @@ async def resync_bulk_vectors(
         doc_filter["organization_id"] = org_id
     if project_id:
         doc_filter["project_id"] = project_id
+    # Governed contracts belong to the contract-worker's reprojection, and a
+    # bulk pass has nothing to repair in them. Selected, each one spent a slot
+    # of the limit on every run (its status is never "synced") and a FAILED one
+    # had its reprojection backoff reset each time. Excluded in the query, so
+    # they cannot crowd repairable documents out of the candidate window either;
+    # the single-document repair still verifies and delegates them.
+    governed = await _governed_document_ids(db)
+    if governed:
+        doc_filter["_id"] = {"$nin": governed}
 
     # Containment: this backfill RE-UPSERTS vectors, so it can undo the
     # publication barrier's purge for a blocked or quarantined document. The
@@ -935,6 +1132,12 @@ async def reconcile_vectors(
     vector_client = VectorClient(config)
 
     doc_filter: Dict[str, Any] = {"deleted": {"$ne": True}}
+    # As in bulk resync: governed contracts are the contract-worker's, and
+    # selecting them spent the limit and reset a FAILED generation's backoff on
+    # every run. The single-document repair still verifies and delegates them.
+    governed = await _governed_document_ids(db)
+    if governed:
+        doc_filter["_id"] = {"$nin": governed}
     # Some datasets may use is_deleted; keep them included unless explicitly true
     doc_filter["is_deleted"] = {"$ne": True}
     if org_id:
@@ -1045,11 +1248,15 @@ async def reconcile_vectors(
             result = await _resync_document_vectors(
                 doc_id, db, config, embedding_client, vector_client
             )
-            repaired += 1
+            delegated = result.get("status") == "delegated"
+            if not delegated:
+                repaired += 1
             details.append(
                 {
                     "document_id": doc_id,
-                    "status": "repaired",
+                    # A governed contract is not repaired here; its projection
+                    # is owned by the contract-worker's reprojection.
+                    "status": "delegated" if delegated else "repaired",
                     "mongo_chunks": result.get("mongo_chunks"),
                     "qdrant_chunks": result.get("qdrant_chunks"),
                     "missing_qdrant": len(missing_in_qdrant),

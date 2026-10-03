@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from ..core.database import get_database
+from ..models.document_metadata import METADATA_EXTRACTION_PROMPT_VERSION
 from ..models.evidence_graph import (
     AIExtraction,
     AIExtractionCreate,
@@ -596,7 +597,7 @@ class EvidenceGraphService:
                 content_hash=content_hash,
                 schema_version="evidence_graph.v2",
                 model=metadata_source,
-                prompt_version="existing_document_metadata.v2",
+                prompt_version=METADATA_EXTRACTION_PROMPT_VERSION,
                 raw_output=parsed,
                 parsed_output=parsed,
                 confidence=0.75 if metadata_source else None,

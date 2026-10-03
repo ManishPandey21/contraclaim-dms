@@ -58,6 +58,7 @@ import pytest
 from bson import ObjectId
 
 from rbac_backend.ai_workflows.langgraph import letter_pipeline
+from rbac_backend.utils.error_handler import LetterError
 from rbac_backend.models.ai_models import LangGraphDraftRequest
 from rbac_backend.services import ai_service as ai_service_module
 from rbac_backend.services import conversation_service as conversation_service_module
@@ -353,6 +354,18 @@ def _project_actor() -> SimpleNamespace:
     )
 
 
+def _org_actor() -> SimpleNamespace:
+    """Organisation A, organisation-wide, no project assignments: the narrowest
+    actor whose canonical row visibility includes an organisation-level letter."""
+    return SimpleNamespace(
+        id="user-org-A",
+        roles=["orguser"],
+        organization_id="org-A",
+        organizations=["org-A"],
+        projects=[],
+    )
+
+
 def _global_actor() -> SimpleNamespace:
     """A global actor, resolved through canonical authorization — not by name."""
     return SimpleNamespace(
@@ -477,35 +490,42 @@ async def test_a_sibling_project_document_sharing_the_letter_number_is_not_draft
     # resolver returned, so this is the shape in which the pipeline had no
     # project value to compare against - and the removed hand-rolled check
     # then waved every project in the tenant through.
+    #
+    # The project-tier actor used here cannot see that letter at all: its
+    # canonical row visibility (`build_scope_query`, and `authorize_scope` on
+    # `GET /letters/{id}`) is its assigned projects. This test once passed only
+    # because the langgraph routes loaded the letter by bare id; they now
+    # refuse it before the pipeline runs, so nothing - sibling-project
+    # material included - reaches a prompt.
     letter_id, safe_id, foreign_id = ObjectId(), ObjectId(), ObjectId()
-    run = await _run_pipeline(
-        monkeypatch,
-        letters=[_letter(letter_id, project_id=None)],
-        documents=[
-            _document(safe_id, letter_no=SHARED_CODE),
-            _document(
-                foreign_id,
-                letter_no=SHARED_CODE,
-                project_id="proj-B",
-                summary=SIBLING_PROJECT_MARKER,
-            ),
-        ],
-        letter_id=letter_id,
-        request_project_id=None,
-    )
+    with pytest.raises(LetterError) as exc:
+        await _run_pipeline(
+            monkeypatch,
+            letters=[_letter(letter_id, project_id=None)],
+            documents=[
+                _document(safe_id, letter_no=SHARED_CODE),
+                _document(
+                    foreign_id,
+                    letter_no=SHARED_CODE,
+                    project_id="proj-B",
+                    summary=SIBLING_PROJECT_MARKER,
+                ),
+            ],
+            letter_id=letter_id,
+            request_project_id=None,
+        )
 
-    _assert_absent(run, SIBLING_PROJECT_MARKER, "sibling-project letterNo fallback")
-    assert str(foreign_id) not in run.provenance_ids(), (
-        "the sibling-project document id survived in the persisted provenance. "
-        "Removing the text while keeping the id still records an unauthorised "
-        "source as a contributor to this draft."
-    )
+    assert exc.value.http_status == 404
+    assert _RecordingLLM.prompts == [], "a refused letter still reached a prompt"
 
 
 @pytest.mark.asyncio
 async def test_a_foreign_organisation_document_sharing_the_letter_number_is_not_drafted_from(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The organisation-level letter is drafted by an organisation-wide actor,
+    # the narrowest one entitled to it (see the sibling-project test above for
+    # why a project-tier actor no longer reaches it).
     letter_id, safe_id, foreign_id = ObjectId(), ObjectId(), ObjectId()
     run = await _run_pipeline(
         monkeypatch,
@@ -521,6 +541,7 @@ async def test_a_foreign_organisation_document_sharing_the_letter_number_is_not_
             ),
         ],
         letter_id=letter_id,
+        actor=_org_actor(),
         request_project_id=None,
     )
 
@@ -528,6 +549,32 @@ async def test_a_foreign_organisation_document_sharing_the_letter_number_is_not_
     assert str(foreign_id) not in run.provenance_ids(), (
         "a foreign-organisation document id survived in the persisted provenance"
     )
+
+
+@pytest.mark.asyncio
+async def test_a_project_tier_actor_cannot_draft_an_organisation_level_letter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    letter_id, foreign_id = ObjectId(), ObjectId()
+    with pytest.raises(LetterError) as exc:
+        await _run_pipeline(
+            monkeypatch,
+            letters=[_letter(letter_id, project_id=None)],
+            documents=[
+                _document(
+                    foreign_id,
+                    letter_no=SHARED_CODE,
+                    organization_id="org-B",
+                    project_id="proj-B",
+                    summary=FOREIGN_ORG_MARKER,
+                ),
+            ],
+            letter_id=letter_id,
+            request_project_id=None,
+        )
+
+    assert exc.value.http_status == 404
+    assert _RecordingLLM.prompts == [], "a refused letter still reached a prompt"
 
 
 # ---------------------------------------------------------------------------

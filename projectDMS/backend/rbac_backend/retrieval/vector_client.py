@@ -262,6 +262,10 @@ class VectorClient:
                     payload[key] = value
             payload = normalize_source_payload(payload)
             payloads.append(payload)
+            if self.enabled and self._client and self._qmodels:
+                # The in-memory index only stands in for a disabled store; kept
+                # beside a live one it grows for the life of the process.
+                continue
             self._memory_index.append(
                 {
                     "vector": vector,
@@ -340,6 +344,56 @@ class VectorClient:
             )
         except Exception:  # metrics must never break the failure path itself
             logger.debug("Failed to record vector store failure metric", exc_info=True)
+
+    async def list_points(
+        self,
+        filters: Dict[str, Any],
+        namespace: Optional[str] = None,
+        limit: int = 1000,
+    ) -> List[Dict[str, str]]:
+        """Point ids WITH their chunk ids, for callers that delete what they list.
+
+        ``list_chunk_ids`` answers the payload chunk id, which is not the point
+        id for LangChain-written points (``uuid5`` of the chunk); deleting by it
+        deletes nothing. Enabled-but-failing raises, like ``list_chunk_ids``.
+        """
+        self._require_tenant_scope(filters, False)
+        collection = namespace or self.collection_name or self.config.qdrant_collection
+        if not (self.enabled and self._client and self._qmodels):
+            return [
+                {
+                    "id": str(entry["payload"].get("chunk_id")),
+                    "chunk_id": str(entry["payload"].get("chunk_id")),
+                }
+                for entry in self._memory_index
+                if entry.get("namespace") == collection
+                and self._matches_filters(entry.get("payload", {}), filters)
+            ]
+        try:
+            points: Dict[str, Dict[str, str]] = {}
+            for qfilter in (
+                self._build_filter(filters),
+                self._build_filter(filters, field_prefix="metadata."),
+            ):
+                res, _ = await asyncio.to_thread(
+                    self._client.scroll,
+                    collection_name=collection,
+                    scroll_filter=qfilter,
+                    limit=limit,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                for point in res:
+                    payload = getattr(point, "payload", None) or {}
+                    chunk_id = self._payload_value(payload, "chunk_id")
+                    points[str(point.id)] = {
+                        "id": str(point.id),
+                        "chunk_id": str(chunk_id or point.id),
+                    }
+            return list(points.values())
+        except Exception as exc:
+            await self._record_failure("list_points", collection)
+            raise VectorStoreUnavailableError(f"Qdrant scroll failed: {exc}") from exc
 
     async def list_chunk_ids(
         self,

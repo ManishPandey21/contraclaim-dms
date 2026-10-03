@@ -142,6 +142,7 @@ class _Database:
         self.ingestion_jobs = _Collection()
         self.chunks = _Collection()
         self.vector_sync_status = _Collection()
+        self.contract_documents = _Collection()
 
 
 class _PersistentQdrant:

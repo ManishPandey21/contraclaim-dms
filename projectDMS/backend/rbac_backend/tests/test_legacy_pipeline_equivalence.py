@@ -329,6 +329,12 @@ def _comparable(result: ProcessingResult) -> Dict[str, Any]:
     return data
 
 
+#: Persisted keys added after the oracle on purpose, each asserted on its own
+#: below. Phase A (correspondence metadata integrity) added the extraction
+#: quality marker; everything else must still match the oracle exactly.
+_ADDED_SINCE_ORACLE = frozenset({"metadata_quality"})
+
+
 def _observed(proc: Any) -> Dict[str, Any]:
     return {
         "ocr_calls": [p.name for p in proc.ocr_service.process_pdf_calls],
@@ -338,7 +344,10 @@ def _observed(proc: Any) -> Dict[str, Any]:
         "openai_uploads": list(proc.openai_service.upload_calls),
         "openai_documents": list(proc.openai_service.process_document_calls),
         "summaries": list(proc.file_service.summaries),
-        "saved": list(proc.database_service.saved),
+        "saved": [
+            {key: value for key, value in saved.items() if key not in _ADDED_SINCE_ORACLE}
+            for saved in proc.database_service.saved
+        ],
         "db_closed": proc.database_service.closed,
     }
 
@@ -394,6 +403,11 @@ async def test_legacy_side_effects_match_pre_phase3(
     (current, _), (oracle, _) = await _run_both(tmp_path, fixture)
 
     assert _observed(current) == _observed(oracle)
+    # The one intended addition is present on every persisted record.
+    assert all(
+        isinstance(saved.get("metadata_quality"), dict)
+        for saved in current.database_service.saved
+    )
 
 
 @pytest.mark.parametrize("fixture", [TEXT_NATIVE, OCR_REQUIRED, EMPTY_PDF])

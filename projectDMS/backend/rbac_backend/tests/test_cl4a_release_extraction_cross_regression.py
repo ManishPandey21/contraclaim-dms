@@ -246,7 +246,6 @@ async def test_contract_master_evidence_resolves_the_retried_document_in_its_pro
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     harness = await _partial_then_recovered(tmp_path, monkeypatch)
-    await _seed_contract_master(harness.db, harness.document_id)
     policy = _Policy(harness.db)
 
     await harness.run_attempt()
@@ -256,6 +255,9 @@ async def test_contract_master_evidence_resolves_the_retried_document_in_its_pro
     assert (mid.consumable, mid.reason) == (True, "in_flight_last_known_good")
 
     assert await harness.run_attempt() is True
+    # Promoted once extracted, as the migration does. From here the general
+    # pipeline no longer writes this document (see the governed test below).
+    await _seed_contract_master(harness.db, harness.document_id)
 
     decision = await resolve_document_authority(harness.db, str(harness.document_id))
     assert (decision.consumable, decision.reason) == (True, "settled")
@@ -284,10 +286,10 @@ async def test_unrecoverable_page_goes_to_review_and_leaves_contract_evidence(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     harness = await _never_recovers(tmp_path, monkeypatch)
-    await _seed_contract_master(harness.db, harness.document_id)
     policy = _Policy(harness.db)
 
     job = await _run_until_terminal(harness)
+    await _seed_contract_master(harness.db, harness.document_id)
     document = await harness.document()
     assert job["processing_state"] == "human_review_required"
     assert document["processing_status"] == "human_review_required"
@@ -309,6 +311,24 @@ async def test_unrecoverable_page_goes_to_review_and_leaves_contract_evidence(
             _selection(harness.db, OTHER_PROJECT), str(harness.document_id)
         )
     assert other.value.status_code == 403
+
+
+async def test_a_governed_document_is_not_reprocessed_by_the_general_pipeline(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Once an instrument governs the Document, a general extraction job is
+    closed at once with nothing written: it would rewrite the evidence rows
+    under a CURRENT projection. It is not retried into dead-letter either."""
+    harness = await _partial_then_recovered(tmp_path, monkeypatch)
+    await _seed_contract_master(harness.db, harness.document_id)
+    before = await harness.document()
+
+    assert await harness.run_attempt() is False
+    job = await harness.job()
+    assert (job["status"], job["stage"]) == ("dead_lettered", "skipped_governed_contract")
+    assert job["error"]["terminal"] is True
+    assert await harness.document() == before, "the refused job wrote to the document"
+    assert await harness.page_rows() == []
 
 
 # --- B, F: the contract ingest path and (cid:N) text ------------------------

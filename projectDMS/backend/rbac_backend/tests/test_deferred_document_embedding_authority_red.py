@@ -141,6 +141,7 @@ class _Collection:
 class _Database:
     def __init__(self, documents: Iterable[dict[str, Any]] = ()) -> None:
         self.documents = _Collection(documents)
+        self.contract_documents = _Collection()
         self.document_vectors = _Collection()
         self.vector_sync_status = _Collection()
         self.document_processing_jobs = _Collection()

@@ -190,7 +190,10 @@ async def test_processor_saves_ocr_fallback_when_ai_text_extraction_fails(tmp_pa
 
     assert result.success is True
     assert result.metadata_source == "ocr_fallback_regex"
-    assert result.metadata.letter_no == "AFC-PM-KNPCC-06-4930"
+    # The OCR text has no labelled letter number, so there is none. The
+    # filename is not source metadata (DI-H6): it used to be stored here as
+    # the extracted letter number, producing false reference links.
+    assert result.metadata.letter_no is None
     assert result.metadata.subject == "Borewell execution delay Body text from OCR"
     assert captured["raw_ocr_text"] == ocr_text
     assert "ai_extraction" in result.partial_failures

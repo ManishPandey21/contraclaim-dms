@@ -38,6 +38,14 @@ from ..utils.notification_service import NotificationService
 from ..models.notification import NotificationContext, NotificationType
 from ..utils.pipeline_logging import configure_pipeline_logger
 from .reference_sync_service import ReferenceSyncService, ReferenceSyncError
+from .metadata_integrity import (
+    assess_metadata_quality,
+    keep_stored_values_on_degraded_source,
+    merge_degraded_snapshot,
+    merge_human_edited_fields,
+    metadata_for_publication,
+    protect_human_edited_fields,
+)
 from .duplicate_detection_service import (
     CLASSIFICATION_DUPLICATE,
     DuplicateDetectionService,
@@ -1155,6 +1163,29 @@ class DocumentService:
 
         document_id = str(job["document_id"])
         now = datetime.utcnow()
+        if await governed_by_contract_master(db, document_id):
+            # Refused before anything is written: marking the document
+            # `processing` would make the projection builder see an ingest in
+            # flight, and a retried refusal would walk the job to dead-letter
+            # while holding it there. Closed once, terminally; the contract
+            # reindex is the path that re-reads a governed contract.
+            message = (
+                "Document is governed by a Contract Master instrument; reprocess it "
+                "through the contract reindex"
+            )
+            logger.warning("Document %s: %s", document_id, message)
+            await db.document_processing_jobs.update_one(
+                {"_id": job_id},
+                {
+                    "$set": {
+                        "status": "dead_lettered",
+                        "stage": "skipped_governed_contract",
+                        "error": {"message": message, "timestamp": now, "terminal": True},
+                        "updated_at": now,
+                    }
+                },
+            )
+            return False
         await db.documents.update_one(
             {"_id": self._validate_document_id(document_id)},
             {
@@ -1642,6 +1673,11 @@ class DocumentService:
         except Exception:
             logger.debug("Failed to emit processing failure audit for %s", job.get("document_id"), exc_info=True)
 
+    async def is_governed_contract(self, document_id: str) -> bool:
+        """True when a Contract Master instrument names this document."""
+        db = await self._get_db()
+        return await governed_by_contract_master(db, document_id)
+
     async def process_document_async(
         self,
         document_id: str,
@@ -1663,6 +1699,10 @@ class DocumentService:
         metadata = None
         metadata_source: Optional[str] = None
         metadata_references: List[Dict[str, Any]] = []
+        references_authoritative = False
+        # The extraction result as published to graph/evidence stores: the
+        # parsed metadata with human-edited and kept stored values put back.
+        publication_metadata: Any = None
         derived_publication_authorized = False
         initial_publication_source: Optional[Dict[str, Any]] = None
         initial_publication_authorized = False
@@ -1685,6 +1725,18 @@ class DocumentService:
                 logger.warning(
                     "Document %s is held by contract extraction; the general "
                     "pipeline will not reprocess it",
+                    document_id,
+                )
+                return False
+            if await governed_by_contract_master(db, document_id, stored.get("_id")):
+                # The general pipeline would replace the clause rows evidence
+                # reads with token chunks while the instrument stays CURRENT -
+                # evidence answering empty from a "current" projection. A
+                # governed contract is re-read by the contract reindex, whose
+                # completion re-opens the reprojection.
+                logger.warning(
+                    "Document %s is governed by a Contract Master instrument; the "
+                    "general pipeline will not reprocess it",
                     document_id,
                 )
                 return False
@@ -1896,6 +1948,27 @@ class DocumentService:
                     update_fields["processing_metadata"]["partial_failures"] = partial_failures
 
             if metadata:
+                metadata_quality = assess_metadata_quality(
+                    metadata,
+                    metadata_source=metadata_source,
+                    partial_failures=getattr(result, "partial_failures", None),
+                )
+                references_authoritative = metadata_quality["references_authoritative"]
+                update_fields["metadata_quality"] = metadata_quality
+                if metadata_quality["degraded"]:
+                    logger.warning(
+                        "[document_pipeline] Metadata for %s is degraded (%s); "
+                        "existing reference links are kept unless references were authoritative",
+                        document_id,
+                        ", ".join(metadata_quality["warnings"]),
+                    )
+                    processing_metadata = update_fields.get("processing_metadata")
+                    if isinstance(processing_metadata, dict):
+                        processing_metadata.setdefault("partial_failures", {})["metadata_parse"] = {
+                            "status": metadata_quality["status"],
+                            "warnings": metadata_quality["warnings"],
+                            "field_failures": metadata_quality["field_failures"],
+                        }
                 if getattr(metadata, "summary", None):
                     update_fields["summary"] = metadata.summary
                 if getattr(metadata, "keywords", None):
@@ -1907,8 +1980,11 @@ class DocumentService:
                     normalized_refs = self._normalize_metadata_references(
                         metadata_reference_values
                     )
-                    update_fields["reference"] = normalized_refs
-                    metadata_references = normalized_refs
+                    # A degraded extraction's references are "unknown", not
+                    # "cites nothing": the stored list and links stay as-is.
+                    if references_authoritative:
+                        update_fields["reference"] = normalized_refs
+                        metadata_references = normalized_refs
                 if getattr(metadata, "full_content", None):
                     update_fields["full_text"] = metadata.full_content
                 if getattr(metadata, "subject", None):
@@ -1926,6 +2002,28 @@ class DocumentService:
                     except Exception:
                         logger.debug("Unable to parse metadata date for %s", document_id)
                 update_fields.update(extracted_metadata_updates(metadata))
+                # Re-read: OCR and LLM work takes minutes, and a person may have
+                # edited the document meanwhile. Protection must see that edit.
+                current_stored = await db.documents.find_one({"_id": doc_oid}) or stored
+                kept_keys: List[str] = []
+                merge_degraded_snapshot(update_fields, current_stored, metadata_quality)
+                kept_human_fields = protect_human_edited_fields(
+                    update_fields, current_stored, dropped_keys=kept_keys
+                )
+                kept_on_degraded = keep_stored_values_on_degraded_source(
+                    update_fields, current_stored, metadata_quality, dropped_keys=kept_keys
+                )
+                publication_metadata = metadata_for_publication(
+                    metadata, current_stored, kept_keys
+                )
+                if kept_human_fields or kept_on_degraded:
+                    logger.info(
+                        "[document_pipeline] Kept stored values for %s: human-edited=%s, "
+                        "degraded-source=%s",
+                        document_id,
+                        ", ".join(kept_human_fields) or "-",
+                        ", ".join(kept_on_degraded) or "-",
+                    )
 
                 graph_document_payload = document.model_dump(by_alias=True)
                 graph_document_payload.update(update_fields)
@@ -1950,7 +2048,7 @@ class DocumentService:
                         await self._publish_graph_and_evidence_from_current(
                             document_id=document_id,
                             extracted_payload=graph_document_payload,
-                            metadata=metadata,
+                            metadata=publication_metadata or metadata,
                             metadata_source=metadata_source,
                             upload_type=upload,
                         )
@@ -2047,7 +2145,7 @@ class DocumentService:
                         await self._publish_graph_and_evidence_from_current(
                             document_id=document_id,
                             extracted_payload=graph_document_payload,
-                            metadata=metadata,
+                            metadata=publication_metadata or metadata,
                             metadata_source=metadata_source,
                             upload_type=upload,
                         )
@@ -2060,13 +2158,22 @@ class DocumentService:
                             {"_id": job_id},
                             {"$set": {"stage": "syncing_references", "updated_at": datetime.utcnow()}},
                         )
-                    await self.reference_sync_service.sync_bidirectional(
-                        document_id=document_id,
-                        references=metadata_references,
-                        source="parser",
-                        default_link_type="indirect",
-                        clear_existing=True,
-                    )
+                    if references_authoritative:
+                        # Bucket-replace: only an authoritative result may
+                        # remove or clear existing parser links.
+                        await self.reference_sync_service.sync_bidirectional(
+                            document_id=document_id,
+                            references=metadata_references,
+                            source="parser",
+                            default_link_type="indirect",
+                            clear_existing=True,
+                        )
+                    else:
+                        logger.warning(
+                            "[document_pipeline] Reference extraction for %s was not "
+                            "authoritative; existing reference links kept",
+                            document_id,
+                        )
                 except ReferenceSyncError as exc:
                     raise DocumentProcessingError(
                         "Metadata was saved, but the extracted references could not be linked. "
@@ -2089,7 +2196,7 @@ class DocumentService:
                     )
                 await self._sync_current_document_to_falkor(
                     document_id,
-                    metadata=metadata,
+                    metadata=publication_metadata or metadata,
                     upload_type=upload,
                     raise_on_error=True,
                 )
@@ -2846,6 +2953,14 @@ class DocumentService:
             except Exception:
                 pass
 
+            db = await self._get_db()
+            existing: Dict[str, Any] = {}
+            for candidate in candidates:
+                found = await db.documents.find_one({"_id": candidate})
+                if found:
+                    existing = found
+                    break
+
             now = datetime.utcnow()
             set_payload: Dict[str, Any] = {
                 **update_fields,
@@ -2853,12 +2968,15 @@ class DocumentService:
                 "updated_at": now,
                 "summary_metadata_updated_at": now,
                 "manual_summary_metadata_override": True,
+                # Per-field marker: reprocessing keeps exactly these fields.
+                "human_edited_fields": merge_human_edited_fields(
+                    existing, update_fields.keys()
+                ),
             }
             if updated_by:
                 set_payload["updated_by"] = updated_by
                 set_payload["summary_metadata_updated_by"] = updated_by
 
-            db = await self._get_db()
             result = await db.documents.update_one(
                 {"_id": {"$in": candidates}, "lifecycle_state": {"$ne": "deleted"}},
                 {"$set": set_payload, "$inc": {"_revision": 1}},
@@ -3319,3 +3437,28 @@ class DocumentService:
 def create_document_service(db: Database) -> DocumentService:
     """Create document service instance"""
     return DocumentService(db)
+
+
+async def governed_by_contract_master(db: Any, document_id: Any, stored_id: Any = None) -> bool:
+    """Whether a Contract Master instrument names this document.
+
+    Such a document's derived rows and vectors have one writer: the
+    contract-worker's reprojection (fed by the contract ingest). Any other
+    pipeline that rewrites them leaves a CURRENT projection describing rows that
+    no longer exist.
+    """
+    from .contract_document_store import CONTRACT_DOCUMENTS_COLLECTION
+    from .publication_policy import _collection
+
+    ids = sorted({str(value) for value in (document_id, stored_id) if value is not None})
+    if not ids:
+        return False
+    instruments = _collection(db, CONTRACT_DOCUMENTS_COLLECTION)
+    if instruments is None:
+        # Unknown is not "ungoverned": answering False here would hand a
+        # governed contract to a pipeline that rewrites its evidence.
+        raise RuntimeError("Contract Master instruments are not readable; governance unknown")
+    return (
+        await instruments.find_one({"document_id": {"$in": ids}}, {"_id": 1})
+        is not None
+    )
