@@ -125,6 +125,23 @@ class VectorClient:
     def _vector_name_for(self, collection: str) -> Optional[str]:
         return self._vector_names.get(collection, self.config.qdrant_vector_name)
 
+    def _forget_vanished_fallback(
+        self, namespace: Optional[str], collection: str, exc: Exception
+    ) -> None:
+        """A proven fallback is reused without a read, so one dropped outside the
+        app would fail every write until a restart. A not-found write to it
+        forgets it; the next call resolves - and recreates - it. Any other
+        error leaves it recorded."""
+        logical = self._logical_collection(namespace)
+        if (
+            collection == logical
+            or self._resolved_collections.get(logical) != collection
+        ):
+            return
+        if getattr(exc, "status_code", None) == 404 or "not found" in str(exc).lower():
+            self._resolved_collections.pop(logical, None)
+            self._vector_names.pop(collection, None)
+
     def _initialize(self) -> None:
         if not self.config.qdrant_url:
             logger.info("Vector client offline: QDRANT_URL not configured")
@@ -394,12 +411,16 @@ class VectorClient:
                     payload=payload,
                 )
                 points.append(point)
-            await asyncio.to_thread(
-                self._client.upsert,
-                collection_name=collection,
-                points=points,
-                wait=True,
-            )
+            try:
+                await asyncio.to_thread(
+                    self._client.upsert,
+                    collection_name=collection,
+                    points=points,
+                    wait=True,
+                )
+            except Exception as exc:
+                self._forget_vanished_fallback(namespace, collection, exc)
+                raise
         _LAST_UPSERT_COLLECTION.set((id(self), collection))
         return len(payloads)
 

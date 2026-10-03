@@ -490,7 +490,8 @@ def test_a_transient_error_does_not_erase_a_proven_fallback(store: Store) -> Non
     assert store.chunk_ids(fallback) == [first["chunk_id"]]
 
     original = store.vc._client
-    store.vc._client = _Spy(original, fail_once=("get_collection", "upsert"))
+    # The proven fallback is reused without a read, so the blip is the write.
+    store.vc._client = _Spy(original, fail_once=("upsert",))
     try:
         with pytest.raises(RuntimeError):
             asyncio.run(_explicit_upsert(store.vc, evidence, _contract_chunk("blip")))
@@ -568,3 +569,47 @@ def test_a_default_dimension_fallback_is_followed_by_default_reads(store: Store)
     ) == 0
     assert store.chunk_ids(fallback) == []
     _assert_default_untouched(store)
+
+
+def test_a_fallback_deleted_outside_the_app_is_resolved_again(store: Store) -> None:
+    """A proven fallback is reused without a read; if it vanishes (an operator
+    dropped it), the failed write forgets it, and the next write resolves and
+    recreates it instead of failing until a restart."""
+    evidence = store.name("document_vectors")
+    fallback = _mismatched(store, evidence)
+    asyncio.run(_explicit_upsert(store.vc, evidence, _contract_chunk("before")))
+    store.client.delete_collection(fallback)
+
+    with pytest.raises(Exception):
+        asyncio.run(_explicit_upsert(store.vc, evidence, _contract_chunk("vanished")))
+
+    after = _contract_chunk("resolved again")
+    assert asyncio.run(_explicit_upsert(store.vc, evidence, after)) == 1
+    assert store.chunk_ids(fallback) == [after["chunk_id"]]
+    assert store.chunk_ids(evidence) == []
+    assert asyncio.run(store.vc.list_chunk_ids(_scope(after), namespace=evidence)) == [
+        after["chunk_id"]
+    ]
+
+
+def test_a_transient_read_error_on_an_unproven_namespace_records_nothing(
+    store: Store,
+) -> None:
+    """The unreadable branch: the read fails and the create cannot help (the
+    collection exists). Nothing is recorded, the write fails visibly, and the
+    next call resolves the namespace's real fallback."""
+    evidence = store.name("document_vectors")
+    fallback = _mismatched(store, evidence)
+    original = store.vc._client
+    store.vc._client = _Spy(original, fail_once=("get_collection",))
+    try:
+        with pytest.raises(Exception):
+            asyncio.run(_explicit_upsert(store.vc, evidence, _contract_chunk("blind")))
+        assert evidence not in store.vc._resolved_collections
+    finally:
+        store.vc._client = original
+
+    chunk = _contract_chunk("seen")
+    asyncio.run(_explicit_upsert(store.vc, evidence, chunk))
+    assert store.chunk_ids(fallback) == [chunk["chunk_id"]]
+    assert store.vc._resolved_collections[evidence] == fallback

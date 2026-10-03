@@ -200,3 +200,23 @@ def test_the_reconcile_route_answers_422(store: Store) -> None:
         )
     assert refused.value.status_code == 422
     assert store.collection_names() == before
+
+
+# --- the helper itself -------------------------------------------------------------------------
+
+
+def test_without_a_known_default_only_omission_is_selectable() -> None:
+    from rbac_backend.retrieval.namespaces import selectable_vector_namespace
+
+    assert selectable_vector_namespace(None, None) is None
+    assert selectable_vector_namespace(None, "document_vectors") is None
+    assert selectable_vector_namespace("document_vectors", "document_vectors") is None
+    for requested, default in (
+        ("document_vectors", None),
+        ("document_vectors", ""),
+        ("", ""),
+        ("", None),
+        ("Document_Vectors", "document_vectors"),
+    ):
+        with pytest.raises(UnsupportedVectorNamespace):
+            selectable_vector_namespace(requested, default)
