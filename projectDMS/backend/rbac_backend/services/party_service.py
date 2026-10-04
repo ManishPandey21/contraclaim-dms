@@ -119,9 +119,20 @@ class PartyService:
         filters: Dict[str, Any],
         pagination: Dict[str, int]
     ) -> Tuple[List[Party], int]:
-        """Get parties with pagination and filtering."""
+        """Get parties with pagination and filtering.
+
+        ``filters`` is either a plain request filter (``search`` / ``type`` /
+        ``project_id`` / ``organization_id``) or the authorised query from
+        ``AuthorizationService.build_party_query``. Any other key is a scope
+        constraint (tenant ``$or``, ``$and``, deny-all ``_id``) and is ANDed in as
+        given; it used to be discarded, which left the listing unscoped.
+        """
         try:
             db = await self._get_db()
+
+            request_keys = {"search", "type", "project_id", "organization_id"}
+            scope = {k: v for k, v in (filters or {}).items() if k not in request_keys}
+            filters = {k: v for k, v in (filters or {}).items() if k in request_keys}
 
             # Build query
             query = {"is_active": True}
@@ -145,6 +156,9 @@ class PartyService:
             # Organization filter
             if filters.get("organization_id"):
                 query["organization_id"] = filters["organization_id"]
+
+            if scope:
+                query = {"$and": [query, scope]}
 
             # Get total count
             total_count = await db.parties.count_documents(query)
