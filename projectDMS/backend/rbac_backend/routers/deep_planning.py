@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from ..core.database import get_db
-from ..core.security import get_current_user, CurrentUser, authorize_scope
+from ..core.security import get_current_user, CurrentUser, authorize_scope, build_scope_query
 from ..models.letter import Letter
 from ..models.document import Document
 from typing import List, Optional, Dict, Tuple, Any
@@ -476,30 +476,28 @@ async def get_vector_store_context(db, query: str, organization_id: str, project
 
 async def find_similar_letters(db, subject: str, organization_id: Optional[str] = None,
                               project_id: Optional[str] = None, current_user: CurrentUser = None) -> List[dict]:
-    """Find similar letters based on subject similarity with proper authorization."""
+    """Find letters similar to `subject` within the caller's authorised tenant scope.
+
+    The candidate set is the caller's row visibility from `build_scope_query`,
+    narrowed by the requested organisation/project; similarity is computed only
+    over that set. These letters reach the drafting prompt, the response body and
+    the persisted draft, so scope is applied here, before any of them see a row.
+    A role outside every scope tier, or a principal with no organisation/project,
+    gets the deny-all filter - never an unfiltered query.
+    """
     try:
+        if current_user is None:
+            return []
+        query_filter = build_scope_query(
+            current_user,
+            organization_id=organization_id,
+            project_id=project_id,
+        )
+        if query_filter == {"_id": {"$in": []}}:
+            return []
+
         logger.info(f"Finding similar letters for subject: {subject}")
         query_embedding = await get_text_embedding(subject)
-
-        # Build filter based on organization and project with authorization
-        query_filter = {}
-
-        # Authorization check
-        if "superadmin" not in current_user.roles:
-            if "orgadmin" in current_user.roles or "orguser" in current_user.roles:
-                query_filter["organization_id"] = current_user.organization_id
-            elif "projectadmin" in current_user.roles or "projectuser" in current_user.roles:
-                if getattr(current_user, "projects", None):
-                    query_filter["project_id"] = {"$in": [str(pid) for pid in current_user.projects]}
-                else:
-                    # No project assignments -> no results
-                    query_filter["project_id"] = "__none__"
-
-        # Add organization and project filters if provided
-        if organization_id:
-            query_filter["organization_id"] = organization_id
-        if project_id:
-            query_filter["project_id"] = project_id
 
         letters_cursor = db.letters.find(query_filter)
         letters = await letters_cursor.to_list(length=None)
@@ -871,11 +869,14 @@ async def generate_deep_planning_draft(
                 request.project_id
             )
 
-        # Find similar letters for reference
+        # Find similar letters for reference. `org_id` is the organisation the
+        # gate just authorised: the request's, else the principal's - for Super
+        # Admin that is the validated navbar selection, so a selected org bounds
+        # the context and no selection keeps the consolidated view.
         similar_letters = await find_similar_letters(
             db,
             request.subject,
-            request.organization_id,
+            org_id,
             request.project_id,
             current_user
         )
