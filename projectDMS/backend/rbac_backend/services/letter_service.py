@@ -82,6 +82,7 @@ class LetterService:
         limit: int = 50,
         filters: Optional[Dict[str, Any]] = None,
         search_query: Optional[str] = None,
+        scope: Optional[Dict[str, Any]] = None,
     ) -> List[Optional[Letter]]:
         """
         Retrieve multiple letters with pagination and optional filtering.
@@ -91,6 +92,7 @@ class LetterService:
             limit: Maximum number of letters to return
             filters: Optional filter dictionary (status/org/project)
             search_query: Optional free-text search term
+            scope: Optional authorization constraint, ANDed with the query as given
 
         Returns:
             List of Letter instances
@@ -118,6 +120,9 @@ class LetterService:
                     {"recipient": pattern},
                     {"letter_no": pattern},
                 ]
+
+            if scope:
+                query = {"$and": [dict(scope), query]} if query else dict(scope)
 
             logger.info(
                 "Retrieving letters: skip=%s, limit=%s, query_keys=%s",
@@ -1201,21 +1206,27 @@ class LetterService:
     async def get_letters_paginated(self, authorized_query: Dict[str, Any], pagination: Dict[str, int]) -> List[Optional[Letter]]:
         """
         Retrieve letters respecting authorization filters and pagination.
+
+        Apart from ``search_query``, ``tab`` and ``status``, every key of
+        ``authorized_query`` is a scope constraint from
+        ``AuthorizationService.build_letter_query`` (tenant scope, deny-all,
+        drafter assignment) and is applied verbatim. It must not pass through
+        ``get_letters``' request-filter whitelist, which would drop it.
         """
-        filters = dict(authorized_query or {})
+        scope = dict(authorized_query or {})
         skip = int(pagination.get('skip', 0) or 0)
         limit = int(pagination.get('limit', 50) or 50)
 
-        search_query = filters.pop('search_query', None)
-        tab_value = filters.pop('tab', None)
-        if tab_value and 'status' not in filters:
-            filters['status'] = tab_value
+        search_query = scope.pop('search_query', None)
+        tab_value = scope.pop('tab', None)
+        status_value = scope.pop('status', None) or tab_value
 
         return await self.get_letters(
             skip=skip,
             limit=limit,
-            filters=filters,
+            filters={'status': status_value} if status_value else {},
             search_query=search_query,
+            scope=scope,
         )
 
     async def create_letter_with_chain(self, letter_data: Any, conversation_context: Optional[Dict[str, Any]], user: Any) -> Letter:
