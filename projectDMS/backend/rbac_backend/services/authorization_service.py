@@ -399,8 +399,9 @@ class AuthorizationService:
         allowed_orgs = self._collect_user_org_ids(current_user)
 
         if org_id:
-            # When an explicit org filter is provided, validate it
-            if allowed_orgs and str(org_id) not in allowed_orgs:
+            # When an explicit org filter is provided, validate it. An empty scope
+            # contains no organisation, so it refuses every explicit filter.
+            if str(org_id) not in allowed_orgs:
                 raise AuthorizationError("Access denied to this organization")
         else:
             # Apply implicit org scoping where applicable
@@ -787,13 +788,18 @@ class AuthorizationService:
         allowed_orgs = self._collect_user_org_ids(current_user)
         allowed_projects = self._collect_user_project_ids(current_user)
 
-        # constrain organization if not specified
+        # constrain organization if not specified; an empty scope denies, it must
+        # never fall through to "no organisation predicate"
         org_id = query.get("organization_id")
         if org_id:
-            if allowed_orgs and str(org_id) not in allowed_orgs:
+            if str(org_id) not in allowed_orgs:
                 raise AuthorizationError("Access denied to this organization")
         elif allowed_orgs:
             query["organization_id"] = {"$in": sorted(allowed_orgs)}
+        else:
+            return {"_id": {"$in": []}}
+        if ({"projectadmin", "projectuser"} & role_names) and not allowed_projects:
+            return {"_id": {"$in": []}}
 
         # constrain project if not specified
         proj_id = query.get("project_id")
@@ -931,9 +937,14 @@ class AuthorizationService:
                             ]
                         }
                     )
+                else:
+                    # No organisation scope and no tier role: deny, never "no predicate".
+                    return {"_id": {"$in": []}}
 
             # project-scoped roles: optionally constrain by assigned projects
             if {"projectadmin", "projectuser"} & role_names:
+                if not allowed_projects:
+                    return {"_id": {"$in": []}}
                 if proj_id:
                     # if explicit project filter provided, ensure it's allowed
                     if allowed_projects and str(proj_id) not in allowed_projects:
