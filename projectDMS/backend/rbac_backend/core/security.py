@@ -237,6 +237,95 @@ async def resolve_stored_principal(db, actor_reference: Any) -> CurrentUser:
         ) from exc
 
 
+async def principal_from_access_token(token: str, db) -> Optional[CurrentUser]:
+    """Resolve one access token to a principal, or ``None`` if it does not authenticate.
+
+    The single definition of "this token authenticates a session", shared by the
+    HTTP dependency (``get_current_user``) and the notifications WebSocket so a
+    token one refuses cannot open the other. It enforces, in order: signature and
+    expiry, the access-token type, the ``sub`` (email) identity, an existing
+    account, the ``user_jwt_min_iat`` revocation floor and session liveness (when
+    a runtime Redis is configured), then drops revoked role references.
+
+    ``None`` means "try the next credential"; it never raises a 401 itself. A
+    session-store or role-store outage raises ``HTTPException(503)`` so it
+    surfaces as an outage instead of falling through to the next credential.
+    """
+    revoked = HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Could not validate credentials")
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        # Reject non-access tokens. Step-up tokens (typ="step_up") share the
+        # signing key and must never authenticate a normal session; tokens with
+        # an explicit non-"access" type are rejected too. Missing type ==
+        # legacy access token (back-compat during rollout).
+        if payload.get("typ") == "step_up" or payload.get("type") not in (None, "access"):
+            return None
+        email: str = payload.get("sub")
+        iat: int = payload.get("iat", 0)
+        if not email:
+            return None
+        user = await db.users.find_one({"email": email})
+        if not user:
+            return None
+        user_id_str = str(user["_id"])
+
+        # JWT Invalidation Check (Phase 3)
+        from ..services.runtime_state import get_runtime_state
+        runtime = get_runtime_state()
+        # C2: only deployments that configure a runtime Redis have an
+        # authoritative revocation store; for them, an unreachable
+        # store must not silently skip the checks (fail-open logout).
+        if runtime.redis_url:
+            try:
+                redis = await runtime.get_redis()
+                if redis is None:
+                    raise _SessionStoreUnavailableError("runtime Redis unreachable")
+                min_iat = await redis.get(f"user_jwt_min_iat:{user_id_str}")
+                if min_iat and iat < int(min_iat):
+                    raise revoked
+
+                # Session invalidation: a logged-out or expired session must
+                # immediately stop authenticating, even within the token TTL.
+                session_id = payload.get("session_id")
+                if session_id:
+                    from ..services.authentication_service import AuthenticationService
+
+                    if not await AuthenticationService().is_session_active(str(session_id)):
+                        raise revoked
+            except HTTPException:
+                raise  # revocation denials keep their 401 semantics
+            except Exception as exc:
+                # Store configured but failing (connection refused,
+                # timeout mid-call, stale client): apply the policy.
+                await _handle_session_store_unavailable(exc)
+
+        try:
+            user = await _without_revoked_roles(db, user)
+        except Exception as exc:
+            # Not a credential problem: a 401 here would force a logout
+            # for a role-store blip. Surface it as the outage it is.
+            logger.error("Role store unavailable while building the principal: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Authorization service temporarily unavailable",
+            ) from exc
+        return _principal_from_user_document(user, email)
+    except JWTError:
+        # Try the next credential source before falling through to dev mode.
+        return None
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_503_SERVICE_UNAVAILABLE:
+            # C2 fail-closed: a session-store outage must surface as an
+            # outage, not be swallowed by the next-credential fallback.
+            raise
+        # Revocation denials (401) fall through to the next candidate; the
+        # caller's final deny still applies if none authenticate.
+        return None
+    except Exception:
+        # Any unexpected token error -> try the next credential source.
+        return None
+
+
 # Moved from organizations.py
 async def get_current_user(request: Request, db = Depends(get_db)):
     """
@@ -267,76 +356,9 @@ async def get_current_user(request: Request, db = Depends(get_db)):
             token_candidates.append(cookie_token)
 
     for token in token_candidates:
-        try:
-            payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
-            # Reject non-access tokens. Step-up tokens (typ="step_up") share the
-            # signing key and must never authenticate a normal session; tokens with
-            # an explicit non-"access" type are rejected too. Missing type ==
-            # legacy access token (back-compat during rollout).
-            if payload.get("typ") == "step_up" or payload.get("type") not in (None, "access"):
-                continue
-            email: str = payload.get("sub")
-            iat: int = payload.get("iat", 0)
-            if email:
-                user = await db.users.find_one({"email": email})
-                if user:
-                    user_id_str = str(user["_id"])
-
-                    # JWT Invalidation Check (Phase 3)
-                    from ..services.runtime_state import get_runtime_state
-                    runtime = get_runtime_state()
-                    # C2: only deployments that configure a runtime Redis have an
-                    # authoritative revocation store; for them, an unreachable
-                    # store must not silently skip the checks (fail-open logout).
-                    if runtime.redis_url:
-                        try:
-                            redis = await runtime.get_redis()
-                            if redis is None:
-                                raise _SessionStoreUnavailableError("runtime Redis unreachable")
-                            min_iat = await redis.get(f"user_jwt_min_iat:{user_id_str}")
-                            if min_iat and iat < int(min_iat):
-                                raise credentials_exception
-
-                            # Session invalidation: a logged-out or expired session must
-                            # immediately stop authenticating, even within the token TTL.
-                            session_id = payload.get("session_id")
-                            if session_id:
-                                from ..services.authentication_service import AuthenticationService
-
-                                if not await AuthenticationService().is_session_active(str(session_id)):
-                                    raise credentials_exception
-                        except HTTPException:
-                            raise  # revocation denials keep their 401 semantics
-                        except Exception as exc:
-                            # Store configured but failing (connection refused,
-                            # timeout mid-call, stale client): apply the policy.
-                            await _handle_session_store_unavailable(exc)
-
-                    try:
-                        user = await _without_revoked_roles(db, user)
-                    except Exception as exc:
-                        # Not a credential problem: a 401 here would force a logout
-                        # for a role-store blip. Surface it as the outage it is.
-                        logger.error("Role store unavailable while building the principal: %s", exc)
-                        raise HTTPException(
-                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                            detail="Authorization service temporarily unavailable",
-                        ) from exc
-                    return _principal_from_user_document(user, email)
-        except JWTError:
-            # Try the next credential source before falling through to dev mode.
-            continue
-        except HTTPException as exc:
-            if exc.status_code == status.HTTP_503_SERVICE_UNAVAILABLE:
-                # C2 fail-closed: a session-store outage must surface as an
-                # outage, not be swallowed by the next-credential fallback.
-                raise
-            # Revocation denials (401) fall through to the next candidate; the
-            # final deny below still applies if none authenticate.
-            continue
-        except Exception:
-            # Any unexpected token error -> try the next credential source.
-            continue
+        principal = await principal_from_access_token(token, db)
+        if principal is not None:
+            return principal
 
     # Fallback: Dev headers (explicitly disabled unless ALLOW_DEV_HEADERS is True)
     if not settings.ALLOW_DEV_HEADERS:

@@ -347,9 +347,10 @@ def test_the_websocket_surface_is_exactly_the_one_that_was_reviewed() -> None:
     with no application-level bound. It is **not** a hole of the same shape as
     the four unauthenticated HTTP routes:
 
-    * it authenticates first - the JWT (or the auth cookie) is decoded and a
-      `user_id` established before the receive loop is ever entered, so an
-      anonymous caller cannot reach the read at all;
+    * it authenticates first - the token (or the auth cookie) is resolved to a
+      principal by `principal_from_access_token`, the check `get_current_user`
+      runs, and a `user_id` established before the receive loop is ever entered,
+      so an anonymous caller cannot reach the read at all;
     * uvicorn bounds a websocket message at its `ws_max_size`, 16 MB by default,
       and this deployment does not raise it (no `ws_max_size` appears anywhere in
       the backend, the Dockerfile or the compose files).
@@ -374,7 +375,7 @@ def test_the_websocket_surface_is_exactly_the_one_that_was_reviewed() -> None:
     )
 
     ws = sources["ws.py"]
-    auth_at = min(ws.index("jwt.decode"), ws.index("if not user_id"))
+    auth_at = min(ws.index("await principal_from_access_token("), ws.index("if not user_id"))
     read_at = ws.index("receive_text")
     assert auth_at < read_at, (
         "the notifications websocket now reads from the client before it "
