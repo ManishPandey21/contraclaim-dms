@@ -7,6 +7,7 @@ from ..utils.error_handler import AuthorizationError
 from ..core.security import (
     validate_role_assignment as core_validate_role_assignment,
     authorize_scope,
+    build_scope_query,
 )
 from ..core.permissions import Permissions
 from ..core.database import get_database
@@ -110,17 +111,41 @@ class AuthorizationService:
     async def build_letter_query(
         self, current_user: Any, filters: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
+        """Build the letter-listing query, bounded by the caller's scope.
+
+        ``organization_id`` / ``project_id`` in ``filters`` come from the client,
+        so they are a narrowing request, never authorization: ``build_scope_query``
+        intersects them with the caller's organisation/project scope and returns a
+        deny-all filter when the request reaches outside it, or when the caller
+        has no scope. They used to be copied in verbatim, so an unfiltered request
+        had no tenant predicate and any organisation could be named.
+
+        Every key of the returned query is a constraint the caller must not
+        escape; ``LetterService.get_letters_paginated`` applies it as given.
+        """
         filters = dict(filters or {})
-        query: Dict[str, Any] = {}
-        for key in ("status", "organization_id", "project_id"):
+
+        def _narrowing(key: str) -> Optional[str]:
             value = filters.get(key)
-            if value:
-                query[key] = value
+            text = str(value).strip() if value is not None else ""
+            if not text or text.lower() == "all":
+                return None
+            return text
+
+        query: Dict[str, Any] = build_scope_query(
+            current_user,
+            organization_id=_narrowing("organization_id"),
+            project_id=_narrowing("project_id"),
+        )
+        status_value = filters.get("status")
+        if status_value:
+            query["status"] = status_value
         role_names = self._extract_role_names(current_user)
         if self._is_contract_letter_drafter(role_names):
             user_id = getattr(current_user, "id", None) or getattr(current_user, "_id", None)
-            if user_id:
-                query["assigned_to"] = str(user_id)
+            if not user_id:
+                return {"_id": {"$in": []}}
+            query["assigned_to"] = str(user_id)
         return query
 
     async def check_letter_access(
