@@ -539,6 +539,31 @@ async def find_similar_letters(db, subject: str, organization_id: Optional[str] 
         logger.error(f"Error finding similar letters: {str(e)}")
         return []
 
+async def find_scoped_letter(db, letter_id: Optional[str], current_user: Optional[CurrentUser],
+                             organization_id: Optional[str] = None,
+                             project_id: Optional[str] = None) -> Optional[dict]:
+    """Load one letter by id, only if it lies inside the caller's tenant scope.
+
+    The id and the scope go to Mongo in one filter, so an out-of-scope letter is
+    never read and is indistinguishable from a nonexistent one. Both id forms are
+    tried (ObjectId and the raw string), as the unscoped lookup did. A missing
+    principal or a deny-all scope returns None without touching the database.
+    """
+    if current_user is None or not letter_id:
+        return None
+    scope = build_scope_query(
+        current_user,
+        organization_id=organization_id,
+        project_id=project_id,
+    )
+    if scope == {"_id": {"$in": []}}:
+        return None
+    candidates: List[Any] = []
+    if ObjectId.is_valid(letter_id):
+        candidates.append(ObjectId(letter_id))
+    candidates.append(letter_id)
+    return await db.letters.find_one({"$and": [{"_id": {"$in": candidates}}, scope]})
+
 async def generate_draft_with_ai(
     subject: str,
     recipient: str,
@@ -888,11 +913,15 @@ async def generate_deep_planning_draft(
         target_letter_info = ""
         try:
             if request.target_letter_id:
-                tl = None
-                if ObjectId.is_valid(request.target_letter_id):
-                    tl = await db.letters.find_one({"_id": ObjectId(request.target_letter_id)})
-                if not tl:
-                    tl = await db.letters.find_one({"_id": request.target_letter_id})
+                # Same scope as the similar letters: a target outside it is
+                # treated exactly like one that does not exist.
+                tl = await find_scoped_letter(
+                    db,
+                    request.target_letter_id,
+                    current_user,
+                    org_id,
+                    request.project_id,
+                )
                 if tl:
                     parts = []
                     # Summary
