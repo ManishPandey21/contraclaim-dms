@@ -288,35 +288,83 @@ def test_dormant_super_user_ungranted_organisation_document_is_refused(run_draft
 
 
 # --------------------------------------------------------------------------
-# Super Admin: the navbar selection bounds the context
+# Super Admin (owner policy, 2026-10-05):
+#   All Organisations + All Projects  => global
+#   Organisation A    + All Projects  => Organisation A only
+#   Organisation A    + Project A1    => Project A1 only
+#
+# A token-authenticated Super Admin principal never carries an organisation
+# (`principal_from_user_doc` clears it), and this route does not read the
+# navbar headers, so the organisation/project reach it through the request
+# body. ALL is still represented by their absence here; the explicit ALL
+# selection model is a separate follow-up and must keep these outcomes.
+# The principal-carried shape (org set on the principal) is pinned as well, so
+# a future resolver that populates it is held to the same boundary.
 # --------------------------------------------------------------------------
-def test_superadmin_selected_organisation_refuses_another_organisation(run_draft):
+_SUPERADMIN = _user(["superadmin"])
+
+
+def test_superadmin_all_organisations_all_projects_is_global(run_draft):
     docs, ids = _world()
-    _assert_refused(run_draft(_user(["superadmin"], org=ORG_A), docs, [ids[D_B1]]), D_B1, ids[D_B1])
-
-
-def test_superadmin_selected_organisation_uses_its_documents(run_draft):
-    docs, ids = _world()
-    _assert_used(run_draft(_user(["superadmin"], org=ORG_A), docs, [ids[D_A2]]), D_A2)
-
-
-def test_superadmin_selected_project_refuses_sibling_project(run_draft):
-    docs, ids = _world()
-    run = run_draft(_user(["superadmin"], org=ORG_A), docs, [ids[D_A2]], project_id=PROJ_A1)
-    _assert_refused(run, D_A2, ids[D_A2])
-
-
-def test_superadmin_selected_project_uses_its_documents(run_draft):
-    docs, ids = _world()
-    run = run_draft(_user(["superadmin"], org=ORG_A), docs, [ids[D_A1]], project_id=PROJ_A1)
+    run = run_draft(_SUPERADMIN, docs, [ids[D_A1], ids[D_B1]])
     _assert_used(run, D_A1)
+    _assert_used(run, D_B1)
 
 
-def test_superadmin_without_selection_has_the_consolidated_view(run_draft):
-    # Same policy as similar letters and the reply target: no navbar
-    # selection is the consolidated (global) view for Super Admin.
+@pytest.mark.parametrize("shape", ["request", "principal"])
+def test_superadmin_organisation_all_projects_is_bounded_to_that_organisation(run_draft, shape):
     docs, ids = _world()
-    _assert_used(run_draft(_user(["superadmin"]), docs, [ids[D_B1]]), D_B1)
+    user = _user(["superadmin"], org=ORG_A) if shape == "principal" else _SUPERADMIN
+    body = {"organization_id": ORG_A} if shape == "request" else {}
+    # Every project inside Organisation A ...
+    both = run_draft(user, docs, [ids[D_A1], ids[D_A2]], **body)
+    _assert_used(both, D_A1)
+    _assert_used(both, D_A2)
+    # ... and nothing outside it.
+    _assert_refused(run_draft(user, docs, [ids[D_B1]], **body), D_B1, ids[D_B1])
+
+
+@pytest.mark.parametrize("shape", ["request", "principal"])
+def test_superadmin_organisation_and_project_is_bounded_to_that_project(run_draft, shape):
+    docs, ids = _world()
+    user = _user(["superadmin"], org=ORG_A) if shape == "principal" else _SUPERADMIN
+    body: Dict[str, Any] = {"project_id": PROJ_A1}
+    if shape == "request":
+        body["organization_id"] = ORG_A
+    _assert_used(run_draft(user, docs, [ids[D_A1]], **body), D_A1)
+    _assert_refused(run_draft(user, docs, [ids[D_A2]], **body), D_A2, ids[D_A2])
+    _assert_refused(run_draft(user, docs, [ids[D_B1]], **body), D_B1, ids[D_B1])
+
+
+def test_superadmin_project_from_another_organisation_reaches_nothing(run_draft):
+    # A stale project left over from a previous organisation selection: the
+    # organisation and the project must both match, so nothing qualifies.
+    docs, ids = _world()
+    body = {"organization_id": ORG_A, "project_id": PROJ_B1}
+    for tag in (D_A1, D_B1):
+        _assert_refused(run_draft(_SUPERADMIN, docs, [ids[tag]], **body), tag, ids[tag])
+
+
+# --------------------------------------------------------------------------
+# Other roles never inherit Super Admin's ALL
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "user",
+    [
+        _user(["orgadmin"], org=ORG_A),
+        _user(["orguser"], org=ORG_A),
+        _user(["projectadmin"], org=ORG_A, projects=[PROJ_A1]),
+        _user(["projectuser"], org=ORG_A, projects=[PROJ_A1]),
+        _user(["contraclaim_expert_drafter"], projects=[PROJ_A1], account_type="contraclaim_staff"),
+        _user(["superuser"], orgs=[ORG_A]),
+    ],
+    ids=["orgadmin", "orguser", "projectadmin", "projectuser", "expert", "superuser"],
+)
+def test_cleared_selection_gives_other_roles_no_global_scope(run_draft, user):
+    # No organisation and no project in the request is the "cleared navbar"
+    # case; it is bounded by the role's entitlement, never global.
+    docs, ids = _world()
+    _assert_refused(run_draft(user, docs, [ids[D_B1]]), D_B1, ids[D_B1])
 
 
 # --------------------------------------------------------------------------
