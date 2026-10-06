@@ -1,7 +1,8 @@
 # Accepted no-fix advisories
 
 **Status:** owner-approved. PYSEC-2026-3740 in force from `release/contraclaim-rc1`;
-R3 (GHSA-vfj7-8cjw-p6xm) in force until 2026-10-10.
+R3 (GHSA-vfj7-8cjw-p6xm) in force until 2026-10-10; R4 (four PyMongo advisories)
+in force until 2026-11-05.
 **Decided:** 2026-09-04 (PYSEC-2026-3740, re-derived against pip-audit 2.10.1,
 llama-index-core 0.14.22) and 2026-10-03 (R3, npm 10.8.2).
 
@@ -14,6 +15,7 @@ including a second advisory in the same package.
 |---|---|---|
 | pip-audit | `PYSEC-2026-3740` (NLTK) | `release/contraclaim-rc1` review triggers |
 | npm audit | `GHSA-vfj7-8cjw-p6xm` (braces), R3 | **2026-10-10**, enforced by the gate |
+| pip-audit + Trivy (backend image) | `CVE-2026-88029`, `CVE-2026-96747`, `CVE-2026-96748`, `CVE-2026-96749` (PyMongo 4.16.0), R4 | **2026-11-05**, enforced by the gate |
 
 ---
 
@@ -232,3 +234,74 @@ does not cover any other advisory.
 
 **The correct statement of the gate's result is "npm audit passed with one
 time-bound owner-approved exception (R3)", never "0 vulnerabilities".**
+
+---
+
+## R4: four PyMongo 4.16.0 advisories, pending a compatible checkpoint release
+
+**THIS DOES NOT FIX THE UNDERLYING PYMONGO VULNERABILITIES.** It temporarily accepts
+four specifically reviewed findings, by advisory id only, until **2026-11-05**.
+
+| | |
+|---|---|
+| **Advisories** | `CVE-2026-88029` (GHSA-8fvv-fgr5-f8ch, medium), `CVE-2026-96747` (GHSA-qx36-8mw2-4r3x, medium), `CVE-2026-96748` (GHSA-vp6j-j7w5-5xjj, high), `CVE-2026-96749` (GHSA-v4x9-3549-crwv, high) |
+| **Package / pinned** | `pymongo` / `4.16.0` (`backend/rbac_backend/requirements.txt`; the legacy manifests pin 4.11.2) |
+| **Fix available** | **Yes, but not installable.** Fixed in 4.18.1 (88029) and 4.18.2 (the other three). `langgraph-checkpoint-mongodb`, imported unconditionally by the live letter-drafting engine (`services/letter_drafting/langgraph_engine.py`), permits no fixed line in any released version: 0.4.0 (pinned) `>=4.12,<4.17`; 0.5.0 (latest on PyPI, 2026-09-04, Python >=3.11) `>=4.12,<4.18`. Its GitHub `main` declares `>=4.18.2` but is unreleased, and unreleased code is not shipped. Overriding the declared constraint is not done either. |
+| **Owner** | @ManishPandey21 |
+| **Decided** | 2026-10-06, by the release owner |
+| **Accepted for** | `release/contraclaim-rc1`, **until 2026-11-05 (UTC, inclusive)** |
+| **Tracking issue** | ManishPandey21/contraclaim-dms#46 |
+
+### Per-advisory record
+
+| CVE | Affected feature | Used by ContraClaim | Reachable from untrusted input | Compensating control | Why the exception is acceptable |
+|---|---|---|---|---|---|
+| CVE-2026-88029 | GridFS read/write/delete by id: a mapping passed as the id is read as query criteria | **No.** No `gridfs`/`GridFSBucket` import or call anywhere in the repository (2026-10-06) | No | Files live in S3, not GridFS | The affected code path is not reachable in the current ContraClaim deployment. |
+| CVE-2026-96747 | CSFLE / Queryable Encryption: a `.sock` KMS endpoint in a key-vault document opens an `AF_UNIX` connection | **No.** No `ClientEncryption`, `AutoEncryptionOpts` or key vault anywhere | No | No key vault exists; the TLS handshake would fail anyway (advisory) | The affected code path is not reachable in the current ContraClaim deployment. |
+| CVE-2026-96748 | Connection-string parsing: a percent-encoded `,` or `:` in the host section injects an extra seed host | **Yes**, every client parses a URI | **No.** All seven `MongoClient`/`AsyncIOMotorClient` constructions take the URI from operator configuration (`settings.DATABASE_URL`, `config.mongo_uri`, `database_url` from settings); no request, tenant or user value is interpolated into a URI | URIs are set at deploy time in secrets/env | The affected code path is not reachable from untrusted input in the current ContraClaim deployment. |
+| CVE-2026-96749 | Native BSON encoder: signed 32-bit size overflow when one document is built from more than ~2 GiB of caller-supplied data | **Yes**, every write encodes BSON with the C extension | **Request paths: no.** nginx `client_max_body_size 200m`; uploads 100 MB (general) and 50 MB (contract); webhook, auth and telemetry bodies 1 MB, 16 KB and 64 KB. **Background paths: not proven.** Extracted text has no total per-document cap, there is no decompression guard, and no memory limit on the backend or worker containers, so a decompression-amplified upload remains a theoretical internal path. | Upload size limits, ClamAV scan before processing; MongoDB rejects >16 MB documents but only after encoding | Accepted short-term on the size gap (two orders of magnitude on every request path) with the residual stated, not as "not exploitable". Follow-up in #46: cap stored extracted text per document. |
+
+Trivy reports only the two HIGH ids at the image scan's CRITICAL,HIGH threshold;
+the two MEDIUM ids are excepted in pip-audit alone.
+
+### Unblock condition
+
+The **released** package metadata of `langgraph-checkpoint-mongodb` on PyPI permits
+`pymongo>=4.18.2`. GitHub `main` does not count. Then, in one PR: upgrade the
+checkpoint package, upgrade `pymongo` to `>=4.18.2` in all three pinned manifests,
+remove every part of R4 (the four `--ignore-vuln` flags, the Trivy ignore file and
+input, the gate step, its tests and this record), and rerun the targeted checkpoint
+tests, the real-Mongo suites, the full backend suite, the dependency scan and the
+image scan.
+
+Forward-compatibility evidence for that upgrade, gathered 2026-10-06 with a
+**test-only** override of the checkpoint package's PyMongo cap (not a supported,
+deployable resolution): PyMongo 4.18.2 with Motor 3.7.0 on Python 3.12 passed 154
+targeted Mongo/Motor/LangGraph-checkpoint tests and all 540 tests of CI's 24
+real-Mongo suites against a MongoDB 8.0.5 replica set.
+
+### Review triggers
+
+1. **2026-11-05 (UTC, inclusive).** From 2026-11-06 the gate fails with
+   "PyMongo temporary security exception expired; reassess or upgrade", and Trivy's
+   own `expired_at` stops ignoring the two HIGH ids. Extending it needs a new
+   decision; the gate's tests pin the date.
+2. A released `langgraph-checkpoint-mongodb` permits `pymongo>=4.18.2`. The gate
+   reads PyPI on every run and fails, naming the release.
+3. The `pymongo` pin moves off 4.16.0 (the gate fails until R4 is removed in the
+   same change).
+4. Any further PyMongo advisory, or any other finding: pip-audit and Trivy fail
+   on it, because only these ids are excepted.
+
+### Enforcement
+
+| | |
+|---|---|
+| CI | `.github/workflows/ci.yml`, job `dependency-scan`, step "Scan Python dependencies": gate tests, then `.github/scripts/pymongo_exception_gate.py`, then `pip-audit` with one `--ignore-vuln` per R4 id |
+| Image scan | Backend image only: `trivyignores: .github/trivy/pymongo-r4.trivyignore.yaml`, two ids scoped to `pkg:pypi/pymongo@4.16.0`, each with `expired_at: 2026-11-05` |
+| Gate tests | `.github/scripts/test_pymongo_exception_gate.py` (expiry boundary, pin change, released/pre-release/yanked checkpoint versions, unreadable PyPI answers fail closed) |
+| Guards | `test_ci_static_gates.py` pins the exact ignored-id list, that the gate and its tests run before the scan, that only the backend image scan carries an ignore file, and that file's exact ids, purl and expiry |
+
+**The correct statement of the scan result is "pip-audit and the backend image
+scan passed with a time-bound owner-approved exception (R4)", never
+"0 vulnerabilities".**

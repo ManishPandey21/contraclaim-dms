@@ -1,0 +1,29 @@
+# R4 - time-bound PyMongo advisory exception for the BACKEND image scan only.
+# THIS DOES NOT FIX THE VULNERABILITIES. Record: projectDMS/docs/NOFIX_ADVISORY_ACCEPTANCE.md (R4).
+# Tracking issue: ManishPandey21/contraclaim-dms#46. Owner: @ManishPandey21.
+#
+# Only the two HIGH ids Trivy reports at CRITICAL,HIGH are listed; the other two
+# R4 ids are MEDIUM and below this scan's threshold. Each entry is scoped to the
+# one accepted package version and expires on its own: after expired_at Trivy
+# reports the finding again and the job fails. Do not add ids or widen the purl;
+# test_ci_static_gates.py pins this file's exact contents.
+vulnerabilities:
+  - id: CVE-2026-96748
+    purls:
+      - "pkg:pypi/pymongo@4.16.0"
+    expired_at: 2026-11-05
+    statement: >-
+      R4. Host injection via percent-encoded delimiters in the connection-string
+      host section. Every Mongo URI comes from operator configuration; no request
+      or user input is interpolated into a URI. Fixed only in 4.18.2, which no
+      released langgraph-checkpoint-mongodb permits.
+  - id: CVE-2026-96749
+    purls:
+      - "pkg:pypi/pymongo@4.16.0"
+    expired_at: 2026-11-05
+    statement: >-
+      R4. Signed size overflow in the native BSON encoder for a single document
+      over ~2 GiB. Request paths are capped far below that (nginx 200 MB,
+      uploads 100/50 MB); background extraction has no total-text cap, a
+      residual tracked in #46. Fixed only in 4.18.2, which no released
+      langgraph-checkpoint-mongodb permits.
