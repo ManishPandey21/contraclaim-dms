@@ -22,7 +22,7 @@ import {
 
 const ORGANIZATION_STORAGE_KEY = "org_id";
 const PROJECT_STORAGE_KEY = "proj_id";
-/** Super Admin's selection, ALL included (`serializeSelection`). */
+/** The selection of a role on the ALL model, ALL included (`serializeSelection`). */
 export const SELECTION_STORAGE_KEY = "tenant_selection";
 
 type TenantContextValue = {
@@ -36,15 +36,20 @@ type TenantContextValue = {
   selectedProjectId: string;
   /** Super Admin's explicit "All Organisations" (implies all projects). */
   allOrganizations: boolean;
-  /** Super Admin's explicit "All Projects" within the selection. */
+  /**
+   * Explicit "All Projects" - contextual: every project of the selected
+   * organisation the user may see (Super Admin, organisation admin/user).
+   */
   allProjects: boolean;
+  /** Whether "All Projects" is offered: Super Admin and organisation-tier roles. */
+  canSelectAllProjects: boolean;
   canSwitchOrganization: boolean;
   canSwitchProject: boolean;
   loading: boolean;
   error: string | null;
   /** An organisation id, or `ALL_SELECTION` (Super Admin only). */
   selectOrganization: (organizationId: string) => void;
-  /** A project id, or `ALL_SELECTION` (Super Admin only). */
+  /** A project id, or `ALL_SELECTION` (Super Admin and organisation-tier roles). */
   selectProject: (projectId: string) => void;
 };
 
@@ -63,14 +68,16 @@ function realId(value: string): string {
   return value === ALL_SELECTION ? "" : value;
 }
 
+const ORGANIZATION_TIER_ROLES = ["orgadmin", "orguser"];
+
 /**
- * Persist a selection. Super Admin's goes to `tenant_selection` with ALL kept
- * explicit; the legacy `org_id` / `proj_id` keys, which many pages read as
- * filters, only ever hold real ids, so ALL removes them rather than leaking
- * the sentinel into a query string.
+ * Persist a selection. A role on the ALL model writes `tenant_selection` with
+ * ALL kept explicit; the legacy `org_id` / `proj_id` keys, which many pages
+ * read as filters, only ever hold real ids, so ALL removes them rather than
+ * leaking the sentinel into a query string.
  */
-function persistSelection(isSystemAdmin: boolean, organizationId: string, projectId: string): void {
-  if (isSystemAdmin) {
+function persistSelection(usesAllModel: boolean, organizationId: string, projectId: string): void {
+  if (usesAllModel) {
     window.localStorage.setItem(
       SELECTION_STORAGE_KEY,
       serializeSelection({ organizationId, projectId }),
@@ -110,6 +117,12 @@ export function TenantProvider({ children }: React.PropsWithChildren) {
   const [error, setError] = useState<string | null>(null);
 
   const isSystemAdmin = roles.includes("superadmin");
+  // Organisation-tier roles default to their organisation + All Projects
+  // (owner policy 2026-10-06). The organisation comes from the profile, never
+  // from stored state, and they never get All Organisations.
+  const isOrganizationTier =
+    !isSystemAdmin && roles.some((role) => ORGANIZATION_TIER_ROLES.includes(role));
+  const usesAllModel = isSystemAdmin || isOrganizationTier;
 
   useEffect(() => {
     let active = true;
@@ -157,6 +170,25 @@ export function TenantProvider({ children }: React.PropsWithChildren) {
             String(storedProject.organization_id) === organizationId
               ? String(storedProject._id)
               : ALL_SELECTION;
+        } else if (nextRoles.some((role) => ORGANIZATION_TIER_ROLES.includes(role))) {
+          // The authenticated organisation is the only one: a stored selection
+          // can choose a project inside it, or All Projects, and nothing else.
+          // Anything else stored (another organisation's project, a Super Admin
+          // ALL left in this browser, the legacy keys) falls back to All Projects.
+          organizationId =
+            (organizationIds.has(profileOrganizationId) ? profileOrganizationId : "") ||
+            String(availableOrganizations[0]?._id || "");
+          const stored = parseSelection(storedValue(SELECTION_STORAGE_KEY));
+          const storedProject = stored ? projectById.get(stored.projectId) : undefined;
+          projectId =
+            organizationId &&
+            stored?.organizationId === organizationId &&
+            storedProject &&
+            String(storedProject.organization_id) === organizationId
+              ? String(storedProject._id)
+              : organizationId
+                ? ALL_SELECTION
+                : "";
         } else {
           organizationId =
             (organizationIds.has(profileOrganizationId) ? profileOrganizationId : "") ||
@@ -203,8 +235,8 @@ export function TenantProvider({ children }: React.PropsWithChildren) {
 
   useEffect(() => {
     if (!selectedOrganizationId) return;
-    persistSelection(isSystemAdmin, selectedOrganizationId, selectedProjectId);
-  }, [isSystemAdmin, selectedOrganizationId, selectedProjectId]);
+    persistSelection(usesAllModel, selectedOrganizationId, selectedProjectId);
+  }, [usesAllModel, selectedOrganizationId, selectedProjectId]);
 
   const projectsForSelectedOrganization = useMemo(
     () =>
@@ -216,17 +248,15 @@ export function TenantProvider({ children }: React.PropsWithChildren) {
   );
 
   const allOrganizations = isSystemAdmin && selectedOrganizationId === ALL_SELECTION;
-  const allProjects = isSystemAdmin && selectedProjectId === ALL_SELECTION;
+  const allProjects = usesAllModel && selectedProjectId === ALL_SELECTION;
 
-  // Super Admin always has ALL to choose, so a single organisation or project
-  // is still a choice; a project choice needs an organisation first.
-  const canSwitchOrganization = isSystemAdmin
-    ? organizations.length > 0
-    : false;
-  const canSwitchProject = isSystemAdmin
+  // On the ALL model there is always ALL to choose, so a single organisation or
+  // project is still a choice; a project choice needs an organisation first.
+  // Organisation-tier roles never switch organisation.
+  const canSwitchOrganization = isSystemAdmin && organizations.length > 0;
+  const canSwitchProject = usesAllModel
     ? !allOrganizations && projectsForSelectedOrganization.length > 0
-    : roles.some((role) => ["orgadmin", "orguser"].includes(role)) &&
-      projectsForSelectedOrganization.length > 1;
+    : false;
 
   const selectOrganization = useCallback(
     (organizationId: string) => {
@@ -253,7 +283,7 @@ export function TenantProvider({ children }: React.PropsWithChildren) {
     (projectId: string) => {
       if (!canSwitchProject || projectId === selectedProjectId) return;
       const isAll = projectId === ALL_SELECTION;
-      if (isAll && !isSystemAdmin) return;
+      if (isAll && !usesAllModel) return;
       if (
         !isAll &&
         !projectsForSelectedOrganization.some(
@@ -265,7 +295,7 @@ export function TenantProvider({ children }: React.PropsWithChildren) {
       // Persist before changing React state. MainLayout remounts the routed page
       // on the state change, and many existing pages initialize their filters
       // synchronously from these storage keys.
-      persistSelection(isSystemAdmin, selectedOrganizationId, projectId);
+      persistSelection(usesAllModel, selectedOrganizationId, projectId);
       // Synchronously, before the routed page remounts and fetches.
       setActiveScope({ organizationId: selectedOrganizationId, projectId });
       setSelectedProjectId(projectId);
@@ -280,7 +310,7 @@ export function TenantProvider({ children }: React.PropsWithChildren) {
     },
     [
       canSwitchProject,
-      isSystemAdmin,
+      usesAllModel,
       projectsForSelectedOrganization,
       selectedOrganizationId,
       selectedProjectId,
@@ -303,6 +333,7 @@ export function TenantProvider({ children }: React.PropsWithChildren) {
       selectedProjectId: realId(selectedProjectId),
       allOrganizations,
       allProjects,
+      canSelectAllProjects: usesAllModel,
       canSwitchOrganization,
       canSwitchProject,
       loading,
@@ -323,6 +354,7 @@ export function TenantProvider({ children }: React.PropsWithChildren) {
       selectProject,
       selectedOrganizationId,
       selectedProjectId,
+      usesAllModel,
     ],
   );
 

@@ -4,8 +4,16 @@ Super Admin:
   * All Organisations + All Projects  => global
   * Organisation A    + All Projects  => Organisation A only
   * Organisation A    + Project A1    => Project A1 only
-Every other role: ALL is refused, and an empty selection stays bounded by the
-role's own entitlement - never global.
+Organisation user / admin of Organisation A (2026-10-06 clarification):
+  * Organisation A    + All Projects  => every project of Organisation A (default)
+  * Organisation A    + Project A1    => Project A1 only
+  * All Organisations, another organisation, or another organisation's project
+    => refused 403
+All Projects is contextual and is a selection instruction, not authority: it is
+evaluated inside the selected organisation and the principal's own grants
+(build_scope_query), so for a project user it means its assigned projects. All
+Organisations is Super Admin's alone. An empty selection stays bounded by the
+role's entitlement - never global.
 
 The navbar sends ALL explicitly as ``__all__`` in ``X-Org-Id`` / ``X-Proj-Id``
 (`client/src/services/active-scope.ts`). `resolve_active_scope` turns it into
@@ -33,6 +41,7 @@ from rbac_backend.tests.test_deep_planning_document_scope import (
     D_A1,
     D_A2,
     D_B1,
+    _document,
     _world,
 )
 from rbac_backend.tests.test_deep_planning_target_letter_scope import (
@@ -49,6 +58,8 @@ from rbac_backend.tests.test_deep_planning_target_letter_scope import (
 )
 
 ALL = ALL_SELECTION
+PROJ_A3 = "proj-a3"
+D_A3 = "DOC_A3"
 SUPERADMIN = _user(["superadmin"])  # token shape: no organisation, no projects
 
 
@@ -71,6 +82,7 @@ def _db(documents: List[Dict[str, Any]], letters: Optional[List[Dict[str, Any]]]
         [
             {"_id": PROJ_A1, "organization_id": ORG_A},
             {"_id": PROJ_A2, "organization_id": ORG_A},
+            {"_id": PROJ_A3, "organization_id": ORG_A},
             {"_id": PROJ_B1, "organization_id": ORG_B},
         ]
     )
@@ -114,24 +126,53 @@ def test_stale_project_from_the_previous_organisation_is_refused():
     assert exc.value.status_code == 403
 
 
-@pytest.mark.parametrize(
-    "user",
-    [
-        _user(["orgadmin"], org=ORG_A),
-        _user(["orguser"], org=ORG_A),
-        _user(["projectadmin"], org=ORG_A, projects=[PROJ_A1]),
-        _user(["projectuser"], org=ORG_A, projects=[PROJ_A1]),
-        _user(["contraclaim_expert_drafter"], projects=[PROJ_A1], account_type="contraclaim_staff"),
-        _user(["superuser"], orgs=[ORG_A]),
-    ],
-    ids=["orgadmin", "orguser", "projectadmin", "projectuser", "expert", "superuser"],
-)
-@pytest.mark.parametrize("org,project", [(ALL, ALL), (ALL, ""), (ORG_A, ALL), ("", ALL)])
-def test_other_roles_cannot_select_all(user, org, project):
+NON_SUPERADMIN = [
+    _user(["orgadmin"], org=ORG_A),
+    _user(["orguser"], org=ORG_A),
+    _user(["projectadmin"], org=ORG_A, projects=[PROJ_A1]),
+    _user(["projectuser"], org=ORG_A, projects=[PROJ_A1]),
+    _user(["contraclaim_expert_drafter"], projects=[PROJ_A1], account_type="contraclaim_staff"),
+    _user(["superuser"], orgs=[ORG_A]),
+]
+NON_SUPERADMIN_IDS = ["orgadmin", "orguser", "projectadmin", "projectuser", "expert", "superuser"]
+
+
+@pytest.mark.parametrize("user", NON_SUPERADMIN, ids=NON_SUPERADMIN_IDS)
+@pytest.mark.parametrize("project", [ALL, "", PROJ_A1])
+def test_other_roles_cannot_select_all_organisations(user, project):
     with pytest.raises(HTTPException) as exc:
-        _resolve(user, org, project)
+        _resolve(user, ALL, project)
     assert exc.value.status_code == 403
     assert exc.value.detail["code"] == "context_forbidden"
+
+
+@pytest.mark.parametrize("role", ["orgadmin", "orguser"])
+def test_organisation_user_all_projects_resolves_to_its_own_organisation(role):
+    scope = _resolve(_user([role], org=ORG_A), ORG_A, ALL)
+    assert (scope.organization_id, scope.project_id) == (ORG_A, None)
+    assert scope.all_projects and not scope.all_organizations
+
+
+@pytest.mark.parametrize("role", ["orgadmin", "orguser"])
+@pytest.mark.parametrize("project", [ALL, ""])
+def test_organisation_user_forged_other_organisation_is_refused(role, project):
+    with pytest.raises(HTTPException) as exc:
+        _resolve(_user([role], org=ORG_A), ORG_B, project)
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.parametrize("role", ["orgadmin", "orguser"])
+@pytest.mark.parametrize("org", [ORG_A, ORG_B, ""])
+def test_organisation_user_forged_other_organisation_project_is_refused(role, org):
+    with pytest.raises(HTTPException) as exc:
+        _resolve(_user([role], org=ORG_A), org, PROJ_B1)
+    assert exc.value.status_code == 403
+
+
+def test_expert_without_an_organisation_grant_cannot_name_one():
+    user = _user(["contraclaim_expert_drafter"], projects=[PROJ_A1], account_type="contraclaim_staff")
+    with pytest.raises(HTTPException):
+        _resolve(user, ORG_A, ALL)
 
 
 # --------------------------------------------------------------------------
@@ -272,20 +313,118 @@ def test_stale_project_header_is_refused_before_any_read(draft):
     assert not run.called_model
 
 
-@pytest.mark.parametrize(
-    "user,headers",
-    [
-        (_user(["orgadmin"], org=ORG_A), _nav(ALL, ALL)),
-        (_user(["orguser"], org=ORG_A), _nav(ORG_A, ALL)),
-        (_user(["projectuser"], org=ORG_A, projects=[PROJ_A1]), _nav(ORG_A, ALL)),
-    ],
-    ids=["orgadmin-all-all", "orguser-all-projects", "projectuser-all-projects"],
-)
-def test_other_roles_sending_all_are_refused(draft, user, headers):
+@pytest.mark.parametrize("user", NON_SUPERADMIN, ids=NON_SUPERADMIN_IDS)
+def test_other_roles_sending_all_organisations_are_refused(draft, user):
     docs, ids = _world()
-    run = draft(user, _db(docs), headers, document_ids=[ids[D_A1]])
+    run = draft(user, _db(docs), _nav(ALL, ALL), document_ids=[ids[D_A1]])
     assert run.status == 403, run.body
     assert not run.called_model
+
+
+# --------------------------------------------------------------------------
+# Organisation user / admin of Organisation A: the A-J matrix (G, the
+# persisted stale project, is a client concern - see the TenantContext tests;
+# its server half is F)
+# --------------------------------------------------------------------------
+def _org_world():
+    docs, ids = _world()
+    a3 = _document(D_A3, ORG_A, PROJ_A3)
+    docs.append(a3)
+    ids[D_A3] = str(a3["_id"])
+    return docs, ids
+
+
+ORG_ROLES = pytest.mark.parametrize("role", ["orguser", "orgadmin"])
+
+
+@ORG_ROLES
+def test_a_default_all_projects_reaches_every_project_of_the_organisation(draft, role):
+    docs, ids = _org_world()
+    run = draft(_user([role], org=ORG_A), _db(docs), _nav(ORG_A, ALL),
+                document_ids=[ids[D_A1], ids[D_A2], ids[D_A3]])
+    _used(run, D_A1, D_A2, D_A3)
+
+
+@ORG_ROLES
+def test_b_all_projects_never_reaches_another_organisation(draft, role):
+    docs, ids = _org_world()
+    _refused(draft(_user([role], org=ORG_A), _db(docs), _nav(ORG_A, ALL), document_ids=[ids[D_B1]]), D_B1)
+
+
+@ORG_ROLES
+def test_c_specific_project_is_that_project_only(draft, role):
+    docs, ids = _org_world()
+    user = _user([role], org=ORG_A)
+    _used(draft(user, _db(docs), _nav(ORG_A, PROJ_A1), document_ids=[ids[D_A1]]), D_A1)
+    _refused(draft(user, _db(docs), _nav(ORG_A, PROJ_A1), document_ids=[ids[D_A2]]), D_A2)
+
+
+@ORG_ROLES
+def test_d_returning_to_all_projects_restores_the_organisation(draft, role):
+    docs, ids = _org_world()
+    user = _user([role], org=ORG_A)
+    _refused(draft(user, _db(docs), _nav(ORG_A, PROJ_A1), document_ids=[ids[D_A3]]), D_A3)
+    _used(draft(user, _db(docs), _nav(ORG_A, ALL), document_ids=[ids[D_A3]]), D_A3)
+
+
+@ORG_ROLES
+@pytest.mark.parametrize("project", [ALL, ""])
+def test_e_forged_organisation_is_refused(draft, role, project):
+    docs, ids = _org_world()
+    run = draft(_user([role], org=ORG_A), _db(docs), _nav(ORG_B, project), document_ids=[ids[D_B1]])
+    assert run.status == 403, run.body
+    assert not run.called_model
+
+
+@ORG_ROLES
+@pytest.mark.parametrize("org", [ORG_A, ORG_B])
+def test_f_forged_other_organisation_project_is_refused(draft, role, org):
+    docs, ids = _org_world()
+    db = _db(docs)
+    run = draft(_user([role], org=ORG_A), db, _nav(org, PROJ_B1), document_ids=[ids[D_B1]])
+    assert run.status == 403, run.body
+    assert db.documents.find_one_filters == []
+    assert not run.called_model
+
+
+@ORG_ROLES
+def test_h_legacy_empty_selection_is_the_organisation_never_global(draft, role):
+    docs, ids = _org_world()
+    user = _user([role], org=ORG_A)
+    _used(draft(user, _db(docs), {}, document_ids=[ids[D_A1], ids[D_A3]]), D_A1, D_A3)
+    _refused(draft(user, _db(docs), {}, document_ids=[ids[D_B1]]), D_B1)
+
+
+@ORG_ROLES
+def test_i_similar_letters_and_reply_target_stay_in_the_organisation(draft, role):
+    a3 = _target("LTR_A3", ORG_A, PROJ_A3)
+    a3["embedding"] = QUERY
+    b1 = _target("LTR_B1", ORG_B, PROJ_B1)
+    b1["embedding"] = QUERY
+    run = draft(_user([role], org=ORG_A), _db([], [a3, b1]), _nav(ORG_A, ALL), target_letter_id=str(b1["_id"]))
+    assert run.status == 200, run.body
+    assert [letter["id"] for letter in run.body["similar_letters"]] == [str(a3["_id"])]
+    assert "LTR_B1" not in run.prompt_text
+
+
+@ORG_ROLES
+def test_j_mixed_ids_never_leak_the_other_organisation(draft, role):
+    docs, ids = _org_world()
+    run = draft(_user([role], org=ORG_A), _db(docs), _nav(ORG_A, ALL), document_ids=[ids[D_A1], ids[D_B1]])
+    _refused(run, D_B1)
+    assert D_A1 not in run.response_text
+
+
+# --------------------------------------------------------------------------
+# Project tier: All Projects is the assigned projects, never the organisation
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize("role", ["projectuser", "projectadmin"])
+def test_project_tier_all_projects_is_its_assigned_projects(draft, role):
+    docs, ids = _org_world()
+    user = _user([role], org=ORG_A, projects=[PROJ_A1, PROJ_A2])
+    _used(draft(user, _db(docs), _nav(ORG_A, ALL), document_ids=[ids[D_A1], ids[D_A2]]), D_A1, D_A2)
+    _refused(draft(user, _db(docs), _nav(ORG_A, ALL), document_ids=[ids[D_A3]]), D_A3)
+    _refused(draft(user, _db(docs), _nav(ORG_A, ALL), document_ids=[ids[D_B1]]), D_B1)
 
 
 @pytest.mark.parametrize(

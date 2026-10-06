@@ -115,6 +115,29 @@ describe("explicit ALL selection", () => {
       expect(activeScopeHeaders()).toEqual({ "X-Org-Id": "org-A", "X-Proj-Id": "proj-A1" });
     });
 
+    it("ALL/ALL -> A/ALL -> A/A1 -> B/ALL: A1 never survives the organisation change", async () => {
+      renderProbe();
+      await waitFor(() => expect(text("all-orgs")).toBe("true"));
+      const seen: Record<string, string>[] = [{ ...activeScopeHeaders() }];
+      click("org A");
+      await waitFor(() => expect(text("org")).toBe("org-A"));
+      seen.push({ ...activeScopeHeaders() });
+      click("project A1");
+      await waitFor(() => expect(text("project")).toBe("proj-A1"));
+      seen.push({ ...activeScopeHeaders() });
+      click("org B");
+      // The very next request after the switch, before any re-render settles.
+      seen.push({ ...activeScopeHeaders() });
+      await waitFor(() => expect(text("org")).toBe("org-B"));
+      expect(seen).toEqual([
+        { "X-Org-Id": ALL_SELECTION, "X-Proj-Id": ALL_SELECTION },
+        { "X-Org-Id": "org-A", "X-Proj-Id": ALL_SELECTION },
+        { "X-Org-Id": "org-A", "X-Proj-Id": "proj-A1" },
+        { "X-Org-Id": "org-B", "X-Proj-Id": ALL_SELECTION },
+      ]);
+      expect(text("project")).toBe("");
+    });
+
     it("changing organisation resets the project to All Projects", async () => {
       renderProbe();
       await waitFor(() => expect(text("all-orgs")).toBe("true"));
@@ -193,38 +216,109 @@ describe("explicit ALL selection", () => {
     });
   });
 
-  describe("other roles", () => {
-    it.each([
-      ["orgadmin", { organization_id: "org-A" }],
-      ["projectuser", { organization_id: "org-A", projects: ["proj-A2"] }],
-    ])("%s keeps a concrete selection and cannot select ALL", async (role, profile) => {
-      getCurrentUserProfile.mockResolvedValue({ roles: [role], ...profile });
-      renderProbe();
-      await waitFor(() => expect(text("org")).toBe("org-A"));
-      expect(text("all-orgs")).toBe("false");
-      expect(text("all-projects")).toBe("false");
-      const before = text("project");
-      expect(before).not.toBe("");
+  describe("organisation user / admin of Organisation A", () => {
+    // Owner policy 2026-10-06: default Organisation A + All Projects, which is
+    // every project of Organisation A - never All Organisations, never another
+    // organisation. The backend enforces the same boundary independently.
+    describe.each(["orguser", "orgadmin"])("%s", (role) => {
+      beforeEach(() => {
+        getCurrentUserProfile.mockResolvedValue({ roles: [role], organization_id: "org-A" });
+      });
 
-      click("all orgs");
-      click("all projects");
-      expect(text("org")).toBe("org-A");
-      expect(text("project")).toBe(before);
-      expect(activeScopeHeaders()["X-Org-Id"]).toBe("org-A");
-      expect(Object.values(activeScopeHeaders())).not.toContain(ALL_SELECTION);
-    });
+      it("A: defaults to Organisation A + All Projects", async () => {
+        renderProbe();
+        await waitFor(() => expect(text("org")).toBe("org-A"));
+        expect(text("all-projects")).toBe("true");
+        expect(text("all-orgs")).toBe("false");
+        expect(text("project")).toBe("");
+        expect(activeScopeHeaders()).toEqual({ "X-Org-Id": "org-A", "X-Proj-Id": ALL_SELECTION });
+      });
 
-    it("ignores a Super Admin ALL selection left in storage", async () => {
-      storage.set(
-        SELECTION_STORAGE_KEY,
-        serializeSelection({ organizationId: ALL_SELECTION, projectId: ALL_SELECTION }),
-      );
-      getCurrentUserProfile.mockResolvedValue({ roles: ["orguser"], organization_id: "org-A" });
-      renderProbe();
-      await waitFor(() => expect(text("org")).toBe("org-A"));
-      expect(text("all-orgs")).toBe("false");
-      expect(Object.values(activeScopeHeaders())).not.toContain(ALL_SELECTION);
+      it("C/D: a project narrows, and All Projects restores the organisation", async () => {
+        renderProbe();
+        await waitFor(() => expect(text("org")).toBe("org-A"));
+        click("project A1");
+        await waitFor(() => expect(text("project")).toBe("proj-A1"));
+        expect(activeScopeHeaders()).toEqual({ "X-Org-Id": "org-A", "X-Proj-Id": "proj-A1" });
+        click("all projects");
+        await waitFor(() => expect(text("all-projects")).toBe("true"));
+        expect(activeScopeHeaders()).toEqual({ "X-Org-Id": "org-A", "X-Proj-Id": ALL_SELECTION });
+      });
+
+      it("E/B: cannot select All Organisations, another organisation or its project", async () => {
+        renderProbe();
+        await waitFor(() => expect(text("org")).toBe("org-A"));
+        click("all orgs");
+        click("org B");
+        click("project B1");
+        expect(text("org")).toBe("org-A");
+        expect(text("all-orgs")).toBe("false");
+        expect(text("project")).toBe("");
+        expect(activeScopeHeaders()).toEqual({ "X-Org-Id": "org-A", "X-Proj-Id": ALL_SELECTION });
+      });
+
+      it("G: a persisted project of another organisation is reset, never sent", async () => {
+        storage.set(
+          SELECTION_STORAGE_KEY,
+          serializeSelection({ organizationId: "org-B", projectId: "proj-B1" }),
+        );
+        renderProbe();
+        await waitFor(() => expect(text("org")).toBe("org-A"));
+        expect(text("all-projects")).toBe("true");
+        expect(Object.values(activeScopeHeaders())).not.toContain("proj-B1");
+      });
+
+      it("G: a valid persisted project of Organisation A survives a refresh", async () => {
+        storage.set(
+          SELECTION_STORAGE_KEY,
+          serializeSelection({ organizationId: "org-A", projectId: "proj-A2" }),
+        );
+        renderProbe();
+        await waitFor(() => expect(text("project")).toBe("proj-A2"));
+        expect(activeScopeHeaders()).toEqual({ "X-Org-Id": "org-A", "X-Proj-Id": "proj-A2" });
+      });
+
+      it("H: a legacy empty or legacy-key selection becomes All Projects of Organisation A", async () => {
+        storage.set("org_id", "org-B");
+        storage.set("proj_id", "proj-B1");
+        renderProbe();
+        await waitFor(() => expect(text("org")).toBe("org-A"));
+        expect(text("all-projects")).toBe("true");
+        expect(activeScopeHeaders()).toEqual({ "X-Org-Id": "org-A", "X-Proj-Id": ALL_SELECTION });
+      });
+
+      it("a Super Admin ALL/ALL left in this browser is not inherited", async () => {
+        storage.set(
+          SELECTION_STORAGE_KEY,
+          serializeSelection({ organizationId: ALL_SELECTION, projectId: ALL_SELECTION }),
+        );
+        renderProbe();
+        await waitFor(() => expect(text("org")).toBe("org-A"));
+        expect(text("all-orgs")).toBe("false");
+        expect(activeScopeHeaders()["X-Org-Id"]).toBe("org-A");
+      });
     });
+  });
+
+  describe("project-tier roles", () => {
+    it.each(["projectuser", "projectadmin"])(
+      "%s keeps its concrete assigned project and cannot select ALL",
+      async (role) => {
+        getCurrentUserProfile.mockResolvedValue({
+          roles: [role],
+          organization_id: "org-A",
+          projects: ["proj-A2"],
+        });
+        renderProbe();
+        await waitFor(() => expect(text("project")).toBe("proj-A2"));
+        expect(text("all-orgs")).toBe("false");
+        expect(text("all-projects")).toBe("false");
+        click("all orgs");
+        click("all projects");
+        expect(text("project")).toBe("proj-A2");
+        expect(Object.values(activeScopeHeaders())).not.toContain(ALL_SELECTION);
+      },
+    );
   });
 });
 

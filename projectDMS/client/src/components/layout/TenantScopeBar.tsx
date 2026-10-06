@@ -15,6 +15,7 @@ const TenantScopeBar = () => {
     selectedProjectId,
     allOrganizations,
     allProjects,
+    canSelectAllProjects,
     canSwitchOrganization,
     canSwitchProject,
     loading,
@@ -78,8 +79,7 @@ const TenantScopeBar = () => {
             value={allProjects ? ALL_SELECTION : selectedProjectId}
             onChange={(event) => selectProject(event.target.value)}
           >
-            {/* Only Super Admin switches organisation, and only Super Admin has ALL. */}
-            {canSwitchOrganization ? (
+            {canSelectAllProjects ? (
               <option value={ALL_SELECTION}>All Projects</option>
             ) : null}
             {projects.map((project) => (

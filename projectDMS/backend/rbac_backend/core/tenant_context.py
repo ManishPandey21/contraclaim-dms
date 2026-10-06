@@ -99,10 +99,16 @@ def _first_header(request: Request, names: tuple[str, ...]) -> str:
     return ""
 
 
-#: The navbar's explicit "All Organisations" / "All Projects" value. Only Super Admin
-#: may send it (owner policy 2026-10-05): All/All is global, Organisation A + All is
-#: Organisation A, Organisation A + Project A1 is A1. It never reaches a query: it
-#: resolves to ``None`` with the matching ``all_*`` flag set.
+#: The navbar's explicit "All Organisations" / "All Projects" value (owner policy
+#: 2026-10-05/06). It is a selection instruction, never authority: it resolves to
+#: ``None`` with the matching ``all_*`` flag set and never reaches a query, and row
+#: visibility still comes from the principal's grants (``build_scope_query``).
+#:
+#: * All Organisations - Super Admin only (global). Any other role is refused.
+#: * All Projects - contextual: every project the principal may see inside the
+#:   selected organisation (Super Admin: all of them; an organisation user: all of
+#:   that organisation's; a project user: its assigned ones). Never global while an
+#:   organisation is selected, and never wider than the principal's grants.
 ALL_SELECTION = "__all__"
 
 
@@ -111,7 +117,7 @@ class ActiveScope:
     """A validated selection. ``project_id is None`` means "no project selected".
 
     ``all_organizations`` / ``all_projects`` record that the selection said ALL
-    explicitly (Super Admin only), as opposed to sending nothing.
+    explicitly, as opposed to sending nothing.
     """
 
     db: Any
@@ -273,14 +279,14 @@ async def resolve_active_scope(db: Any, user: Any, *, organization_id: Any, proj
     requested_project = _as_id(project_id)
     scope = ScopeService(db)
 
-    # Explicit ALL is Super Admin's alone. Any other role sending it is refused
-    # rather than read as "no selection": it must never become a way to ask for
-    # more than the role's own entitlement.
+    # All Organisations is Super Admin's alone. Any other role sending it is
+    # refused rather than read as "no selection", so it can never become a way to
+    # ask for more than the role's own organisations.
     all_organizations = requested_org == ALL_SELECTION
     all_projects = all_organizations or requested_project == ALL_SELECTION
-    if all_projects and not scope.is_superadmin(user):
+    if all_organizations and not scope.is_superadmin(user):
         raise await _forbid(
-            db, user, "All Organisations / All Projects is available only to Super Admin.", "", "",
+            db, user, "All Organisations is available only to Super Admin.", "", "",
             disclose=False,
         )
     if all_organizations:
@@ -292,6 +298,9 @@ async def resolve_active_scope(db: Any, user: Any, *, organization_id: Any, proj
             )
         return ActiveScope(db, user, None, None, all_organizations=True, all_projects=True)
     if requested_project == ALL_SELECTION:
+        # All Projects within the selected organisation. The organisation is still
+        # checked against the principal's grants below; row visibility inside it
+        # stays with build_scope_query.
         requested_project = ""
 
     if not requested_project:
