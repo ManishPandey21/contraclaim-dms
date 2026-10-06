@@ -535,10 +535,13 @@ def _trivy_ignore_inputs() -> dict[str, str]:
     }
 
 
-def test_only_the_backend_image_scan_carries_the_pymongo_exception() -> None:
+def test_only_the_images_carrying_pymongo_scan_with_the_pymongo_exception() -> None:
+    """R4 covers the two images that install pymongo 4.16.0 - the backend, and the
+    LangGraph service through langgraph-checkpoint-mongodb. No other scan ignores anything."""
     assert _trivy_ignore_inputs() == {
-        "projectdms-backend": ".github/trivy/pymongo-r4.trivyignore.yaml"
-    }, "R4 is accepted for the backend image alone; no other scan may ignore anything"
+        "projectdms-backend": ".github/trivy/pymongo-r4.trivyignore.yaml",
+        "projectdms-langgraph": ".github/trivy/pymongo-r4.trivyignore.yaml",
+    }
 
 
 def test_the_trivy_exception_is_exact_scoped_and_expiring() -> None:

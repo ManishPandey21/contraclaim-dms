@@ -353,7 +353,7 @@ jobs:
           timeout: 20m
           # R4 (NOFIX_ADVISORY_ACCEPTANCE.md, #46): exactly the two HIGH PyMongo
           # ids, scoped to pkg:pypi/pymongo@4.16.0, each expiring 2026-11-05.
-          # Backend image only; it does not fix them.
+          # Backend and LangGraph images only; it does not fix them.
           trivyignores: .github/trivy/pymongo-r4.trivyignore.yaml
       - name: Drop the backend image
         run: docker image rm projectdms-backend:${{ github.sha }}
@@ -429,6 +429,11 @@ jobs:
           # CRITICAL,HIGH and --exit-code 1 are unchanged, so this cannot turn a
           # finding into a pass.
           timeout: 20m
+          # R4 (NOFIX_ADVISORY_ACCEPTANCE.md, #46): the same two HIGH PyMongo ids.
+          # pymongo 4.16.0 is here only as an unused transitive dependency of the
+          # pinned langgraph-checkpoint-mongodb; this image is not deployed by
+          # docker-compose.prod.yml and never imports pymongo. It does not fix them.
+          trivyignores: .github/trivy/pymongo-r4.trivyignore.yaml
       - name: Drop the LangGraph image
         run: docker image rm projectdms-langgraph:${{ github.sha }}
       - name: Build the Graphiti image

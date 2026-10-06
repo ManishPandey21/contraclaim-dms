@@ -1,4 +1,4 @@
-# R4 - time-bound PyMongo advisory exception for the BACKEND image scan only.
+# R4 - time-bound PyMongo advisory exception for the BACKEND and LANGGRAPH image scans only.
 # THIS DOES NOT FIX THE VULNERABILITIES. Record: projectDMS/docs/NOFIX_ADVISORY_ACCEPTANCE.md (R4).
 # Tracking issue: ManishPandey21/contraclaim-dms#46. Owner: @ManishPandey21.
 #

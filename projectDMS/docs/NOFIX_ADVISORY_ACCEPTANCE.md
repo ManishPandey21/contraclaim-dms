@@ -15,7 +15,7 @@ including a second advisory in the same package.
 |---|---|---|
 | pip-audit | `PYSEC-2026-3740` (NLTK) | `release/contraclaim-rc1` review triggers |
 | npm audit | `GHSA-vfj7-8cjw-p6xm` (braces), R3 | **2026-10-10**, enforced by the gate |
-| pip-audit + Trivy (backend image) | `CVE-2026-88029`, `CVE-2026-96747`, `CVE-2026-96748`, `CVE-2026-96749` (PyMongo 4.16.0), R4 | **2026-11-05**, enforced by the gate |
+| pip-audit + Trivy (backend and LangGraph images) | `CVE-2026-88029`, `CVE-2026-96747`, `CVE-2026-96748`, `CVE-2026-96749` (PyMongo 4.16.0), R4 | **2026-11-05**, enforced by the gate |
 
 ---
 
@@ -264,6 +264,14 @@ four specifically reviewed findings, by advisory id only, until **2026-11-05**.
 Trivy reports only the two HIGH ids at the image scan's CRITICAL,HIGH threshold;
 the two MEDIUM ids are excepted in pip-audit alone.
 
+Two images carry `pymongo 4.16.0`. The **backend** image installs it directly; the
+assessment above is for it. The **LangGraph service** image
+(`services/langgraph`) gets it only transitively, from its own pin of
+`langgraph-checkpoint-mongodb==0.4.0`. That service never imports pymongo, motor or
+bson (it checkpoints with the in-memory `MemorySaver`), and
+`docker-compose.prod.yml` does not define it, so for that image all four affected
+code paths are not reachable in the current ContraClaim deployment.
+
 ### Unblock condition
 
 The **released** package metadata of `langgraph-checkpoint-mongodb` on PyPI permits
@@ -298,9 +306,9 @@ real-Mongo suites against a MongoDB 8.0.5 replica set.
 | | |
 |---|---|
 | CI | `.github/workflows/ci.yml`, job `dependency-scan`, step "Scan Python dependencies": gate tests, then `.github/scripts/pymongo_exception_gate.py`, then `pip-audit` with one `--ignore-vuln` per R4 id |
-| Image scan | Backend image only: `trivyignores: .github/trivy/pymongo-r4.trivyignore.yaml`, two ids scoped to `pkg:pypi/pymongo@4.16.0`, each with `expired_at: 2026-11-05` |
+| Image scan | Backend and LangGraph images only: `trivyignores: .github/trivy/pymongo-r4.trivyignore.yaml`, two ids scoped to `pkg:pypi/pymongo@4.16.0`, each with `expired_at: 2026-11-05`. Because the LangGraph image resolves pymongo transitively, a newer resolution there stops matching the purl and fails the scan visibly. |
 | Gate tests | `.github/scripts/test_pymongo_exception_gate.py` (expiry boundary, pin change, released/pre-release/yanked checkpoint versions, unreadable PyPI answers fail closed) |
-| Guards | `test_ci_static_gates.py` pins the exact ignored-id list, that the gate and its tests run before the scan, that only the backend image scan carries an ignore file, and that file's exact ids, purl and expiry |
+| Guards | `test_ci_static_gates.py` pins the exact ignored-id list, that the gate and its tests run before the scan, that only the backend and LangGraph image scans carry an ignore file, and that file's exact ids, purl and expiry |
 
 **The correct statement of the scan result is "pip-audit and the backend image
 scan passed with a time-bound owner-approved exception (R4)", never
