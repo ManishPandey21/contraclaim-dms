@@ -1,5 +1,6 @@
 import { Building2, FolderKanban } from "lucide-react";
 import { useTenant } from "@/contexts/TenantContext";
+import { ALL_SELECTION } from "@/services/active-scope";
 
 const selectClassName =
   "min-w-0 max-w-56 truncate rounded-md border border-blue-200 bg-white px-2 py-1 text-sm font-semibold text-slate-900 shadow-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-200";
@@ -12,6 +13,8 @@ const TenantScopeBar = () => {
     selectedProject,
     selectedOrganizationId,
     selectedProjectId,
+    allOrganizations,
+    allProjects,
     canSwitchOrganization,
     canSwitchProject,
     loading,
@@ -44,9 +47,10 @@ const TenantScopeBar = () => {
           <select
             aria-label="Select organisation"
             className={selectClassName}
-            value={selectedOrganizationId}
+            value={allOrganizations ? ALL_SELECTION : selectedOrganizationId}
             onChange={(event) => selectOrganization(event.target.value)}
           >
+            <option value={ALL_SELECTION}>All Organisations</option>
             {organizations.map((organization) => (
               <option key={organization._id} value={organization._id}>
                 {organization.name}
@@ -55,7 +59,7 @@ const TenantScopeBar = () => {
           </select>
         ) : (
           <strong className="max-w-56 truncate text-sm text-slate-900" title={selectedOrganization?.name}>
-            {selectedOrganization?.name || "Not selected"}
+            {allOrganizations ? "All Organisations" : selectedOrganization?.name || "Not selected"}
           </strong>
         )}
       </div>
@@ -71,9 +75,13 @@ const TenantScopeBar = () => {
           <select
             aria-label="Select project"
             className={selectClassName}
-            value={selectedProjectId}
+            value={allProjects ? ALL_SELECTION : selectedProjectId}
             onChange={(event) => selectProject(event.target.value)}
           >
+            {/* Only Super Admin switches organisation, and only Super Admin has ALL. */}
+            {canSwitchOrganization ? (
+              <option value={ALL_SELECTION}>All Projects</option>
+            ) : null}
             {projects.map((project) => (
               <option key={project._id} value={project._id}>
                 {project.name}
@@ -82,7 +90,7 @@ const TenantScopeBar = () => {
           </select>
         ) : (
           <strong className="max-w-56 truncate text-sm text-slate-900" title={selectedProject?.name}>
-            {selectedProject?.name || "Not selected"}
+            {allProjects ? "All Projects" : selectedProject?.name || "Not selected"}
           </strong>
         )}
       </div>

@@ -99,14 +99,27 @@ def _first_header(request: Request, names: tuple[str, ...]) -> str:
     return ""
 
 
+#: The navbar's explicit "All Organisations" / "All Projects" value. Only Super Admin
+#: may send it (owner policy 2026-10-05): All/All is global, Organisation A + All is
+#: Organisation A, Organisation A + Project A1 is A1. It never reaches a query: it
+#: resolves to ``None`` with the matching ``all_*`` flag set.
+ALL_SELECTION = "__all__"
+
+
 @dataclass
 class ActiveScope:
-    """A validated selection. ``project_id is None`` means "no project selected"."""
+    """A validated selection. ``project_id is None`` means "no project selected".
+
+    ``all_organizations`` / ``all_projects`` record that the selection said ALL
+    explicitly (Super Admin only), as opposed to sending nothing.
+    """
 
     db: Any
     user: Any
     organization_id: Optional[str]
     project_id: Optional[str]
+    all_organizations: bool = False
+    all_projects: bool = False
 
     @property
     def has_project(self) -> bool:
@@ -260,11 +273,32 @@ async def resolve_active_scope(db: Any, user: Any, *, organization_id: Any, proj
     requested_project = _as_id(project_id)
     scope = ScopeService(db)
 
+    # Explicit ALL is Super Admin's alone. Any other role sending it is refused
+    # rather than read as "no selection": it must never become a way to ask for
+    # more than the role's own entitlement.
+    all_organizations = requested_org == ALL_SELECTION
+    all_projects = all_organizations or requested_project == ALL_SELECTION
+    if all_projects and not scope.is_superadmin(user):
+        raise await _forbid(
+            db, user, "All Organisations / All Projects is available only to Super Admin.", "", "",
+            disclose=False,
+        )
+    if all_organizations:
+        if requested_project and requested_project != ALL_SELECTION:
+            # A project outside any selected organisation is stale UI state.
+            raise await _forbid(
+                db, user, "Select the project's organisation before selecting a project.", "", "",
+                disclose=False,
+            )
+        return ActiveScope(db, user, None, None, all_organizations=True, all_projects=True)
+    if requested_project == ALL_SELECTION:
+        requested_project = ""
+
     if not requested_project:
         if requested_org and not scope.is_superadmin(user):
             if not await scope.is_client_scope_allowed(user, organization_id=requested_org):
                 raise await _forbid(db, user, "This organisation is not accessible to your account.", requested_org, "")
-        return ActiveScope(db, user, requested_org or None, None)
+        return ActiveScope(db, user, requested_org or None, None, all_projects=all_projects)
 
     # One message for every unusable selection - absent, deactivated, owned by another
     # organisation, or outside the principal's scope. Varying it would let any
