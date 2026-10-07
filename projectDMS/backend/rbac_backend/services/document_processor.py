@@ -88,6 +88,15 @@ class LegacyDispatchResult:
     pages_human_review: List[int] = field(default_factory=list)
 
 
+def _ran(pipeline_version: str, result: Any) -> Any:
+    """Stamp the pipeline that produced `result` onto it, and hand it back."""
+    try:
+        result.pipeline_version = pipeline_version
+    except (AttributeError, TypeError, ValueError):
+        pass
+    return result
+
+
 class DocumentProcessor:
     """Main document processor service"""
 
@@ -584,6 +593,17 @@ class DocumentProcessor:
         logger.info("[document_pipeline] Starting document processing for %s", pdf_path)
 
         processed_path: Optional[Path] = None
+        # What will actually run, normalised once: anything not explicitly
+        # unified takes the legacy path below, so it is recorded as legacy.
+        executed_pipeline = (
+            UNIFIED_PIPELINE if pipeline_version == UNIFIED_PIPELINE else LEGACY_PIPELINE
+        )
+        logger.info(
+            "[document_pipeline] %s routed to pipeline_version=%s (requested=%r)",
+            Path(pdf_path).name,
+            executed_pipeline,
+            pipeline_version,
+        )
 
         try:
             # Validate input file
@@ -616,7 +636,7 @@ class DocumentProcessor:
             extraction = None
             pages_human_review: List[int] = []
 
-            if pipeline_version != UNIFIED_PIPELINE:
+            if executed_pipeline != UNIFIED_PIPELINE:
                 legacy = await self._extract_legacy(input_path)
                 processed_path = legacy.processed_path
                 raw_ocr_text = legacy.raw_text
@@ -626,7 +646,7 @@ class DocumentProcessor:
                     input_path.name,
                     len(raw_ocr_text or ""),
                 )
-                return await self._extract_and_persist(
+                return _ran(executed_pipeline, await self._extract_and_persist(
                     input_path=input_path,
                     original_path=pdf_path,
                     processed_path=processed_path,
@@ -638,7 +658,7 @@ class DocumentProcessor:
                     document_id=document_id,
                     skip_embeddings=skip_embeddings,
                     start_time=start_time,
-                )
+                ))
 
             run_id = extraction_run_id or str(uuid4())
             db = await self.database_service.get_database()
@@ -665,6 +685,7 @@ class DocumentProcessor:
                     processing_time=time.time() - start_time,
                     source_kind=dispatch.kind.value,
                     processing_state=ProcessingState.STORED_ONLY.value,
+                    pipeline_version=executed_pipeline,
                 )
             extraction = dispatch.extraction
             if extraction is None:
@@ -708,7 +729,7 @@ class DocumentProcessor:
             )
 
 
-            return await self._extract_and_persist(
+            return _ran(executed_pipeline, await self._extract_and_persist(
                 input_path=input_path,
                 original_path=pdf_path,
                 processed_path=processed_path,
@@ -720,7 +741,7 @@ class DocumentProcessor:
                 document_id=document_id,
                 skip_embeddings=skip_embeddings,
                 start_time=start_time,
-            )
+            ))
         except InconsistentExtractionRunError as e:
             # Retrying cannot heal this: the run's page evidence and the
             # checkpoint disagree, and every further attempt would re-derive
@@ -739,6 +760,7 @@ class DocumentProcessor:
                 processing_state=ProcessingState.HUMAN_REVIEW_REQUIRED.value,
                 pages_human_review=list(e.missing_page_numbers),
                 publishable=False,
+                pipeline_version=executed_pipeline,
             )
         except Exception as e:
             processing_time = time.time() - start_time
@@ -750,6 +772,7 @@ class DocumentProcessor:
                 processing_time=processing_time,
                 # A failed extraction is never publishable.
                 publishable=False,
+                pipeline_version=executed_pipeline,
             )
 
         finally:

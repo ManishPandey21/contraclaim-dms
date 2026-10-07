@@ -331,6 +331,11 @@ class ProcessingResult(BaseModel):
     #: embedded, graph-published or answered from retrieval while its review
     #: flag is still being written.
     publishable: bool = True
+    #: The extraction pipeline that actually ran (`legacy_v0`/`unified_v1`),
+    #: stamped by the processor on every outcome, failures included. It names
+    #: what executed, not what was requested: an unrecognised request ran
+    #: legacy and is reported as legacy.
+    pipeline_version: Optional[str] = None
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
