@@ -276,7 +276,8 @@ jobs:
         # release, reached only through build/test tooling and absent from the
         # client runtime image (projectDMS/docs/NOFIX_ADVISORY_ACCEPTANCE.md).
         # The gate fails on any CRITICAL, on any HIGH not rooted in exactly that
-        # advisory, after 2026-10-10, when a patched braces is published, and
+        # advisory, after 2026-11-05 (R3 renewed 2026-10-07 from 2026-10-10 after a
+        # fresh review), when a patched braces is published, and
         # on any npm or report failure. Its own tests run first.
         run: |
           node --version && npm --version
