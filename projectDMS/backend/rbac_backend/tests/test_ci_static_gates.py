@@ -444,6 +444,15 @@ REACHABILITY_GUARD = (
 #: pip-audit prints in its own ID column.
 ACCEPTED_ADVISORY = "PYSEC-2026-3740"
 
+#: R4 (NOFIX_ADVISORY_ACCEPTANCE.md, #46): four PyMongo 4.16.0 advisories, each
+#: accepted by id until 2026-11-05 because no released langgraph-checkpoint-mongodb
+#: permits the fixed line. Their expiry and unblock checks live in
+#: .github/scripts/pymongo_exception_gate.py, which must run before the scan.
+PYMONGO_R4_ADVISORIES = ("CVE-2026-88029", "CVE-2026-96747", "CVE-2026-96748", "CVE-2026-96749")
+PYMONGO_R4_TRIVY_ADVISORIES = ("CVE-2026-96748", "CVE-2026-96749")
+PYMONGO_R4_EXPIRES = "2026-11-05"
+PYMONGO_R4_TRIVYIGNORE = GIT_ROOT / ".github" / "trivy" / "pymongo-r4.trivyignore.yaml"
+
 #: Flags that would weaken the scan itself rather than exempt one advisory.
 #: `--ignore-vuln` is pip-audit's ONLY suppression mechanism, so a wider waiver
 #: has to come from one of these instead - and every one of them is real,
@@ -485,15 +494,67 @@ def test_the_python_scan_still_runs_pip_audit_over_the_release_requirements() ->
     )
 
 
-def test_exactly_one_advisory_is_ignored_and_it_is_the_accepted_one() -> None:
-    """A second id cannot be slipped in beside the first."""
+def test_exactly_the_accepted_advisories_are_ignored() -> None:
+    """Another id cannot be slipped in beside the accepted ones."""
     ignored = _ignored_advisories()
 
-    assert ignored == [ACCEPTED_ADVISORY], (
+    assert ignored == [ACCEPTED_ADVISORY, *PYMONGO_R4_ADVISORIES], (
         f"dependency-scan ignores {ignored}; the owner accepted exactly "
-        f"[{ACCEPTED_ADVISORY!r}]. Another advisory needs its own decision "
-        f"record, not another flag."
+        f"{[ACCEPTED_ADVISORY, *PYMONGO_R4_ADVISORIES]}. Another advisory needs its "
+        f"own decision record, not another flag."
     )
+
+
+def test_the_pymongo_exception_gate_runs_before_the_scan_and_its_tests_first() -> None:
+    """R4 may only be in force while its expiry and unblock checks are passing."""
+    command = _python_scan_command()
+    tests = command.find("test_pymongo_exception_gate.py")
+    gate = command.find("pymongo_exception_gate.py --repo-root")
+    scan = command.find("pip-audit -r")
+    assert -1 < tests < gate < scan, (
+        "the R4 gate (and its tests, first) must run before pip-audit, or the "
+        "exception outlives its expiry and its unblock condition unnoticed"
+    )
+
+    spec = importlib.util.spec_from_file_location(
+        "_pymongo_gate", GIT_ROOT / ".github" / "scripts" / "pymongo_exception_gate.py"
+    )
+    assert spec and spec.loader
+    gate_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate_module)
+    assert gate_module.ADVISORIES == PYMONGO_R4_ADVISORIES
+    assert gate_module.TRIVY_ADVISORIES == PYMONGO_R4_TRIVY_ADVISORIES
+    assert gate_module.EXPIRES.isoformat() == PYMONGO_R4_EXPIRES
+
+
+def _trivy_ignore_inputs() -> dict[str, str]:
+    return {
+        str(step["with"].get("image-ref", "")).split(":")[0]: str(step["with"]["trivyignores"])
+        for step in _trivy_steps()
+        if step["with"].get("trivyignores")
+    }
+
+
+def test_only_the_images_carrying_pymongo_scan_with_the_pymongo_exception() -> None:
+    """R4 covers the two images that install pymongo 4.16.0 - the backend, and the
+    LangGraph service through langgraph-checkpoint-mongodb. No other scan ignores anything."""
+    assert _trivy_ignore_inputs() == {
+        "projectdms-backend": ".github/trivy/pymongo-r4.trivyignore.yaml",
+        "projectdms-langgraph": ".github/trivy/pymongo-r4.trivyignore.yaml",
+    }
+
+
+def test_the_trivy_exception_is_exact_scoped_and_expiring() -> None:
+    """Two ids, one package version, one expiry - nothing broader."""
+    document = yaml.safe_load(PYMONGO_R4_TRIVYIGNORE.read_text(encoding="utf-8"))
+    assert set(document) == {"vulnerabilities"}, "only vulnerability ids may be ignored"
+    entries = document["vulnerabilities"]
+    assert [entry["id"] for entry in entries] == list(PYMONGO_R4_TRIVY_ADVISORIES)
+    for entry in entries:
+        assert set(entry) == {"id", "purls", "expired_at", "statement"}, entry["id"]
+        assert entry["purls"] == ["pkg:pypi/pymongo@4.16.0"], entry["id"]
+        assert str(entry["expired_at"]) == PYMONGO_R4_EXPIRES, entry["id"]
+        assert "R4" in entry["statement"], entry["id"]
 
 
 def test_nothing_wider_than_one_advisory_is_ignored() -> None:
@@ -504,10 +565,13 @@ def test_nothing_wider_than_one_advisory_is_ignored() -> None:
         assert flag not in command, (
             f"{flag} weakens the scan itself rather than exempting one advisory"
         )
-    assert "nltk" not in command.lower(), (
-        "the exception is keyed on an advisory id, never on the package: a "
-        "second NLTK advisory must still fail this job"
-    )
+    audit = " ".join(line for line in command.splitlines() if "pip-audit -r" in line)
+    assert audit, "no pip-audit invocation found"
+    for package in ("nltk", "pymongo"):
+        assert package not in audit.lower(), (
+            "an exception is keyed on an advisory id, never on the package: a "
+            f"further {package} advisory must still fail this job"
+        )
 
 
 def test_the_dependency_scan_can_still_fail_the_job() -> None:
@@ -525,6 +589,23 @@ def test_the_dependency_scan_can_still_fail_the_job() -> None:
         assert form not in str(step["run"]), (
             f"{form!r} in the scan step swallows pip-audit's exit code"
         )
+
+
+def test_the_pymongo_exception_has_a_written_owner_decision() -> None:
+    """R4 names every id, says it fixes nothing, and records the way out."""
+    record = NOFIX_RECORD.read_text(encoding="utf-8")
+    assert "## R4:" in record
+    section = record.split("## R4:", 1)[1]
+    for advisory in PYMONGO_R4_ADVISORIES:
+        assert advisory in section, f"R4 does not record {advisory}"
+    for phrase in (
+        "THIS DOES NOT FIX",
+        PYMONGO_R4_EXPIRES,
+        "#46",
+        "Unblock condition",
+        "not reachable in the current ContraClaim deployment",
+    ):
+        assert phrase in section, f"R4 is missing {phrase!r}"
 
 
 def test_the_accepted_advisory_has_a_written_owner_decision() -> None:
@@ -941,7 +1022,7 @@ def test_the_audit_gate_excepts_exactly_one_advisory_until_its_expiry() -> None:
     assert ids == {"ghsa-vfj7-8cjw-p6xm"}, f"the gate names {sorted(ids)}"
     assert (gate.GHSA, gate.CVE, gate.PACKAGE) == ("GHSA-vfj7-8cjw-p6xm", "CVE-2026-93687", "braces")
     assert (gate.NPM_SOURCE_ID, gate.AFFECTED_RANGE, gate.INSTALLED_VERSION) == (1240992, "<=3.0.3", "3.0.3")
-    assert gate.EXPIRES.isoformat() == "2026-10-10"
+    assert gate.EXPIRES.isoformat() == "2026-11-05"  # R3 renewed 2026-10-07; a new decision moves it
     assert tuple(gate.AUDIT_COMMAND) == ("npm", "audit", "--json"), (
         "the gate must audit the whole tree, unfiltered"
     )
