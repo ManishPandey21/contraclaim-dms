@@ -1022,7 +1022,7 @@ def test_the_audit_gate_excepts_exactly_one_advisory_until_its_expiry() -> None:
     assert ids == {"ghsa-vfj7-8cjw-p6xm"}, f"the gate names {sorted(ids)}"
     assert (gate.GHSA, gate.CVE, gate.PACKAGE) == ("GHSA-vfj7-8cjw-p6xm", "CVE-2026-93687", "braces")
     assert (gate.NPM_SOURCE_ID, gate.AFFECTED_RANGE, gate.INSTALLED_VERSION) == (1240992, "<=3.0.3", "3.0.3")
-    assert gate.EXPIRES.isoformat() == "2026-10-10"
+    assert gate.EXPIRES.isoformat() == "2026-11-05"  # R3 renewed 2026-10-07; a new decision moves it
     assert tuple(gate.AUDIT_COMMAND) == ("npm", "audit", "--json"), (
         "the gate must audit the whole tree, unfiltered"
     )

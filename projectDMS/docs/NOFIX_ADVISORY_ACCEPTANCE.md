@@ -1,7 +1,7 @@
 # Accepted no-fix advisories
 
 **Status:** owner-approved. PYSEC-2026-3740 in force from `release/contraclaim-rc1`;
-R3 (GHSA-vfj7-8cjw-p6xm) in force until 2026-10-10; R4 (four PyMongo advisories)
+R3 (GHSA-vfj7-8cjw-p6xm) in force until 2026-11-05 (renewed 2026-10-07 from 2026-10-10); R4 (four PyMongo advisories)
 in force until 2026-11-05.
 **Decided:** 2026-09-04 (PYSEC-2026-3740, re-derived against pip-audit 2.10.1,
 llama-index-core 0.14.22) and 2026-10-03 (R3, npm 10.8.2).
@@ -14,7 +14,7 @@ including a second advisory in the same package.
 | Scanner | Accepted advisory | Until |
 |---|---|---|
 | pip-audit | `PYSEC-2026-3740` (NLTK) | `release/contraclaim-rc1` review triggers |
-| npm audit | `GHSA-vfj7-8cjw-p6xm` (braces), R3 | **2026-10-10**, enforced by the gate |
+| npm audit | `GHSA-vfj7-8cjw-p6xm` (braces), R3 | **2026-11-05** (renewed once, 2026-10-07), enforced by the gate |
 | pip-audit + Trivy (backend and LangGraph images) | `CVE-2026-88029`, `CVE-2026-96747`, `CVE-2026-96748`, `CVE-2026-96749` (PyMongo 4.16.0), R4 | **2026-11-05**, enforced by the gate |
 
 ---
@@ -155,7 +155,7 @@ scanner.
 | **Fix available** | **No.** 3.0.3 is braces' `latest`; no newer release is published (2026-10-03). |
 | **Upstream severity** | HIGH. The gate does not key on a CVSS score, because sources report different CVSS versions. |
 | **Decided** | 2026-10-03, by the release owner, on the evidence below |
-| **Accepted for** | the integrate/prod-20261002 release, **until 2026-10-10** |
+| **Accepted for** | `release/contraclaim-rc1`, **until 2026-11-05** (originally until 2026-10-10; renewed 2026-10-07, see *Renewal 2026-10-07* below) |
 
 ### What the advisory says
 
@@ -213,7 +213,7 @@ The lockfile is unchanged since base `e02b71b`; the advisory was published after
 This acceptance expires on **any** of the following. It is not permanent, and it
 does not cover any other advisory.
 
-1. **2026-10-10 (UTC, inclusive).** From 2026-10-11 00:00 UTC (05:30 IST) the gate
+1. **2026-11-05 (UTC, inclusive).** From 2026-11-06 00:00 UTC (05:30 IST) the gate
    fails, whatever else is true. The gate runs only when CI runs, so a commit that
    went green earlier is not re-gated by itself. Deploy only from an exact-head CI
    run made within the window.
@@ -228,12 +228,29 @@ does not cover any other advisory.
 |---|---|
 | CI | `.github/workflows/ci.yml`, job `dependency-scan`, step "Scan frontend dependencies": `.github/scripts/npm_audit_gate.py`, with the raw report kept as the `npm-audit-report` artifact |
 | Gate tests | `.github/scripts/test_npm_audit_gate.py`, which runs in the same step before the gate |
-| Visibility | The gate prints `TEMPORARY OWNER-APPROVED SECURITY EXCEPTION: GHSA-vfj7-8cjw-p6xm ... expires 2026-10-10` on every pass that uses it. |
+| Visibility | The gate prints `TEMPORARY OWNER-APPROVED SECURITY EXCEPTION: GHSA-vfj7-8cjw-p6xm ... expires 2026-11-05` on every pass that uses it. |
 | Runtime basis | The gate fails if a package outside the 17 accepted build/test dependents reaches braces, or if any file under `client/src` imports a package of the chain. |
 | Guards | `test_ci_static_gates.py` pins that the step runs the gate and its tests, and that nothing swallows or weakens it. It also loads the gate and pins the audit command, every identity constant, the expiry, the dependent set, and that `_is_exception_advisory` rejects each identity variant. |
 
 **The correct statement of the gate's result is "npm audit passed with one
 time-bound owner-approved exception (R3)", never "0 vulnerabilities".**
+
+### Renewal 2026-10-07 (from 2026-10-10 to 2026-11-05)
+
+Renewed explicitly, once, by the release owner, after a fresh review on release
+`160f18f` (2026-10-07). This is not a silent extension. Every premise of the
+original acceptance was re-checked:
+
+| Premise | Re-checked result |
+|---|---|
+| No patched release | `braces` 3.0.3 (2024-05-21) is still the newest version on npm; the advisory still lists no patched version (updated 2026-10-02). |
+| No clean dependency path | `braces` arrives through `tailwindcss` 3 (chokidar, fast-glob, micromatch), `typescript-eslint` (fast-glob) and `@types/jest` (expect, jest-message-util, micromatch). A newer `typescript-eslint` might remove one path, but Tailwind 3 keeps `braces` in the tree. Leaving Tailwind 3 is a major migration, not a dependency bump. |
+| One installed copy | `package-lock.json` has a single `node_modules/braces` at 3.0.3. |
+| Dependent set | `npm audit` (npm 10, Node 20) reports 14 HIGH packages, all inside the 17 accepted dependents, none new. `@tailwindcss/typography`, `lovable-tagger` and `tailwindcss-animate` are no longer HIGH, which narrows the exposure. The gate's own `evaluate_report` confirms every HIGH is rooted in this advisory. |
+| Build/test only | The client image's runtime stage copies only `dist/` and `scripts/serve-dist.mjs`. The chain is loaded only by `vite.config.ts` (`lovable-tagger`) and `tailwind.config.ts` (`tailwindcss`, `tailwindcss-animate`) at build time. |
+| No `client/src` import | No file under `client/src` imports any package of the chain. The gate re-checks this on every run. |
+
+Why 2026-11-05: a short, 29-day window, aligned with R4, so both no-fix exceptions come up for review on the same date. The upgrade trigger is unchanged: a published `braces` release above 3.0.3 fails the gate immediately.
 
 ---
 

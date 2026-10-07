@@ -45,7 +45,8 @@ PACKAGE = "braces"
 NPM_SOURCE_ID = 1240992
 AFFECTED_RANGE = "<=3.0.3"
 INSTALLED_VERSION = "3.0.3"
-EXPIRES = dt.date(2026, 10, 10)  # last day the exception applies (UTC, inclusive)
+EXPIRES = dt.date(2026, 11, 5)  # last day the exception applies (UTC, inclusive); renewed
+# 2026-10-07 from 2026-10-10 after a fresh review (NOFIX_ADVISORY_ACCEPTANCE.md, R3 renewal)
 
 # The packages npm reported HIGH through braces when R3 was accepted - all
 # build/test tooling. A package outside this set reaching braces is a new
