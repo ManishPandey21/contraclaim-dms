@@ -444,14 +444,23 @@ REACHABILITY_GUARD = (
 #: pip-audit prints in its own ID column.
 ACCEPTED_ADVISORY = "PYSEC-2026-3740"
 
-#: R4 (NOFIX_ADVISORY_ACCEPTANCE.md, #46): four PyMongo 4.16.0 advisories, each
-#: accepted by id until 2026-11-05 because no released langgraph-checkpoint-mongodb
-#: permits the fixed line. Their expiry and unblock checks live in
-#: .github/scripts/pymongo_exception_gate.py, which must run before the scan.
+#: R4 (NOFIX_ADVISORY_ACCEPTANCE.md, #46), RETIRED: four PyMongo 4.16.0
+#: advisories accepted until langgraph-checkpoint-mongodb permitted the fixed
+#: line. 0.5.1 did, and the deploy manifests now pin pymongo 4.18.2. None of
+#: these ids may be ignored again, and the exception machinery must stay gone.
 PYMONGO_R4_ADVISORIES = ("CVE-2026-88029", "CVE-2026-96747", "CVE-2026-96748", "CVE-2026-96749")
-PYMONGO_R4_TRIVY_ADVISORIES = ("CVE-2026-96748", "CVE-2026-96749")
-PYMONGO_R4_EXPIRES = "2026-11-05"
-PYMONGO_R4_TRIVYIGNORE = GIT_ROOT / ".github" / "trivy" / "pymongo-r4.trivyignore.yaml"
+PYMONGO_FIXED_VERSION = "4.18.2"
+CHECKPOINT_MONGODB_VERSION = "0.5.1"
+#: Every manifest a deployed image installs. Each must pin the fixed driver.
+DEPLOY_MANIFESTS = (
+    GIT_ROOT / "projectDMS" / "backend" / "rbac_backend" / "requirements.txt",
+    GIT_ROOT / "projectDMS" / "services" / "langgraph" / "requirements.txt",
+)
+RETIRED_R4_FILES = (
+    GIT_ROOT / ".github" / "scripts" / "pymongo_exception_gate.py",
+    GIT_ROOT / ".github" / "scripts" / "test_pymongo_exception_gate.py",
+    GIT_ROOT / ".github" / "trivy" / "pymongo-r4.trivyignore.yaml",
+)
 
 #: Flags that would weaken the scan itself rather than exempt one advisory.
 #: `--ignore-vuln` is pip-audit's ONLY suppression mechanism, so a wider waiver
@@ -498,33 +507,40 @@ def test_exactly_the_accepted_advisories_are_ignored() -> None:
     """Another id cannot be slipped in beside the accepted ones."""
     ignored = _ignored_advisories()
 
-    assert ignored == [ACCEPTED_ADVISORY, *PYMONGO_R4_ADVISORIES], (
+    assert ignored == [ACCEPTED_ADVISORY], (
         f"dependency-scan ignores {ignored}; the owner accepted exactly "
-        f"{[ACCEPTED_ADVISORY, *PYMONGO_R4_ADVISORIES]}. Another advisory needs its "
+        f"{[ACCEPTED_ADVISORY]}. Another advisory needs its "
         f"own decision record, not another flag."
     )
 
 
-def test_the_pymongo_exception_gate_runs_before_the_scan_and_its_tests_first() -> None:
-    """R4 may only be in force while its expiry and unblock checks are passing."""
+def test_the_retired_pymongo_exception_stays_retired() -> None:
+    """R4 ended when its unblock condition held; nothing of it may linger."""
     command = _python_scan_command()
-    tests = command.find("test_pymongo_exception_gate.py")
-    gate = command.find("pymongo_exception_gate.py --repo-root")
-    scan = command.find("pip-audit -r")
-    assert -1 < tests < gate < scan, (
-        "the R4 gate (and its tests, first) must run before pip-audit, or the "
-        "exception outlives its expiry and its unblock condition unnoticed"
-    )
+    for advisory in PYMONGO_R4_ADVISORIES:
+        assert advisory not in command, f"{advisory} is fixed by the upgrade; do not ignore it"
+    assert "pymongo_exception_gate" not in command
+    for path in RETIRED_R4_FILES:
+        assert not path.exists(), f"{path.name} belongs to the retired R4 exception"
 
-    spec = importlib.util.spec_from_file_location(
-        "_pymongo_gate", GIT_ROOT / ".github" / "scripts" / "pymongo_exception_gate.py"
+
+def _pinned(manifest: Path, package: str) -> str:
+    pins = re.findall(
+        rf"^{re.escape(package)}==(\S+)\s*$",
+        manifest.read_text(encoding="utf-8"),
+        flags=re.MULTILINE | re.IGNORECASE,
     )
-    assert spec and spec.loader
-    gate_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(gate_module)
-    assert gate_module.ADVISORIES == PYMONGO_R4_ADVISORIES
-    assert gate_module.TRIVY_ADVISORIES == PYMONGO_R4_TRIVY_ADVISORIES
-    assert gate_module.EXPIRES.isoformat() == PYMONGO_R4_EXPIRES
+    assert len(pins) == 1, f"{manifest.name} must pin {package} exactly once, found {pins}"
+    return pins[0]
+
+
+@pytest.mark.parametrize("manifest", DEPLOY_MANIFESTS, ids=lambda p: p.parent.name)
+def test_every_deployed_image_pins_the_fixed_pymongo(manifest: Path) -> None:
+    """The four R4 advisories are fixed only from 4.18.2."""
+    from packaging.version import Version
+
+    assert Version(_pinned(manifest, "pymongo")) >= Version(PYMONGO_FIXED_VERSION)
+    assert _pinned(manifest, "langgraph-checkpoint-mongodb") == CHECKPOINT_MONGODB_VERSION
 
 
 def _trivy_ignore_inputs() -> dict[str, str]:
@@ -535,26 +551,9 @@ def _trivy_ignore_inputs() -> dict[str, str]:
     }
 
 
-def test_only_the_images_carrying_pymongo_scan_with_the_pymongo_exception() -> None:
-    """R4 covers the two images that install pymongo 4.16.0 - the backend, and the
-    LangGraph service through langgraph-checkpoint-mongodb. No other scan ignores anything."""
-    assert _trivy_ignore_inputs() == {
-        "projectdms-backend": ".github/trivy/pymongo-r4.trivyignore.yaml",
-        "projectdms-langgraph": ".github/trivy/pymongo-r4.trivyignore.yaml",
-    }
-
-
-def test_the_trivy_exception_is_exact_scoped_and_expiring() -> None:
-    """Two ids, one package version, one expiry - nothing broader."""
-    document = yaml.safe_load(PYMONGO_R4_TRIVYIGNORE.read_text(encoding="utf-8"))
-    assert set(document) == {"vulnerabilities"}, "only vulnerability ids may be ignored"
-    entries = document["vulnerabilities"]
-    assert [entry["id"] for entry in entries] == list(PYMONGO_R4_TRIVY_ADVISORIES)
-    for entry in entries:
-        assert set(entry) == {"id", "purls", "expired_at", "statement"}, entry["id"]
-        assert entry["purls"] == ["pkg:pypi/pymongo@4.16.0"], entry["id"]
-        assert str(entry["expired_at"]) == PYMONGO_R4_EXPIRES, entry["id"]
-        assert "R4" in entry["statement"], entry["id"]
+def test_no_image_scan_ignores_anything() -> None:
+    """With R4 retired, every Trivy scan reports every fixable CRITICAL/HIGH."""
+    assert _trivy_ignore_inputs() == {}
 
 
 def test_nothing_wider_than_one_advisory_is_ignored() -> None:
@@ -591,20 +590,14 @@ def test_the_dependency_scan_can_still_fail_the_job() -> None:
         )
 
 
-def test_the_pymongo_exception_has_a_written_owner_decision() -> None:
-    """R4 names every id, says it fixes nothing, and records the way out."""
+def test_the_retired_pymongo_exception_records_how_it_ended() -> None:
+    """The record keeps R4's history and says why it no longer applies."""
     record = NOFIX_RECORD.read_text(encoding="utf-8")
     assert "## R4:" in record
-    section = record.split("## R4:", 1)[1]
+    section = record.split("## R4:", 1)[1].split("\n## ", 1)[0]
     for advisory in PYMONGO_R4_ADVISORIES:
         assert advisory in section, f"R4 does not record {advisory}"
-    for phrase in (
-        "THIS DOES NOT FIX",
-        PYMONGO_R4_EXPIRES,
-        "#46",
-        "Unblock condition",
-        "not reachable in the current ContraClaim deployment",
-    ):
+    for phrase in ("RETIRED", PYMONGO_FIXED_VERSION, CHECKPOINT_MONGODB_VERSION, "#46"):
         assert phrase in section, f"R4 is missing {phrase!r}"
 
 

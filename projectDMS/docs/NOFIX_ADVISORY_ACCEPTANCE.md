@@ -254,7 +254,26 @@ Why 2026-11-05: a short, 29-day window, aligned with R4, so both no-fix exceptio
 
 ---
 
-## R4: four PyMongo 4.16.0 advisories, pending a compatible checkpoint release
+## R4: four PyMongo 4.16.0 advisories, RETIRED 2026-10-08
+
+> **RETIRED 2026-10-08.** The unblock condition below held:
+> `langgraph-checkpoint-mongodb` **0.5.1** was released on PyPI on 2026-10-08
+> (final, not yanked, Python >=3.11) and requires `pymongo>=4.18.2`. Every
+> deploy manifest now pins `pymongo==4.18.2` and `langgraph-checkpoint-mongodb==0.5.1`
+> (`backend/rbac_backend/requirements.txt`, `services/langgraph/requirements.txt`;
+> the legacy root and `backend/requirements.txt` manifests follow). 4.18.2 fixes all
+> four advisories, so the pip-audit ids, the Trivy ignore file and the expiry/unblock
+> gate were removed in the same change. `test_ci_static_gates.py` now fails if any
+> of these ids is ignored again or the exception files reappear.
+>
+> 0.5.1 also validates checkpoint identifiers (`thread_id`, `checkpoint_ns`,
+> `checkpoint_id`, `task_id`, `task_path`) as strings and raises `ValueError`
+> otherwise. Every call site passes strings (f-strings, `str(...)`, `str(uuid4())`).
+>
+> Still open in #46, independent of the exception: a per-document cap on stored
+> extracted text (the CVE-2026-96749 residual below).
+>
+> The record below is kept as the history of the decision.
 
 **THIS DOES NOT FIX THE UNDERLYING PYMONGO VULNERABILITIES.** It temporarily accepts
 four specifically reviewed findings, by advisory id only, until **2026-11-05**.
