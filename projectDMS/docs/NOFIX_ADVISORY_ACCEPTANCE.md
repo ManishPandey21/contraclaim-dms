@@ -15,7 +15,7 @@ including a second advisory in the same package.
 |---|---|---|
 | pip-audit | `PYSEC-2026-3740` (NLTK) | `release/contraclaim-rc1` review triggers |
 | npm audit | `GHSA-vfj7-8cjw-p6xm` (braces), R3 | **2026-11-05** (renewed once, 2026-10-07), enforced by the gate |
-| pip-audit + Trivy (backend and LangGraph images) | `CVE-2026-88029`, `CVE-2026-96747`, `CVE-2026-96748`, `CVE-2026-96749` (PyMongo 4.16.0), R4 | **2026-11-05**, enforced by the gate |
+| ~~pip-audit + Trivy (backend and LangGraph images)~~ | ~~`CVE-2026-88029`, `CVE-2026-96747`, `CVE-2026-96748`, `CVE-2026-96749` (PyMongo 4.16.0), R4~~ | **RESOLVED 2026-10-08**: fixed by pymongo 4.18.2; nothing ignored |
 
 ---
 
@@ -254,9 +254,9 @@ Why 2026-11-05: a short, 29-day window, aligned with R4, so both no-fix exceptio
 
 ---
 
-## R4: four PyMongo 4.16.0 advisories, RETIRED 2026-10-08
+## R4: four PyMongo 4.16.0 advisories, RESOLVED 2026-10-08
 
-> **RETIRED 2026-10-08.** The unblock condition below held:
+> **RESOLVED 2026-10-08, exception RETIRED.** The advisories are fixed, not expired. The unblock condition below held:
 > `langgraph-checkpoint-mongodb` **0.5.1** was released on PyPI on 2026-10-08
 > (final, not yanked, Python >=3.11) and requires `pymongo>=4.18.2`. Every
 > deploy manifest now pins `pymongo==4.18.2` and `langgraph-checkpoint-mongodb==0.5.1`

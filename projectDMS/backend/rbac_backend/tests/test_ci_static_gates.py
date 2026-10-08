@@ -597,7 +597,7 @@ def test_the_retired_pymongo_exception_records_how_it_ended() -> None:
     section = record.split("## R4:", 1)[1].split("\n## ", 1)[0]
     for advisory in PYMONGO_R4_ADVISORIES:
         assert advisory in section, f"R4 does not record {advisory}"
-    for phrase in ("RETIRED", PYMONGO_FIXED_VERSION, CHECKPOINT_MONGODB_VERSION, "#46"):
+    for phrase in ("RESOLVED", "RETIRED", PYMONGO_FIXED_VERSION, CHECKPOINT_MONGODB_VERSION, "#46"):
         assert phrase in section, f"R4 is missing {phrase!r}"
 
 
