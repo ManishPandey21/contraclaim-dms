@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple, cast
+from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
 from .models import (
     Completeness,
@@ -39,6 +39,12 @@ from .models import (
     PageExtractionResult,
     PageSource,
     PageStatus,
+)
+from .numeric_integrity import (
+    phantom_space_count,
+    phantom_space_repair_record,
+    readable_page,
+    repair_split_grouped_numbers,
 )
 from .page_classifier import PageClassifier
 from .page_store import (
@@ -132,6 +138,9 @@ class PageExtractionEngine:
         #: Set when the source could not be opened at all, so the resulting
         #: unrenderable page can carry a reason a human can act on.
         self._open_error: Optional[str] = None
+        #: Pages whose native read dropped phantom space glyphs, as
+        #: page -> (the unaided reading, glyphs dropped). Evidence for `_merge`.
+        self._native_repairs: Dict[int, Tuple[str, int]] = {}
 
     async def extract(
         self, source: Path, *, retry_pages: Optional[Sequence[int]] = None
@@ -559,11 +568,22 @@ class PageExtractionEngine:
                     or "Page could not be rendered or extracted"
                 )
 
+            raw_text: Optional[str] = None
+            applied_repairs: List[Dict[str, Any]] = []
             if number in overrides:
                 text = overrides[number]
                 page_source = PageSource.OCR
+                # OCR can break a grouped number at a word gap. Joined only
+                # when the pieces provably belong together.
+                repaired, ocr_repairs = repair_split_grouped_numbers(text)
+                if ocr_repairs:
+                    raw_text, text = text, repaired
+                    applied_repairs = ocr_repairs
             else:
                 text = native_text
+                if number in self._native_repairs:
+                    raw_text, dropped = self._native_repairs[number]
+                    applied_repairs = [phantom_space_repair_record(dropped)]
 
             # Unusable text is evidence, never published: `text` - and so
             # combined_text, page records, chunking and embeddings - carries
@@ -593,8 +613,11 @@ class PageExtractionEngine:
                     tables=tables,
                     batch_id=batch_id,
                     error=error,
-                    raw_text=withheld,
+                    # Withheld text outranks a repair: nothing was published,
+                    # so the unusable reading is the evidence to keep.
+                    raw_text=withheld if withheld is not None else raw_text,
                     text_withheld=withheld is not None,
+                    applied_repairs=[] if withheld is not None else applied_repairs,
                 )
             )
         return pages
@@ -603,18 +626,31 @@ class PageExtractionEngine:
         import pdfplumber
 
         pages: Dict[int, _NativePage] = {}
+        self._native_repairs = {}
         try:
             with pdfplumber.open(source) as pdf:
                 for index, page in enumerate(pdf.pages, start=1):
                     classification = self.classifier.classify(page)
+                    # Excel padding glyphs drawn inside a digit split amounts
+                    # ("1 9,292,171"); every read goes through the same filter.
                     try:
-                        text = page.extract_text() or ""
+                        text = readable_page(page).extract_text() or ""
                     except Exception:
                         text = ""
                     try:
-                        tables = page.extract_tables() or []
+                        tables = readable_page(page).extract_tables() or []
                     except Exception:
                         tables = []
+                    dropped = phantom_space_count(page)
+                    if dropped:
+                        try:
+                            unaided = (
+                                readable_page(page, keep_phantoms=True).extract_text() or ""
+                            )
+                        except Exception:
+                            unaided = ""
+                        if unaided != text:
+                            self._native_repairs[index] = (unaided, dropped)
                     pages[index] = (text, classification, tables)
         except Exception as exc:
             # A document that will not open is a visible unrenderable page, not

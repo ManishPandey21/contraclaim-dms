@@ -290,15 +290,18 @@ class DocumentProcessor:
                 }
             )
 
+        # Extraction may already have repaired this page (phantom glyphs, OCR
+        # number joins); its records are appended to, never replaced.
+        prior = list(getattr(page, "applied_repairs", None) or [])
         if repaired_text == original_text and repaired_tables == original_tables:
-            page.applied_repairs = applied
+            page.applied_repairs = prior + applied
             return verdict
 
         if page.raw_text is None:
             page.raw_text = original_text
         page.text = repaired_text
         page.tables = repaired_tables
-        page.applied_repairs = applied
+        page.applied_repairs = prior + applied
 
         # Re-verify. The repaired text is only canonical if the gate agrees.
         return self.quality_gate.assess(page, tables=page.tables or None)
