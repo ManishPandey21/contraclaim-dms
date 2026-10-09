@@ -37,6 +37,7 @@ entire document out of the vector store) is unchanged and not tested here.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -601,3 +602,187 @@ async def test_j_marking_review_twice_writes_the_same_verdict() -> None:
     assert _without_time(first["processing_error"]) == _without_time(
         second["processing_error"]
     )
+
+
+# --- The deferral reason the vector sync row records -------------------------
+#
+# Policy unchanged: a review page still withholds the whole document's
+# embeddings. Only the recorded reason changes. Every deferral used to be
+# written as "Embeddings deferred pending duplicate check", including a
+# document held back because a page needs human review.
+
+from rbac_backend.services import database_service as database_service_module  # noqa: E402
+from rbac_backend.services.database_service import (  # noqa: E402
+    DEFERRAL_DUPLICATE_PENDING,
+    DEFERRAL_HUMAN_REVIEW,
+    DatabaseService,
+)
+from rbac_backend.tests.test_document_processor import (  # noqa: E402
+    FakeOpenAIService,
+    make_processor,
+)
+
+
+class _SyncRows:
+    def __init__(self) -> None:
+        self.rows: Dict[str, Dict[str, Any]] = {}
+
+    async def update_one(self, query, update, upsert=False):
+        row = self.rows.setdefault(query["document_id"], {})
+        row.update(update.get("$set", {}))
+        for key in update.get("$unset", {}):
+            row.pop(key, None)
+
+
+async def _deferred_row(monkeypatch, **save_kwargs: Any) -> Dict[str, Any]:
+    rows = _SyncRows()
+    db = SimpleNamespace(vector_sync_status=rows)
+    service = DatabaseService.__new__(DatabaseService)
+    service.partial_failures = {}
+
+    async def get_database():
+        return db
+
+    async def upsert(*_a, **_k):
+        return {"_id": "doc-1"}
+
+    async def no_refusal(*_a, **_k):
+        return None
+
+    async def no_canonical(*_a, **_k):
+        return None
+
+    service.get_database = get_database
+    service._upsert_document_metadata = upsert
+    monkeypatch.setattr(database_service_module, "refuse_contract_source_write", no_refusal)
+    monkeypatch.setattr(database_service_module, "resolve_canonical_document", no_canonical)
+
+    chunks = await service.save_document_data(
+        "doc-1", "letter.pdf", None, "text", "text", skip_embeddings=True, **save_kwargs
+    )
+    assert chunks == 0
+    return rows.rows["doc-1"]
+
+
+@pytest.mark.asyncio
+async def test_review_hold_is_recorded_as_review_not_duplicate_check(monkeypatch) -> None:
+    row = await _deferred_row(
+        monkeypatch, deferral_reasons=[DEFERRAL_HUMAN_REVIEW], review_pages=[5]
+    )
+
+    assert row["sync_status"] == "deferred"
+    assert row["deferral_reasons"] == [DEFERRAL_HUMAN_REVIEW]
+    assert "human review" in row["details"]
+    assert "5" in row["details"]
+    assert "duplicate" not in row["details"]
+
+
+@pytest.mark.asyncio
+async def test_duplicate_hold_is_recorded_as_duplicate_check(monkeypatch) -> None:
+    row = await _deferred_row(monkeypatch, deferral_reasons=[DEFERRAL_DUPLICATE_PENDING])
+
+    assert row["deferral_reasons"] == [DEFERRAL_DUPLICATE_PENDING]
+    assert row["details"] == "Embeddings deferred pending duplicate check"
+
+
+@pytest.mark.asyncio
+async def test_a_caller_naming_no_reason_keeps_the_duplicate_check(monkeypatch) -> None:
+    row = await _deferred_row(monkeypatch)
+
+    assert row["deferral_reasons"] == [DEFERRAL_DUPLICATE_PENDING]
+    assert row["details"] == "Embeddings deferred pending duplicate check"
+
+
+@pytest.mark.asyncio
+async def test_both_holds_are_recorded(monkeypatch) -> None:
+    row = await _deferred_row(
+        monkeypatch,
+        deferral_reasons=[DEFERRAL_DUPLICATE_PENDING, DEFERRAL_HUMAN_REVIEW],
+        review_pages=[7, 5, 5],
+    )
+
+    assert row["deferral_reasons"] == sorted([DEFERRAL_DUPLICATE_PENDING, DEFERRAL_HUMAN_REVIEW])
+    assert "page(s) 5, 7 need human review" in row["details"]
+    assert "duplicate check" in row["details"]
+
+
+@pytest.mark.asyncio
+async def test_a_later_write_clears_the_previous_hold() -> None:
+    rows = _SyncRows()
+    db = SimpleNamespace(vector_sync_status=rows)
+    service = DatabaseService.__new__(DatabaseService)
+
+    await service._update_vector_sync_status(
+        db, "doc-1", status="deferred", details="Embeddings withheld: page(s) 5 need human review",
+        deferral_reasons=[DEFERRAL_HUMAN_REVIEW],
+    )
+    await service._update_vector_sync_status(
+        db, "doc-1", status="synced", mongo_chunks=3, qdrant_chunks=3
+    )
+
+    row = rows.rows["doc-1"]
+    assert row["sync_status"] == "synced"
+    assert "details" not in row
+    assert "deferral_reasons" not in row
+
+
+async def _processor_save_kwargs(
+    tmp_path, monkeypatch, *, pages_human_review: List[int], skip_embeddings: bool
+) -> Dict[str, Any]:
+    pdf_path = tmp_path / "LET-001.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+    report = "1) Date: 09-07-2026\n2) Letter No.: LET-001\n5) Subject: S\n25) Full Content: Body"
+    processor = make_processor("Body text", FakeOpenAIService(text_response=report))
+    captured: Dict[str, Any] = {}
+
+    async def fake_save(*_args: Any, **kwargs: Any) -> int:
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(processor, "_save_results", fake_save)
+    await processor._extract_and_persist(
+        input_path=pdf_path,
+        original_path=str(pdf_path),
+        processed_path=pdf_path,
+        raw_ocr_text="Body text",
+        extraction=None,
+        pages_human_review=pages_human_review,
+        path_structure="org/project",
+        upload_type="incoming",
+        document_id="doc-1",
+        skip_embeddings=skip_embeddings,
+        start_time=0.0,
+    )
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_processor_names_the_review_hold(tmp_path, monkeypatch) -> None:
+    kwargs = await _processor_save_kwargs(
+        tmp_path, monkeypatch, pages_human_review=[5], skip_embeddings=False
+    )
+
+    # Policy unchanged: the review page still withholds every embedding.
+    assert kwargs["skip_embeddings"] is True
+    assert kwargs["deferral_reasons"] == [DEFERRAL_HUMAN_REVIEW]
+    assert kwargs["review_pages"] == [5]
+
+
+@pytest.mark.asyncio
+async def test_processor_names_the_duplicate_hold(tmp_path, monkeypatch) -> None:
+    kwargs = await _processor_save_kwargs(
+        tmp_path, monkeypatch, pages_human_review=[], skip_embeddings=True
+    )
+
+    assert kwargs["skip_embeddings"] is True
+    assert kwargs["deferral_reasons"] == [DEFERRAL_DUPLICATE_PENDING]
+
+
+@pytest.mark.asyncio
+async def test_processor_without_a_hold_names_none(tmp_path, monkeypatch) -> None:
+    kwargs = await _processor_save_kwargs(
+        tmp_path, monkeypatch, pages_human_review=[], skip_embeddings=False
+    )
+
+    assert kwargs["skip_embeddings"] is False
+    assert kwargs["deferral_reasons"] is None

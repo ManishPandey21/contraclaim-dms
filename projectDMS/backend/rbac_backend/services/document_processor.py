@@ -11,7 +11,11 @@ from typing import Optional, Any, Dict, List, Sequence
 from uuid import uuid4
 
 from .text_processing_service import TextProcessingService
-from .database_service import DatabaseService
+from .database_service import (
+    DEFERRAL_DUPLICATE_PENDING,
+    DEFERRAL_HUMAN_REVIEW,
+    DatabaseService,
+)
 from .file_service import FileService
 from .ocr_service import OCRService
 from .openai_service import OpenAIService
@@ -1005,6 +1009,8 @@ class DocumentProcessor:
         *,
         metadata_quality: Optional[Dict[str, Any]] = None,
         source_text_status: Optional[str] = None,
+        deferral_reasons: Optional[List[str]] = None,
+        review_pages: Optional[List[int]] = None,
     ) -> int:
         """Save processing results to file system and database"""
         try:
@@ -1041,6 +1047,8 @@ class DocumentProcessor:
                 skip_embeddings=skip_embeddings,
                 metadata_quality=metadata_quality,
                 source_provenance=source_provenance,
+                deferral_reasons=deferral_reasons,
+                review_pages=review_pages,
             )
 
             return chunks_created
@@ -1293,6 +1301,15 @@ class DocumentProcessor:
                     if raw_ocr_text and raw_ocr_text.strip()
                     else SOURCE_TEXT_ABSENT
                 ),
+                # Which hold withheld the vectors, so the sync row names it.
+                # None, not [], when nothing is held: persistence then sees
+                # exactly what it saw before reasons existed.
+                deferral_reasons=(
+                    ([DEFERRAL_HUMAN_REVIEW] if blocked_for_review else [])
+                    + ([DEFERRAL_DUPLICATE_PENDING] if skip_embeddings else [])
+                )
+                or None,
+                review_pages=list(pages_human_review) or None,
             )
             partial_failures.update(dict(getattr(self.database_service, "partial_failures", {}) or {}))
 
