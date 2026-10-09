@@ -82,7 +82,7 @@ pycparser==2.22
 pydantic==2.12.5
 pydantic-settings==2.9.0
 pydantic_core==2.41.5
-pymongo==4.16.0
+pymongo==4.18.2
 pytest==9.0.3
 pytest-asyncio==1.3.0
 pytesseract==0.3.13
@@ -120,7 +120,7 @@ langchain-text-splitters==1.1.2
 # Official production workflow runtime. Keep this aligned with the root and
 # sidecar manifests; backend/Dockerfile installs this file.
 langgraph==1.2.9
-langgraph-checkpoint-mongodb==0.4.0
+langgraph-checkpoint-mongodb==0.5.1
 langchain-openai==1.1.14
 # 1.0 keeps the LangChain Core 1.x contract while supporting the production
 # Qdrant 1.12 server; the 1.1 package forces a newer incompatible client.
