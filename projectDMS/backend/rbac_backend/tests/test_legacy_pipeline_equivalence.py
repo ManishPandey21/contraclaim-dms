@@ -324,6 +324,7 @@ def _comparable(result: ProcessingResult) -> Dict[str, Any]:
         "source_kind",
         "processing_state",
         "pages_human_review",
+        "pipeline_version",
     ):
         data.pop(key, None)
     return data
@@ -388,6 +389,17 @@ async def test_legacy_result_matches_pre_phase3(tmp_path: Path, fixture: str) ->
 
     assert oracle_result.success is True, "oracle itself failed; fixture is wrong"
     assert _comparable(current_result) == _comparable(oracle_result)
+
+
+@pytest.mark.parametrize("fixture", [TEXT_NATIVE, OCR_REQUIRED, EMPTY_PDF])
+@pytest.mark.asyncio
+async def test_legacy_result_reports_the_legacy_pipeline(
+    tmp_path: Path, fixture: str
+) -> None:
+    """The one field added since the oracle names the path that ran."""
+    (_, current_result), _ = await _run_both(tmp_path, fixture)
+
+    assert current_result.pipeline_version == "legacy_v0"
 
 
 @pytest.mark.parametrize("fixture", [TEXT_NATIVE, OCR_REQUIRED, EMPTY_PDF])

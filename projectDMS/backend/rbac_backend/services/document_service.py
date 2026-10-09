@@ -58,6 +58,29 @@ from .source_text import full_text_updates
 logger = logging.getLogger(__name__)
 configure_pipeline_logger(logger)
 
+
+def _page_extraction_record(result: Any) -> Optional[Dict[str, Dict[str, Any]]]:
+    """How each page of `result` was read, keyed by page number.
+
+    `None` when the extractor kept no per-page record - the legacy path decides
+    once per document, and inventing page methods for it would claim evidence
+    that does not exist.
+    """
+    extraction = getattr(result, "extraction_result", None)
+    pages = getattr(extraction, "pages", None)
+    if not pages:
+        return None
+    record: Dict[str, Dict[str, Any]] = {}
+    for page in pages:
+        source = getattr(page, "source", None)
+        status = getattr(page, "status", None)
+        record[str(getattr(page, "number", len(record) + 1))] = {
+            "source": getattr(source, "value", source),
+            "status": getattr(status, "value", status),
+        }
+    return record
+
+
 class DocumentServiceError(Exception):
     """Custom exception for document service errors"""
     pass
@@ -2119,6 +2142,11 @@ class DocumentService:
                     "processing_time": getattr(result, "processing_time", None),
                     "chunks_created": getattr(result, "chunks_created", None),
                     "metadata_source": metadata_source,
+                    # Which pipeline produced this text, and how each page was
+                    # read. A canary is audited from these; without them an OCR
+                    # failure and a native page look the same on the record.
+                    "pipeline_version": getattr(result, "pipeline_version", None),
+                    "page_extraction": _page_extraction_record(result),
                 }
                 partial_failures = getattr(result, "partial_failures", None) or {}
                 if partial_failures:
@@ -2239,6 +2267,7 @@ class DocumentService:
                 update_fields["processing_error"] = {
                     "message": getattr(result, "error", "Document processing failed"),
                     "timestamp": datetime.utcnow(),
+                    "pipeline_version": getattr(result, "pipeline_version", None),
                 }
 
             if metadata is not None and publishable and not derived_publication_authorized:

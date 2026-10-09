@@ -365,3 +365,34 @@ explicitly accepted in writing before Phase 7 can be declared fully complete.
 | **G12** | **`post_deploy_verify.sh` is statically verified only.** Its 15 canary checks are asserted to exist, to be read-only, and to parse — never executed against a running stack. | The script itself is unproven in production. Run it during Step 2 and paste the output into §6; a check that misreads a live container would only surface there. |
 | **G14** | **Jobs carry no claiming-worker identity.** `_claim_next_processing_job` writes `status`/`stage`/`started_at`/`heartbeat_at`/`updated_at`/`attempts` only. | Step 3's "which worker claimed this job" is **not answerable from Mongo**. The execution package substitutes code-path detection (unified writes page evidence, legacy writes none), which is stronger, plus per-container log correlation. Adding a `claimed_by` field is a recommended small pre-window change. |
 | **G13** | **Rollback is implemented and unit-tested, never drilled.** Claim/routing rollback behaviour is proven in `test_pipeline_routing_boundary.py` (in-flight jobs keep their version, run/evidence identities survive an allowlist change). No process has been stopped, scaled, or recreated. | Step 4 remains BLOCKED on authorisation. "Rollback works" currently means *the code does the right thing*, not *the operation has been performed*. |
+| **G15** | **Jobless runs stay on `legacy_v0`, even for a canary organisation.** `POST /documents/{id}/process` and bulk upload with OCR call the processor without a durable job, so no persisted version exists and `pipeline_version_of({})` answers legacy. This is deliberate: the unified path relies on the job checkpoint to keep a partial extraction out of `completed`, and a jobless run has none. Pinned by `test_mixed_correspondence_pagewise_canary.py::test_a_jobless_reprocess_is_deliberately_legacy`. | A canary organisation's reprocess or bulk-OCR upload still loses scanned pages (R1). Only the queued upload path is canaried. Routing these through a durable job is a follow-up. |
+| **G16** | **A raster inset on a page that also has a real text layer is not read by either pipeline.** The engine OCRs a page only when its native text is under the threshold; a page with a typed header over a scanned body keeps the header and drops the scan. | Pinned as a strict xfail (`test_a_raster_inset_on_a_native_page_is_read`). Region-level OCR is a follow-up, not part of the R1 canary. |
+
+---
+
+## 9. R1 acceptance evidence (2026-10-08)
+
+The 2026-10-07 extraction audit showed `legacy_v0` making one OCR decision per
+document: if any of the first five pages has usable text, no page is OCR'd. A
+scanned letter followed by captioned photos or native annexures loses the letter
+and is still reported as processed. `unified_v1` already decides per page; the
+canary is how it reaches a tenant.
+
+| Check | Where | Result |
+|---|---|---|
+| Legacy defect reproduced on synthetic stand-ins of both audit documents | `test_mixed_correspondence_pagewise_canary.py` (strict xfail on `legacy_v0`) | no OCR, every critical phrase absent |
+| Unified recovers scanned pages, OCRs only those, keeps native pages native, deterministic | same module | pass, stub OCR runner |
+| Same, through real OCRmyPDF/tesseract | `test_mixed_correspondence_live_ocr_acceptance.py` (skips without binaries; `RUN_LIVE_OCR_ACCEPTANCE=1` makes a missing binary fail) | pass in the backend image |
+| Real audit PDFs (not committed; `EXTRACTION_AUDIT_FIXTURE_DIR`) | same module | GLM 150 → 3,555 chars, claim 5,233 → 8,050 chars |
+| The pipeline that ran is recorded | `ProcessingResult.pipeline_version`; document `processing_metadata.pipeline_version` / `processing_error.pipeline_version` | pass |
+| How each page was read is recorded | document `processing_metadata.page_extraction` (`{page: {source, status}}`; `null` for legacy, which keeps no per-page record) | pass |
+
+Measured cost in the backend image (single run, Docker Desktop host, not
+production hardware): GLM 0.4 s legacy vs 63.3 s unified (3 of 5 pages OCR'd,
+peak OCR child RSS 192 MB); claim 3.7 s vs 13.8 s (1 of 6 pages OCR'd, 128 MB).
+Page-wise OCR costs roughly 15-20 s of CPU per scanned page. Size the canary
+worker and queue-age alerts from that, not from legacy timings.
+
+Docker note for anyone repeating the live run: the image sets
+`TMPDIR=/app/tmp`. Bind-mounting a checkout over `/app` hides that directory,
+and Ghostscript then fails every OCR batch with exit 7. Pass `-e TMPDIR=/tmp`.
