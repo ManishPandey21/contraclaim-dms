@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Sequence
 
+from .numeric_integrity import readable_page
 from .page_mapping import PageMappingError, map_source_pages_to_output
 
 logger = logging.getLogger(__name__)
@@ -152,5 +153,5 @@ class OcrMyPdfRunner:
             extracted: Dict[int, str] = {}
             for page_number, index in mapping.items():
                 if 0 <= index < output_page_count:
-                    extracted[page_number] = pdf.pages[index].extract_text() or ""
+                    extracted[page_number] = readable_page(pdf.pages[index]).extract_text() or ""
             return extracted
