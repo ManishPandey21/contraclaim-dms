@@ -205,7 +205,7 @@ const DocumentViewerPage: React.FC = () => {
       return status;
     } catch (error) {
       console.warn("Unable to fetch processing status", error);
-      const fallbackStatus = {
+      const fallbackStatus: DocumentProcessingJobStatus = {
         _id: "",
         document_id: documentId,
         status: "not_queued",
