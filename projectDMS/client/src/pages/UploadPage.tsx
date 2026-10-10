@@ -48,6 +48,7 @@ import enhancedApi, {
   UploadPolicy,
 } from "@/services/enhanced-api";
 import { useRegisterProjectScope } from "@/hooks/useRegisterProjectScope";
+import { isTerminalProcessingStatus } from "@/utils/processingStatus";
 
 interface DuplicateBlock {
   message: string;
@@ -120,6 +121,17 @@ const describeDocumentProgress = (
     return { label: "Retrying", tone: "warning" };
   }
   const stage = (result.processing_stage || "").toLowerCase();
+  if (status === "human_review_required") {
+    return { label: "Needs human review", tone: "warning" };
+  }
+  if (status === "stored_only") {
+    return { label: "Stored without extraction", tone: "success" };
+  }
+  if (status === "partially_processed") {
+    return isTerminalProcessingStatus(status, stage)
+      ? { label: "Partially processed", tone: "warning" }
+      : { label: "Retrying remaining pages", tone: "warning" };
+  }
   return {
     label:
       PROCESSING_STAGE_LABELS[stage] ||
@@ -136,7 +148,7 @@ const isDocumentProgressSettled = (result: DocumentProcessingResult): boolean =>
   if (!result.success || !result.document_id) return true;
   const status = (result.processing_status || "").toLowerCase();
   if (!status) return true;
-  return ["completed", "failed", "dead_lettered"].includes(status);
+  return isTerminalProcessingStatus(status, result.processing_stage);
 };
 
 interface UploadFile {

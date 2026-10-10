@@ -29,6 +29,7 @@ import EnclosuresPanel from "@/components/document-viewer/EnclosuresPanel";
 import ReferencesPanel from "@/components/document-viewer/ReferencesPanel";
 import DocumentDetailsPanel from "@/components/document-viewer/DocumentDetailsPanel";
 import LinkedRecordsPanel from "@/components/document-viewer/LinkedRecordsPanel";
+import { isTerminalProcessingStatus } from "@/utils/processingStatus";
 
 const DocumentViewer = React.lazy(
   () => import("@/components/document-viewer/DocumentViewer")
@@ -204,7 +205,7 @@ const DocumentViewerPage: React.FC = () => {
       return status;
     } catch (error) {
       console.warn("Unable to fetch processing status", error);
-      const fallbackStatus = {
+      const fallbackStatus: DocumentProcessingJobStatus = {
         _id: "",
         document_id: documentId,
         status: "not_queued",
@@ -253,19 +254,22 @@ const DocumentViewerPage: React.FC = () => {
   useEffect(() => {
     if (!documentId) return;
     let cancelled = false;
-    let completedRefreshDone = false;
-    const terminal = new Set(["completed", "failed", "dead_lettered", "not_queued"]);
+    let settledRefreshDone = false;
 
-    const currentStatus = processingStatus?.status;
-    if (currentStatus && terminal.has(currentStatus)) {
+    if (isTerminalProcessingStatus(processingStatus?.status, processingStatus?.stage)) {
       return;
     }
 
     const poll = async () => {
       const status = await fetchProcessingStatus();
       if (cancelled || !status) return;
-      if (status.status === "completed" && !completedRefreshDone) {
-        completedRefreshDone = true;
+      // Any final verdict, not only `completed`, may have rewritten the
+      // document (review message, extracted fields), so reload it once.
+      if (
+        isTerminalProcessingStatus(status.status, status.stage) &&
+        !settledRefreshDone
+      ) {
+        settledRefreshDone = true;
         await fetchDocument();
       }
     };
@@ -273,8 +277,7 @@ const DocumentViewerPage: React.FC = () => {
     void poll();
     const interval = window.setInterval(() => {
       if (cancelled) return;
-      const current = processingStatus?.status;
-      if (current && terminal.has(current)) {
+      if (isTerminalProcessingStatus(processingStatus?.status, processingStatus?.stage)) {
         window.clearInterval(interval);
         return;
       }
@@ -285,7 +288,13 @@ const DocumentViewerPage: React.FC = () => {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [documentId, fetchDocument, fetchProcessingStatus, processingStatus?.status]);
+  }, [
+    documentId,
+    fetchDocument,
+    fetchProcessingStatus,
+    processingStatus?.status,
+    processingStatus?.stage,
+  ]);
 
   const fetchAvailableAndLinkedDocuments = useCallback(async () => {
     if (!documentId) return;
@@ -773,10 +782,21 @@ const DocumentViewerPage: React.FC = () => {
     "dead_lettered",
     "metadata_extracted",
     "completed",
+    "human_review_required",
+    "partially_processed",
+    "stored_only",
   ].includes(effectiveProcessingStatus);
   const processingLabel =
     effectiveProcessingStatus === "completed"
       ? "Metadata extracted"
+      : effectiveProcessingStatus === "human_review_required"
+        ? "Needs human review"
+      : effectiveProcessingStatus === "partially_processed"
+        ? isTerminalProcessingStatus(effectiveProcessingStatus, processingStatus?.stage)
+          ? "Partially processed"
+          : "Partially processed; remaining pages will be retried"
+      : effectiveProcessingStatus === "stored_only"
+        ? "Stored without extraction"
       : effectiveProcessingStatus === "metadata_extracted"
         ? "Metadata extracted; indexing is finishing"
         : effectiveProcessingStatus === "failed" ||
