@@ -26,6 +26,11 @@ from ..extraction.models import (
     PageSource,
     PageStatus,
 )
+from ..extraction.canonical import (
+    CanonicalDocument,
+    DuplicatePageError,
+    assemble_canonical_document,
+)
 from ..extraction.page_store import InconsistentExtractionRunError
 
 DOCUMENT_OCR_PAGES = "document_ocr_pages"
@@ -80,6 +85,37 @@ def to_document_page_record(
         "rotation": classification.rotation,
         "source_pdf_page_link": f"document:{document_id}#page={page.number}",
     }
+
+
+class CanonicalEvidenceInconsistentError(RuntimeError):
+    """Persisted page evidence and the canonical manifest disagree.
+
+    Raised instead of serving or publishing text whose provenance cannot be
+    vouched for: a page set that is missing or duplicated, rows that do not
+    reassemble to the text the pipeline is about to persist, or rows that
+    changed after their manifest was written. Carries page numbers and
+    checksums only; never page text.
+    """
+
+    def __init__(self, document_id: str, reason: str, **details: Any) -> None:
+        self.document_id = document_id
+        self.reason = reason
+        self.details = details
+        #: Pages implicated, when the mismatch can name them.
+        self.page_numbers: List[int] = list(details.get("pages") or [])
+        super().__init__(
+            f"canonical evidence for document {document_id!r} is inconsistent: "
+            f"{reason} {details}"
+        )
+
+
+class CanonicalHeadConflictError(RuntimeError):
+    """Another publish moved the head between this publish's read and write.
+
+    Transient by nature - the next attempt republishes from the rows - so it
+    is deliberately not a CanonicalEvidenceInconsistentError, which is
+    terminal.
+    """
 
 
 class MalformedPageRecordError(ValueError):
@@ -353,3 +389,118 @@ class DocumentPageStore:
             upsert=True,
             session=session,
         )
+
+    async def publish_canonical(
+        self,
+        *,
+        expected: CanonicalDocument,
+        pipeline_version: Optional[str],
+        source_sha256: Optional[str],
+        engine_version: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Publish this run as the document's canonical evidence.
+
+        The manifest is built from the page rows as persisted - the source of
+        truth - not from the caller's in-memory pages, and the two must agree
+        byte for byte before the head moves. So the head can never describe
+        text the rows do not hold, and a write that silently failed for one
+        page stops here instead of being published.
+
+        One write moves the pointer and its manifest together. Page text stays
+        in the page rows only: the manifest holds offsets and checksums (about
+        350 bytes per page - 420 KB at 1,200 pages, so the 16 MB document limit
+        sits near 40,000 pages) and never duplicates evidence.
+
+        The head write is guarded on the revision it read, so two concurrent
+        publishes for one document cannot both land with the same revision.
+        Returns the manifest written.
+        """
+        expected_numbers = expected.page_numbers
+        wanted = set(expected_numbers)
+        cursor = self.db[DOCUMENT_OCR_PAGES].find(
+            {
+                "document_id": self.document_id,
+                "extraction_run_id": self.extraction_run_id,
+            }
+        )
+        records = [
+            record
+            for record in await cursor.to_list(length=None)
+            if int(record.get("page_number") or 0) in wanted
+        ]
+        try:
+            persisted = assemble_canonical_document(
+                from_document_page_record(record) for record in records
+            )
+        except (DuplicatePageError, MalformedPageRecordError) as exc:
+            raise CanonicalEvidenceInconsistentError(
+                self.document_id,
+                "page rows cannot be assembled",
+                pages=(
+                    exc.page_numbers
+                    if isinstance(exc, DuplicatePageError)
+                    else [exc.page_number]
+                ),
+                error=str(exc),
+            ) from exc
+        if persisted.page_numbers != expected_numbers:
+            raise CanonicalEvidenceInconsistentError(
+                self.document_id,
+                "page rows missing for this run",
+                pages=sorted(wanted - set(persisted.page_numbers)),
+                expected_pages=expected_numbers,
+                persisted_pages=persisted.page_numbers,
+            )
+        if persisted.sha256 != expected.sha256:
+            expected_by_page = {
+                span.page_number: span.content_sha256 for span in expected.page_map
+            }
+            raise CanonicalEvidenceInconsistentError(
+                self.document_id,
+                "persisted rows do not reassemble to the assembled text",
+                pages=[
+                    span.page_number
+                    for span in persisted.page_map
+                    if expected_by_page.get(span.page_number) != span.content_sha256
+                ],
+                expected_sha256=expected.sha256,
+                persisted_sha256=persisted.sha256,
+            )
+
+        heads = self.db[DOCUMENT_EXTRACTION_HEADS]
+        previous = await heads.find_one({"document_id": self.document_id}) or {}
+        now = datetime.now(timezone.utc)
+        manifest: Dict[str, Any] = {
+            **persisted.manifest(),
+            "extraction_run_id": self.extraction_run_id,
+            "expected_page_numbers": expected_numbers,
+            "organization_id": str(self.organization_id),
+            "project_id": str(self.project_id) if self.project_id else None,
+            "pipeline_version": pipeline_version,
+            "engine_version": engine_version,
+            "source_sha256": source_sha256,
+            # Monotonic per document: any republish - a resumed page, a new
+            # run - is a new revision a consumer can compare against.
+            "canonical_revision": int(previous.get("canonical_revision") or 0) + 1,
+            "built_at": now,
+            "published_at": now,
+        }
+        if previous:
+            guard: Dict[str, Any] = {"document_id": self.document_id}
+            guard["canonical_revision"] = (
+                previous["canonical_revision"]
+                if "canonical_revision" in previous
+                else {"$exists": False}
+            )
+            result = await heads.update_one(guard, {"$set": manifest})
+            if getattr(result, "matched_count", 1) == 0:
+                raise CanonicalHeadConflictError(
+                    f"canonical head for document {self.document_id!r} changed "
+                    "while this run was publishing"
+                )
+        else:
+            # The unique document_id index refuses a concurrent first publish.
+            await heads.update_one(
+                {"document_id": self.document_id}, {"$set": manifest}, upsert=True
+            )
+        return manifest
