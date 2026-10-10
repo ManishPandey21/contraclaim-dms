@@ -26,6 +26,11 @@ from ..extraction.models import (
     PageSource,
     PageStatus,
 )
+from ..extraction.canonical import (
+    CanonicalDocument,
+    DuplicatePageError,
+    assemble_canonical_document,
+)
 from ..extraction.page_store import InconsistentExtractionRunError
 
 DOCUMENT_OCR_PAGES = "document_ocr_pages"
@@ -80,6 +85,26 @@ def to_document_page_record(
         "rotation": classification.rotation,
         "source_pdf_page_link": f"document:{document_id}#page={page.number}",
     }
+
+
+class CanonicalEvidenceInconsistentError(RuntimeError):
+    """Persisted page evidence and the canonical manifest disagree.
+
+    Raised instead of serving or publishing text whose provenance cannot be
+    vouched for: a page set that is missing or duplicated, rows that do not
+    reassemble to the text the pipeline is about to persist, or rows that
+    changed after their manifest was written. Carries page numbers and
+    checksums only; never page text.
+    """
+
+    def __init__(self, document_id: str, reason: str, **details: Any) -> None:
+        self.document_id = document_id
+        self.reason = reason
+        self.details = details
+        super().__init__(
+            f"canonical evidence for document {document_id!r} is inconsistent: "
+            f"{reason} {details}"
+        )
 
 
 class MalformedPageRecordError(ValueError):
@@ -353,3 +378,83 @@ class DocumentPageStore:
             upsert=True,
             session=session,
         )
+
+    async def publish_canonical(
+        self,
+        *,
+        expected: CanonicalDocument,
+        pipeline_version: Optional[str],
+        source_sha256: Optional[str],
+        engine_version: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Publish this run as the document's canonical evidence.
+
+        The manifest is built from the page rows as persisted - the source of
+        truth - not from the caller's in-memory pages, and the two must agree
+        byte for byte before the head moves. So the head can never describe
+        text the rows do not hold, and a write that silently failed for one
+        page stops here instead of being published.
+
+        One write moves the pointer and its manifest together. Page text stays
+        in the page rows only: the manifest holds offsets and checksums, so it
+        is small, never duplicates evidence and never hits the document size
+        limit however long the document is. Returns the manifest written.
+        """
+        expected_numbers = expected.page_numbers
+        wanted = set(expected_numbers)
+        cursor = self.db[DOCUMENT_OCR_PAGES].find(
+            {
+                "document_id": self.document_id,
+                "extraction_run_id": self.extraction_run_id,
+            }
+        )
+        records = [
+            record
+            for record in await cursor.to_list(length=None)
+            if int(record.get("page_number") or 0) in wanted
+        ]
+        try:
+            persisted = assemble_canonical_document(
+                from_document_page_record(record) for record in records
+            )
+        except (DuplicatePageError, MalformedPageRecordError) as exc:
+            raise CanonicalEvidenceInconsistentError(
+                self.document_id, "page rows cannot be assembled", error=str(exc)
+            ) from exc
+        if persisted.page_numbers != expected_numbers:
+            raise CanonicalEvidenceInconsistentError(
+                self.document_id,
+                "page rows missing for this run",
+                expected_pages=expected_numbers,
+                persisted_pages=persisted.page_numbers,
+            )
+        if persisted.sha256 != expected.sha256:
+            raise CanonicalEvidenceInconsistentError(
+                self.document_id,
+                "persisted rows do not reassemble to the assembled text",
+                expected_sha256=expected.sha256,
+                persisted_sha256=persisted.sha256,
+            )
+
+        heads = self.db[DOCUMENT_EXTRACTION_HEADS]
+        previous = await heads.find_one({"document_id": self.document_id}) or {}
+        now = datetime.now(timezone.utc)
+        manifest: Dict[str, Any] = {
+            **persisted.manifest(),
+            "extraction_run_id": self.extraction_run_id,
+            "expected_page_numbers": expected_numbers,
+            "organization_id": str(self.organization_id),
+            "project_id": str(self.project_id) if self.project_id else None,
+            "pipeline_version": pipeline_version,
+            "engine_version": engine_version,
+            "source_sha256": source_sha256,
+            # Monotonic per document: any republish - a resumed page, a new
+            # run - is a new revision a consumer can compare against.
+            "canonical_revision": int(previous.get("canonical_revision") or 0) + 1,
+            "built_at": now,
+            "published_at": now,
+        }
+        await heads.update_one(
+            {"document_id": self.document_id}, {"$set": manifest}, upsert=True
+        )
+        return manifest

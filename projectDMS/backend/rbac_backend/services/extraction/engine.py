@@ -30,6 +30,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
+from .canonical import assemble_canonical_document
 from .models import (
     Completeness,
     ExtractedPage,
@@ -273,7 +274,7 @@ class PageExtractionEngine:
 
         return PageExtractionResult(
             pages=pages,
-            combined_text="\n\n".join(page.text or "" for page in pages),
+            combined_text=assemble_canonical_document(pages).text,
             ocr_pages_total=len(attempted) if self.policy.ocr_enabled else 0,
             ocr_failed_pages=failed,
             ocr_deferred_pages=sorted(deferred),
