@@ -764,3 +764,30 @@ async def test_a_concurrent_head_move_is_refused_not_overwritten() -> None:
         await store.publish_canonical(
             expected=assemble_canonical_document(pages), pipeline_version="unified_v1", source_sha256=None
         )
+
+
+async def test_soft_deleted_document_evidence_is_retained_but_not_served() -> None:
+    """Owner decision: deletion is logical; evidence is kept, never read."""
+    db = FakeDb()
+    document_id = await _published_in(db, ORG_A, A1)
+    # Positive control: readable before deletion.
+    before = await get_document_canonical_evidence(
+        db, document_id, current_user=ADMIN_A1, selection=ActiveScope(db, ADMIN_A1, ORG_A, A1)
+    )
+    assert before.status == EVIDENCE_PUBLISHED
+
+    # What DocumentService.delete_document writes.
+    await db.documents.update_one(
+        {"_id": ObjectId(document_id)}, {"$set": {"lifecycle_state": "deleted"}}
+    )
+
+    for user in (ADMIN_A1, SUPERADMIN):
+        with pytest.raises(Exception) as raised:
+            await get_document_canonical_evidence(
+                db, document_id, current_user=user, selection=ActiveScope(db, user, ORG_A, A1)
+            )
+        # Same answer as GET /documents/{id} for a soft-deleted document.
+        assert getattr(raised.value, "http_status", None) == 404
+    # Retained, not purged.
+    assert await db[DOCUMENT_OCR_PAGES].find({"document_id": document_id}).to_list(None)
+    assert await db[DOCUMENT_EXTRACTION_HEADS].find_one({"document_id": document_id})

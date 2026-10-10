@@ -116,6 +116,20 @@ consumer must check it before relying on the text as authoritative.
   are never processed. An enclosure uploaded as its own document uses this
   same layer.
 
+## Deletion and retention
+
+Owner decision, 2026-10-10:
+
+- Ordinary document deletion is logical: `DocumentService.delete_document`
+  sets `lifecycle_state="deleted"`.
+- The page rows and the head are **retained**. There is no cascade delete.
+- The canonical evidence read path does not serve a deleted document. It
+  answers 404, the same answer `GET /documents/{id}` gives.
+
+Future requirement, not implemented: retention periods, legal hold and a
+permanent-purge operation for `document_ocr_pages` and
+`document_extraction_heads`.
+
 ## Backward compatibility
 
 There is no migration. The new fields live in the existing

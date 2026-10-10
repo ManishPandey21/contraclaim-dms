@@ -168,7 +168,10 @@ async def get_document_canonical_evidence(
         )
     selection.require_selection()
     document = await _find_document(db, str(document_id))
-    if not document:
+    # Deletion is logical: the document row, its page rows and its head are
+    # retained (owner decision, 2026-10-10), but a deleted document is not
+    # found here - the same answer GET /documents/{id} gives it.
+    if not document or document.get("lifecycle_state") == "deleted":
         raise DocumentError("Document not found", status.HTTP_404_NOT_FOUND)
     await selection.require_record(document, allow_unscoped=True)
     await (policy or PolicyService(db)).authorize_document(
