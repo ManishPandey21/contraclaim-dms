@@ -14,8 +14,8 @@ Every read reassembles the text from the rows with the single assembly rule in
 disagreement raises instead of serving text whose provenance cannot be vouched
 for.
 
-Access is bounded exactly like ``GET /documents/{id}``: the navbar selection
-(when given) holds the record, then ``PolicyService.authorize_document`` with
+Access is bounded exactly like ``GET /documents/{id}``: the required navbar selection
+holds the record, then ``PolicyService.authorize_document`` with
 ``dms.document.view`` decides. There is deliberately no unscoped variant.
 
 Acceptance criteria this interface is designed to keep (not implemented here):
@@ -151,19 +151,26 @@ async def get_document_canonical_evidence(
     document_id: str,
     *,
     current_user: Any,
-    selection: Any = None,
+    selection: Any,
     policy: Any = None,
 ) -> CanonicalEvidence:
-    """The complete canonical evidence of one document the caller may view."""
+    """The complete canonical evidence of one document the caller may view.
+
+    ``selection`` (the request's validated ``ActiveScope``) is required, not
+    optional: for the global roles ``authorize_document`` alone does not bind
+    the navbar selection, so a call without one would be an unscoped read.
+    """
     from .policy_service import PolicyService
 
-    if selection is not None:
-        selection.require_selection()
+    if selection is None:
+        raise DocumentError(
+            "An active scope selection is required", status.HTTP_400_BAD_REQUEST
+        )
+    selection.require_selection()
     document = await _find_document(db, str(document_id))
     if not document:
         raise DocumentError("Document not found", status.HTTP_404_NOT_FOUND)
-    if selection is not None:
-        await selection.require_record(document, allow_unscoped=True)
+    await selection.require_record(document, allow_unscoped=True)
     await (policy or PolicyService(db)).authorize_document(
         current_user, Permissions.DOCUMENT_VIEW, document
     )

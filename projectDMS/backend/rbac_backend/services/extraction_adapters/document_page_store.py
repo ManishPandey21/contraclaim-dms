@@ -101,10 +101,21 @@ class CanonicalEvidenceInconsistentError(RuntimeError):
         self.document_id = document_id
         self.reason = reason
         self.details = details
+        #: Pages implicated, when the mismatch can name them.
+        self.page_numbers: List[int] = list(details.get("pages") or [])
         super().__init__(
             f"canonical evidence for document {document_id!r} is inconsistent: "
             f"{reason} {details}"
         )
+
+
+class CanonicalHeadConflictError(RuntimeError):
+    """Another publish moved the head between this publish's read and write.
+
+    Transient by nature - the next attempt republishes from the rows - so it
+    is deliberately not a CanonicalEvidenceInconsistentError, which is
+    terminal.
+    """
 
 
 class MalformedPageRecordError(ValueError):
@@ -396,9 +407,13 @@ class DocumentPageStore:
         page stops here instead of being published.
 
         One write moves the pointer and its manifest together. Page text stays
-        in the page rows only: the manifest holds offsets and checksums, so it
-        is small, never duplicates evidence and never hits the document size
-        limit however long the document is. Returns the manifest written.
+        in the page rows only: the manifest holds offsets and checksums (about
+        350 bytes per page - 420 KB at 1,200 pages, so the 16 MB document limit
+        sits near 40,000 pages) and never duplicates evidence.
+
+        The head write is guarded on the revision it read, so two concurrent
+        publishes for one document cannot both land with the same revision.
+        Returns the manifest written.
         """
         expected_numbers = expected.page_numbers
         wanted = set(expected_numbers)
@@ -419,19 +434,35 @@ class DocumentPageStore:
             )
         except (DuplicatePageError, MalformedPageRecordError) as exc:
             raise CanonicalEvidenceInconsistentError(
-                self.document_id, "page rows cannot be assembled", error=str(exc)
+                self.document_id,
+                "page rows cannot be assembled",
+                pages=(
+                    exc.page_numbers
+                    if isinstance(exc, DuplicatePageError)
+                    else [exc.page_number]
+                ),
+                error=str(exc),
             ) from exc
         if persisted.page_numbers != expected_numbers:
             raise CanonicalEvidenceInconsistentError(
                 self.document_id,
                 "page rows missing for this run",
+                pages=sorted(wanted - set(persisted.page_numbers)),
                 expected_pages=expected_numbers,
                 persisted_pages=persisted.page_numbers,
             )
         if persisted.sha256 != expected.sha256:
+            expected_by_page = {
+                span.page_number: span.content_sha256 for span in expected.page_map
+            }
             raise CanonicalEvidenceInconsistentError(
                 self.document_id,
                 "persisted rows do not reassemble to the assembled text",
+                pages=[
+                    span.page_number
+                    for span in persisted.page_map
+                    if expected_by_page.get(span.page_number) != span.content_sha256
+                ],
                 expected_sha256=expected.sha256,
                 persisted_sha256=persisted.sha256,
             )
@@ -454,7 +485,22 @@ class DocumentPageStore:
             "built_at": now,
             "published_at": now,
         }
-        await heads.update_one(
-            {"document_id": self.document_id}, {"$set": manifest}, upsert=True
-        )
+        if previous:
+            guard: Dict[str, Any] = {"document_id": self.document_id}
+            guard["canonical_revision"] = (
+                previous["canonical_revision"]
+                if "canonical_revision" in previous
+                else {"$exists": False}
+            )
+            result = await heads.update_one(guard, {"$set": manifest})
+            if getattr(result, "matched_count", 1) == 0:
+                raise CanonicalHeadConflictError(
+                    f"canonical head for document {self.document_id!r} changed "
+                    "while this run was publishing"
+                )
+        else:
+            # The unique document_id index refuses a concurrent first publish.
+            await heads.update_one(
+                {"document_id": self.document_id}, {"$set": manifest}, upsert=True
+            )
         return manifest

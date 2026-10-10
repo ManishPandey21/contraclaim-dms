@@ -29,6 +29,7 @@ from .extraction.image_extractor import extract_image, extract_text_file
 from .extraction.image_ocr_runner import TesseractImageOcrRunner
 from .extraction.models import Completeness, PageStatus, SourceKind
 from .extraction.page_store import InconsistentExtractionRunError
+from .extraction_adapters.document_page_store import CanonicalEvidenceInconsistentError
 from .extraction.quality.gate import ExtractionQualityGate
 from .extraction.source_kind import SourceKindRouter
 from .extraction.text_quality import withhold_unusable
@@ -94,18 +95,17 @@ class LegacyDispatchResult:
     pages_human_review: List[int] = field(default_factory=list)
 
 
-async def _file_sha256(path: Path) -> Optional[str]:
+async def _file_sha256(path: Path) -> str:
     """Checksum of the exact bytes this evidence was extracted from."""
 
-    def _digest() -> Optional[str]:
-        try:
-            digest = hashlib.sha256()
-            with open(path, "rb") as handle:
-                for block in iter(lambda: handle.read(1 << 20), b""):
-                    digest.update(block)
-            return digest.hexdigest()
-        except OSError:
-            return None
+    # Not caught: the bytes were read moments ago to extract them, and
+    # evidence published with unknown provenance would look like success.
+    def _digest() -> str:
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for block in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(block)
+        return digest.hexdigest()
 
     return await asyncio.to_thread(_digest)
 
@@ -797,11 +797,12 @@ class DocumentProcessor:
                 skip_embeddings=skip_embeddings,
                 start_time=start_time,
             ))
-        except InconsistentExtractionRunError as e:
+        except (InconsistentExtractionRunError, CanonicalEvidenceInconsistentError) as e:
             # Retrying cannot heal this: the run's page evidence and the
-            # checkpoint disagree, and every further attempt would re-derive
-            # the same disagreement while burning the retry budget. Report it
-            # as terminal so a person sees it, with page numbers only.
+            # checkpoint (or the text about to be published) disagree, and
+            # every further attempt would re-derive the same disagreement while
+            # burning the retry budget. Report it as terminal so a person sees
+            # it, with page numbers only.
             processing_time = time.time() - start_time
             logger.error(
                 "[document_pipeline] Extraction run inconsistent for %s: %s",
@@ -813,7 +814,11 @@ class DocumentProcessor:
                 error=str(e),
                 processing_time=processing_time,
                 processing_state=ProcessingState.HUMAN_REVIEW_REQUIRED.value,
-                pages_human_review=list(e.missing_page_numbers),
+                pages_human_review=list(
+                    e.missing_page_numbers
+                    if isinstance(e, InconsistentExtractionRunError)
+                    else e.page_numbers
+                ),
                 publishable=False,
                 pipeline_version=executed_pipeline,
             )

@@ -44,6 +44,7 @@ from rbac_backend.services.extraction.models import (
     PageStatus,
 )
 from rbac_backend.services.extraction_adapters.document_page_store import (
+    CanonicalHeadConflictError,
     DOCUMENT_EXTRACTION_HEADS,
     DOCUMENT_OCR_PAGES,
     DocumentPageStore,
@@ -159,8 +160,17 @@ async def _publish(store: DocumentPageStore, pages: List[ExtractedPage]) -> dict
     )
 
 
+def _selected(db: FakeDb, org: str = ORG_A, project: str = A1, user: Any = SUPERADMIN) -> ActiveScope:
+    """The navbar selection the browser sends: the record's own project."""
+    return ActiveScope(db, user, org, project)
+
+
 async def _evidence(harness: RetryHarness, user: CurrentUser = SUPERADMIN):
-    return await get_document_canonical_evidence(harness.db, str(harness.document_id), current_user=user)
+    document = await harness.document()
+    selection = _selected(harness.db, str(document["organization_id"]), str(document["project_id"]), user)
+    return await get_document_canonical_evidence(
+        harness.db, str(harness.document_id), current_user=user, selection=selection
+    )
 
 
 async def _head(harness: RetryHarness) -> Optional[dict]:
@@ -257,7 +267,7 @@ async def test_deterministic_repair_keeps_raw_auditable_and_canonical_corrected(
     )
 
     await _publish(_store(db, document_id), [page])
-    evidence = await get_document_canonical_evidence(db, document_id, current_user=SUPERADMIN)
+    evidence = await get_document_canonical_evidence(db, document_id, current_user=SUPERADMIN, selection=_selected(db))
 
     assert "19,292,171" in evidence.text
     assert "1 9,292,171" not in evidence.text
@@ -291,7 +301,7 @@ async def test_reprocessing_one_page_updates_the_canonical_representation() -> N
     before = await _publish(store, [_page(1, "one"), _page(2, "", status=PageStatus.OCR_FAILED, source=PageSource.EMPTY)])
 
     after = await _publish(store, [_page(1, "one"), _page(2, "two recovered", source=PageSource.OCR, status=PageStatus.OCR_COMPLETED)])
-    evidence = await get_document_canonical_evidence(db, document_id, current_user=SUPERADMIN)
+    evidence = await get_document_canonical_evidence(db, document_id, current_user=SUPERADMIN, selection=_selected(db))
 
     assert before["build_status"] == "partial"
     assert after["build_status"] == "complete"
@@ -338,7 +348,7 @@ async def test_a_stale_head_is_detected_on_read_never_served() -> None:
     )
 
     with pytest.raises(CanonicalEvidenceInconsistentError):
-        await get_document_canonical_evidence(db, document_id, current_user=SUPERADMIN)
+        await get_document_canonical_evidence(db, document_id, current_user=SUPERADMIN, selection=_selected(db))
 
 
 async def test_large_document_is_neither_truncated_on_write_nor_on_read() -> None:
@@ -350,7 +360,7 @@ async def test_large_document_is_neither_truncated_on_write_nor_on_read() -> Non
 
     started = time.perf_counter()
     manifest = await _publish(_store(db, document_id), pages)
-    evidence = await get_document_canonical_evidence(db, document_id, current_user=SUPERADMIN)
+    evidence = await get_document_canonical_evidence(db, document_id, current_user=SUPERADMIN, selection=_selected(db))
     elapsed = time.perf_counter() - started
 
     assert manifest["page_count"] == page_count
@@ -365,7 +375,7 @@ async def test_a_document_without_canonical_evidence_says_so_explicitly() -> Non
     db = FakeDb()
     document_id = await _seed_document(db, ocrText="legacy text", ocr_text_kind="source")
 
-    evidence = await get_document_canonical_evidence(db, document_id, current_user=SUPERADMIN)
+    evidence = await get_document_canonical_evidence(db, document_id, current_user=SUPERADMIN, selection=_selected(db))
 
     assert evidence.status == EVIDENCE_NOT_BUILT
     assert evidence.text is None
@@ -382,7 +392,7 @@ async def test_evidence_rows_from_another_tenant_are_never_served() -> None:
     await _publish(_store(db, document_id, org=ORG_B, project=B1), [_page(1, "foreign")])
 
     with pytest.raises(CanonicalEvidenceInconsistentError):
-        await get_document_canonical_evidence(db, document_id, current_user=SUPERADMIN)
+        await get_document_canonical_evidence(db, document_id, current_user=SUPERADMIN, selection=_selected(db))
 
 
 # --- tenant isolation on the read path --------------------------------------
@@ -415,7 +425,9 @@ async def test_foreign_project_member_is_refused() -> None:
     document_id = await _published_in(db, ORG_A, A1)
 
     with pytest.raises(HTTPException) as raised:
-        await get_document_canonical_evidence(db, document_id, current_user=MEMBER_A2)
+        await get_document_canonical_evidence(
+            db, document_id, current_user=MEMBER_A2, selection=ActiveScope(db, MEMBER_A2, ORG_A, A1)
+        )
     assert raised.value.status_code == 403
 
 
@@ -436,7 +448,9 @@ async def test_foreign_organisation_is_refused() -> None:
     document_id = await _published_in(db, ORG_A, A1)
 
     with pytest.raises(HTTPException) as raised:
-        await get_document_canonical_evidence(db, document_id, current_user=ORG_ADMIN_B)
+        await get_document_canonical_evidence(
+            db, document_id, current_user=ORG_ADMIN_B, selection=ActiveScope(db, ORG_ADMIN_B, ORG_A, A1)
+        )
     assert raised.value.status_code == 403
 
 
@@ -445,7 +459,9 @@ async def test_member_without_view_permission_is_refused() -> None:
     document_id = await _published_in(db, ORG_A, A1)
 
     with pytest.raises(HTTPException) as raised:
-        await get_document_canonical_evidence(db, document_id, current_user=NO_VIEW_A1)
+        await get_document_canonical_evidence(
+            db, document_id, current_user=NO_VIEW_A1, selection=ActiveScope(db, NO_VIEW_A1, ORG_A, A1)
+        )
     assert raised.value.status_code == 403
 
 
@@ -467,7 +483,7 @@ async def test_superadmin_is_still_bounded_by_an_explicit_selection() -> None:
 async def test_unknown_document_is_not_found_and_reveals_nothing() -> None:
     db = FakeDb()
     with pytest.raises(Exception) as raised:
-        await get_document_canonical_evidence(db, str(ObjectId()), current_user=SUPERADMIN)
+        await get_document_canonical_evidence(db, str(ObjectId()), current_user=SUPERADMIN, selection=_selected(db))
     assert getattr(raised.value, "http_status", None) == 404
 
 
@@ -475,7 +491,9 @@ async def test_anonymous_caller_is_refused() -> None:
     db = FakeDb()
     document_id = await _published_in(db, ORG_A, A1)
     with pytest.raises(HTTPException) as raised:
-        await get_document_canonical_evidence(db, document_id, current_user=None)
+        await get_document_canonical_evidence(
+            db, document_id, current_user=None, selection=ActiveScope(db, None, ORG_A, A1)
+        )
     assert raised.value.status_code == 401
 
 
@@ -668,7 +686,7 @@ async def test_a_new_run_replaces_the_head_and_keeps_the_old_rows() -> None:
     await _publish(_store(db, document_id, run="job-1"), [_page(1, "first extraction")])
 
     manifest = await _publish(_store(db, document_id, run="job-2"), [_page(1, "second extraction")])
-    evidence = await get_document_canonical_evidence(db, document_id, current_user=SUPERADMIN)
+    evidence = await get_document_canonical_evidence(db, document_id, current_user=SUPERADMIN, selection=_selected(db))
 
     assert manifest["extraction_run_id"] == "job-2"
     assert evidence.extraction_run_id == "job-2"
@@ -695,3 +713,54 @@ async def test_failing_to_publish_evidence_fails_the_attempt_before_any_indexing
     # Nothing downstream ran on evidence that could not be published.
     assert harness.saves() == []
     assert await _head(harness) is None
+
+
+async def test_a_call_without_a_selection_is_refused_not_served_unscoped() -> None:
+    db = FakeDb()
+    document_id = await _published_in(db, ORG_A, A1)
+
+    with pytest.raises(Exception) as raised:
+        await get_document_canonical_evidence(db, document_id, current_user=SUPERADMIN, selection=None)
+    assert getattr(raised.value, "http_status", None) == 400
+
+
+async def test_a_deterministic_publish_mismatch_is_terminal_not_retried(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    harness = await RetryHarness.create(tmp_path, monkeypatch, page_lines=[[NATIVE_ONE], [NATIVE_TWO]], script={})
+
+    async def _rows_disagree(self, **kwargs: Any) -> dict:
+        raise CanonicalEvidenceInconsistentError(self.document_id, "persisted rows differ", pages=[2])
+
+    monkeypatch.setattr(DocumentPageStore, "publish_canonical", _rows_disagree)
+
+    await harness.run_attempt()
+    job = await harness.job()
+
+    assert job["processing_state"] == "human_review_required"
+    assert job["status"] != "retrying"
+    assert harness.saves() == []
+
+
+async def test_a_concurrent_head_move_is_refused_not_overwritten() -> None:
+    db = FakeDb()
+    document_id = await _seed_document(db)
+    store = _store(db, document_id)
+    pages = [_page(1, "one")]
+    await _publish(store, pages)
+    original_find_one = db[DOCUMENT_EXTRACTION_HEADS].find_one
+
+    async def _stale_read(query: dict, *args: Any, **kwargs: Any):
+        head = await original_find_one(query, *args, **kwargs)
+        # Another worker publishes between this read and the guarded write.
+        await db[DOCUMENT_EXTRACTION_HEADS].update_one(
+            {"document_id": document_id}, {"$set": {"canonical_revision": 99}}
+        )
+        return head
+
+    db[DOCUMENT_EXTRACTION_HEADS].find_one = _stale_read
+
+    with pytest.raises(CanonicalHeadConflictError):
+        await store.publish_canonical(
+            expected=assemble_canonical_document(pages), pipeline_version="unified_v1", source_sha256=None
+        )

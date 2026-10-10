@@ -47,13 +47,20 @@ The engine and the processor both call this builder.
 indexing step. It reads the run's rows back, reassembles them, and refuses
 (`CanonicalEvidenceInconsistentError`) if a page is missing or duplicated, or
 if the rows do not hash to the text the pipeline is about to persist. Only
-then does one `update_one` move the head and write its manifest. A failed
-publish fails the attempt. No metadata, chunks or vectors are written from
-unvouched text.
+then does one `update_one` move the head and write its manifest. That write is
+guarded on the revision it read: a concurrent publish raises
+`CanonicalHeadConflictError` (transient, retried) instead of being
+overwritten.
+
+A failed publish fails the attempt, and no metadata, chunks or vectors are
+written from unvouched text. A deterministic mismatch is terminal
+(`human_review_required`, naming the pages). It is not retried.
 
 **Read** (`services/canonical_evidence_service.get_document_canonical_evidence`)
-takes `(db, document_id, current_user, selection=None)`. Authorisation is the
-same as `GET /documents/{id}`: `ActiveScope.require_record`, then
+takes `(db, document_id, current_user, selection)`. The selection is
+required: without one it refuses with 400, because for the global roles
+`authorize_document` alone does not bind the navbar selection. Authorisation
+is then the same as `GET /documents/{id}`: `ActiveScope.require_record`, then
 `PolicyService.authorize_document(dms.document.view)`. It then:
 
 - reassembles the text from the head's run rows;
@@ -89,6 +96,11 @@ consumer must check it before relying on the text as authoritative.
   verify-on-publish plus verify-on-read. A crash between a row rewrite and the
   head write is detected on read as `CanonicalEvidenceInconsistentError`, and
   the next attempt republishes. It is never served as stale text.
+- **Cross-run ordering is not enforced.** The head records whichever run
+  published last. One job per document at a time is enforced by the job queue,
+  not by the head.
+- **Head size.** The page map takes about 350 bytes per page (420 KB at 1,200
+  pages). The 16 MB document limit sits near 40,000 pages.
 - **Legacy pipeline (`legacy_v0`) produces no page evidence.** That is every
   production document today, since `UNIFIED_EXTRACTION_ENABLED` is off. Such a
   document reads as `status=not_built`, with its `ocrText` offered as
