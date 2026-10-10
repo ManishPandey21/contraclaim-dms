@@ -132,6 +132,11 @@ class ProcessingAttemptOutcome:
     expected_page_numbers: List[int] = field(default_factory=list)
     resolved_page_numbers: List[int] = field(default_factory=list)
     remaining_page_numbers: List[int] = field(default_factory=list)
+    #: Pages the quality gate sent to a person. Not a subset of
+    #: `remaining_page_numbers`: a gate-failed page is resolved extraction, so
+    #: it never appears there, and without this list a review the gate alone
+    #: triggered had no record of which page caused it.
+    review_page_numbers: List[int] = field(default_factory=list)
     page_attempts: Dict[str, int] = field(default_factory=dict)
     attempts_exhausted: bool = False
 
@@ -142,6 +147,7 @@ class ProcessingAttemptOutcome:
             "expected_page_numbers": list(self.expected_page_numbers),
             "resolved_page_numbers": list(self.resolved_page_numbers),
             "remaining_page_numbers": list(self.remaining_page_numbers),
+            "review_page_numbers": list(self.review_page_numbers),
             "page_attempts": dict(self.page_attempts),
         }
 
@@ -167,6 +173,7 @@ def build_attempt_outcome(
         if page.status in _UNRESOLVED_PAGE_STATUSES
     )
     resolved = [number for number in expected if number not in set(remaining)]
+    review = sorted({page.number for page in result.pages if page.needs_review})
 
     page_attempts = {str(key): int(value) for key, value in prior_page_attempts.items()}
     for page in result.pages:
@@ -184,6 +191,7 @@ def build_attempt_outcome(
         expected_page_numbers=expected,
         resolved_page_numbers=resolved,
         remaining_page_numbers=remaining,
+        review_page_numbers=review,
         page_attempts=page_attempts,
         attempts_exhausted=attempts_exhausted,
     )

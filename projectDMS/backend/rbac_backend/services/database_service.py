@@ -47,6 +47,27 @@ configure_pipeline_logger(logger)
 sync_logger = logging.getLogger("storage.sync")
 configure_pipeline_logger(sync_logger)
 
+#: Why a run deferred its embeddings, recorded on the vector sync row as
+#: ``deferral_reasons``. Before these existed every deferral was written as
+#: "pending duplicate check", including a document held back because a page
+#: needs human review.
+DEFERRAL_DUPLICATE_PENDING = "duplicate_pending"
+DEFERRAL_HUMAN_REVIEW = "human_review_required"
+
+
+def _deferral_details(reasons: List[str], review_pages: Optional[List[int]]) -> str:
+    parts = []
+    if DEFERRAL_HUMAN_REVIEW in reasons:
+        pages = ", ".join(str(page) for page in sorted(set(review_pages or [])))
+        parts.append(
+            f"Embeddings withheld: page(s) {pages} need human review"
+            if pages
+            else "Embeddings withheld: page(s) need human review"
+        )
+    if DEFERRAL_DUPLICATE_PENDING in reasons:
+        parts.append("Embeddings deferred pending duplicate check")
+    return "; ".join(parts)
+
 
 class DatabaseService:
     """Service for database operations using async Motor client"""
@@ -178,6 +199,8 @@ class DatabaseService:
         skip_embeddings: bool = False,
         metadata_quality: Optional[Dict[str, Any]] = None,
         source_provenance: Optional[Dict[str, Any]] = None,
+        deferral_reasons: Optional[List[str]] = None,
+        review_pages: Optional[List[int]] = None,
     ) -> int:
         """
         Save document data to database and create embeddings.
@@ -185,6 +208,11 @@ class DatabaseService:
         ``source_provenance`` labels what ``full_text`` (the ``ocrText`` write)
         is: ``ocr_text_kind`` and ``source_text_status`` from
         ``services/source_text.py``.
+
+        ``deferral_reasons`` says why ``skip_embeddings`` holds the vectors
+        back (``DEFERRAL_*``); it defaults to the duplicate check, the only
+        reason callers had before it existed. ``review_pages`` names the pages
+        behind a human-review hold.
 
         Returns:
             Number of embedding chunks created
@@ -215,20 +243,25 @@ class DatabaseService:
                 source_provenance=source_provenance,
             )
 
-            # Deferred while a duplicate check is pending: metadata is saved,
-            # but no vectors exist until stage-2 releases the document.
+            # Deferred while a hold applies (a pending duplicate check, or a
+            # page awaiting human review): metadata is saved, but no vectors
+            # exist until the hold is released. The row records which hold.
             if skip_embeddings:
+                reasons = sorted(set(deferral_reasons or [DEFERRAL_DUPLICATE_PENDING]))
+                details = _deferral_details(reasons, review_pages)
                 await self._update_vector_sync_status(
                     db,
                     str(doc.get("_id")),
                     status="deferred",
                     mongo_chunks=0,
                     qdrant_chunks=None,
-                    details="Embeddings deferred pending duplicate check",
+                    details=details,
+                    deferral_reasons=reasons,
                 )
                 logger.info(
-                    "[document_pipeline] Embeddings deferred for %s (duplicate check pending)",
+                    "[document_pipeline] Embeddings deferred for %s (%s)",
                     document_id or doc.get("_id"),
+                    details,
                 )
                 return 0
 
@@ -691,27 +724,43 @@ class DatabaseService:
         mongo_chunks: Optional[int] = None,
         qdrant_chunks: Optional[int] = None,
         details: Optional[str] = None,
+        deferral_reasons: Optional[List[str]] = None,
     ) -> None:
-        """Persist vector sync bookkeeping without raising pipeline errors."""
+        """Persist vector sync bookkeeping without raising pipeline errors.
+
+        ``details`` and ``deferral_reasons`` describe this write only: a write
+        without them clears the previous ones, so a row that moved on from a
+        hold (or a mismatch) never keeps reporting it.
+        """
         payload: Dict[str, Any] = {
             "document_id": document_id,
             "sync_status": status,
             "updatedAt": datetime.utcnow(),
         }
+        stale: Dict[str, str] = {}
         if mongo_chunks is not None:
             payload["mongo_chunks"] = int(mongo_chunks)
         if qdrant_chunks is not None:
             payload["qdrant_chunks"] = int(qdrant_chunks)
         if details:
             payload["details"] = details
+        else:
+            stale["details"] = ""
+        if deferral_reasons:
+            payload["deferral_reasons"] = list(deferral_reasons)
+        else:
+            stale["deferral_reasons"] = ""
 
+        update: Dict[str, Any] = {
+            "$set": payload,
+            "$setOnInsert": {"createdAt": datetime.utcnow()},
+        }
+        if stale:
+            update["$unset"] = stale
         try:
             await db.vector_sync_status.update_one(
                 {"document_id": document_id},
-                {
-                    "$set": payload,
-                    "$setOnInsert": {"createdAt": datetime.utcnow()},
-                },
+                update,
                 upsert=True,
             )
         except Exception as exc:  # pragma: no cover - bookkeeping should not fail pipeline
