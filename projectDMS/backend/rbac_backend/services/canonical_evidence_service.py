@@ -52,6 +52,7 @@ from .extraction_adapters.document_page_store import (
     MalformedPageRecordError,
     from_document_page_record,
 )
+from .publication_policy import is_consumable
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,11 @@ class CanonicalEvidence:
     organization_id: Optional[str]
     project_id: Optional[str]
     status: str
+    #: ``publication_policy.is_consumable`` for the document. Evidence is
+    #: served for review even when this is False (human review, quarantine,
+    #: deletion); a drafting/claim consumer must honour it before relying on
+    #: the text as authoritative.
+    publication_consumable: bool
     text: Optional[str] = None
     pages: List[PageEvidence] = field(default_factory=list)
     manifest: Dict[str, Any] = field(default_factory=dict)
@@ -181,6 +187,7 @@ async def _read_canonical_evidence(db: Any, document: Dict[str, Any]) -> Canonic
             organization_id=organization_id,
             project_id=project_id,
             status=EVIDENCE_NOT_BUILT,
+            publication_consumable=is_consumable(document),
             legacy_text=document.get("ocrText"),
             legacy_text_kind=document.get("ocr_text_kind"),
         )
@@ -266,6 +273,7 @@ async def _read_canonical_evidence(db: Any, document: Dict[str, Any]) -> Canonic
         organization_id=organization_id,
         project_id=project_id,
         status=EVIDENCE_PUBLISHED,
+        publication_consumable=is_consumable(document),
         text=canonical.text,
         pages=page_evidence,
         manifest=manifest,

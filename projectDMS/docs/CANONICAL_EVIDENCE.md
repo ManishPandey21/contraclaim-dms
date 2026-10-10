@@ -63,6 +63,11 @@ same as `GET /documents/{id}`: `ActiveScope.require_record`, then
 A row changed after publication, rows under another tenant, or a missing page
 raises. Nothing is served. There is no HTTP endpoint, and no unscoped variant.
 
+The result also carries `publication_consumable`
+(`publication_policy.is_consumable`). Evidence is served for review even when
+that is False: human review, quarantine, deletion. A drafting or claim
+consumer must check it before relying on the text as authoritative.
+
 ## Behaviour that is pinned (`tests/test_canonical_evidence.py`)
 
 - Review page: its text stays in the canonical text, and `review_pages` names

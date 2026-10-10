@@ -496,6 +496,7 @@ async def test_digital_multi_page_document_is_complete_and_ordered(tmp_path: Pat
     positions = [evidence.text.index(marker) for marker in (NATIVE_ONE, NATIVE_TWO, NATIVE_THREE)]
     assert positions == sorted(positions)
     assert {page.source for page in evidence.pages} == {"text_layer"}
+    assert evidence.publication_consumable is True
     # Exactly what was persisted as the document's text.
     assert evidence.text == harness.full_text()
 
@@ -595,6 +596,8 @@ async def test_review_page_text_is_kept_while_vectors_stay_withheld(tmp_path: Pa
     assert evidence.manifest["review_pages"] == [2]
     assert evidence.page(2).needs_review is True
     assert evidence.manifest["build_status"] == "complete"
+    # Served for review, but flagged: a drafting consumer must not rely on it.
+    assert evidence.publication_consumable is False
 
 
 async def test_indexing_failure_never_prevents_canonical_evidence(tmp_path: Path, monkeypatch: Any) -> None:
