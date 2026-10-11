@@ -176,8 +176,12 @@ async function mockBackend(page: Page) {
 test("links an existing incoming letter to a Variation and unlinks it without deleting the letter", async ({ page }) => {
   const store = await mockBackend(page);
 
-  // Variation Register -> open the Variation's correspondence
+  // Variation Register -> open the Variation's correspondence. Super Admin now
+  // lands on All Organisations / All Projects, where record-level actions are
+  // disabled until a project is chosen, so choose it in the navbar first.
   await page.goto("/variations");
+  await page.getByRole("combobox", { name: "Select organisation" }).selectOption(ORG);
+  await page.getByRole("combobox", { name: "Select project" }).selectOption(PROJECT);
   await expect(page.getByRole("heading", { name: "Variation Register" })).toBeVisible();
   await page.getByRole("button", { name: "Correspondence for VO-001" }).click();
   const dialog = page.getByRole("dialog");
