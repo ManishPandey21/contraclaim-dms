@@ -566,3 +566,9 @@ $C up -d --no-deps --no-build --pull never client
   - Receipt confirmed; `promote` → `current.json` = `2533b19`.
 - **Evidence.** `/var/backups/contraclaim-stg-evidence/REL-2533b19-STAGEA-20261011T162351Z/` (SHA256SUMS).
 - **Pending.** Legacy smoke upload. It needs an authenticated production user, which the operator performs.
+- **Legacy smoke (17:08Z, operator via UI):** the GLM audit letter (sha256 `e727e5d5…`).
+  - `POST /api/documents` 200 with AV enforced.
+  - Job `legacy_v0`, claimed only by `document-worker`, `completed` in 11 s on 1 attempt.
+  - Vectors synced (1/1). Canonical evidence `not_built` (0 page rows, 0 heads).
+  - Text extracted: 150 characters, **identical to the certified image's staging legacy result for the same file**. Pages 1–2 have no text layer, and legacy skips OCR when any text exists (KL-9, pre-existing). Unified_v1 recovered 8/8 facts from this file in staging.
+- **Release 1.0 Stage A: PASS.**
