@@ -206,3 +206,37 @@ def test_document_worker_is_not_exposed_to_the_edge() -> None:
 
     assert "edge-net" not in (service.get("networks") or [])
     assert "ports" not in service
+
+
+# --- The API decides each job's pipeline (P1-1, 2026-10-11) -----------------
+#
+# `pipeline_version` is written once, at job creation, by
+# DocumentService.queue_document_processing, which runs in the API process
+# (routers/documents.py). The workers only honour the persisted value. So the
+# routing configuration that matters is the backend service's: with the
+# allowlist on the workers alone, every canary upload is created legacy_v0 and
+# the canary tests nothing. Reproduced on a staging stack built from 2533b19.
+
+ROUTING_VARIABLES = {
+    "UNIFIED_EXTRACTION_ENABLED": "${UNIFIED_EXTRACTION_ENABLED:-false}",
+    "UNIFIED_EXTRACTION_CANARY_ORG_IDS": "${UNIFIED_EXTRACTION_CANARY_ORG_IDS:-}",
+}
+
+
+def test_the_api_receives_the_routing_configuration_it_decides_with() -> None:
+    env = _services()["backend"]["environment"]
+
+    for name, expression in ROUTING_VARIABLES.items():
+        assert env.get(name) == expression, (
+            f"backend must receive {name} as {expression!r}: the API assigns "
+            "pipeline_version at upload, so a value the API never sees routes nothing"
+        )
+
+
+def test_every_service_that_reads_routing_sees_the_same_configuration() -> None:
+    """API and workers are configured from one source and cannot disagree."""
+    services = _services()
+    for name in ("backend", "document-worker", "document-worker-canary"):
+        env = services[name]["environment"]
+        for variable, expression in ROUTING_VARIABLES.items():
+            assert env.get(variable) == expression, f"{name}: {variable}"
