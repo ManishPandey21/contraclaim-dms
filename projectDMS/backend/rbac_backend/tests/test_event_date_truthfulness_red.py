@@ -380,7 +380,7 @@ async def _verified_at_a() -> tuple[Any, dict[str, Any], dict[str, Any]]:
 
 
 def test_changing_only_event_date_retires_the_old_date_text() -> None:
-    async def scenario() -> None:
+    async def scenario() -> dict[str, Any]:
         svc, chronology, event = await _verified_at_a()
         updated = await svc.update_event(
             chronology["_id"], event["_id"], MatterChronologyEventUpdate(event_date=DATE_B), _user()
@@ -399,11 +399,13 @@ def test_changing_only_event_date_retires_the_old_date_text() -> None:
         assert project_event["event_date"] == DATE_B
         assert _metadata(project_event).get("date_text") != DATE_A_TEXT
 
-        current = await svc.get_event(chronology["_id"], event["_id"])
-        rows = adapter_harness._adapter_rows(adapter_harness._event(**{**current, "verification_status": "approved"}), [])
-        assert rows[0]["date"] == DATE_B
+        return await svc.get_event(chronology["_id"], event["_id"])
 
-    _run(scenario())
+    current = _run(scenario())
+    # The arbitration chronology adapter (its own event loop) reads the edited row.
+    scoped = {**current, "organization_id": "org-1", "project_id": "project-1", "verification_status": "approved"}
+    rows = adapter_harness._adapter_rows(adapter_harness._event(**scoped), [adapter_harness._doc("metadata_extracted")])
+    assert rows[0]["date"] == DATE_B
 
 
 def test_changing_event_date_and_date_text_together_keeps_both() -> None:

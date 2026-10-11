@@ -377,6 +377,21 @@ class ChronologyService:
             meta = dict(update.get("metadata") or before.get("metadata") or {})
             meta.update(date_metadata(update.get("event_date"), DATE_ROLE_EVENT if update.get("event_date") else None))
             update["metadata"] = meta
+            # The ledger, exports and the timeline projection prefer
+            # `date_text`, so the old text must not outlive the date it spelled.
+            # Text supplied with the new date is the reviewer's and is kept.
+            if "date_text" not in update:
+                update["date_text"] = None
+            if "date_type" not in update:
+                if update.get("event_date") is None:
+                    update["date_type"] = ChronologyDateType.UNDATED.value
+                elif _enum_value(before.get("date_type")) in {
+                    ChronologyDateType.UNDATED.value,
+                    ChronologyDateType.INFERRED.value,
+                }:
+                    # A date a person entered is neither missing nor a
+                    # day-first guess any more; other precisions are theirs.
+                    update["date_type"] = ChronologyDateType.EXACT.value
         material = [field for field in changed if field not in _PRESENTATION_ONLY_EVENT_FIELDS]
         was_verified = before.get("verification_status") in _VERIFIED_STATES
         note = None
