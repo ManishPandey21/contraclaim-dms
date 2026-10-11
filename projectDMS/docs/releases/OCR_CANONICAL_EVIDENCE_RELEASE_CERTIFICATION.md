@@ -541,3 +541,28 @@ $C up -d --no-deps --no-build --pull never client
 # 6. After each step: contraclaim-falkordb-1 still Exited, getent hosts falkordb == 1 address,
 #    document-worker-canary not created (replicas 0), UNIFIED_EXTRACTION_ENABLED=false.
 ```
+
+### Stage A deployment (2026-10-11, 16:50:38Z–16:52:40Z)
+
+- **Image ids.** The certified `4b7b4aae…` / `11c904e9…` are **containerd OCI index digests** (Docker Desktop's image store). On production's classic overlay2 store the same images load as their **config digests**: backend/workers `sha256:fca3c3ad1803472bdfed1bed61aaa599cbb4684323372aa25ec8b062cfbc5e1f`, client `sha256:eeb1a7b62aace63ea9188d51201e55b9ea656a65333b63939daa0399ea445812`. Identity is proven: the certified local image's own config digest equals the production id, and the layer diffID list matches (fingerprints `5bb83a78…`, `119024f2…`).
+- **Re-scans.**
+  - Local, exact certified images: 16:23Z.
+  - Production host, loaded ids: 16:49Z, using the host's unpinned `aquasec/trivy:latest`. Freshness gate GO with 0 fixable HIGH/CRITICAL.
+- **Checkout.** `git fetch origin release/contraclaim-rc1` (the host's `origin` is `contraclaim-dms`) and `git merge --ff-only 2533b19…` → HEAD `2533b19`, tree `e3804d6`, tracked tree clean.
+- **Rollback tags.** `contraclaim-rollback-{backend,contract-worker,document-worker,client}:1e89bf3-pre2533b19` (`a82a6b31` / `cd95b7e1`).
+- **Deploy.**
+  - backend → contract-worker → document-worker → client, each `up -d --no-deps --no-build --pull never`, each dry-run first (only the named service).
+  - After each service: exact image, `RELEASE_SHA=2533b19`, no other container restarted, `contraclaim-falkordb-1` still exited, `falkordb` → 1 address (the cutover), 0 new errors.
+  - Gateway not recreated; it serves the new bundle `index-G35t3wIS.js`.
+- **Health.**
+  - API: health/ready 200; public `/health` 200; `/api/me` unauthenticated → 401.
+  - Data services: Mongo rs0 1 primary + 2 secondaries; Redis auth OK; Qdrant 200; clamd PONG.
+  - Workers: Redis/Mongo/FalkorDB reachable from both; document-worker `legacy_v0` only; contract-worker the only scheduler (9 leader-locked jobs).
+  - Jobs and logs: 0 jobs queued/processing, dead letters unchanged (4); 0 errors / auth failures / graph errors / 5xx.
+- **Parity.** 175 collections and every tracked count identical before and after; page rows 0, heads 0.
+- **Governed record.**
+  - `release_manifest.py certify` + `target` (FULL).
+  - `post_deploy_verify.sh`: 0 failures, 1 known warning (`ALLOWED_DOCUMENT_MIMES` unset, code default).
+  - Receipt confirmed; `promote` → `current.json` = `2533b19`.
+- **Evidence.** `/var/backups/contraclaim-stg-evidence/REL-2533b19-STAGEA-20261011T162351Z/` (SHA256SUMS).
+- **Pending.** Legacy smoke upload. It needs an authenticated production user, which the operator performs.
