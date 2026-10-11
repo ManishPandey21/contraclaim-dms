@@ -243,4 +243,3 @@ def test_super_admin_without_a_selection_follows_the_existing_selection_rule() -
             assert await _status(env.db, CANDIDATE_A1) == "ai_suggested"
 
     _run(scenario())
-

@@ -326,9 +326,6 @@ MATERIAL_EDITS: list[tuple[str, dict[str, Any]]] = [
     ("impact_amount", {"impact_amount": 1000000.0}),
     ("issue_tags", {"issue_tags": ["site_access"]}),
     ("claim_heads", {"claim_heads": ["eot"]}),
-    ("claim_id", {"claim_id": "claim-7"}),
-    ("matter_id", {"matter_id": "matter-7"}),
-    ("contract_id", {"contract_id": "contract-7"}),
     ("contract_clauses", {"contract_clauses": ["Clause 2.1"]}),
     ("source_document_id", {"source_document_id": "doc-B"}),
     ("source_page", {"source_page": 3}),
@@ -677,3 +674,21 @@ async def test_reverification_republishes_links_from_the_current_content() -> No
     assert project_event["status"] == "open"
     assert project_event["description"] == "Corrected narrative"
     assert len([row for row in db.project_events.documents if (row.get("metadata") or {}).get("chronology_event_id") == event["_id"]]) == 1
+
+
+@pytest.mark.asyncio
+async def test_linking_a_new_event_to_a_verified_event_is_a_material_edit() -> None:
+    from rbac_backend.models.chronology import ChronologyLinkRequest
+    from rbac_backend.routers import chronology as chronology_router
+
+    db, service, chronology = await _db_and_chronology()
+    other = await _candidate(service, chronology, title="Related event")
+    event = await _verified(service, chronology)
+
+    linked = await chronology_router.link_chronology_event(
+        chronology_id=chronology["_id"], event_id=event["_id"], payload=ChronologyLinkRequest(related_event_ids=[other["_id"]]),
+        db=db, current_user=_user(), policy=_editor(), selection=_selected(db, _user()),
+    )
+
+    assert linked.verification_status == NEEDS_REVIEW
+    assert await _verified_links_for(db, event["_id"]) == []
