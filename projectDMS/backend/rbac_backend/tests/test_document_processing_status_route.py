@@ -17,11 +17,14 @@ in-memory Mongo boundary; only permission/entitlement seams are patched.
 
 from __future__ import annotations
 
+import sys
 from datetime import datetime
 
+import pytest
 from bson import ObjectId
 
-from rbac_backend.tests.test_cl4a_documents_contracts_scope import (  # noqa: F401 - fixtures
+from rbac_backend.core.database import get_database as _original_get_database
+from rbac_backend.tests.test_cl4a_documents_contracts_scope import (  # noqa: F401 - autouse seams
     A1,
     A2,
     DOC_A1,
@@ -35,7 +38,7 @@ from rbac_backend.tests.test_cl4a_documents_contracts_scope import (  # noqa: F4
     _authorization_seams,
     _code,
     _Database,
-    db,
+    _seeded,
 )
 
 #: The fields the client's ``DocumentProcessingJobStatus`` declares.
@@ -43,6 +46,20 @@ CLIENT_FIELDS = {
     "_id", "document_id", "status", "stage", "attempts", "max_attempts", "error",
     "metadata", "created_at", "queued_at", "started_at", "completed_at", "updated_at",
 }
+
+
+@pytest.fixture
+def db(monkeypatch: pytest.MonkeyPatch) -> _Database:
+    """The CL-4A seed, with every module's ``get_database`` routed to it."""
+    database = _seeded()
+
+    async def _get_database() -> _Database:
+        return database
+
+    for name, module in list(sys.modules.items()):
+        if "rbac_backend" in name and getattr(module, "get_database", None) is _original_get_database:
+            monkeypatch.setattr(module, "get_database", _get_database)
+    return database
 
 
 def _path(document_id: ObjectId) -> str:
