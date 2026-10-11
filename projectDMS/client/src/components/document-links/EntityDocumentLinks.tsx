@@ -249,11 +249,17 @@ export default function EntityDocumentLinks({
     }
   };
 
-  const inputClass = "h-9 rounded-md border border-input bg-background px-3 text-sm";
+  // `w-full min-w-0`: a control's intrinsic width (a select sizes to its longest
+  // option) must never set the width of the form around it.
+  const inputClass = "h-9 w-full min-w-0 rounded-md border border-input bg-background px-3 text-sm";
   const fieldId = (name: string) => `${targetType}-document-${name}`;
 
+  // `min-w-0` on the root: this component is placed inside grid and flex parents
+  // (a Dialog is a grid), whose items default to `min-width: auto`. Without it a
+  // long, unwrapped filename sets the parent's track width and the content spills
+  // past the dialog and the viewport.
   return (
-    <div className="space-y-3">
+    <div className="min-w-0 space-y-3">
       {loading ? (
         <p className="flex items-center text-sm text-muted-foreground">
           <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading linked Documents…
@@ -270,13 +276,13 @@ export default function EntityDocumentLinks({
         const name = documentName(link.document, link.document_id);
         const details = correspondenceDetails(link.document);
         return (
-          <div key={link._id} data-testid="linked-document" className="flex items-center gap-2 rounded-md border p-2 text-sm">
-            <Link to={`/documentviewer/${link.document_id}`}
-              className="flex min-w-0 flex-1 items-center gap-2 hover:underline">
-              <FileText className="h-4 w-4 shrink-0" />
-              <span className="min-w-0">
-                <span className="block truncate">{name}</span>
-                {details && <span className="block truncate text-xs text-muted-foreground">{details}</span>}
+          <div key={link._id} data-testid="linked-document" className="flex min-w-0 items-center gap-2 rounded-md border p-2 text-sm">
+            <Link to={`/documentviewer/${link.document_id}`} title={name}
+              className="flex min-w-0 flex-1 items-start gap-2 hover:underline">
+              <FileText className="mt-0.5 h-4 w-4 shrink-0" />
+              <span className="min-w-0 flex-1">
+                <span className="line-clamp-2 [overflow-wrap:anywhere]">{name}</span>
+                {details && <span className="block truncate text-xs text-muted-foreground" title={details}>{details}</span>}
               </span>
               <span className="ml-auto shrink-0 text-xs text-muted-foreground">
                 {roleLabels.get(link.relationship_role) || relationshipRoleLabel(link.relationship_role)}
@@ -298,23 +304,26 @@ export default function EntityDocumentLinks({
         <p className="text-xs text-muted-foreground">You have view-only access to document links.</p>
       ) : (
         <div className="space-y-2 border-t pt-3">
-          <label className="flex items-center gap-2 text-xs" htmlFor={fieldId("role")}>
+          <label className="flex flex-wrap items-center gap-2 text-xs" htmlFor={fieldId("role")}>
             Relationship role
             <select id={fieldId("role")}
-              className="h-9 rounded-md border border-input bg-background px-2 text-sm"
+              className="h-9 min-w-0 max-w-full rounded-md border border-input bg-background px-2 text-sm"
               value={role} onChange={(event) => setRole(event.target.value)}>
               {roles.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
             </select>
           </label>
-          <div className="flex gap-2">
+          <div className="flex min-w-0 gap-2">
             <label className="sr-only" htmlFor={fieldId("search")}>Search Documents</label>
             <input id={fieldId("search")} className={`${inputClass} flex-1`}
               placeholder={correspondenceOnly ? "Letter number, subject or party" : "Search Documents"}
               value={query} onChange={(event) => setQuery(event.target.value)} />
-            <Button type="button" variant="outline" size="sm" disabled={busy} onClick={searchNow}>Search</Button>
+            <Button type="button" variant="outline" size="sm" className="shrink-0" disabled={busy} onClick={searchNow}>Search</Button>
           </div>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
-            <label className="flex flex-col gap-1 text-xs" htmlFor={fieldId("direction")}>
+          {/* Columns follow the width this component is given, not the viewport: the
+              same filters sit in a 672px dialog (3 + 2) and in full-width cards (5),
+              and fall to 2 then 1 column as space runs out. */}
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,10rem),1fr))] gap-2">
+            <label className="flex min-w-0 flex-col gap-1 text-xs" htmlFor={fieldId("direction")}>
               Direction
               <select id={fieldId("direction")} className={inputClass} value={direction}
                 onChange={(event) => setDirection(event.target.value as Direction)}>
@@ -324,22 +333,22 @@ export default function EntityDocumentLinks({
                 {!correspondenceOnly && <option value="contract">Contract</option>}
               </select>
             </label>
-            <label className="flex flex-col gap-1 text-xs" htmlFor={fieldId("letter-no")}>
+            <label className="flex min-w-0 flex-col gap-1 text-xs" htmlFor={fieldId("letter-no")}>
               Letter number
               <input id={fieldId("letter-no")} className={inputClass} value={letterNo}
                 onChange={(event) => setLetterNo(event.target.value)} />
             </label>
-            <label className="flex flex-col gap-1 text-xs" htmlFor={fieldId("subject")}>
+            <label className="flex min-w-0 flex-col gap-1 text-xs" htmlFor={fieldId("subject")}>
               Subject
               <input id={fieldId("subject")} className={inputClass} value={subject}
                 onChange={(event) => setSubject(event.target.value)} />
             </label>
-            <label className="flex flex-col gap-1 text-xs" htmlFor={fieldId("date-from")}>
+            <label className="flex min-w-0 flex-col gap-1 text-xs" htmlFor={fieldId("date-from")}>
               Date from
               <input id={fieldId("date-from")} type="date" className={inputClass} value={dateFrom}
                 onChange={(event) => setDateFrom(event.target.value)} />
             </label>
-            <label className="flex flex-col gap-1 text-xs" htmlFor={fieldId("date-to")}>
+            <label className="flex min-w-0 flex-col gap-1 text-xs" htmlFor={fieldId("date-to")}>
               Date to
               <input id={fieldId("date-to")} type="date" className={inputClass} value={dateTo}
                 onChange={(event) => setDateTo(event.target.value)} />
@@ -356,20 +365,24 @@ export default function EntityDocumentLinks({
             const alreadyLinked = linkedDocumentIds.has(document._id);
             return (
               <div key={document._id} data-testid="document-search-result"
-                className="flex items-center justify-between gap-2 rounded-md border p-2 text-sm">
-                <label className="flex items-center gap-2">
-                  <input type="checkbox" aria-label={`Select ${name}`} disabled={alreadyLinked || busy}
+                className="flex min-w-0 items-start justify-between gap-2 rounded-md border p-2 text-sm">
+                <label className="flex min-w-0 flex-1 items-start gap-2" title={name}>
+                  <input type="checkbox" className="mt-0.5 shrink-0" aria-label={`Select ${name}`} disabled={alreadyLinked || busy}
                     checked={selected.has(document._id)} onChange={(event) => setSelected((current) => {
                       const next = new Set(current);
                       if (event.target.checked) next.add(document._id); else next.delete(document._id);
                       return next;
                     })} />
-                  <span>
-                    <span className="block">{name}</span>
-                    {details && <span className="block text-xs text-muted-foreground">{details}</span>}
+                  <span className="min-w-0 flex-1">
+                    <span className="line-clamp-2 [overflow-wrap:anywhere]">{name}</span>
+                    {details && (
+                      <span className="line-clamp-2 text-xs text-muted-foreground [overflow-wrap:anywhere]" title={details}>
+                        {details}
+                      </span>
+                    )}
                   </span>
                 </label>
-                <div className="flex items-center gap-2">
+                <div className="flex shrink-0 items-center gap-2">
                   <Link to={`/documentviewer/${document._id}`} aria-label={`View ${name}`}
                     className="text-xs text-primary hover:underline">View</Link>
                   {alreadyLinked ? <span className="text-xs text-muted-foreground">Already linked</span> : (
