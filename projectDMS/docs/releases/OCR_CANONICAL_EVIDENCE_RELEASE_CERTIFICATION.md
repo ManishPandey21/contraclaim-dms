@@ -486,3 +486,58 @@ OPEN ISSUES            = P1-1 (until fixed), P2-1, P2-2, P2-3, P2-4, P2-5, KL-1.
 PRODUCTION HEALTH      =
 NEXT EXPANSION DECISION=
 ```
+
+## 21. Release 1.0 production window log (2026-10-11)
+
+### Gate 1: backup (PASS)
+
+| Item | Evidence |
+|---|---|
+| FalkorDB forensic snapshots (before any stop) | `/var/backups/contraclaim-forensics/falkor-20261011T160938Z/{original,cutover}/` (mode 700): `original.rdb` sha256 `74ec9359…846a` (307,319 B), `cutover.rdb` sha256 `583c5518…e41a` (130,810 B), each with a `RECORD.txt` and `SHA256SUMS`. The size gap is FalkorDB's `telemetry{contraclaim}` stream, not graph data. |
+| Reconciliation | Original ids 151/152: Letters whose source documents are `lifecycle=deleted` (2026-08-24 uploads). Cutover ids 151/152: stubs for **active** documents uploaded 2026-10-05 05:34:37 and 2026-09-25 18:20:59 (nodes created 11 s and 30 s later). Neither engine holds the other's codes. Relationship count 0 on all four. Active data present only on the original: **NO**. The original's data dir is `/FalkorDB` (its container layer), not the shared `/data`. |
+| Stop | `docker stop contraclaim-falkordb-1` at 2026-10-11T16:11:23Z (exit 137; container kept, not removed). DNS `falkordb` → 1 address (the cutover's). Cutover fingerprints unchanged (nodes `b6d48b1d…`, rels `c7323c44…`, edges `46aaae71…`; 156 nodes / 220 rels). The backend, contract-worker and document-worker FalkorDB clients query successfully; 0 FalkorDB errors. |
+| Backup `20261011-214219` | script exit 0; flush redis **ok**, falkordb **ok** (cutover LASTSAVE advanced); `backup_status.py` ok; 6/6 checksums OK; offsite sync complete |
+| FalkorDB restore drill | archive restored into `falkordb/falkordb:v4.0.8` with `--network none`; graph names, counts, labels and all three content fingerprints equal the live cutover; container and workdir removed |
+| Mongo restore drill | `20261011-214219` archive restored into a network-less throwaway `mongod`; 175 collections and 8 key counts equal live |
+
+### Gate 2: Redis credential rotation (PASS)
+
+- `.env` copied to `.env.pre-redis-rotation-20261011T161624Z` (mode 600). The new 64-char password was generated on the host, never printed (sha256 prefix `6300ed94`).
+- The three `*_REDIS_URL` keys in `.env` did not contain the live password and are unused by compose (the URLs are built from `REDIS_PASSWORD`). They are left as is and recorded as cleanup.
+- Redis BGSAVE, then `up -d --no-deps --no-build --pull never redis`, then backend → contract-worker → document-worker, one at a time with the same flags. Same images (`a82a6b31`). 16:16:48Z–16:17:24Z.
+- Redis keys preserved (db0 = 3, db1 = 7). The new password is live in `.env`, in redis, and in all 15 URL variables across the three app services. The old password gets `WRONGPASS`; no password gets `NOAUTH`. 0 auth errors, health/ready 200, public edge 200, workers restarted (legacy_v0 restriction, scheduler leader).
+- Stale copies still holding older secrets (not loaded by anything): `/opt/contraclaim-dms/.env`, `projectDMS/backend/.env`, `/opt/contraclaim-dms/backend/.env`, and the `projectDMS/.env.pre-*` / `.env.bak-*` files. Cleanup is an owner decision.
+
+### Rendered Stage A procedure (for owner review, NOT executed)
+
+`docker-compose.prod.yml`, `docker-compose.mongo-replicaset.yml`, `config/` and both Dockerfiles are byte-identical between `1e89bf3` and `2533b19`, so Stage A is an image swap on an unchanged compose definition.
+
+Dry-run evidence on the host (2026-10-11):
+
+- `up -d --no-deps --no-build --pull never <service>` touches only that service.
+- `up -d backend` **without** `--no-deps` would recreate and start `contraclaim-falkordb-1` and recreate `qdrant`. **Forbidden.**
+
+```bash
+C="docker compose -p contraclaim -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml"
+# 0. Same-id re-scan (≤ 24 h), SHA reconfirm, fresh backup (exit 0, both flushes ok).
+# 1. Ship the certified bytes (ids survive save/load):
+#    docker save contraclaim-cert-backend:2533b19 contraclaim-cert-client:2533b19 | ssh contraclaim docker load
+#    verify ids == 4b7b4aae… / 11c904e9…
+# 2. Rollback tags for the running ids:
+docker tag sha256:a82a6b31336b16a4f2eb02a124bbb36e2a47c736a82a4e0094cd7f1b2b49b35c contraclaim-rollback-backend:1e89bf3
+docker tag sha256:cd95b7e12cd21f7b8de4445b0779a0825a32a21dc2120d76acd54e63f2cb4d6b contraclaim-rollback-client:1e89bf3
+# 3. Code: git fetch origin && git merge --ff-only origin/release/contraclaim-rc1   (expect 2533b19 / e3804d6)
+# 4. Retag certified ids to the compose names:
+for s in backend contract-worker document-worker document-worker-canary; do docker tag sha256:4b7b4aae06a0c66e88cc0b70c638c018eccccad0bb5d4f24d8a20aa6c9bb35f9 contraclaim-$s:latest; done
+docker tag sha256:11c904e97663d4421dc7437e1e35d10a6472ebf7515e61120eaf02af72c373ee contraclaim-client:latest
+# 5. Prove, then act - per service, never a blanket up:
+for s in backend contract-worker document-worker client; do
+  $C up --dry-run -d --no-deps --no-build --pull never $s   # must show ONLY "$s Recreate"
+done
+$C up -d --no-deps --no-build --pull never backend          # then /health/ready 200
+$C up -d --no-deps --no-build --pull never contract-worker
+$C up -d --no-deps --no-build --pull never document-worker
+$C up -d --no-deps --no-build --pull never client
+# 6. After each step: contraclaim-falkordb-1 still Exited, getent hosts falkordb == 1 address,
+#    document-worker-canary not created (replicas 0), UNIFIED_EXTRACTION_ENABLED=false.
+```
