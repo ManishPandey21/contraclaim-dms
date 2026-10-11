@@ -32,8 +32,25 @@ async def _main_async(args: argparse.Namespace) -> int:
         results = await runner.run(apply=args.apply, target=args.target)
         print(json.dumps([result.to_dict() for result in results], indent=2, default=_json_default))
 
-        failures = [result for result in results if result.warnings and args.fail_on_warning]
-        if failures:
+        # Notices are reported, never suppressed: demoting them out of the gate
+        # is not the same as hiding them, and an operator reading a dry run has
+        # to see what each migration says it will not do (F-A8M-1).
+        for result in results:
+            for notice in result.notices:
+                print(f"NOTICE  {result.version} {result.name}: {notice}", file=sys.stderr)
+
+        warned = [result for result in results if result.warnings]
+        for result in warned:
+            for warning in result.warnings:
+                print(f"WARNING {result.version} {result.name}: {warning}", file=sys.stderr)
+
+        if warned and args.fail_on_warning:
+            versions = ", ".join(result.version for result in warned)
+            print(
+                f"--fail-on-warning: {len(warned)} migration(s) reported findings about "
+                f"this database ({versions}). Review them before promoting.",
+                file=sys.stderr,
+            )
             return 2
         return 0
     finally:

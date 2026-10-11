@@ -10,10 +10,10 @@ from .database import get_db  # Corrected import
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, EmailStr, Field
 import uuid
-import re
 from bson import ObjectId
 from pydantic import ConfigDict
-from ..services.permission_service import PermissionService
+from ..services.permission_service import PermissionService, fetch_role_documents
+from .role_reference import ROLE_ALIASES as _ROLE_REFERENCE_ALIASES, normalize_role_key, resolve_role_reference
 from ..utils.audit_logger import get_audit_logger
 
 
@@ -61,41 +61,14 @@ async def _handle_session_store_unavailable(exc: Exception) -> None:
         exc,
     )
 
-# Compatibility role aliases to normalize various role naming schemes
-ROLE_ALIASES = {
-    "organization-user": "orguser",
-    "org-user": "orguser",
-    "organization user": "orguser",
-    "organizationuser": "orguser",
-    "orguser": "orguser",
-    "organization-admin": "orgadmin",
-    "org-admin": "orgadmin",
-    "organization admin": "orgadmin",
-    "organizationadmin": "orgadmin",
-    "orgadmin": "orgadmin",
-    "project-user": "projectuser",
-    "project user": "projectuser",
-    "projectuser": "projectuser",
-    "proj-user": "projectuser",
-    "proj user": "projectuser",
-    "projuser": "projectuser",
-    "project-admin": "projectadmin",
-    "project admin": "projectadmin",
-    "projectadmin": "projectadmin",
-    "proj-admin": "projectadmin",
-    "proj admin": "projectadmin",
-    "projadmin": "projectadmin",
-    "super-admin": "superadmin",
-    "super admin": "superadmin",
-    "superadministrator": "superadmin",
-}
+# The principal's role-alias table lives with the reference resolver, so the key the
+# principal carries and the document the permission resolver loads cannot drift apart.
+ROLE_ALIASES = _ROLE_REFERENCE_ALIASES
 
 def _normalize_roles_list(roles):
     out = []
     for r in (roles or []):
-        s = str(r).strip().lower()
-        s = ROLE_ALIASES.get(s, ROLE_ALIASES.get(re.sub(r"[^a-z0-9]", "", s), s))
-        out.append(s)
+        out.append(normalize_role_key(r))
     # de-duplicate while preserving order
     result = []
     seen = set()
@@ -120,6 +93,239 @@ class CurrentUser(BaseModel):
     projects: List[str] = Field(default_factory=list)
     account_type: str = "client_user"
     disabled: bool = False
+class StoredPrincipalUnavailableError(Exception):
+    """A durable actor reference could not be resolved to a real principal.
+
+    It is deliberately NOT an ``HTTPException``: the callers are background
+    workers with no response to shape. What matters is that it is an error at
+    all — the caller must stop, never continue against a stand-in.
+    """
+
+
+async def _without_revoked_roles(db, user: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop `users.roles` references that must not reach the principal.
+
+    `CurrentUser.roles` is what every name-based decision reads - superadmin
+    bypass, scope, role manageability. System roles are stored under their key
+    (`"superadmin"`, `"orgadmin"`), so without this a soft-deleted system role kept
+    granting by name even after `PermissionService` stopped counting its
+    permissions (R-A9B).
+
+    Each reference is judged by `core.role_reference`, the same resolver that decides
+    which document `PermissionService` loads, so tier and permissions agree: a
+    deactivated role - reached directly or through a legacy spelling - is dropped,
+    and so is a legacy spelling that resolves to no role or to more than one. A bare
+    key with no document is kept, as before. One query per principal.
+    """
+    references = list(user.get("roles") or [])
+    if not references:
+        return user
+    documents = await fetch_role_documents(db, references)
+    kept = [reference for reference in references if resolve_role_reference(reference, documents).keeps_role_key]
+    if len(kept) == len(references):
+        return user
+    return {**user, "roles": kept}
+
+
+def _principal_from_user_document(user: Dict[str, Any], email: Optional[str] = None) -> CurrentUser:
+    """Build the canonical principal from an entitlement-store row.
+
+    One construction, two doors: the authenticated request (``get_current_user``)
+    and the re-resolution of a durable actor reference on a background worker
+    (``resolve_stored_principal``). Keeping it in one place is the point — a
+    second, slightly different principal builder is how a background path ends up
+    with roles the request path would never have granted.
+    """
+    # Derive organizations for superuser/similar users if not present
+    orgs = user.get("organizations", [])
+    org_id = user.get("organization_id")
+    if (not orgs) and org_id:
+        try:
+            orgs = [str(org_id)]
+        except Exception:
+            orgs = [org_id]
+    roles = _normalize_roles_list(user.get("roles", []))
+    org_id_sanitized = org_id
+    orgs_sanitized = orgs or []
+    projects_sanitized = (user.get("projects", []) or [])
+    if "superadmin" in roles:
+        org_id_sanitized = None
+        orgs_sanitized = []
+        projects_sanitized = []
+    return CurrentUser(
+        id=str(user["_id"]),
+        username=user.get("username", email),
+        email=user.get("email", email),
+        first_name=user.get("first_name") or user.get("firstName"),
+        last_name=user.get("last_name") or user.get("lastName"),
+        job_title=user.get("job_title") or user.get("jobTitle"),
+        roles=roles,
+        organization_id=org_id_sanitized,
+        organizations=orgs_sanitized,
+        projects=projects_sanitized,
+        account_type=user.get("account_type", "client_user"),
+        disabled=user.get("disabled", False),
+    )
+
+
+async def resolve_stored_principal(db, actor_reference: Any) -> CurrentUser:
+    """Re-resolve the authenticated principal behind a durable actor reference.
+
+    Queued work — a LangGraph drafting run, a reconciliation pass — has no HTTP
+    request, so it has no ``get_current_user`` result to carry. What it does have
+    is the identifier of the human who started it, written from the authenticated
+    principal at request time (``created_by`` and friends).
+
+    That identifier is an IDENTITY, never an entitlement. This resolves it
+    against the entitlement store and returns the SAME canonical principal the
+    request would have carried, evaluated NOW: a revoked project assignment or a
+    disabled account is honoured on the next attempt rather than replayed from a
+    role list cached when the job was queued. That is also why user roles must
+    not be persisted alongside the job — see ``docs/AUTHZ.md``.
+
+    It never fabricates authority. A reference that resolves to no enabled user
+    raises ``StoredPrincipalUnavailableError``, and callers must fail rather than
+    continue with a synthesised stand-in; a principal derived from the resource
+    being read is circular and is not authority.
+    """
+    reference = str(actor_reference or "").strip()
+    if not reference:
+        raise StoredPrincipalUnavailableError(
+            "no stored actor reference: this work has no principal to run as"
+        )
+    if db is None:
+        raise StoredPrincipalUnavailableError(
+            "no database available to resolve the stored principal"
+        )
+
+    candidates: List[Dict[str, Any]] = []
+    try:
+        oid = ObjectId(reference)
+    except Exception:
+        oid = None
+    if oid is not None:
+        candidates.append({"_id": oid})
+    candidates.append({"_id": reference})
+    # `_user_id` records `id or email or username`, so the reference may be any
+    # of the three. Resolution follows the same order.
+    candidates.append({"email": reference})
+    candidates.append({"username": reference})
+
+    user: Optional[Dict[str, Any]] = None
+    for query in candidates:
+        try:
+            user = await db.users.find_one(query)
+        except Exception as exc:  # noqa: BLE001 - re-raised as a refusal
+            raise StoredPrincipalUnavailableError(
+                f"the entitlement store could not be read for principal {reference!r}: {exc}"
+            ) from exc
+        if user:
+            break
+    if not user:
+        raise StoredPrincipalUnavailableError(
+            f"stored actor reference {reference!r} resolves to no user"
+        )
+    if user.get("disabled"):
+        raise StoredPrincipalUnavailableError(
+            f"stored actor reference {reference!r} resolves to a disabled account"
+        )
+    try:
+        return _principal_from_user_document(await _without_revoked_roles(db, user))
+    except Exception as exc:  # noqa: BLE001 - an unbuildable principal is a refusal
+        raise StoredPrincipalUnavailableError(
+            f"stored actor reference {reference!r} is not a usable principal: {exc}"
+        ) from exc
+
+
+async def principal_from_access_token(token: str, db) -> Optional[CurrentUser]:
+    """Resolve one access token to a principal, or ``None`` if it does not authenticate.
+
+    The single definition of "this token authenticates a session", shared by the
+    HTTP dependency (``get_current_user``) and the notifications WebSocket so a
+    token one refuses cannot open the other. It enforces, in order: signature and
+    expiry, the access-token type, the ``sub`` (email) identity, an existing
+    account, the ``user_jwt_min_iat`` revocation floor and session liveness (when
+    a runtime Redis is configured), then drops revoked role references.
+
+    ``None`` means "try the next credential"; it never raises a 401 itself. A
+    session-store or role-store outage raises ``HTTPException(503)`` so it
+    surfaces as an outage instead of falling through to the next credential.
+    """
+    revoked = HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Could not validate credentials")
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        # Reject non-access tokens. Step-up tokens (typ="step_up") share the
+        # signing key and must never authenticate a normal session; tokens with
+        # an explicit non-"access" type are rejected too. Missing type ==
+        # legacy access token (back-compat during rollout).
+        if payload.get("typ") == "step_up" or payload.get("type") not in (None, "access"):
+            return None
+        email: str = payload.get("sub")
+        iat: int = payload.get("iat", 0)
+        if not email:
+            return None
+        user = await db.users.find_one({"email": email})
+        if not user:
+            return None
+        user_id_str = str(user["_id"])
+
+        # JWT Invalidation Check (Phase 3)
+        from ..services.runtime_state import get_runtime_state
+        runtime = get_runtime_state()
+        # C2: only deployments that configure a runtime Redis have an
+        # authoritative revocation store; for them, an unreachable
+        # store must not silently skip the checks (fail-open logout).
+        if runtime.redis_url:
+            try:
+                redis = await runtime.get_redis()
+                if redis is None:
+                    raise _SessionStoreUnavailableError("runtime Redis unreachable")
+                min_iat = await redis.get(f"user_jwt_min_iat:{user_id_str}")
+                if min_iat and iat < int(min_iat):
+                    raise revoked
+
+                # Session invalidation: a logged-out or expired session must
+                # immediately stop authenticating, even within the token TTL.
+                session_id = payload.get("session_id")
+                if session_id:
+                    from ..services.authentication_service import AuthenticationService
+
+                    if not await AuthenticationService().is_session_active(str(session_id)):
+                        raise revoked
+            except HTTPException:
+                raise  # revocation denials keep their 401 semantics
+            except Exception as exc:
+                # Store configured but failing (connection refused,
+                # timeout mid-call, stale client): apply the policy.
+                await _handle_session_store_unavailable(exc)
+
+        try:
+            user = await _without_revoked_roles(db, user)
+        except Exception as exc:
+            # Not a credential problem: a 401 here would force a logout
+            # for a role-store blip. Surface it as the outage it is.
+            logger.error("Role store unavailable while building the principal: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Authorization service temporarily unavailable",
+            ) from exc
+        return _principal_from_user_document(user, email)
+    except JWTError:
+        # Try the next credential source before falling through to dev mode.
+        return None
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_503_SERVICE_UNAVAILABLE:
+            # C2 fail-closed: a session-store outage must surface as an
+            # outage, not be swallowed by the next-credential fallback.
+            raise
+        # Revocation denials (401) fall through to the next candidate; the
+        # caller's final deny still applies if none authenticate.
+        return None
+    except Exception:
+        # Any unexpected token error -> try the next credential source.
+        return None
+
+
 # Moved from organizations.py
 async def get_current_user(request: Request, db = Depends(get_db)):
     """
@@ -150,95 +356,9 @@ async def get_current_user(request: Request, db = Depends(get_db)):
             token_candidates.append(cookie_token)
 
     for token in token_candidates:
-        try:
-            payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
-            # Reject non-access tokens. Step-up tokens (typ="step_up") share the
-            # signing key and must never authenticate a normal session; tokens with
-            # an explicit non-"access" type are rejected too. Missing type ==
-            # legacy access token (back-compat during rollout).
-            if payload.get("typ") == "step_up" or payload.get("type") not in (None, "access"):
-                continue
-            email: str = payload.get("sub")
-            iat: int = payload.get("iat", 0)
-            if email:
-                user = await db.users.find_one({"email": email})
-                if user:
-                    user_id_str = str(user["_id"])
-                    
-                    # JWT Invalidation Check (Phase 3)
-                    from ..services.runtime_state import get_runtime_state
-                    runtime = get_runtime_state()
-                    # C2: only deployments that configure a runtime Redis have an
-                    # authoritative revocation store; for them, an unreachable
-                    # store must not silently skip the checks (fail-open logout).
-                    if runtime.redis_url:
-                        try:
-                            redis = await runtime.get_redis()
-                            if redis is None:
-                                raise _SessionStoreUnavailableError("runtime Redis unreachable")
-                            min_iat = await redis.get(f"user_jwt_min_iat:{user_id_str}")
-                            if min_iat and iat < int(min_iat):
-                                raise credentials_exception
-
-                            # Session invalidation: a logged-out or expired session must
-                            # immediately stop authenticating, even within the token TTL.
-                            session_id = payload.get("session_id")
-                            if session_id:
-                                from ..services.authentication_service import AuthenticationService
-
-                                if not await AuthenticationService().is_session_active(str(session_id)):
-                                    raise credentials_exception
-                        except HTTPException:
-                            raise  # revocation denials keep their 401 semantics
-                        except Exception as exc:
-                            # Store configured but failing (connection refused,
-                            # timeout mid-call, stale client): apply the policy.
-                            await _handle_session_store_unavailable(exc)
-
-                    # Derive organizations for superuser/similar users if not present
-                    orgs = user.get("organizations", [])
-                    org_id = user.get("organization_id")
-                    if (not orgs) and org_id:
-                        try:
-                            orgs = [str(org_id)]
-                        except Exception:
-                            orgs = [org_id]
-                    roles = _normalize_roles_list(user.get("roles", []))
-                    org_id_sanitized = org_id
-                    orgs_sanitized = orgs or []
-                    projects_sanitized = (user.get("projects", []) or [])
-                    if "superadmin" in roles:
-                        org_id_sanitized = None
-                        orgs_sanitized = []
-                        projects_sanitized = []
-                    return CurrentUser(
-                        id=str(user["_id"]),
-                        username=user.get("username", email),
-                        email=user.get("email", email),
-                        first_name=user.get("first_name") or user.get("firstName"),
-                        last_name=user.get("last_name") or user.get("lastName"),
-                        job_title=user.get("job_title") or user.get("jobTitle"),
-                        roles=roles,
-                        organization_id=org_id_sanitized,
-                        organizations=orgs_sanitized,
-                        projects=projects_sanitized,
-                        account_type=user.get("account_type", "client_user"),
-                        disabled=user.get("disabled", False),
-                    )
-        except JWTError:
-            # Try the next credential source before falling through to dev mode.
-            continue
-        except HTTPException as exc:
-            if exc.status_code == status.HTTP_503_SERVICE_UNAVAILABLE:
-                # C2 fail-closed: a session-store outage must surface as an
-                # outage, not be swallowed by the next-credential fallback.
-                raise
-            # Revocation denials (401) fall through to the next candidate; the
-            # final deny below still applies if none authenticate.
-            continue
-        except Exception:
-            # Any unexpected token error -> try the next credential source.
-            continue
+        principal = await principal_from_access_token(token, db)
+        if principal is not None:
+            return principal
 
     # Fallback: Dev headers (explicitly disabled unless ALLOW_DEV_HEADERS is True)
     if not settings.ALLOW_DEV_HEADERS:
@@ -306,7 +426,7 @@ async def get_current_user(request: Request, db = Depends(get_db)):
 
     # No valid auth found
     raise credentials_exception
-    
+
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
@@ -571,7 +691,7 @@ def build_scope_query(
             return _deny_all()
         if organization_id is not None and (org_id_val is None or str(organization_id) != str(org_id_val)):
             return _deny_all()
-        q: Dict[str, Any] = {}
+        q = {}
         if org_id_val is not None:
             q[org_field] = str(org_id_val)
         if project_id is not None:
@@ -593,7 +713,7 @@ def build_scope_query(
         proj_ids = [str(p) for p in (getattr(current_user, "projects", []) or [])]
         if not proj_ids:
             return _deny_all()
-        q: Dict[str, Any] = {}
+        q = {}
         if project_id is not None:
             if str(project_id) not in proj_ids:
                 return _deny_all()

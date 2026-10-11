@@ -22,7 +22,7 @@ def test_service_imports():
     print("=" * 60)
     print("TESTING SERVICE IMPORTS")
     print("=" * 60)
-    
+
     services_to_test = [
         ("TextProcessingService", "rbac_backend.services.text_processing_service"),
         ("FileService", "rbac_backend.services.file_service"),
@@ -31,9 +31,9 @@ def test_service_imports():
         ("DatabaseService", "rbac_backend.services.database_service"),
         ("DocumentProcessor", "rbac_backend.services.document_processor"),
     ]
-    
+
     results = {}
-    
+
     for service_name, module_path in services_to_test:
         try:
             module = __import__(module_path, fromlist=[service_name])
@@ -43,7 +43,7 @@ def test_service_imports():
         except Exception as e:
             results[service_name] = {"status": "❌ FAIL", "error": str(e)}
             print(f"❌ {service_name}: Import failed - {str(e)[:100]}")
-    
+
     return results
 
 def test_service_instantiation():
@@ -51,14 +51,14 @@ def test_service_instantiation():
     print("\n" + "=" * 60)
     print("TESTING SERVICE INSTANTIATION")
     print("=" * 60)
-    
+
     results = {}
-    
+
     try:
         # Test TextProcessingService
         from rbac_backend.services.text_processing_service import TextProcessingService
         from rbac_backend.config.document_processing_config import DocumentProcessingConfig
-        
+
         config = DocumentProcessingConfig()
         text_service = TextProcessingService(config)
         results["TextProcessingService"] = "✅ PASS"
@@ -66,12 +66,12 @@ def test_service_instantiation():
     except Exception as e:
         results["TextProcessingService"] = f"❌ FAIL: {str(e)[:100]}"
         print(f"❌ TextProcessingService: Instantiation failed - {str(e)[:100]}")
-    
+
     try:
         # Test FileService
         from rbac_backend.services.file_service import FileService
         from rbac_backend.config.document_processing_config import DocumentProcessingConfig
-        
+
         config = DocumentProcessingConfig()
         file_service = FileService(config)
         results["FileService"] = "✅ PASS"
@@ -79,7 +79,7 @@ def test_service_instantiation():
     except Exception as e:
         results["FileService"] = f"❌ FAIL: {str(e)[:100]}"
         print(f"❌ FileService: Instantiation failed - {str(e)[:100]}")
-    
+
     return results
 
 def test_service_methods():
@@ -87,32 +87,32 @@ def test_service_methods():
     print("\n" + "=" * 60)
     print("TESTING SERVICE METHODS")
     print("=" * 60)
-    
+
     results = {}
-    
+
     try:
         # Test TextProcessingService methods
         from rbac_backend.services.text_processing_service import TextProcessingService
         from rbac_backend.config.document_processing_config import DocumentProcessingConfig
-        
+
         config = DocumentProcessingConfig()
         text_service = TextProcessingService(config)
-        
+
         # Test chunk_text method
         test_text = "This is a test document. " * 100
         chunks = text_service.chunk_text(test_text)
-        
+
         if isinstance(chunks, list) and len(chunks) > 0:
             results["TextProcessingService.chunk_text"] = "✅ PASS"
             print(f"✅ TextProcessingService.chunk_text: Created {len(chunks)} chunks")
         else:
             results["TextProcessingService.chunk_text"] = "❌ FAIL: No chunks created"
             print("❌ TextProcessingService.chunk_text: No chunks created")
-            
+
     except Exception as e:
         results["TextProcessingService.chunk_text"] = f"❌ FAIL: {str(e)[:100]}"
         print(f"❌ TextProcessingService.chunk_text: {str(e)[:100]}")
-    
+
     try:
         # Test parse_extraction_report method
         from rbac_backend.services.text_processing_service import TextProcessingService
@@ -120,7 +120,7 @@ def test_service_methods():
 
         config = DocumentProcessingConfig()
         text_service = TextProcessingService(config)
-        
+
         # Test with sample report
         sample_report = """
         1) Date: 2024-01-15
@@ -134,20 +134,20 @@ def test_service_methods():
         9) Contractual Clauses: clause1, clause2
         10) Full content: This is the full content of the test document.
         """
-        
+
         metadata = text_service.parse_extraction_report(sample_report)
-        
+
         if hasattr(metadata, 'date') and metadata.date:
             results["TextProcessingService.parse_extraction_report"] = "✅ PASS"
             print("✅ TextProcessingService.parse_extraction_report: Parsing successful")
         else:
             results["TextProcessingService.parse_extraction_report"] = "❌ FAIL: No metadata parsed"
             print("❌ TextProcessingService.parse_extraction_report: No metadata parsed")
-            
+
     except Exception as e:
         results["TextProcessingService.parse_extraction_report"] = f"❌ FAIL: {str(e)[:100]}"
         print(f"❌ TextProcessingService.parse_extraction_report: {str(e)[:100]}")
-    
+
     return results
 
 def main():
@@ -155,34 +155,34 @@ def main():
     print("ContractDMS Service Validation Test")
     print("Testing services defined in metadata_with_all_funtion.md")
     print(f"Backend path: {backend_dir}")
-    
+
     all_results = {}
-    
+
     # Test imports
     import_results = test_service_imports()
     all_results.update(import_results)
-    
+
     # Test instantiation
     instantiation_results = test_service_instantiation()
     all_results.update(instantiation_results)
-    
+
     # Test methods
     method_results = test_service_methods()
     all_results.update(method_results)
-    
+
     # Summary
     print("\n" + "=" * 60)
     print("TEST SUMMARY")
     print("=" * 60)
-    
+
     passed = sum(1 for result in all_results.values() if "✅ PASS" in str(result))
     total = len(all_results)
-    
+
     print(f"Total tests: {total}")
     print(f"Passed: {passed}")
     print(f"Failed: {total - passed}")
     print(f"Success rate: {(passed/total)*100:.1f}%")
-    
+
     if passed == total:
         print("\n🎉 ALL TESTS PASSED! Services are working correctly.")
         return 0

@@ -1045,6 +1045,28 @@ def test_case_workspace_sources_are_added_to_source_ledger():
     assert "Claim amount is entered but no quantum/payment source is selected." not in context["missing_evidence"]
 
 
+def test_claim_register_drafting_never_trusts_raw_legacy_document_membership():
+    db = _FakeDb()
+    db.claims.rows[0]["linked_document_ids"] = ["unresolved-legacy-document"]
+    draft = {
+        "_id": "draft-1",
+        "case_id": "case-1",
+        "organization_id": "org-1",
+        "project_id": "project-1",
+        "draft_type": "statement_of_claim",
+        "title": "EOT claim",
+    }
+
+    context = asyncio.run(
+        ArbitrationContextBuilder(db).build(draft, [], [], [], _FakeUser())
+    )
+
+    claim_source = next(
+        row for row in context["source_ledger"] if row.get("source_origin") == "claim_register"
+    )
+    assert claim_source["metadata"]["linked_document_ids"] == []
+
+
 def test_review_mode_can_include_unverified_case_sources_with_warning():
     draft = {
         "_id": "draft-1",

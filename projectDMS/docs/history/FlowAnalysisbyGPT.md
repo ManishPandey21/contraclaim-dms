@@ -112,4 +112,3 @@
 - Add coverage for end-to-end ingestion (single + bulk) and regression tests around reference serialisation.
 - Expand operational dashboards to track queue depth, metadata failure rates, and vector ingestion lag.
 - Update documentation (Upload & Letter workflow guides) once Docling/LangGraph enhancements land.
-

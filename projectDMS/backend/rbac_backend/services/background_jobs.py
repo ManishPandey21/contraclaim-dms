@@ -41,7 +41,7 @@ class BackgroundJobProcessor:
     Note: Job priority is not enforced due to use of simple asyncio.Queue.
     Consider a PriorityQueue or external queue like Celery for real priority support.
     """
-    
+
     def __init__(self, max_workers: int = 5):
         self.max_workers = max_workers
         self.jobs: Dict[str, Job] = {}
@@ -58,10 +58,10 @@ class BackgroundJobProcessor:
     async def start(self):
         if self.running:
             return
-        
+
         self.running = True
         logger.info(f"Starting background job processor with {self.max_workers} workers")
-        
+
         for i in range(self.max_workers):
             worker = asyncio.create_task(self._worker(f"worker-{i}"))
             self.workers.append(worker)
@@ -69,63 +69,63 @@ class BackgroundJobProcessor:
     async def stop(self):
         if not self.running:
             return
-        
+
         logger.info("Stopping background job processor")
         self.running = False
-        
+
         for worker in self.workers:
             worker.cancel()
-        
+
         # Await worker shutdown with timeout to avoid indefinite waits
         try:
             await asyncio.wait_for(asyncio.gather(*self.workers, return_exceptions=True), timeout=10)
         except asyncio.TimeoutError:
             logger.warning("Timeout waiting for workers to stop")
-        
+
         self.workers.clear()
 
     async def _worker(self, worker_name: str):
         logger.info(f"Worker {worker_name} started")
-        
+
         while self.running:
             try:
                 job: Job = await asyncio.wait_for(self.job_queue.get(), timeout=1.0)
-                
+
                 if job.status == JobStatus.CANCELLED:
                     continue
-                
+
                 logger.info(f"Worker {worker_name} processing job {job.id}: {job.name}")
                 await self._execute_job(job)
-                
+
             except asyncio.TimeoutError:
                 continue
             except Exception as e:
                 logger.error(f"Worker {worker_name} error: {e}")
                 logger.debug(traceback.format_exc())
                 continue
-        
+
         logger.info(f"Worker {worker_name} stopped")
 
     async def _execute_job(self, job: Job):
         job.status = JobStatus.RUNNING
         job.started_at = datetime.utcnow()
-        
+
         try:
             if asyncio.iscoroutinefunction(job.func):
                 result = await job.func(*job.args, **job.kwargs)
             else:
                 result = job.func(*job.args, **job.kwargs)
-            
+
             job.result = result
             job.status = JobStatus.COMPLETED
             job.completed_at = datetime.utcnow()
             self._stats['completed_jobs'] += 1
             logger.info(f"Job {job.id} completed successfully")
-            
+
         except Exception as e:
             job.error = str(e)
             job.retry_count += 1
-            
+
             if job.retry_count <= job.max_retries:
                 job.status = JobStatus.PENDING
                 await self.job_queue.put(job)
@@ -152,7 +152,7 @@ class BackgroundJobProcessor:
             priority=priority,
             max_retries=max_retries,
         )
-        
+
         self.jobs[job_id] = job
         await self.job_queue.put(job)
         self._stats['total_jobs'] += 1
@@ -192,10 +192,10 @@ class BackgroundJobProcessor:
             if job.status in [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED]
             and job.completed_at and job.completed_at < cutoff_time
         ]
-        
+
         for job_id in old_job_ids:
             del self.jobs[job_id]
-        
+
         if old_job_ids:
             logger.info(f"Cleaned up {len(old_job_ids)} old jobs")
 
@@ -219,13 +219,13 @@ async def scan_and_alert_assignments(db):
     from email.message import EmailMessage
     from datetime import datetime, timezone
     from bson import ObjectId
-    
+
     email_service = EmailService(db)
     if not email_service._smtp_enabled:
         return
-        
+
     now = datetime.now(timezone.utc)
-        
+
     # Phase 1: Scan for new/reassigned drafters in 'letters' collection
     try:
         cursor = db.letters.find({})
@@ -242,7 +242,7 @@ async def scan_and_alert_assignments(db):
                     msg["Subject"] = f"Assignment Alert: You have been assigned to draft letter: {letter.get('title') or letter.get('subject')}"
                     msg["From"] = email_service.from_email
                     msg["To"] = user.get("email")
-                    
+
                     body = (
                         f"Hello {user.get('first_name') or user.get('username') or 'there'},\n\n"
                         f"You have been assigned to draft a contractual reply letter.\n\n"
@@ -270,7 +270,7 @@ async def scan_and_alert_assignments(db):
         assignments = await cursor.to_list(length=None)
         for assignment in assignments:
             reviewer_id = assignment.get("reviewer_user_id")
-            
+
             # Scenario 2a: Send reviewer assignment alert
             if not assignment.get("notified"):
                 user = await db.users.find_one({"_id": ObjectId(reviewer_id) if ObjectId.is_valid(reviewer_id) else reviewer_id})
@@ -279,10 +279,10 @@ async def scan_and_alert_assignments(db):
                     msg["Subject"] = f"Review Assignment: You have been assigned to review draft run"
                     msg["From"] = email_service.from_email
                     msg["To"] = user.get("email")
-                    
+
                     note_str = f"Note from assigner: {assignment.get('note')}\n\n" if assignment.get("note") else ""
                     due_str = f"Due Date: {assignment.get('due_at').strftime('%Y-%m-%d %H:%M')}\n\n" if assignment.get("due_at") else ""
-                    
+
                     body = (
                         f"Hello {user.get('first_name') or user.get('username') or 'there'},\n\n"
                         f"You have been assigned to review a generated draft run.\n\n"
@@ -300,7 +300,7 @@ async def scan_and_alert_assignments(db):
                             {"_id": assignment["_id"]},
                             {"$set": {"notified": True, "updated_at": now}}
                         )
-            
+
             # Scenario 2b: Overdue assignments alert
             due_at = assignment.get("due_at")
             if due_at and not assignment.get("overdue_notified"):
@@ -313,7 +313,7 @@ async def scan_and_alert_assignments(db):
                         msg["Subject"] = f"URGENT: Review Assignment OVERDUE"
                         msg["From"] = email_service.from_email
                         msg["To"] = user.get("email")
-                        
+
                         body = (
                             f"Hello {user.get('first_name') or user.get('username') or 'there'},\n\n"
                             f"Your review assignment is OVERDUE.\n\n"
@@ -338,11 +338,11 @@ async def start_background_services():
     """Start background services."""
     try:
         logger.info("Starting background services...")
-        
+
         # Start the background job processor
         processor = get_background_processor()
         await processor.start()
-        
+
         # Schedule periodic cleanup
         async def periodic_cleanup():
             while processor.running:
@@ -353,7 +353,7 @@ async def start_background_services():
                     break
                 except Exception as e:
                     logger.error(f"Error in periodic cleanup: {e}")
-                    
+
         # Schedule periodic assignment alerts
         async def periodic_assignment_alerts():
             from ..core.database import get_database
@@ -367,7 +367,7 @@ async def start_background_services():
                     break
                 except Exception as e:
                     logger.error(f"Error in periodic assignment alerts: {e}")
-        
+
         # Schedule periodic subscription lifecycle management
         async def periodic_subscription_lifecycle():
             from .subscription_lifecycle_service import SubscriptionLifecycleService
@@ -397,32 +397,18 @@ async def start_background_services():
                 except Exception as e:
                     logger.error(f"Error in periodic subscription lifecycle: {e}")
 
-        async def periodic_document_processing_jobs():
-            """Poll durable Mongo-backed document processing jobs."""
-            from .document_service import DocumentService
-
-            service = DocumentService()
-            while processor.running:
-                try:
-                    processed = await service.process_next_processing_jobs(limit=3)
-                    await asyncio.sleep(1 if processed else 3)
-                except asyncio.CancelledError:
-                    break
-                except Exception as e:
-                    logger.error(f"Error in durable document processing loop: {e}")
-                    await asyncio.sleep(5)
-
         # Start cleanup task
         asyncio.create_task(periodic_cleanup())
         # Start assignment alerts task
         asyncio.create_task(periodic_assignment_alerts())
         # Start subscription lifecycle task
         asyncio.create_task(periodic_subscription_lifecycle())
-        # Start durable document processing queue task
-        asyncio.create_task(periodic_document_processing_jobs())
-        
+        # The durable document processing loop is NOT started here: it lives
+        # behind START_DOCUMENT_EXTRACTION_WORKERS so heavy OCR can run in a
+        # dedicated worker container. See start_document_extraction_workers.
+
         logger.info("Background services started successfully")
-        
+
     except Exception as e:
         logger.error(f"Failed to start background services: {e}")
         raise
@@ -431,25 +417,109 @@ async def stop_background_services():
     """Stop background services."""
     try:
         logger.info("Stopping background services...")
-        
+
         # Stop the background job processor
         processor = get_background_processor()
         await processor.stop()
-        
+
         logger.info("Background services stopped successfully")
-        
+
     except Exception as e:
         logger.error(f"Failed to stop background services: {e}")
         raise
 
+
+# --- Document extraction workers -------------------------------------------
+#
+# Kept separate from start/stop_background_services so the durable document
+# extraction loop can run in a dedicated worker container while the web tier
+# keeps cleanup, assignment alerts, and subscription lifecycle running.
+#
+# The loop owns its own stop event rather than reading the background job
+# processor's `running` flag: on the dedicated worker START_BACKGROUND_SERVICES
+# is false, so that processor is never started and a `while processor.running`
+# condition would exit immediately - a loop that looks started and silently
+# processes nothing.
+
+_document_extraction_task: Optional[asyncio.Task] = None
+_document_extraction_stop: Optional[asyncio.Event] = None
+
+
+async def periodic_document_processing_jobs(stop_event: asyncio.Event) -> None:
+    """Poll durable Mongo-backed document processing jobs until stopped."""
+    from .document_service import DocumentService
+
+    from ..core.config import settings
+
+    service = DocumentService()
+    # An empty restriction claims every version - the single-worker default.
+    # A canary sets this so a second worker cannot drain other tenants' jobs.
+    pipeline_versions = settings.worker_pipeline_versions() or None
+    if pipeline_versions:
+        logger.info(
+            "Document extraction worker restricted to pipeline versions: %s",
+            sorted(pipeline_versions),
+        )
+
+    while not stop_event.is_set():
+        try:
+            processed = await service.process_next_processing_jobs(
+                limit=3, pipeline_versions=pipeline_versions
+            )
+            await asyncio.sleep(1 if processed else 3)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Error in durable document processing loop: {e}")
+            await asyncio.sleep(5)
+
+
+async def start_document_extraction_workers() -> None:
+    """Start the durable document extraction loop."""
+    global _document_extraction_task, _document_extraction_stop
+
+    if _document_extraction_task is not None and not _document_extraction_task.done():
+        logger.info("Document extraction workers already running")
+        return
+
+    logger.info("Starting document extraction workers...")
+    _document_extraction_stop = asyncio.Event()
+    _document_extraction_task = asyncio.create_task(
+        periodic_document_processing_jobs(_document_extraction_stop)
+    )
+    logger.info("Document extraction workers started")
+
+
+async def stop_document_extraction_workers() -> None:
+    """Stop the durable document extraction loop."""
+    global _document_extraction_task, _document_extraction_stop
+
+    task = _document_extraction_task
+    stop_event = _document_extraction_stop
+    _document_extraction_task = None
+    _document_extraction_stop = None
+
+    if stop_event is not None:
+        stop_event.set()
+    if task is None or task.done():
+        return
+
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    logger.info("Document extraction workers stopped")
+
+
 # Additional utility functions for job management
 
 async def submit_background_job(
-    name: str, 
-    func: Callable, 
-    *args, 
-    priority: int = 0, 
-    max_retries: int = 3, 
+    name: str,
+    func: Callable,
+    *args,
+    priority: int = 0,
+    max_retries: int = 3,
     **kwargs
 ) -> str:
     """Submit a job to the background processor."""
@@ -507,7 +577,7 @@ def get_background_services_info() -> Dict[str, Any]:
     try:
         processor = get_background_processor()
         stats = processor.get_stats()
-        
+
         return {
             "status": "running" if processor.running else "stopped",
             "workers_count": len(processor.workers),

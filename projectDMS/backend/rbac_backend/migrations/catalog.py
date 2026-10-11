@@ -70,7 +70,31 @@ from .v20260811_0001_key_date_eot_revision_workflow import upgrade as upgrade_ke
 from .v20260813_0001_key_date_eot_attribution import DESCRIPTION as KEY_DATE_ATTRIBUTION_DESCRIPTION
 from .v20260813_0001_key_date_eot_attribution import NAME as KEY_DATE_ATTRIBUTION_NAME
 from .v20260813_0001_key_date_eot_attribution import VERSION as KEY_DATE_ATTRIBUTION_VERSION
+from .v20260814_0001_document_extraction_indexes import (
+    DESCRIPTION as DOC_EXTRACTION_IDX_DESCRIPTION,
+)
+from .v20260814_0001_document_extraction_indexes import NAME as DOC_EXTRACTION_IDX_NAME
+from .v20260814_0001_document_extraction_indexes import (
+    VERSION as DOC_EXTRACTION_IDX_VERSION,
+)
+from .v20260814_0001_document_extraction_indexes import (
+    upgrade as upgrade_document_extraction_indexes,
+)
+from .v20260820_0001_entity_document_links import (
+    DESCRIPTION as ENTITY_DOCUMENT_LINKS_DESCRIPTION,
+)
+from .v20260820_0001_entity_document_links import NAME as ENTITY_DOCUMENT_LINKS_NAME
+from .v20260820_0001_entity_document_links import VERSION as ENTITY_DOCUMENT_LINKS_VERSION
+from .v20260820_0001_entity_document_links import upgrade as upgrade_entity_document_links
 from .v20260813_0001_key_date_eot_attribution import upgrade as upgrade_key_date_attribution
+from .v20260906_0001_permission_name_unique import (
+    DESCRIPTION as PERMISSION_NAME_UNIQUE_DESCRIPTION,
+)
+from .v20260906_0001_permission_name_unique import NAME as PERMISSION_NAME_UNIQUE_NAME
+from .v20260906_0001_permission_name_unique import VERSION as PERMISSION_NAME_UNIQUE_VERSION
+from .v20260906_0001_permission_name_unique import (
+    upgrade as upgrade_permission_name_unique,
+)
 
 
 MIGRATIONS = [
@@ -169,5 +193,23 @@ MIGRATIONS = [
         name=KEY_DATE_ATTRIBUTION_NAME,
         description=KEY_DATE_ATTRIBUTION_DESCRIPTION,
         upgrade=upgrade_key_date_attribution,
+    ),
+    Migration(
+        version=DOC_EXTRACTION_IDX_VERSION,
+        name=DOC_EXTRACTION_IDX_NAME,
+        description=DOC_EXTRACTION_IDX_DESCRIPTION,
+        upgrade=upgrade_document_extraction_indexes,
+    ),
+    Migration(
+        version=ENTITY_DOCUMENT_LINKS_VERSION,
+        name=ENTITY_DOCUMENT_LINKS_NAME,
+        description=ENTITY_DOCUMENT_LINKS_DESCRIPTION,
+        upgrade=upgrade_entity_document_links,
+    ),
+    Migration(
+        version=PERMISSION_NAME_UNIQUE_VERSION,
+        name=PERMISSION_NAME_UNIQUE_NAME,
+        description=PERMISSION_NAME_UNIQUE_DESCRIPTION,
+        upgrade=upgrade_permission_name_unique,
     ),
 ]

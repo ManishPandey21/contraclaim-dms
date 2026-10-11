@@ -18,12 +18,10 @@ set -euo pipefail
 ROOT_DIR=${ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 ENV_FILE=${ENV_FILE:-"$ROOT_DIR/.env"}
 
-if [[ -f "$ENV_FILE" ]]; then
-  set -a
-  # shellcheck disable=SC1090
-  source "$ENV_FILE"
-  set +a
-fi
+# Read as data, not executed - see scripts/lib/env_file.sh and F-A8M-2.
+# shellcheck source=scripts/lib/env_file.sh
+. "$ROOT_DIR/scripts/lib/env_file.sh"
+env_file_load "$ENV_FILE"
 
 BACKUP_ROOT=${BACKUP_ROOT:-/var/backups/contractdms}
 BACKUP_S3_PREFIX=${BACKUP_S3_PREFIX:-contraclaim/backups}
@@ -35,7 +33,15 @@ log() { printf '[offsite-backup %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 
 # 1) Produce the local backup (Mongo dump + volume tarballs + manifest).
 log "running local backup"
-BACKUP_ROOT="$BACKUP_ROOT" bash "$ROOT_DIR/scripts/production_backup.sh"
+# Exit 3 means the artefacts are complete but a persistence flush was not
+# proven. Those artefacts still have to leave the host - losing off-site
+# replication is a worse outcome than an unflushed engine - so the sync runs
+# and the status is carried to the caller at the end (R-A9H D1).
+local_backup_status=0
+BACKUP_ROOT="$BACKUP_ROOT" bash "$ROOT_DIR/scripts/production_backup.sh" || local_backup_status=$?
+if [ "$local_backup_status" -ne 0 ] && [ "$local_backup_status" -ne 3 ]; then
+  exit "$local_backup_status"
+fi
 
 # 2) Mirror to S3. Remote retention is enforced by an S3 lifecycle rule
 #    (see docs/OPERATIONS.md); local retention is handled by production_backup.sh.
@@ -45,3 +51,7 @@ log "syncing ${BACKUP_ROOT} -> ${DEST}"
 aws s3 sync "$BACKUP_ROOT" "$DEST" --only-show-errors
 
 log "offsite backup complete"
+if [ "$local_backup_status" -eq 3 ]; then
+  log "WARN: the local backup reported an unproven persistence flush (exit 3)"
+  exit 3
+fi

@@ -63,7 +63,7 @@ from ..dependencies import get_notification_service
 
 
 
-from ..services.conversation_service import ConversationService  
+from ..services.conversation_service import ConversationService
 from ..services.strategy_context_service import StrategyContextService
 
 
@@ -80,7 +80,7 @@ from ..models.letter import (
 
 
 
-    Letter, LetterCreate, LetterUpdate, ConversationTree, 
+    Letter, LetterCreate, LetterUpdate, ConversationTree,
 
 
 
@@ -95,7 +95,7 @@ from ..utils.validation import validate_input, sanitize_text
 
 
 
-from ..utils.error_handler import handle_exceptions, LetterError
+from ..utils.error_handler import BaseDomainError, handle_exceptions, LetterError
 
 
 
@@ -172,7 +172,7 @@ class LetterController:
 
 
 
-    
+
 
 
 
@@ -264,7 +264,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -284,7 +284,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -330,7 +330,7 @@ class LetterController:
 
             return letters
 
-        except HTTPException:
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
 
@@ -392,7 +392,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -412,7 +412,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -420,11 +420,11 @@ class LetterController:
 
 
 
-            
 
 
 
-        except (LetterError, HTTPException):
+
+        except (BaseDomainError, HTTPException):
 
 
 
@@ -496,7 +496,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -508,7 +508,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -528,7 +528,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -556,7 +556,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -576,7 +576,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -584,11 +584,11 @@ class LetterController:
 
 
 
-            
 
 
 
-        except (LetterError, HTTPException):
+
+        except (BaseDomainError, HTTPException):
 
 
 
@@ -672,7 +672,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -692,7 +692,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -704,7 +704,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -724,7 +724,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -732,11 +732,11 @@ class LetterController:
 
 
 
-            
 
 
 
-        except (LetterError, HTTPException):
+
+        except (BaseDomainError, HTTPException):
 
 
 
@@ -800,7 +800,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -820,7 +820,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -828,7 +828,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -848,7 +848,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -856,11 +856,11 @@ class LetterController:
 
 
 
-            
 
 
 
-        except (LetterError, HTTPException):
+
+        except (BaseDomainError, HTTPException):
 
 
 
@@ -924,7 +924,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -944,7 +944,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -952,7 +952,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -972,7 +972,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -980,11 +980,11 @@ class LetterController:
 
 
 
-            
 
 
 
-        except (LetterError, HTTPException):
+
+        except (BaseDomainError, HTTPException):
 
 
 
@@ -1060,7 +1060,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -1076,7 +1076,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -1088,7 +1088,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -1104,7 +1104,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -1116,7 +1116,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -1136,7 +1136,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -1144,11 +1144,11 @@ class LetterController:
 
 
 
-            
 
 
 
-        except (LetterError, HTTPException):
+
+        except (BaseDomainError, HTTPException):
 
 
 
@@ -1272,7 +1272,7 @@ class LetterController:
 
 
 
-        
+
 
 
 
@@ -1292,7 +1292,7 @@ class LetterController:
 
 
 
-        
+
 
 
 
@@ -1312,7 +1312,7 @@ class LetterController:
 
 
 
-        
+
 
 
 
@@ -1616,7 +1616,7 @@ class LetterController:
 
 
 
-        
+
 
 
 
@@ -1644,7 +1644,7 @@ class LetterController:
 
 
 
-        
+
 
 
 
@@ -1684,7 +1684,7 @@ class LetterController:
 
 
 
-                "Previous letter not found", 
+                "Previous letter not found",
 
 
 
@@ -1696,7 +1696,7 @@ class LetterController:
 
 
 
-        
+
 
 
 
@@ -1708,7 +1708,7 @@ class LetterController:
 
 
 
-        
+
 
 
 
@@ -1724,7 +1724,7 @@ class LetterController:
 
 
 
-        
+
 
 
 
@@ -1752,7 +1752,7 @@ class LetterController:
 
 
 
-        
+
 
 
 
@@ -1824,7 +1824,7 @@ class LetterController:
 
 
 
-        
+
 
 
 
@@ -1852,7 +1852,7 @@ class LetterController:
 
 
 
-        
+
 
 
 
@@ -2020,7 +2020,7 @@ async def get_letters(
 
 
 
-    
+
 
 
 
@@ -2390,7 +2390,7 @@ async def reparent_letter(
 
 
 
-    
+
 
 
 
@@ -2414,7 +2414,7 @@ async def get_letter_context_documents(
 ):
     """Return curated context documents for the specified letter."""
     await controller.get_letter(letter_id, current_user)
-    return await controller.letter_service.get_context_documents(letter_id)
+    return await controller.letter_service.get_context_documents(letter_id, current_user)
 
 
 @router.put("/letters/{letter_id}/context-documents")
@@ -2449,16 +2449,26 @@ async def generate_letter_strategy_context(
         letter_service=controller.letter_service,
         conversation_service=controller.conversation_service,
     )
-    result = await context_service.generate_context(letter_id)
-    await controller.letter_service.update_letter(
-        letter_id,
-        {
-            "contractor_context": result.contractor_context,
-            "engineer_context": result.engineer_context,
-            "employer_context": result.employer_context,
-            "thread_letters": result.thread_letters,
-        },
-    )
+    result = await context_service.generate_context(letter_id, current_user)
+    if result.thread_letters:
+        # Empty strings, not None. `update_letter` drops None values from a
+        # dict payload, so a role whose only sources were filtered out would
+        # silently KEEP the text an earlier, unbounded run stored -
+        # contamination that outlives the fix. A regeneration overwrites every
+        # role it computed.
+        #
+        # Guarded on an actually-computed thread: a caller whose entitlement
+        # resolves to nothing produced no view of this letter, and their empty
+        # view must not overwrite what other readers legitimately stored.
+        await controller.letter_service.update_letter(
+            letter_id,
+            {
+                "contractor_context": result.contractor_context or "",
+                "engineer_context": result.engineer_context or "",
+                "employer_context": result.employer_context or "",
+                "thread_letters": result.thread_letters,
+            },
+        )
     return result
 
 
@@ -2771,4 +2781,3 @@ async def complete_letter(
 
 
     )
-

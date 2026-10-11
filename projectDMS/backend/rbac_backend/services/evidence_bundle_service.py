@@ -114,12 +114,15 @@ class EvidenceBundleService:
 
         return FileObjectService()
 
-    async def _gather_documents(self, claim: Dict[str, Any]) -> List[Dict[str, Any]]:
+    async def _gather_documents(
+        self, claim: Dict[str, Any], document_sources: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
         """Fetch linked documents, keeping only those in the claim's tenant scope."""
         db = await self._get_db()
         claim_org = claim.get("organization_id")
         results: List[Dict[str, Any]] = []
-        for doc_id in claim.get("linked_document_ids") or []:
+        for source in document_sources:
+            doc_id = str(source.get("document_id") or "")
             try:
                 document = await db.documents.find_one({"_id": doc_id})
             except Exception:  # pragma: no cover - defensive
@@ -131,7 +134,10 @@ class EvidenceBundleService:
             if claim_org and document.get("organization_id") not in (None, claim_org):
                 results.append({"document_id": doc_id, "name": document.get("filename"), "status": "out_of_scope", "data": None})
                 continue
-            data = await self._read_bytes(document)
+            resolved = {**document}
+            if source.get("file_object_id"):
+                resolved["file_object_id"] = source["file_object_id"]
+            data = await self._read_bytes(resolved)
             results.append(
                 {
                     "document_id": doc_id,
@@ -164,9 +170,14 @@ class EvidenceBundleService:
         claim: Dict[str, Any],
         audit_events: List[Dict[str, Any]],
         *,
+        document_ids: Optional[List[str]] = None,
+        document_sources: Optional[List[Dict[str, Any]]] = None,
         generated_by: Optional[str] = None,
     ) -> bytes:
-        documents = await self._gather_documents(claim)
+        sources = document_sources or [
+            {"document_id": document_id} for document_id in (document_ids or [])
+        ]
+        documents = await self._gather_documents(claim, sources)
         return build_evidence_zip(
             claim=claim,
             audit_csv=audit_events_to_csv(audit_events),

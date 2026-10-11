@@ -6,5 +6,3 @@ OPENAI_MODELS = {
 "chat": "gpt-4o",
 "responses": "gpt-4o"
 }
-
-

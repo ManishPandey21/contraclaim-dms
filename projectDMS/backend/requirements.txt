@@ -1,4 +1,4 @@
-aiosmtplib==3.0.2
+aiosmtplib==5.1.2
 annotated-types==0.7.0
 anyio==4.8.0
 bcrypt==4.2.1
@@ -13,7 +13,7 @@ cffi==1.17.1
 charset-normalizer==3.4.3
 click==8.1.8
 colorama==0.4.6
-cryptography==44.0.2
+cryptography==50.0.0
 Deprecated==1.2.18
 deprecation==2.1.0
 distro==1.9.0
@@ -59,11 +59,11 @@ pydantic==2.10.6
 pydantic-settings==2.8.1
 pydantic_core==2.27.2
 Pygments==2.19.2
-pymongo==4.11.2
+pymongo==4.18.2
 pytest==8.3.5
 python-dateutil==2.9.0.post0
 python-dotenv==1.0.1
-PyJWT[crypto]==2.10.1
+PyJWT[crypto]==2.15.1
 python-multipart==0.0.20
 reportlab==5.0.0
 rich==14.1.0
@@ -78,12 +78,12 @@ tqdm==4.67.1
 typing-inspect==0.9.0
 typing-inspection==0.4.1
 typing_extensions==4.12.2
-urllib3==2.3.0
+urllib3==2.8.0
 uvicorn==0.34.0
 wrapt==1.17.3
 llama-index-core==0.14.22
 llama-index-embeddings-openai==0.6.0
 llama-index-vector-stores-mongodb==0.10.1
-pydantic-ai==1.1.0
+pydantic-ai==1.107.7
 bleach==6.1.0
 griffe==1.14.0

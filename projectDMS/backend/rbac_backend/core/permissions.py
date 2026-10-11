@@ -73,6 +73,8 @@ CLIENT_DMS_PERMISSIONS: List[str] = [
     "dms.insurance.manage_types",
     "dms.contract.master.view",
     "dms.contract.master.manage",
+    "dms.contract.applicability.manage",
+    "dms.contract.catalogue.browse",
     "dms.contract.read",
     "dms.contract.update",
     "dms.contract.clause.create",
@@ -87,6 +89,10 @@ CLIENT_DMS_PERMISSIONS: List[str] = [
     "dms.evidence_graph.view",
     "dms.evidence_graph.verify",
     "dms.evidence_graph.manage",
+    "dms.hindrance.view",
+    "dms.hindrance.create",
+    "dms.hindrance.edit",
+    "dms.hindrance.archive",
     "dms.contract.timeline.view",
     "dms.chronology.view",
     "dms.chronology.create",
@@ -238,6 +244,11 @@ class Permissions:
     INSURANCE_MANAGE_TYPES = "dms.insurance.manage_types"
     CONTRACT_MASTER_VIEW = "dms.contract.master.view"
     CONTRACT_MASTER_MANAGE = "dms.contract.master.manage"
+    # Organisation-tier only: excluded from the projectadmin bulk merge via
+    # ORG_TIER_ONLY_PERMISSIONS. They stay canonical so they remain seeded and
+    # entitlement-scoped.
+    CONTRACT_APPLICABILITY_MANAGE = "dms.contract.applicability.manage"
+    CONTRACT_CATALOGUE_BROWSE = "dms.contract.catalogue.browse"
     IPC_VIEW = "dms.ipc.view"
     IPC_CREATE = "dms.ipc.create"
     IPC_EDIT = "dms.ipc.edit"
@@ -247,6 +258,13 @@ class Permissions:
     EVIDENCE_GRAPH_VIEW = "dms.evidence_graph.view"
     EVIDENCE_GRAPH_VERIFY = "dms.evidence_graph.verify"
     EVIDENCE_GRAPH_MANAGE = "dms.evidence_graph.manage"
+    # Hindrance & Constraint Register (backed by `delay_events`). Deliberately a
+    # separate family from the evidence graph: holding graph access does not
+    # confer register access, and no legacy alias widens these.
+    HINDRANCE_VIEW = "dms.hindrance.view"
+    HINDRANCE_CREATE = "dms.hindrance.create"
+    HINDRANCE_EDIT = "dms.hindrance.edit"
+    HINDRANCE_ARCHIVE = "dms.hindrance.archive"
     CONTRACT_TIMELINE_VIEW = "dms.contract.timeline.view"
     CHRONOLOGY_VIEW = "dms.chronology.view"
     CHRONOLOGY_CREATE = "dms.chronology.create"
@@ -303,6 +321,23 @@ class Permissions:
     PLATFORM_ROLE_MANAGE = "platform.role.manage"
     PLATFORM_PERMISSION_MANAGE = "platform.permission.manage"
 
+#: Organisation-tier capabilities. They are canonical CLIENT_DMS permissions --
+#: so they are seeded, assignable and entitlement-scoped like any other -- but
+#: they must NOT reach project-tier roles through the bulk default-role merge.
+#:
+#: The exclusion lives here, in the merge, rather than by omitting them from
+#: CLIENT_DMS_PERMISSIONS. That list simultaneously feeds the canonical
+#: catalogue, defines the entitlement-scoped set, and drives the bulk role
+#: grant; omitting a permission to solve the third would silently break the
+#: first two, and an unscoped permission passes the subscription gate.
+ORG_TIER_ONLY_PERMISSIONS: frozenset = frozenset(
+    {
+        "dms.contract.applicability.manage",
+        "dms.contract.catalogue.browse",
+    }
+)
+
+
 PERMISSION_DOMAINS: Dict[str, str] = {
     **{permission: "client_dms" for permission in CLIENT_DMS_PERMISSIONS},
     **{permission: "drafting" for permission in DRAFTING_PERMISSIONS},
@@ -331,47 +366,91 @@ LEGACY_PERMISSION_ALIASES: Dict[str, List[str]] = {
     "dms.bankguarantee.release": ["projects:update"],
     "dms.contract.master.view": ["projects:read"],
     "dms.contract.master.manage": ["projects:update"],
+    "dms.contract.applicability.manage": ["projects:update"],
+    "dms.contract.catalogue.browse": ["organizations:read"],
     "dms.ipc.approve": ["projects:update"],
     "dms.evidence_graph.manage": ["projects:update"],
     "dms.chronology.admin": ["projects:update"],
     "dms.arbitration.approve": ["projects:update"],
     "dms.arbitration.admin": ["projects:update"],
-    "dms.admin": ["system:admin"],
+    # `system:admin` is nobody's legacy name (F-A9B-2, R-A9D). It is non-delegable
+    # system administration and gates the platform-wide legal-words admin; declaring
+    # it here let every organisation, billing and subscription admin pass that gate.
+    "dms.admin": [],
     "billing.plan.view": ["organizations:read"],
-    "billing.plan.manage": ["system:admin"],
+    "billing.plan.manage": [],
     "billing.invoice.view": ["organizations:read"],
     "billing.invoice.download": ["organizations:read"],
-    "subscription.entitlement.manage": ["system:admin"],
-    "subscription.upgrade": ["system:admin"],
-    "subscription.downgrade": ["system:admin"],
-    "subscription.cancel": ["system:admin"],
-    "subscription.trial.manage": ["system:admin"],
-    "subscription.addon.manage": ["system:admin"],
+    "subscription.entitlement.manage": [],
+    "subscription.upgrade": [],
+    "subscription.downgrade": [],
+    "subscription.cancel": [],
+    "subscription.trial.manage": [],
+    "subscription.addon.manage": [],
     "subscription.history.view": ["organizations:read"],
     "subscription.usage.view": ["reports:view"],
     "subscription.archive_access": [],
     "subscription.offboarding_export": [],
 }
 
+#: Older spellings of names that are still checked today (`orgs:view` is
+#: `organizations:read`). Each label names exactly one target, so a label is a
+#: spelling of that name, never a permission of its own.
+LEGACY_LABEL_ALIASES: Dict[str, List[str]] = {
+    "organizations:read": ["orgs:view"],
+    "organizations:create": ["orgs:create"],
+    "organizations:update": ["orgs:edit"],
+    "organizations:delete": ["orgs:delete"],
+    "projects:read": ["projects:view"],
+    "projects:update": ["projects:edit"],
+}
+
+#: One owner per alias, for `permission_domain` only. A shared alias keeps its
+#: LAST declaration here, so this map must never decide whether a permission is
+#: held - that is `equivalent_permissions`.
 ALIAS_TO_CANONICAL: Dict[str, str] = {
     alias: canonical
     for canonical, aliases in LEGACY_PERMISSION_ALIASES.items()
     for alias in aliases
 }
 
+_LABEL_TARGET: Dict[str, str] = {
+    label: name for name, labels in LEGACY_LABEL_ALIASES.items() for label in labels
+}
+_DECLARED_BY: Dict[str, frozenset] = {
+    alias: frozenset(
+        canonical for canonical, aliases in LEGACY_PERMISSION_ALIASES.items() if alias in aliases
+    )
+    for alias in ALIAS_TO_CANONICAL
+}
+
 
 def equivalent_permissions(permission: str) -> set[str]:
-    """Return canonical and legacy spellings that should satisfy the same check."""
+    """Every held name that satisfies a check for `permission`.
+
+    A held name satisfies the check when it is the same name (a label spelling
+    counts), or when one of the two declares the other in
+    `LEGACY_PERMISSION_ALIASES`: a canonical holder passes the legacy route gate
+    its alias names, and a stored legacy name passes each canonical check that
+    declares it.
+
+    That is one hop and deliberately not transitive. Canonical permissions that
+    share a legacy alias (twenty share `projects:update`) are not equivalent to
+    each other, and legacy names that share a canonical are not either; treating
+    them so let `dms.task.manage` satisfy `dms.project.manage` (F-A9A-2). The
+    relation is symmetric, so this is also every name a holder of `permission`
+    can be advertised to hold. Nothing else may expand the alias tables.
+    """
     key = (permission or "").strip()
     if not key:
         return set()
 
-    canonical = ALIAS_TO_CANONICAL.get(key, key)
-    equivalents = {key, canonical}
-    equivalents.update(LEGACY_PERMISSION_ALIASES.get(canonical, []))
-
-    if key in LEGACY_PERMISSION_ALIASES:
-        equivalents.update(LEGACY_PERMISSION_ALIASES[key])
+    name = _LABEL_TARGET.get(key, key)
+    related = {name, *LEGACY_PERMISSION_ALIASES.get(name, []), *_DECLARED_BY.get(name, ())}
+    equivalents = {key}
+    for related_name in related:
+        equivalents.add(related_name)
+        equivalents.update(LEGACY_LABEL_ALIASES.get(related_name, []))
     return equivalents
 
 

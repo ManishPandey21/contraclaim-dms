@@ -199,7 +199,8 @@ class ContractIngestQueue:
 
         key = self._job_key(job_id)
         existing_status = await redis.hget(key, "status")
-        if existing_status in {"queued", "running"}:
+        # "waiting" is a job between attempts: it is already on its way back.
+        if existing_status in {"queued", "running", "waiting"}:
             return job_id
 
         await redis.hset(
@@ -267,10 +268,12 @@ class ContractIngestQueue:
                 continue
 
             status = str(metadata.get("status") or "").lower()
-            if status in {"completed", "failed"}:
+            if status in {"completed", "failed", "superseded"}:
                 await redis.lrem(settings.CONTRACT_QUEUE_PROCESSING_NAME, 0, job_id)
                 continue
-            if status == "running" and not self._job_is_stale(metadata, now):
+            # A job waiting out a backoff or its turn keeps its worker's
+            # heartbeat: it is recovered only when that worker is gone.
+            if status in {"running", "waiting"} and not self._job_is_stale(metadata, now):
                 continue
 
             await redis.hset(
@@ -401,19 +404,29 @@ class ContractIngestQueue:
             )
             await redis.lrem(settings.CONTRACT_QUEUE_PROCESSING_NAME, 1, job_id)
         except Exception as exc:
+            from .contract_source_lease import ContractSourceBusy, LostSourceLease
+
+            # A lost lease with no live owner left is an ordinary failed attempt:
+            # the source it tainted needs a clean ingest, and only a retry makes
+            # one. Only a live owner is yielded to.
+            yields = isinstance(exc, ContractSourceBusy) or (
+                isinstance(exc, LostSourceLease) and getattr(exc, "holder", None)
+            )
+            if yields:
+                await self._yield_to_source_owner(redis, key, job_id, attempts, exc)
+                return
             logger.error("Contract ingest job %s failed: %s", job_id, exc)
             retries = max(1, int(settings.CONTRACT_QUEUE_MAX_RETRIES))
             await redis.hset(
                 key,
                 mapping={
-                    "status": "failed" if attempts >= retries else "queued",
+                    "status": "failed" if attempts >= retries else "waiting",
                     "last_error": str(exc),
                     "updated_at": _utc_now(),
                     "failed_at": _utc_now() if attempts >= retries else "",
                     "next_retry_at": _utc_now() if attempts < retries else "",
                 },
             )
-            await redis.lrem(settings.CONTRACT_QUEUE_PROCESSING_NAME, 1, job_id)
             if attempts >= retries:
                 await redis.hset(
                     key,
@@ -424,27 +437,106 @@ class ContractIngestQueue:
                 )
                 await self._push_unique(redis, settings.CONTRACT_QUEUE_DEADLETTER_NAME, job_id)
             else:
+                # The job stays on the processing list until it is back on the
+                # queue: a worker killed during the backoff leaves an entry that
+                # stale-job recovery re-queues (its hash says "queued"), not a
+                # job on no list at all.
                 await asyncio.sleep(min(2 ** attempts, 10))
-                await self._push_unique(redis, settings.CONTRACT_QUEUE_NAME, job_id)
+                await self._requeue_if_still_waiting(redis, key, job_id)
+            if attempts >= retries:
+                await redis.lrem(settings.CONTRACT_QUEUE_PROCESSING_NAME, 1, job_id)
         finally:
             heartbeat_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await heartbeat_task
 
+    async def _yield_to_source_owner(
+        self, redis: Redis, key: str, job_id: str, attempts: int, exc: Exception
+    ) -> None:
+        """Another ingest owns this document's source. Never spends a retry.
+
+        * The owner is this same job (a redelivered copy of a run that holds
+          the lease): the copy stops, and leaves the job's processing entry and
+          hash to the owning run. If that run has died, the entry is what
+          stale-job recovery redelivers once its heartbeat is stale - so the job
+          is never lost, and it runs again once the lease lapses.
+        * This run lost its lease to another job: its outcome is discarded. The
+          hash is closed as ``superseded`` (not left ``running``, which made
+          every later enqueue for this upload - an OCR retry, a reindex - a
+          silent no-op).
+        * Busy with another job, or the holder could not be read: the job
+          waits its turn and runs again; its next acquire learns whether a live
+          owner exists. An unreadable holder is never taken for "superseded" -
+          that would drop the job even when nobody is left to re-ingest, and
+          could close the hash of a live copy of this same job.
+        """
+        from .contract_source_lease import UNKNOWN_HOLDER, LostSourceLease
+
+        holder = getattr(exc, "holder", None)
+        if holder == f"ingest:{job_id}":
+            logger.info("Contract ingest job %s is already running elsewhere: %s", job_id, exc)
+            return
+        if isinstance(exc, LostSourceLease) and holder != UNKNOWN_HOLDER:
+            await redis.lrem(settings.CONTRACT_QUEUE_PROCESSING_NAME, 1, job_id)
+            logger.info("Contract ingest job %s lost its source to %s: %s", job_id, holder, exc)
+            await redis.hset(
+                key,
+                mapping={
+                    "status": "superseded",
+                    "last_error": str(exc),
+                    "updated_at": _utc_now(),
+                },
+            )
+            return
+        logger.info("Contract ingest job %s waits for the source owner %s", job_id, holder)
+        await redis.hset(
+            key,
+            mapping={
+                "status": "waiting",
+                "attempts": str(max(0, attempts - 1)),
+                "last_error": str(exc),
+                "updated_at": _utc_now(),
+            },
+        )
+        # Still on the processing list while it waits ("waiting", heartbeat
+        # alive): recovery leaves it alone while this worker lives, and
+        # re-queues it once this worker is stopped or killed.
+        await asyncio.sleep(min(2 ** max(1, attempts), 10))
+        await self._requeue_if_still_waiting(redis, key, job_id)
+
+    async def _requeue_if_still_waiting(self, redis: Redis, key: str, job_id: str) -> None:
+        """Back on the queue, unless something else already moved the job on
+        (recovery re-queued it, or it is running again): pushing it then would
+        deliver it twice, and "queued" would overwrite a live "running". Only a
+        waiter that re-queued removes its processing entry - otherwise the
+        entry left there belongs to whoever moved the job on."""
+        if await redis.hget(key, "status") != "waiting":
+            return
+        await redis.hset(key, mapping={"status": "queued", "updated_at": _utc_now()})
+        await self._push_unique(redis, settings.CONTRACT_QUEUE_NAME, job_id)
+        await redis.lrem(settings.CONTRACT_QUEUE_PROCESSING_NAME, 1, job_id)
+
     async def _heartbeat_job(self, job_id: str, worker_name: str) -> None:
         while True:
             await asyncio.sleep(self.heartbeat_seconds)
-            redis = await self.connect()
-            if redis is None:
-                return
-            await redis.hset(
-                self._job_key(job_id),
-                mapping={
-                    "heartbeat_at": _utc_now(),
-                    "updated_at": _utc_now(),
-                    "worker": worker_name,
-                },
-            )
+            try:
+                redis = await self.connect()
+                if redis is None:
+                    return
+                await redis.hset(
+                    self._job_key(job_id),
+                    mapping={
+                        "heartbeat_at": _utc_now(),
+                        "updated_at": _utc_now(),
+                        "worker": worker_name,
+                    },
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # One Redis error must not end the heartbeat of a live job: a
+                # silent heartbeat makes recovery redeliver a run still going.
+                logger.warning("Contract ingest heartbeat for %s failed", job_id, exc_info=True)
 
     def _job_is_stale(self, metadata: Dict[str, Any], now: datetime) -> bool:
         heartbeat = _parse_utc_timestamp(

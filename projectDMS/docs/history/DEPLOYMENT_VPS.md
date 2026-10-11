@@ -195,4 +195,3 @@ sudo systemctl reload nginx
 - Build images using the provided Dockerfile (backend) and `npm run build` (frontend) served via Nginx.
 - Use docker-compose to run API + Mongo + Redis + Qdrant with volume mounts for data.
 ```
-

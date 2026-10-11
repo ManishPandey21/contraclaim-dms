@@ -31,6 +31,17 @@ vi.mock("@/services/key-dates-api", () => ({
   updateEOTDetermination: vi.fn(),
 }));
 vi.mock("@/services/documents-api", () => ({ listDocuments: api.listDocuments }));
+vi.mock("@/hooks/useHasPermission", () => ({ default: () => true }));
+vi.mock("@/components/document-links/EntityDocumentLinks", () => ({
+  default: (props: any) => (
+    <div
+      data-testid="entity-document-links"
+      data-target-type={props.targetType}
+      data-target-id={props.targetId}
+      data-frozen={String(props.frozen)}
+    />
+  ),
+}));
 
 // The workflow renders CsvImportDialog, which reads the navbar tenant selection.
 const { useTenant } = vi.hoisted(() => ({ useTenant: vi.fn() }));
@@ -127,7 +138,7 @@ describe("KeyDateRevisionWorkflow", () => {
   it("labels an employer-initiated determination by its reference, not an EOT-N", async () => {
     renderWorkflow();
     expect(await screen.findByText("Employer determination")).toBeInTheDocument();
-    expect(screen.getByText(/CLIENT\/OWN-1/)).toBeInTheDocument();
+    expect(screen.getAllByText(/CLIENT\/OWN-1/).length).toBeGreaterThan(0);
   });
 
   it("supersede offers only later revisions and requires a reason", async () => {
@@ -152,5 +163,41 @@ describe("KeyDateRevisionWorkflow", () => {
   it("offers the employer-initiated determination entry point", async () => {
     renderWorkflow();
     expect(await screen.findByRole("button", { name: /Employer Determination/i })).toBeInTheDocument();
+  });
+
+  it("renders event-level evidence for every submission and determination", async () => {
+    renderWorkflow();
+    const evidence = await screen.findAllByTestId("entity-document-links");
+    expect(evidence).toHaveLength(5);
+    expect(evidence.map((node) => node.getAttribute("data-target-type"))).toEqual([
+      "eot_submission", "eot_submission", "eot_submission",
+      "eot_determination", "eot_determination",
+    ]);
+    expect(evidence.map((node) => node.getAttribute("data-target-id"))).toEqual([
+      "s-1", "s-2", "s-3", "d-1", "d-2",
+    ]);
+    expect(evidence.every((node) => node.getAttribute("data-frozen") === "true")).toBe(true);
+  });
+
+  it("highlights and scrolls to a deep-linked submission's evidence", async () => {
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    const { container } = render(
+      <KeyDateRevisionWorkflow projectId="p" milestones={MILESTONES} onChanged={vi.fn()} focusSubmissionId="s-2" />,
+    );
+    await screen.findAllByTestId("entity-document-links");
+    const focused = container.querySelector("#submission-evidence-s-2");
+    expect(focused).toHaveAttribute("data-focused", "true");
+    expect(container.querySelectorAll("[data-focused]")).toHaveLength(1);
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
+  });
+
+  it("highlights a deep-linked determination's evidence", async () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    const { container } = render(
+      <KeyDateRevisionWorkflow projectId="p" milestones={MILESTONES} onChanged={vi.fn()} focusDeterminationId="d-2" />,
+    );
+    await screen.findAllByTestId("entity-document-links");
+    expect(container.querySelector("#determination-evidence-d-2")).toHaveAttribute("data-focused", "true");
   });
 });

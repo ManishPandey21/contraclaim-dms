@@ -447,7 +447,7 @@ async def _seed_link_targets(db):
 
 
 @pytest.mark.asyncio
-async def test_submission_document_and_letter_links_round_trip():
+async def test_submission_letter_links_round_trip_without_legacy_document_membership():
     db = _DB()
     await _seed(db)
     links = await _seed_link_targets(db)
@@ -458,26 +458,26 @@ async def test_submission_document_and_letter_links_round_trip():
         organization_id="org-A", project_id="proj-A",
         contractor_submission_date=datetime(2026, 2, 1),
         contractor_letter_reference="CON/EOT-1", status="submitted",
-        linked_document_ids=[links["document"]],
+        linked_document_ids=[],
         linked_letter_ids=[links["letter"]],
         items=[EOTSubmissionItemInput(
             milestone_ref="KD-01", eot_submitted_date=datetime(2026, 3, 1), claimed_extension_days=60,
         )],
     ), _user())
 
-    assert submission["linked_document_ids"] == [links["document"]]
+    assert submission.get("linked_document_ids") in (None, [])
     assert submission["linked_letter_ids"] == [links["letter"]]
 
 
 @pytest.mark.asyncio
-async def test_submission_rejects_a_document_from_another_project():
+async def test_submission_direct_service_rejects_ambiguous_legacy_document_intent():
     db = _DB()
     await _seed(db)
     links = await _seed_link_targets(db)
     svc = KeyDateRevisionService(db)
     await svc.freeze_baseline("org-A", "proj-A", "primary", _user())
 
-    with pytest.raises(KeyDateError, match="outside the selected project"):
+    with pytest.raises(KeyDateError, match="manual review"):
         await svc.create_submission(EOTSubmissionCreate(
             organization_id="org-A", project_id="proj-A",
             contractor_submission_date=datetime(2026, 2, 1),
@@ -515,13 +515,13 @@ async def test_determination_rejects_a_letter_from_another_organisation():
 
 
 @pytest.mark.asyncio
-async def test_submission_rejects_an_unparseable_document_id():
+async def test_submission_direct_service_rejects_unparseable_legacy_document_intent():
     db = _DB()
     await _seed(db)
     svc = KeyDateRevisionService(db)
     await svc.freeze_baseline("org-A", "proj-A", "primary", _user())
 
-    with pytest.raises(KeyDateError, match="outside the selected project"):
+    with pytest.raises(KeyDateError, match="manual review"):
         await svc.create_submission(EOTSubmissionCreate(
             organization_id="org-A", project_id="proj-A",
             contractor_submission_date=datetime(2026, 2, 1),

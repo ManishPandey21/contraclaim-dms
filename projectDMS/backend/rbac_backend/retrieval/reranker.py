@@ -52,11 +52,26 @@ class LLMRerankerBackend:
 
     async def score(self, query: str, passages: List[str]) -> List[float]:
         numbered = "\n".join(f"[{i + 1}] {p[:600]}" for i, p in enumerate(passages))
-        prompt = self._PROMPT.format(count=len(passages), query=query, passages=numbered)
-        raw = await self._llm.generate(prompt, max_tokens=16 * len(passages) + 64, model=self._model)
+        prompt = self._PROMPT.format(
+            count=len(passages), query=query, passages=numbered
+        )
+        raw = await self._llm.generate(
+            prompt, max_tokens=16 * len(passages) + 64, model=self._model
+        )
         match = re.search(r"\[[\s\S]*\]", raw or "")
         if not match:
-            raise ValueError(f"reranker LLM returned no JSON array: {raw[:200]!r}")
+            # The reply is the model's answer to a prompt carrying up to 600
+            # characters of each retrieved passage, so a model that echoes its
+            # input puts customer contract text in this message - and
+            # `RerankerService.score` logs the exception verbatim at WARNING.
+            # The static guard inspects logging-call arguments, not `raise`
+            # arguments, so it could not see this one. The class fix is
+            # `test_extracted_content_not_logged.py::
+            # test_no_extraction_module_raises_with_extracted_content`.
+            # Length, not content.
+            raise ValueError(
+                f"reranker LLM returned no JSON array (reply_length={len(raw or '')})"
+            )
         scores = json.loads(match.group(0))
         if not isinstance(scores, list) or len(scores) != len(passages):
             raise ValueError("reranker LLM returned wrong-length score array")
@@ -86,7 +101,9 @@ class RerankerService:
         provider = str(getattr(settings, "RERANKER_PROVIDER", "llm") or "llm").lower()
         backend: Optional[RerankerBackend] = None
         if provider == "llm":
-            backend = LLMRerankerBackend(llm_generator, model=getattr(settings, "RERANKER_MODEL", None) or None)
+            backend = LLMRerankerBackend(
+                llm_generator, model=getattr(settings, "RERANKER_MODEL", None) or None
+            )
         return cls(
             backend,
             enabled=bool(getattr(settings, "RERANKER_ENABLED", False)),
@@ -96,7 +113,9 @@ class RerankerService:
             weight=float(getattr(settings, "RERANKER_WEIGHT", 0.5)),
         )
 
-    async def rerank(self, query: str, results: List[SearchResult]) -> List[SearchResult]:
+    async def rerank(
+        self, query: str, results: List[SearchResult]
+    ) -> List[SearchResult]:
         """Re-order ``results`` (already heuristically ranked) by a blend of the
         heuristic score and the backend relevance score.
 
@@ -109,9 +128,12 @@ class RerankerService:
             return results
 
         head = results[: self.top_n]
-        tail = results[self.top_n:]
+        tail = results[self.top_n :]
         passages = [
-            (res.payload or {}).get("text_enriched") or (res.payload or {}).get("text") or res.snippet or ""
+            (res.payload or {}).get("text_enriched")
+            or (res.payload or {}).get("text")
+            or res.snippet
+            or ""
             for res in head
         ]
         try:
@@ -119,7 +141,9 @@ class RerankerService:
                 self.backend.score(query, passages), timeout=self.timeout_ms / 1000.0
             )
         except Exception as exc:
-            logger.warning("Reranker (%s) failed; keeping heuristic order: %s", self.provider, exc)
+            logger.warning(
+                "Reranker (%s) failed; keeping heuristic order: %s", self.provider, exc
+            )
             return results
 
         heuristic = [self._heuristic_score(res) for res in head]

@@ -1,6 +1,6 @@
 # Production Readiness Plan for ContraClaim DMS
 
-Repository: `ManishPandey21/contraclaim-dms`  
+Repository: `ManishPandey21/contraclaim-dms`
 Target outcome: raise production readiness from **6.3/10** to **9/10**.
 
 ## Current vs Target Score

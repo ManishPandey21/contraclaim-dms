@@ -206,13 +206,13 @@ class PromptRegistry:
 
         latest = await self.get_latest(prompt_key)
         next_version = (latest.version + 1) if latest else 1
-        
+
         if self.db is not None:
             await self.db[self.COLLECTION].update_many(
                 {"prompt_key": prompt_key, "enabled": True},
                 {"$set": {"enabled": False}},
             )
-            
+
         new_record = PromptTemplateRecord(
             prompt_key=prompt_key,
             version=next_version,
@@ -220,13 +220,13 @@ class PromptRegistry:
             template=template,
             enabled=True,
         )
-        
+
         if self.db is not None:
             doc = new_record.model_dump(by_alias=True)
             if "_id" in doc and doc["_id"] is None:
                 del doc["_id"]
             await self.db[self.COLLECTION].insert_one(doc)
-            
+
         return new_record
 
     @staticmethod

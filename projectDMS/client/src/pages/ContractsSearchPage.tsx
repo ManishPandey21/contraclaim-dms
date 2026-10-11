@@ -43,6 +43,7 @@ import {
   ChevronUp,
   Eye,
 } from "lucide-react";
+import { usePinnedPageScope } from "@/hooks/useRegisterProjectScope";
 
 type Organization = { id: string; name: string; shortName?: string | null };
 type Project = { _id: string; name: string; organization_id: string };
@@ -451,6 +452,8 @@ const ContractsSearchPage: React.FC = () => {
     const params = new URLSearchParams(window.location.search);
     return params.get("project_id") || window.localStorage.getItem("proj_id") || "";
   });
+  // CL-4A: while the navbar selects a project, this page's picker follows it.
+  usePinnedPageScope(orgId, setOrgId, projId, setProjId);
   const [docId, setDocId] = useState<string>(() => {
     const params = new URLSearchParams(window.location.search);
     return params.get("document_id") || window.localStorage.getItem("doc_id") || "";

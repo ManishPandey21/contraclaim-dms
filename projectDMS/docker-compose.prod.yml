@@ -61,7 +61,14 @@ x-backend-env: &backend-env
   QDRANT_VECTOR_NAME: "${QDRANT_VECTOR_NAME:-}"
   VECTORDB_URL: "http://qdrant:6333"
   VECTORDB_API_KEY: "${QDRANT_API_KEY:?QDRANT_API_KEY is required}"
-  LANGGRAPH_API_TOKEN: "${LANGGRAPH_API_TOKEN:?LANGGRAPH_API_TOKEN is required}"
+  # Not `:?`. LANGGRAPH_ENABLED defaults to false and this file defines no
+  # langgraph service, so hard-requiring the token made `docker compose config`
+  # fail for a service that is not running - which is why the only placeholder
+  # in R-A8I's staging render was this variable. The requirement lives where it
+  # can see the switch: `config.py` refuses a production start with
+  # LANGGRAPH_ENABLED=true and no token, and `verify_langgraph_token` rejects
+  # every call when none is configured.
+  LANGGRAPH_API_TOKEN: "${LANGGRAPH_API_TOKEN:-}"
   LANGGRAPH_ENABLED: "${LANGGRAPH_ENABLED:-false}"
   # The official in-process LangGraph drafting engine is selected entirely on
   # the server. Keep the safe v2/off defaults until an explicit rollout is
@@ -158,11 +165,22 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      # Release identity: baked into the image (revision label + RELEASE_SHA
+      # environment) by backend/Dockerfile, never set at `up`, so a recreated
+      # container cannot claim a release its code is not. Build with
+      # RELEASE_SHA="$(git rev-parse HEAD)" (OPERATIONS 7a); unset, the image
+      # says `unknown` and post_deploy_verify.sh fails.
+      args:
+        RELEASE_SHA: "${RELEASE_SHA:-unknown}"
     restart: unless-stopped
     environment:
       <<: *backend-env
       START_BACKGROUND_SERVICES: "true"
       START_CONTRACT_QUEUE_WORKERS: "false"
+      # Heavy OCR/extraction belongs on document-worker, not on the request
+      # tier. START_BACKGROUND_SERVICES stays true here: it also gates cleanup,
+      # assignment alerts, and subscription lifecycle.
+      START_DOCUMENT_EXTRACTION_WORKERS: "false"
       # H2: the web tier must not run cron jobs (it may be scaled to >1 replica).
       # The contract-worker is the single scheduler owner; the leader lock is the
       # safety net if this is ever flipped on by mistake.
@@ -196,6 +214,9 @@ services:
     build:
       context: ./client
       dockerfile: Dockerfile
+      # Release identity baked into the image (client/Dockerfile).
+      args:
+        RELEASE_SHA: "${RELEASE_SHA:-unknown}"
     restart: unless-stopped
     depends_on:
       backend:
@@ -217,12 +238,23 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      # Release identity: baked into the image (revision label + RELEASE_SHA
+      # environment) by backend/Dockerfile, never set at `up`, so a recreated
+      # container cannot claim a release its code is not. Build with
+      # RELEASE_SHA="$(git rev-parse HEAD)" (OPERATIONS 7a); unset, the image
+      # says `unknown` and post_deploy_verify.sh fails.
+      args:
+        RELEASE_SHA: "${RELEASE_SHA:-unknown}"
     restart: unless-stopped
     command: ["python", "-m", "rbac_backend.worker"]
     environment:
       <<: *backend-env
       START_BACKGROUND_SERVICES: "false"
       START_CONTRACT_QUEUE_WORKERS: "true"
+      # Contract Master reprojection (PENDING -> CURRENT). Exactly one service
+      # runs it; the claim lease keeps extra replicas safe, not useful.
+      START_CONTRACT_REPROJECTION_WORKERS: "true"
+      START_DOCUMENT_EXTRACTION_WORKERS: "false"
       START_DRAFTING_QUEUE_WORKERS: "${START_DRAFTING_QUEUE_WORKERS:-false}"
       START_FILING_EXPORT_QUEUE_WORKERS: "${START_FILING_EXPORT_QUEUE_WORKERS:-true}"
       # H2: single owner of the leader-locked cron jobs (keep this at 1 replica).
@@ -244,8 +276,119 @@ services:
       - ${BACKUP_ROOT:-/var/backups/contractdms}:${BACKUP_ROOT:-/var/backups/contractdms}:ro
     logging: *default-logging
 
+  # Dedicated document extraction worker. Heavy OCR runs here so it does not
+  # add sustained CPU to the request-serving backend container.
+  document-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      # Release identity: baked into the image (revision label + RELEASE_SHA
+      # environment) by backend/Dockerfile, never set at `up`, so a recreated
+      # container cannot claim a release its code is not. Build with
+      # RELEASE_SHA="$(git rev-parse HEAD)" (OPERATIONS 7a); unset, the image
+      # says `unknown` and post_deploy_verify.sh fails.
+      args:
+        RELEASE_SHA: "${RELEASE_SHA:-unknown}"
+    restart: unless-stopped
+    command: ["python", "-m", "rbac_backend.worker"]
+    environment:
+      <<: *backend-env
+      START_BACKGROUND_SERVICES: "false"
+      START_CONTRACT_QUEUE_WORKERS: "false"
+      START_DOCUMENT_EXTRACTION_WORKERS: "true"
+      # Unified extraction rollout. Global switch off; organisations are opted
+      # in one at a time through the allowlist. See
+      # docs/operations/unified_extraction_canary_and_rollback.md
+      UNIFIED_EXTRACTION_ENABLED: "${UNIFIED_EXTRACTION_ENABLED:-false}"
+      UNIFIED_EXTRACTION_CANARY_ORG_IDS: "${UNIFIED_EXTRACTION_CANARY_ORG_IDS:-}"
+      EXTRACTION_FALLBACK_ENABLED: "${EXTRACTION_FALLBACK_ENABLED:-false}"
+      EXTRACTION_FALLBACK_MAX_PAGES_PER_DOCUMENT: "${EXTRACTION_FALLBACK_MAX_PAGES_PER_DOCUMENT:-5}"
+      # Which pipeline versions this worker may claim. Defaults to legacy_v0,
+      # NOT empty: empty means "claim anything", so an operator who starts a
+      # canary and forgets to restrict this service would let it drain the
+      # canary's unified_v1 queue. Defaulting closed means the canary is safe
+      # even when this variable is omitted entirely.
+      #
+      # Consequence to know before global enablement: if
+      # UNIFIED_EXTRACTION_ENABLED is ever set true without widening this,
+      # unified jobs are created but never claimed and queue age grows. That is
+      # deliberate - a visibly stalled queue is recoverable, a tenant silently
+      # processed by the wrong pipeline is not. post_deploy_verify.sh checks
+      # for exactly this combination.
+      DOCUMENT_WORKER_PIPELINE_VERSIONS: "${DOCUMENT_WORKER_PIPELINE_VERSIONS:-legacy_v0}"
+      # contract-worker is the single scheduler owner. Never flip this to true:
+      # two schedulers double-fire cron jobs and the leader lock is a safety
+      # net, not a licence.
+      RUN_SCHEDULER: "false"
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      falkordb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - service-net
+      - data-net
+      - egress-net
+    volumes:
+      - backend_uploads:/app/uploads
+      - backend_logs:/app/logs
+    logging: *default-logging
+
+  # Canary extraction worker. Scale to 1 ONLY during an authorised canary
+  # window, with document-worker restricted to legacy_v0. Because the claim
+  # predicate filters on the job's persisted pipeline_version, this worker
+  # physically cannot claim another tenant's legacy job.
+  #
+  # Rollback is server-side: empty UNIFIED_EXTRACTION_CANARY_ORG_IDS so new
+  # jobs are created legacy_v0, then scale this service back to 0. No image
+  # redeploy, no page-evidence deletion.
+  document-worker-canary:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      # Release identity: baked into the image (revision label + RELEASE_SHA
+      # environment) by backend/Dockerfile, never set at `up`, so a recreated
+      # container cannot claim a release its code is not. Build with
+      # RELEASE_SHA="$(git rev-parse HEAD)" (OPERATIONS 7a); unset, the image
+      # says `unknown` and post_deploy_verify.sh fails.
+      args:
+        RELEASE_SHA: "${RELEASE_SHA:-unknown}"
+    restart: unless-stopped
+    command: ["python", "-m", "rbac_backend.worker"]
+    deploy:
+      replicas: ${DOCUMENT_WORKER_CANARY_REPLICAS:-0}
+    environment:
+      <<: *backend-env
+      START_BACKGROUND_SERVICES: "false"
+      START_CONTRACT_QUEUE_WORKERS: "false"
+      START_DOCUMENT_EXTRACTION_WORKERS: "true"
+      UNIFIED_EXTRACTION_ENABLED: "${UNIFIED_EXTRACTION_ENABLED:-false}"
+      UNIFIED_EXTRACTION_CANARY_ORG_IDS: "${UNIFIED_EXTRACTION_CANARY_ORG_IDS:-}"
+      EXTRACTION_FALLBACK_ENABLED: "${EXTRACTION_FALLBACK_ENABLED:-false}"
+      EXTRACTION_FALLBACK_MAX_PAGES_PER_DOCUMENT: "${EXTRACTION_FALLBACK_MAX_PAGES_PER_DOCUMENT:-5}"
+      # The whole point of this service: it claims unified jobs and nothing else.
+      DOCUMENT_WORKER_PIPELINE_VERSIONS: "unified_v1"
+      RUN_SCHEDULER: "false"
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      falkordb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - service-net
+      - data-net
+      - egress-net
+    volumes:
+      - backend_uploads:/app/uploads
+      - backend_logs:/app/logs
+    logging: *default-logging
+
   qdrant:
-    image: qdrant/qdrant:v1.12.5
+    image: qdrant/qdrant:v1.12.5@sha256:05fecce7dce45d1254e0468bc037e8210e187fd56fa847688b012293d5f08aae
     restart: unless-stopped
     environment:
       QDRANT__SERVICE__API_KEY: "${QDRANT_API_KEY:?QDRANT_API_KEY is required}"
@@ -266,13 +409,22 @@ services:
     logging: *default-logging
 
   falkordb:
-    image: falkordb/falkordb:v4.0.8
+    image: falkordb/falkordb:v4.0.8@sha256:af5f2aa035390f04fa6d1f0c6353669f5f75c101f6b4f385fcb672a288b4edb8
     restart: unless-stopped
     environment:
       FALKORDB_PASSWORD: "${FALKORDB_PASSWORD:?FALKORDB_PASSWORD is required}"
       # The FalkorDB image entrypoint loads the graph module, then appends
       # REDIS_ARGS. Overriding `command` starts plain Redis without FalkorDB.
+      #
+      # --dir is load-bearing. The image's WORKDIR is /FalkorDB and Redis
+      # defaults `dir` to the working directory, so without this the RDB and
+      # the AOF are written to the container's writable layer instead of the
+      # mounted volume below. The backup then archives an empty /data, every
+      # run reports success, and the graph does not survive the container
+      # being replaced. Keep this path equal to the falkordb_data mount;
+      # test_deployment_config.py fails when they diverge.
       REDIS_ARGS: >-
+        --dir /data
         --save 900 1
         --save 300 10
         --appendonly yes
@@ -292,7 +444,7 @@ services:
     logging: *default-logging
 
   redis:
-    image: redis:7.4-alpine
+    image: redis:7.4-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
     restart: unless-stopped
     command:
       - sh
@@ -346,24 +498,80 @@ services:
   clamav:
     # Pinned like every other image: AV is fail-closed in production, so an
     # unexpected upstream release must not be able to break uploads on redeploy.
-    image: clamav/clamav:1.4
+    # R-A8Y: 1.4.6, the index digest R-A8X scanned (0 fixable CRITICAL/HIGH) and
+    # the R-A8Y disposable drill validated. The tag itself is rebuilt upstream
+    # (it already points elsewhere), so only the digest names these bytes.
+    image: clamav/clamav:1.4.6@sha256:71fbb76b397cd84a90043caf1178a7f81bd0c131a031e7b0619afd721fbfad41
     restart: unless-stopped
+    environment:
+      # Signature checks per day. The image default is 1, which lets one missed
+      # check leave the daily database ~48 h old - the freshness FAIL threshold
+      # (scripts/check_clamav_signature_freshness.py). 12 is freshclam's own
+      # documented default.
+      FRESHCLAM_CHECKS: "12"
     deploy:
       resources:
         limits:
-          memory: 2g
+          # A concurrent database reload holds the old and new engine at once:
+          # the R-A8Y drill peaked at 1952 MiB, 96 MiB under the former 2g. Now
+          # that updates really happen, that reload runs every day.
+          memory: 3g
     healthcheck:
-      test: ["CMD-SHELL", "clamdscan --ping=1 || exit 1"]
+      # Health is still "clamd answers PING". The rest heals a race measured in
+      # the R-A8Y drill: the image's /init starts freshclam and clamd together,
+      # freshclam can finish an update before clamd listens ("Clamd was NOT
+      # notified"), clamd keeps the database it began loading, and its SelfCheck
+      # then reports "Database status OK" - so it serves the old signatures until
+      # the NEXT published daily. When the daily version on disk (CVD/CLD header
+      # field 3) is newer than the one clamd reports loaded, ask for ONE RELOAD
+      # (marker file); scanning continues during a concurrent reload. Fail
+      # visible rather than heal silently: an unreadable VERSION is unhealthy,
+      # and so is a newer database still not loaded 10 minutes after the
+      # request - a reload that keeps failing is reported, never retried every
+      # 15 s. test_clamav_update_path.py pins this; the R-A8Y drill ran it.
+      test:
+        - CMD-SHELL
+        - >-
+          clamdscan --ping=1 >/dev/null || exit 1;
+          loaded=$$(printf 'zVERSION\0' | nc -w 5 127.0.0.1 3310 | tr -d '\0' | cut -d/ -f2);
+          case "$$loaded" in ''|*[!0-9]*) echo "clamd VERSION unreadable: $$loaded"; exit 1;; esac;
+          disk=0;
+          for f in /var/lib/clamav/daily.cvd /var/lib/clamav/daily.cld; do
+          [ -f "$$f" ] || continue;
+          v=$$(head -c 512 "$$f" | cut -d: -f3);
+          case "$$v" in ''|*[!0-9]*) continue;; esac;
+          [ "$$v" -gt "$$disk" ] && disk=$$v;
+          done;
+          m=/tmp/.clamd-reload-requested;
+          if [ "$$disk" -gt "$$loaded" ]; then
+          if [ ! -e "$$m" ]; then touch "$$m"; clamdscan --reload >/dev/null 2>&1;
+          elif [ -n "$$(find "$$m" -mmin +10)" ]; then echo "daily $$disk on disk but $$loaded loaded 10 min after RELOAD"; exit 1;
+          fi;
+          else rm -f "$$m";
+          fi;
+          exit 0
       interval: 15s
       timeout: 10s
       retries: 5
       start_period: 30s
+    # R-A8Y: on service-net alone (internal: true) freshclam had no route and no
+    # DNS, failed every daily check for 67 days, and clamd served the database
+    # baked into the image. egress-net gives it the update path; every peer on
+    # egress-net is already a peer on service-net, so no new service becomes
+    # reachable. Never data-net or edge-net. test_clamav_update_path.py pins this.
     networks:
       - service-net
+      - egress-net
+    # Signatures survive container recreation. A new, empty volume is seeded by
+    # Docker from the image's own /var/lib/clamav, so a fresh install starts
+    # with the baked database and freshclam brings it current. Regenerable
+    # cache: deliberately NOT part of the backup set.
+    volumes:
+      - clamav_db:/var/lib/clamav
     logging: *default-logging
 
   gateway:
-    image: httpd:2.4
+    image: httpd:2.4@sha256:393435ee1a31437adeb1f03c134224c9ce5fa5f527e8c0cb9bea576b0d6fc742
     restart: unless-stopped
     depends_on:
       client:
@@ -402,6 +610,7 @@ volumes:
   qdrant_snapshots:
   falkordb_data:
   redis_data:
+  clamav_db:
 
 networks:
   data-net:

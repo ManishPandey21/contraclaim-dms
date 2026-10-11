@@ -26,4 +26,3 @@ def get_vector_client() -> VectorClient:
 @lru_cache(maxsize=1)
 def get_llm_generator() -> LLMGenerator:
     return LLMGenerator(get_retrieval_config())
-

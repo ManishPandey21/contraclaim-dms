@@ -1,11 +1,11 @@
 # Arbitration LangGraph Production Deployment and Acceptance Record
 
-**Deployment date:** 2026-07-23  
-**Environment:** ContraClaim production (`/opt/contraclaim-dms/projectDMS`)  
-**ContraClaim source commit:** `8b57c619de9f8c66e1629be40f3c1cd8ad635f44`  
-**projectDMS equivalent commit:** `24ee3d03abbc10f214805727eaae3ffce852ae8d`  
-**Decision:** **Implemented but not production accepted**  
-**Authoritative engine:** `arbitration_v2`  
+**Deployment date:** 2026-07-23
+**Environment:** ContraClaim production (`/opt/contraclaim-dms/projectDMS`)
+**ContraClaim source commit:** `8b57c619de9f8c66e1629be40f3c1cd8ad635f44`
+**projectDMS equivalent commit:** `24ee3d03abbc10f214805727eaae3ffce852ae8d`
+**Decision:** **Implemented but not production accepted**
+**Authoritative engine:** `arbitration_v2`
 **Rollout:** `off`, primary percentage `0`, production acceptance `false`
 
 ## 1. Executive decision

@@ -91,7 +91,7 @@ class AntivirusService:
                 virus_name = response.split("FOUND")[0].replace("stream:", "").strip()
                 logger.critical("Infected file detected! File: %s, Virus: %s", path.name, virus_name)
                 return False, virus_name
-            
+
             if "OK" in response:
                 logger.debug("File %s is CLEAN", path.name)
                 return True, None

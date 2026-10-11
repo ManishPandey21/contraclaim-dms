@@ -28,12 +28,12 @@ class DocumentProcessingError(Exception):
 
 class MetadataProcessorService:
     """Service wrapper for metadata processing functionality."""
-    
+
     def __init__(self, config: Optional[DocumentProcessingConfig] = None):
         """Initialize the metadata processor service."""
         self.config = config or DocumentProcessingConfig()
         self.processor = create_document_processor(self.config)
-        
+
     async def process_document(
         self,
         pdf_path: str,
@@ -45,7 +45,7 @@ class MetadataProcessorService:
     ) -> Dict[str, Any]:
         """
         Process a single document for metadata extraction.
-        
+
         Args:
             pdf_path: Path to the PDF file to process
             path_structure: Organization/project path structure
@@ -53,23 +53,23 @@ class MetadataProcessorService:
             document_id: Optional document ID for database updates
             enable_ocr: Whether to enable OCR processing
             enable_embeddings: Whether to create vector embeddings
-            
+
         Returns:
             Dictionary containing processing results
         """
         start_time = datetime.utcnow()
-        
+
         try:
             logger.info(f"Starting metadata processing for: {pdf_path}")
-            
+
             # Validate input file
             file_path = Path(pdf_path)
             if not file_path.exists():
                 raise DocumentProcessingError(f"File not found: {pdf_path}")
-            
+
             if not file_path.suffix.lower() == '.pdf':
                 raise DocumentProcessingError(f"Only PDF files are supported, got: {file_path.suffix}")
-            
+
             # Configure processing options
             processing_config = DocumentProcessingConfig(
                 uploads_dir=self.config.uploads_dir,
@@ -83,10 +83,10 @@ class MetadataProcessorService:
                 mongo_uri=self.config.mongo_uri,
                 database_name=self.config.database_name
             )
-            
+
             # Create processor with updated config
             processor = create_document_processor(processing_config)
-            
+
             # Process the document
             logger.info("Starting metadata extraction for %s (PydanticAI enabled=%s)", pdf_path, processing_config.use_pydantic_ai)
             result = await processor.process_document(
@@ -95,9 +95,9 @@ class MetadataProcessorService:
                 upload_type=upload_type,
                 document_id=document_id
             )
-            
+
             processing_time = (datetime.utcnow() - start_time).total_seconds()
-            
+
             if is_dataclass(result):
                 result_dict: Dict[str, Any] = asdict(result)
             elif hasattr(result, "model_dump"):
@@ -128,14 +128,14 @@ class MetadataProcessorService:
                 "embeddings_enabled": enable_embeddings,
                 "processed_at": datetime.utcnow().isoformat()
             }
-            
+
             logger.info(f"Metadata processing completed for {pdf_path} in {processing_time:.2f}s")
             return enriched_result
-            
+
         except DocumentProcessorError as e:
             processing_time = (datetime.utcnow() - start_time).total_seconds()
             logger.error(f"Metadata processing failed for {pdf_path}: {str(e)}")
-            
+
             return {
                 "success": False,
                 "error": str(e),
@@ -143,11 +143,11 @@ class MetadataProcessorService:
                 "file_path": pdf_path,
                 "processed_at": datetime.utcnow().isoformat()
             }
-            
+
         except Exception as e:
             processing_time = (datetime.utcnow() - start_time).total_seconds()
             logger.error(f"Unexpected error processing {pdf_path}: {str(e)}")
-            
+
             return {
                 "success": False,
                 "error": f"Unexpected processing error: {str(e)}",
@@ -163,7 +163,7 @@ class MetadataProcessorService:
     ) -> list[Dict[str, Any]]:
         """
         Process multiple documents concurrently with controlled concurrency.
-        
+
         Args:
             documents_info: List of document info dictionaries containing:
                 - pdf_path: Path to PDF file
@@ -171,16 +171,16 @@ class MetadataProcessorService:
                 - upload_type: incoming/outgoing
                 - document_id: Optional document ID
             max_concurrent: Maximum number of concurrent processes
-            
+
         Returns:
             List of processing results
         """
         try:
             logger.info(f"Starting batch processing of {len(documents_info)} documents")
-            
+
             # Create semaphore to limit concurrency
             semaphore = asyncio.Semaphore(max_concurrent)
-            
+
             async def process_with_semaphore(doc_info):
                 async with semaphore:
                     return await self.process_document(
@@ -191,11 +191,11 @@ class MetadataProcessorService:
                         enable_ocr=doc_info.get('enable_ocr', True),
                         enable_embeddings=doc_info.get('enable_embeddings', True)
                     )
-            
+
             # Process all documents concurrently
             tasks = [process_with_semaphore(doc_info) for doc_info in documents_info]
             results = await asyncio.gather(*tasks, return_exceptions=True)
-            
+
             # Handle exceptions in results
             processed_results = []
             for i, result in enumerate(results):
@@ -209,12 +209,12 @@ class MetadataProcessorService:
                     })
                 else:
                     processed_results.append(result)
-            
+
             successful_count = sum(1 for r in processed_results if r.get('success', False))
             logger.info(f"Batch processing completed: {successful_count}/{len(processed_results)} successful")
-            
+
             return processed_results
-            
+
         except Exception as e:
             logger.error(f"Batch processing failed: {str(e)}")
             raise DocumentProcessorError(f"Batch processing failed: {str(e)}")
@@ -227,41 +227,41 @@ class MetadataProcessorService:
     ) -> Dict[str, Any]:
         """
         Extract metadata from PDF without full document processing.
-        
+
         Args:
             pdf_path: Path to PDF file
             skip_database_save: Skip saving to database
             skip_embeddings: Skip creating vector embeddings
-            
+
         Returns:
             Extracted metadata dictionary
         """
         try:
             logger.info(f"Extracting metadata from: {pdf_path}")
-            
+
             # Create a lightweight processor for metadata extraction only
             from ..services.ocr_service import OCRService
             from ..services.openai_service import OpenAIService
             from ..services.text_processing_service import TextProcessingService
-            
+
             config = self.config
             ocr_service = OCRService(config)
             openai_service = OpenAIService(config)
             text_service = TextProcessingService(config)
-            
+
             # Process PDF
             input_path = Path(pdf_path)
             processed_path, raw_ocr_text = await ocr_service.process_pdf(input_path)
-            
+
             # Upload to OpenAI and extract content
             file_id = openai_service.upload_file(processed_path)
-            
+
             try:
                 extracted_content = openai_service.extract_document_metadata(file_id)
-                
+
                 # Parse extracted content
                 parsed_metadata = text_service.parse_extraction_report(extracted_content)
-                
+
                 result = {
                     "success": True,
                     "metadata": {
@@ -281,14 +281,14 @@ class MetadataProcessorService:
                     "processed_file_path": str(processed_path),
                     "extracted_at": datetime.utcnow().isoformat()
                 }
-                
+
                 logger.info(f"Metadata extraction completed for: {pdf_path}")
                 return result
-                
+
             finally:
                 # Always cleanup the uploaded file
                 openai_service.cleanup_file(file_id)
-                
+
         except Exception as e:
             logger.error(f"Metadata extraction failed for {pdf_path}: {str(e)}")
             return {
@@ -301,16 +301,16 @@ class MetadataProcessorService:
     async def validate_document_processability(self, pdf_path: str) -> Dict[str, Any]:
         """
         Validate if a document can be processed for metadata extraction.
-        
+
         Args:
             pdf_path: Path to PDF file
-            
+
         Returns:
             Validation result dictionary
         """
         try:
             file_path = Path(pdf_path)
-            
+
             # Basic file checks
             if not file_path.exists():
                 return {
@@ -318,14 +318,14 @@ class MetadataProcessorService:
                     "error": "File does not exist",
                     "checks": {"file_exists": False}
                 }
-            
+
             if not file_path.suffix.lower() == '.pdf':
                 return {
                     "valid": False,
                     "error": "Only PDF files are supported",
                     "checks": {"file_exists": True, "is_pdf": False}
                 }
-            
+
             file_size_mb = file_path.stat().st_size / (1024 * 1024)
             if file_size_mb > self.config.max_file_size_mb:
                 return {
@@ -333,12 +333,12 @@ class MetadataProcessorService:
                     "error": f"File too large: {file_size_mb:.1f}MB > {self.config.max_file_size_mb}MB",
                     "checks": {"file_exists": True, "is_pdf": True, "size_ok": False}
                 }
-            
+
             # Check if PDF has text or needs OCR
             from ..services.ocr_service import OCRService
             ocr_service = OCRService(self.config)
             has_text = ocr_service.is_pdf_textual(file_path)
-            
+
             return {
                 "valid": True,
                 "file_size_mb": file_size_mb,
@@ -351,7 +351,7 @@ class MetadataProcessorService:
                     "readable": True
                 }
             }
-            
+
         except Exception as e:
             logger.error(f"Validation failed for {pdf_path}: {str(e)}")
             return {
@@ -363,10 +363,10 @@ class MetadataProcessorService:
     async def get_processing_status(self, document_id: str) -> Optional[Dict[str, Any]]:
         """
         Get the processing status of a document.
-        
+
         Args:
             document_id: ID of the document
-            
+
         Returns:
             Processing status dictionary or None if not found
         """
@@ -374,19 +374,19 @@ class MetadataProcessorService:
             # This would typically query a processing status database
             # For now, we'll return a placeholder
             logger.info(f"Getting processing status for document: {document_id}")
-            
+
             # In a real implementation, you would:
             # 1. Query the database for processing tasks
             # 2. Check if metadata extraction is complete
             # 3. Check if embeddings are created
             # 4. Return current status
-            
+
             return {
                 "document_id": document_id,
                 "status": "completed",  # placeholder
                 "last_updated": datetime.utcnow().isoformat()
             }
-            
+
         except Exception as e:
             logger.error(f"Failed to get processing status for {document_id}: {str(e)}")
             return None
@@ -402,8 +402,7 @@ class MetadataProcessorService:
                 setattr(self.config, key, value)
             else:
                 logger.warning(f"Unknown config parameter: {key}")
-        
+
         # Recreate processor with new config
         self.processor = create_document_processor(self.config)
         logger.info("Configuration updated and processor recreated")
-

@@ -99,6 +99,31 @@ def _route_source(route: Any) -> str:
                     inspect.getsource(AIAssistantController._authorize_ai_action),
                 ]
             )
+    if route.endpoint.__module__ == "rbac_backend.routers.document_relationships":
+        from rbac_backend.services.document_relationship_service import (
+            DocumentRelationshipService,
+        )
+
+        delegated_methods = {
+            "batch_link_documents": "link_batch",
+            "list_entity_document_links": "list_for_target",
+            "freeze_entity_document_links": "freeze",
+            "remove_document_link": "remove",
+            "document_link_history": "history",
+            "list_document_entity_links": "list_for_document",
+            "list_document_link_dependencies": "list_for_document",
+        }
+        method_name = delegated_methods.get(str(route.name))
+        method = getattr(DocumentRelationshipService, method_name, None) if method_name else None
+        if method is not None:
+            source = "\n".join(
+                [
+                    source,
+                    inspect.getsource(method),
+                    inspect.getsource(DocumentRelationshipService._target),
+                    inspect.getsource(DocumentRelationshipService._document),
+                ]
+            )
     return source
 
 
@@ -121,6 +146,12 @@ def _classify_source(source: str, route: Any) -> tuple[str, list[str], str]:
             "PolicyService(db).authorize",
             "policy_service.authorize",
             "authorize_document",
+            # services/contract_scope_resolver.py: PolicyService.authorize, then
+            # mints the AuthorizedContractScope token.
+            "await authorize_contract_scope(",
+            # services/contract_candidate_authority.py: PolicyService.authorize at
+            # organisation scope, then ScopeService organisation-wide reach.
+            "await require_organization_wide_scope(",
         ],
     )
     if policy_markers:

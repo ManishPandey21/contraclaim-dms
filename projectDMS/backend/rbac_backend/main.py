@@ -9,18 +9,22 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .core.config import settings
 from .core.csrf import validate_unsafe_cookie_request
+from .core.errors import register_domain_error_handler
+from .core.public_body_limit import PublicBodyLimitMiddleware, public_body_caps
 from .routers import (
     ai_assistant,
     arbitration_drafting,
     auth,
     chronology,
     client_errors,
+    upload_policy,
     contact,
     concerns,
     contracts,
     contract_appraisal,
     contract_clauses,
     contract_master,
+    contract_master_api,
     claims,
     key_dates,
     variations,
@@ -29,10 +33,13 @@ from .routers import (
     ipc_bills,
     evidence_graph,
     evidence_registers,
+    hindrances,
     ipc_categories,
     sla,
     dashboard,
     deep_planning,
+    document_relationships,
+    legacy_relationship_backfill,
     documents,
     email,
     email_share,
@@ -68,7 +75,12 @@ from .routers import (
     retrieval_engine,
 )
 from .routers.ws import router as ws_router
-from .services.background_jobs import start_background_services, stop_background_services
+from .services.background_jobs import (
+    start_background_services,
+    start_document_extraction_workers,
+    stop_background_services,
+    stop_document_extraction_workers,
+)
 from .services.contract_ingest_queue import (
     start_contract_ingest_queue,
     stop_contract_ingest_queue,
@@ -110,8 +122,31 @@ app = FastAPI(
 )
 _loop_handler_installed = False
 
+# F-A8W-B3. Routers re-raise the whole BaseDomainError family; a route without
+# `handle_exceptions` must still answer at the error's own status, not 500.
+register_domain_error_handler(app)
+
 # Distributed tracing (opt-in; no-op unless OTEL_ENABLED + libs installed).
 setup_tracing(app)
+
+# Above the router, which is what the property needs: it runs before FastAPI
+# builds a `Request` or parses a declared body model. It is NOT the outermost
+# middleware - `add_middleware` inserts at position 0, so the CORS layer added
+# below and the `@app.middleware("http")` request-context layer registered after
+# it both sit outside. Measured in the shipped image:
+# `['BaseHTTPMiddleware', 'CORSMiddleware', 'PublicBodyLimitMiddleware']`.
+# That is sufficient because neither of those two reads the body -
+# `request_context_middleware` touches only headers and the URL - and it is
+# stated here rather than assumed, because a comment claiming "outermost" would
+# be the sort of thing nobody re-checks.
+#
+# An unauthenticated caller decided how much this process held on four routes;
+# see `core/public_body_limit.py` for which, and why a pure-ASGI middleware
+# rather than four handler rewrites.
+app.add_middleware(
+    PublicBodyLimitMiddleware,
+    caps=public_body_caps(settings),
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -128,8 +163,11 @@ app.add_middleware(
         "X-Requested-With",
         "X-Step-Up-Token",
         "Idempotency-Key",
+        # Active organisation / project selection (core/tenant_context.py).
+        "X-Org-Id",
+        "X-Proj-Id",
     ],
-    expose_headers=["X-Request-ID", "Content-Disposition"],
+    expose_headers=["X-Request-ID", "Content-Disposition", "Retry-After"],
 )
 
 
@@ -210,14 +248,18 @@ app.include_router(auth.router, prefix="/api", tags=["auth"])
 app.include_router(sso.router, prefix="/api", tags=["sso"])
 app.include_router(contact.router, prefix="/api", tags=["contact"])
 app.include_router(client_errors.router, prefix="/api", tags=["client-errors"])
+app.include_router(upload_policy.router, prefix="/api", tags=["config"])
 app.include_router(users.router, prefix="/api", tags=["users"])
 app.include_router(profiles.router, prefix="/api", tags=["profiles"])
 app.include_router(documents.router, prefix="/api", tags=["documents"])
+app.include_router(document_relationships.router, prefix="/api", tags=["document-relationships"])
+app.include_router(legacy_relationship_backfill.router, prefix="/api", tags=["legacy-relationship-backfill"])
 app.include_router(contracts.router, prefix="/api", tags=["contracts"])
 app.include_router(claims.router, prefix="/api", tags=["claims"])
 app.include_router(contract_appraisal.router, prefix="/api", tags=["contract-appraisal"])
 app.include_router(contract_clauses.router, prefix="/api", tags=["contract-clauses"])
 app.include_router(contract_master.router, prefix="/api", tags=["contract-master"])
+app.include_router(contract_master_api.router, prefix="/api", tags=["contract-master-v1"])
 app.include_router(key_dates.router, prefix="/api", tags=["key-dates"])
 app.include_router(variations.router, prefix="/api", tags=["variations"])
 app.include_router(bank_guarantees.router, prefix="/api", tags=["bank-guarantees"])
@@ -225,6 +267,7 @@ app.include_router(insurance.router, prefix="/api", tags=["insurance"])
 app.include_router(ipc_bills.router, prefix="/api", tags=["ipc-bills"])
 app.include_router(evidence_graph.router, prefix="/api", tags=["evidence-graph"])
 app.include_router(evidence_registers.router, prefix="/api", tags=["evidence-registers"])
+app.include_router(hindrances.router, prefix="/api", tags=["hindrances"])
 app.include_router(arbitration_drafting.router, prefix="/api", tags=["arbitration-drafting"])
 app.include_router(chronology.router, prefix="/api", tags=["chronology"])
 app.include_router(ipc_categories.router, prefix="/api", tags=["ipc-categories"])
@@ -320,6 +363,8 @@ async def startup_event() -> None:
 
     if settings.START_BACKGROUND_SERVICES:
         await start_background_services()
+    if settings.START_DOCUMENT_EXTRACTION_WORKERS:
+        await start_document_extraction_workers()
     if settings.START_CONTRACT_QUEUE_WORKERS:
         await start_contract_ingest_queue()
 
@@ -332,6 +377,8 @@ async def startup_event() -> None:
 async def shutdown_event() -> None:
     if settings.START_CONTRACT_QUEUE_WORKERS:
         await stop_contract_ingest_queue()
+    if settings.START_DOCUMENT_EXTRACTION_WORKERS:
+        await stop_document_extraction_workers()
     if settings.START_BACKGROUND_SERVICES:
         await stop_background_services()
     await get_runtime_state().close()

@@ -98,7 +98,7 @@ class UserCreatePayload(BaseModel):
 
 class UserController:
     """Secure user controller with comprehensive authentication and authorization."""
-    
+
     def __init__(
         self,
         user_service: UserService,
@@ -132,7 +132,7 @@ class UserController:
                 window_seconds=settings.LOGIN_IP_RATE_LIMIT_WINDOW,
                 max_requests=settings.LOGIN_IP_RATE_LIMIT_REQUESTS,
             )
-            
+
             # Additional email-based rate limiting
             await self.rate_limiter.check_email_limit(
                 login_data.email,
@@ -140,14 +140,14 @@ class UserController:
                 window_seconds=settings.LOGIN_EMAIL_RATE_LIMIT_WINDOW,
                 max_requests=settings.LOGIN_EMAIL_RATE_LIMIT_REQUESTS,
             )
-            
+
             # Validate input
             validated_email = validate_email(login_data.email)
             password = validate_input(login_data.password, max_length=200, required=True)
-            
+
             # Get user by email (prevent user enumeration by using consistent timing)
             user = await self.user_service.get_user_by_email_secure(validated_email)
-            
+
             # Check if account is locked
             if user and await self.authentication_service.is_account_locked(user.id):
                 await self.audit_logger.log_login_failed(
@@ -159,7 +159,7 @@ class UserController:
                     "Account is temporarily locked due to suspicious activity",
                     status.HTTP_423_LOCKED
                 )
-            
+
             # Verify credentials
             if not user or not await self.authentication_service.verify_password_secure(
                 password, user.hashed_password
@@ -170,17 +170,17 @@ class UserController:
                     "invalid_credentials",
                     client_ip=client_ip
                 )
-                
+
                 # Increment failed attempts if user exists
                 if user:
                     await self.authentication_service.increment_failed_attempts(user.id)
-                
+
                 # Generic error message to prevent user enumeration
                 raise AuthenticationError(
                     "Invalid email or password",
                     status.HTTP_401_UNAUTHORIZED
                 )
-            
+
             # Check if user is disabled
             if user.disabled:
                 await self.audit_logger.log_login_failed(
@@ -192,10 +192,10 @@ class UserController:
                     "Account is disabled",
                     status.HTTP_401_UNAUTHORIZED
                 )
-            
+
             # Reset failed attempts on successful login
             await self.authentication_service.reset_failed_attempts(user.id)
-            
+
             # Create access token with user context
             access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
             access_token = create_access_token(
@@ -206,31 +206,31 @@ class UserController:
                 },
                 expires_delta=access_token_expires
             )
-            
+
             # Store session information
             session_id = await self.authentication_service.create_user_session(
                 user.id, client_ip, user_agent, access_token_expires
             )
-            
+
             # Update last login
             await self.user_service.update_last_login(user.id)
-            
+
             # Audit log successful login
             await self.audit_logger.log_login_successful(
                 str(user.id), user.email, client_ip=client_ip, session_id=session_id
             )
-            
+
             # Build user response
             user_response = await self._build_user_response(user, include_effective_permissions=True)
-            
+
             return LoginResponse(
                 access_token=access_token,
                 token_type="bearer",
                 expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
                 user=user_response
             )
-            
-        except (AuthenticationError, UserError, HTTPException):
+
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Authentication failed: {str(e)}")
@@ -248,13 +248,15 @@ class UserController:
         try:
             # Rate limiting for user creation
             await self.rate_limiter.check_user_limit(current_user.id, cost=10)
-            
+
             # Authorization check
             await self.auth_service.require_permission(current_user, "users:create")
-            
+
             # Validate and sanitize input
             validated_data = await self._validate_user_input(user_data)
-            
+            # Every later check, and the stored record, sees canonical role ids only.
+            validated_data.roles = await self._resolve_assigned_roles(validated_data.roles)
+
             # Check for existing user
             existing_user = await self.user_service.check_user_exists(
                 validated_data.email, validated_data.username
@@ -264,34 +266,36 @@ class UserController:
                     "User with this email or username already exists",
                     status.HTTP_409_CONFLICT
                 )
-            
+
             # Validate role assignments and organizational context
             await self._validate_user_context(validated_data, current_user)
-            
+
             # Create user
             user = await self.user_service.create_user(
                 validated_data, validated_data.password
             )
-            
+
             # Audit log
             await self.audit_logger.log_user_created(
-                current_user.id, user.id, user.email, validated_data.roles
+                current_user.id, user.id, user.email, roles=validated_data.roles
             )
-            
+
             # Send welcome email (background task)
             # background_tasks.add_task(
             #     self.notification_service.send_welcome_email, user
             # )
-            
+
             # Build response
             user_response = await self._build_user_response(user)
-            
+
             return user_response
-            
+
         except (UserError, AuthenticationError, HTTPException):
             raise
         except (ValueError, ValidationError, UserServiceError) as e:
             raise UserError(str(e), status.HTTP_400_BAD_REQUEST)
+        except (BaseDomainError, HTTPException):
+            raise
         except Exception as e:
             logger.error(f"User creation failed: {str(e)}")
             raise HTTPException(
@@ -309,33 +313,33 @@ class UserController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id)
-            
+
             # Authorization check
             await self.auth_service.require_permission(current_user, "users:read")
-            
+
             # Build authorized query
             authorized_query = await self.auth_service.build_user_query(
                 current_user, filters
             )
-            
+
             # Get users with pagination
             users, total_count = await self.user_service.get_users_paginated(
                 authorized_query, pagination
             )
-            
+
             # Build response objects
             user_responses = []
             for user in users:
                 user_response = await self._build_user_response(user)
                 user_responses.append(user_response)
-            
+
             return UserListResponse(
                 users=user_responses,
                 total=total_count,
                 page=pagination["skip"] // pagination["limit"] + 1,
                 limit=pagination["limit"]
             )
-            
+
         except (BaseDomainError, HTTPException, ValueError):
             raise
         except Exception as e:
@@ -354,26 +358,26 @@ class UserController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id)
-            
+
             # Authorization check
             await self.auth_service.require_permission(current_user, "users:read")
-            
+
             # Validate user ID
             validated_user_id = validate_object_id(user_id)
-            
+
             # Get user
             user = await self.user_service.get_user_by_id(validated_user_id)
             if not user:
                 raise UserError("User not found", status.HTTP_404_NOT_FOUND)
-            
+
             # Check authorization for this specific user
             await self.auth_service.check_user_access(current_user, user, "read")
-            
+
             # Build response
             user_response = await self._build_user_response(user)
-            
+
             return user_response
-            
+
         except (BaseDomainError, HTTPException, ValueError):
             raise
         except Exception as e:
@@ -413,32 +417,40 @@ class UserController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id, cost=5)
-            
+
             # Authorization check
             await self.auth_service.require_permission(current_user, "users:update")
-            
+
             # Validate user ID
             validated_user_id = validate_object_id(user_id)
-            
+
             # Get existing user
             existing_user = await self.user_service.get_user_by_id(validated_user_id)
             if not existing_user:
                 raise UserError("User not found", status.HTTP_404_NOT_FOUND)
-            
+
             # Check authorization for this specific user
             await self.auth_service.check_user_access(current_user, existing_user, "update")
-            
+
+            # check_user_access authorised the user's CURRENT organisation. The
+            # body can name another one, or projects of another one, and both
+            # were written unchecked - an org admin could move any user in its
+            # tenant, itself included, into a foreign tenant (R-A8X review).
+            await self._enforce_update_stays_in_scope(current_user, existing_user, update_data)
+
             # Validate update data
             validated_update = await self._validate_user_update(update_data, existing_user)
 
             if validated_update.roles is not None:
+                # Resolve before judging: an alias must be judged as the role it becomes.
+                validated_update.roles = await self._resolve_assigned_roles(validated_update.roles)
                 await self._enforce_role_assignment_scope(
                     current_user,
                     validated_update.roles,
                     getattr(existing_user, "organization_id", None),
                     getattr(existing_user, "projects", []) or [],
                 )
-            
+
             # Check for conflicts if updating email or username
             if validated_update.email or validated_update.username:
                 existing_with_credentials = await self.user_service.check_user_exists(
@@ -451,33 +463,33 @@ class UserController:
                         "User with this email or username already exists",
                         status.HTTP_409_CONFLICT
                     )
-            
+
             # Hash new password if provided
             if validated_update.password:
                 validated_update.hashed_password = get_password_hash(validated_update.password)
                 validated_update.password = None  # Don't store plain password
-            
+
             # Update user
             updated_user = await self.user_service.update_user(
                 validated_user_id, validated_update
             )
-            
+
             # Audit log
             changed_fields = self._get_changed_fields(existing_user, validated_update)
             await self.audit_logger.log_user_updated(
                 current_user.id, validated_user_id, changed_fields
             )
-            
+
             # Invalidate sessions if critical fields changed
             if any(field in changed_fields for field in ['roles', 'disabled', 'password']):
                 await self.authentication_service.invalidate_user_sessions(validated_user_id)
-            
+
             # Build response
             user_response = await self._build_user_response(updated_user)
-            
+
             return user_response
-            
-        except (UserError, HTTPException):
+
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to update user {user_id}: {str(e)}")
@@ -495,28 +507,28 @@ class UserController:
         try:
             # Rate limiting for destructive operations
             await self.rate_limiter.check_user_limit(current_user.id, cost=20)
-            
+
             # Authorization check
             await self.auth_service.require_permission(current_user, "users:delete")
-            
+
             # Validate user ID
             validated_user_id = validate_object_id(user_id)
-            
+
             # Get user for validation
             user = await self.user_service.get_user_by_id(validated_user_id)
             if not user:
                 raise UserError("User not found", status.HTTP_404_NOT_FOUND)
-            
+
             # Check authorization for this specific user
             await self.auth_service.check_user_access(current_user, user, "delete")
-            
+
             # Prevent self-deletion
             if str(validated_user_id) == str(current_user.id):
                 raise UserError(
                     "Cannot delete your own account",
                     status.HTTP_400_BAD_REQUEST
                 )
-            
+
             # Check for dependencies (created documents, etc.)
             dependencies = await self.user_service.check_user_dependencies(validated_user_id)
             if dependencies:
@@ -524,20 +536,20 @@ class UserController:
                     f"Cannot delete user with active dependencies: {', '.join(dependencies)}",
                     status.HTTP_409_CONFLICT
                 )
-            
+
             # Delete user (this should also invalidate sessions)
             delete_success = await self.user_service.delete_user(validated_user_id)
             if not delete_success:
                 raise UserError("User not found", status.HTTP_404_NOT_FOUND)
-            
+
             # Audit log
             await self.audit_logger.log_user_deleted(
                 current_user.id, validated_user_id, user.email
             )
-            
+
             return {"message": "User deleted successfully"}
-            
-        except (UserError, HTTPException):
+
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to delete user {user_id}: {str(e)}")
@@ -555,13 +567,13 @@ class UserController:
         try:
             # Invalidate current session
             await self.authentication_service.invalidate_session(session_token)
-            
+
             # Audit log
             await self.audit_logger.log_user_logged_out(current_user.id, current_user.email)
-            
+
             return {"message": "Logged out successfully"}
-            
-        except HTTPException:
+
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Logout failed for user {current_user.id}: {str(e)}")
@@ -606,9 +618,11 @@ class UserController:
                     status.HTTP_400_BAD_REQUEST,
                 )
 
+            # Case is kept: role names are matched exactly, and ids/keys are normalised
+            # by `_resolve_assigned_roles`. Lowercasing here broke name matches.
             validated_roles: List[str] = []
             for role in (user_data.roles or []):
-                normalized_role = sanitize_text(str(role).lower())
+                normalized_role = sanitize_text(str(role))
                 if normalized_role:
                     validated_roles.append(normalized_role)
             if not validated_roles:
@@ -657,7 +671,7 @@ class UserController:
     ) -> UserUpdate:
         """Validate user update data."""
         validated_fields = {}
-        
+
         if update_data.first_name is not None:
             validated_fields['first_name'] = sanitize_text(
                 validate_input(
@@ -685,10 +699,10 @@ class UserController:
                     pattern=r'^[a-zA-Z0-9_.-]+$'
                 )
             )
-        
+
         if update_data.email is not None:
             validated_fields['email'] = validate_email(update_data.email)
-        
+
         if update_data.password is not None:
             password_validation = validate_password_strength(update_data.password)
             if not password_validation.is_valid:
@@ -697,24 +711,76 @@ class UserController:
                     status.HTTP_400_BAD_REQUEST
                 )
             validated_fields['password'] = update_data.password
-        
+
         if update_data.roles is not None:
+            # Case is kept; `_resolve_assigned_roles` resolves names exactly and keys normalised.
             validated_roles = []
             for role in update_data.roles:
-                normalized_role = sanitize_text(str(role).lower())
-                validated_roles.append(normalized_role)
+                normalized_role = sanitize_text(str(role))
+                if normalized_role:
+                    validated_roles.append(normalized_role)
             validated_fields['roles'] = validated_roles
-        
+
         if update_data.disabled is not None:
             validated_fields['disabled'] = update_data.disabled
-        
+
         if update_data.organization_id is not None:
             validated_fields['organization_id'] = update_data.organization_id
-        
+
         if update_data.projects is not None:
             validated_fields['projects'] = update_data.projects
-        
+
         return UserUpdate(**validated_fields)
+
+    async def _enforce_update_stays_in_scope(
+        self, current_user: CurrentUser, existing_user: Any, update_data: Any
+    ) -> None:
+        """Refuse an update that moves a user outside the caller's authorised tenant.
+
+        Only a superadmin may change a user's organisation. For anyone else,
+        every project assigned must belong to the user's existing organisation.
+        The create path already refuses a foreign organisation
+        (`_validate_user_context`); this is the update-side equivalent.
+        """
+        from ..core.security import _normalize_roles_list
+
+        actor_roles = set(_normalize_roles_list(getattr(current_user, "roles", None) or []))
+        if "superadmin" in actor_roles:
+            return
+
+        existing_org = getattr(existing_user, "organization_id", None)
+        if existing_org is None and isinstance(existing_user, dict):
+            existing_org = existing_user.get("organization_id")
+        requested_org = getattr(update_data, "organization_id", None)
+        if requested_org is not None and str(requested_org) != str(existing_org or ""):
+            raise UserError(
+                "Not authorized to move a user to another organization",
+                status.HTTP_403_FORBIDDEN,
+            )
+        requested_orgs = getattr(update_data, "organizations", None)
+        if requested_orgs is not None and any(str(org) != str(existing_org or "") for org in requested_orgs):
+            raise UserError(
+                "Not authorized to grant a user another organization",
+                status.HTTP_403_FORBIDDEN,
+            )
+
+        requested_projects = [str(project) for project in (getattr(update_data, "projects", None) or []) if project]
+        if not requested_projects:
+            return
+        from bson import ObjectId
+
+        object_ids = [ObjectId(project) for project in requested_projects if ObjectId.is_valid(project)]
+        cursor = self.user_service.db.projects.find(
+            {"_id": {"$in": [*object_ids, *requested_projects]}},
+            {"organization_id": 1},
+        )
+        found = {str(row["_id"]): str(row.get("organization_id") or "") for row in await cursor.to_list(length=None)}
+        outside = [project for project in requested_projects if found.get(project) != str(existing_org or "")]
+        if outside:
+            raise UserError(
+                "Not authorized to assign projects outside the user's organization",
+                status.HTTP_403_FORBIDDEN,
+            )
 
     async def _validate_user_context(
         self, user_data: UserCreate, current_user: CurrentUser
@@ -728,10 +794,10 @@ class UserController:
             )
         # Role assignment validation
         await self.auth_service.validate_role_assignment(current_user, user_data.roles)
-        
+
         # Organizational context validation
         user_roles = set(current_user.roles or [])
-        
+
         if "superadmin" in user_roles:
             # Superadmin can create users in any organization
             pass
@@ -774,33 +840,63 @@ class UserController:
             user_data.projects or [],
         )
 
+    async def _resolve_assigned_roles(self, requested_roles: List[str]) -> List[str]:
+        """Resolve every requested role to exactly one active role document.
+
+        Returns the documents' ids, deduplicated in request order. That id is what is
+        stored, so the principal later reads the same key the checks below judged.
+
+        A string is looked up three ways: as a role id, as the key the principal's
+        normaliser gives it (`core.security._normalize_roles_list`, so `super-admin`
+        is judged as the `superadmin` role it will become), and as an exact role name.
+        No match, more than one distinct match, or a deactivated role is refused
+        with 400 before anything is written. There is no scope guess for a string
+        without a document: that guess is how an alias reached Super Admin (ADR 0001).
+        """
+        from ..core.security import _normalize_roles_list
+
+        resolved: List[str] = []
+        for requested in requested_roles or []:
+            text = str(requested or "").strip()
+            if not text:
+                continue
+            normalized = (_normalize_roles_list([text]) or [""])[0]
+
+            matches: Dict[str, Any] = {}
+            for key in dict.fromkeys([text, normalized]):
+                if key:
+                    role = await self.role_service.get_role_by_id(key)
+                    if role:
+                        matches[str(role.id)] = role
+            role = await self.role_service.get_role_by_name(text)
+            if role:
+                matches[str(role.id)] = role
+
+            if not matches:
+                raise UserError(f"Unknown role: {text}", status.HTTP_400_BAD_REQUEST)
+            if len(matches) > 1:
+                raise UserError(f"Role '{text}' matches more than one role", status.HTTP_400_BAD_REQUEST)
+            ((role_id, role),) = matches.items()
+            if not role.is_active:
+                raise UserError(f"Role '{text}' is not active", status.HTTP_400_BAD_REQUEST)
+            if role_id not in resolved:
+                resolved.append(role_id)
+        return resolved
+
     async def _resolve_role_scope(self, role_id: str) -> dict:
         role = await self.role_service.get_role_by_id(role_id)
         if not role:
             role = await self.role_service.get_role_by_name(role_id)
-        if role:
-            return {
-                "id": role.id,
-                "name": role.name,
-                "scope": role.scope,
-                "organization_id": role.organization_id,
-                "project_id": role.project_id,
-            }
-        key = str(role_id or "").lower()
-        if key in {"superadmin", "superuser"}:
-            scope = "system"
-        elif "project" in key:
-            scope = "project"
-        elif "org" in key:
-            scope = "organization"
-        else:
-            scope = "organization"
+        if not role:
+            # Roles reach here already resolved by `_resolve_assigned_roles`; a miss means
+            # the role vanished in between. Refuse rather than guess a scope.
+            raise UserError(f"Unknown role: {role_id}", status.HTTP_400_BAD_REQUEST)
         return {
-            "id": role_id,
-            "name": role_id,
-            "scope": scope,
-            "organization_id": None,
-            "project_id": None,
+            "id": role.id,
+            "name": role.name,
+            "scope": role.scope,
+            "organization_id": role.organization_id,
+            "project_id": role.project_id,
         }
 
     async def _enforce_role_assignment_scope(
@@ -922,14 +1018,14 @@ class UserController:
     def _get_changed_fields(self, original: User, update: UserUpdate) -> List[str]:
         """Get list of fields that were changed."""
         changed_fields = []
-        
+
         for field_name in update.__fields_set__:
             if hasattr(original, field_name):
                 old_value = getattr(original, field_name)
                 new_value = getattr(update, field_name)
                 if old_value != new_value:
                     changed_fields.append(field_name)
-        
+
         return changed_fields
 
 
@@ -946,7 +1042,7 @@ async def get_user_controller(db = Depends(get_db)) -> UserController:
     )
     audit_logger = AuditLogger()
     notification_service = NotificationService(db)
-    
+
     return UserController(
         user_service, auth_service, authentication_service,
         rate_limiter, audit_logger, notification_service
@@ -1001,7 +1097,7 @@ async def get_users(
         'disabled': disabled
     }
     pagination = {'skip': skip, 'limit': limit}
-    
+
     return await controller.get_users(pagination, filters, current_user)
 
 
@@ -1071,11 +1167,11 @@ async def lock_user_account(
     """Lock user account for security purposes."""
     await require_step_up(request, current_user, action="users.lock")
     await controller.auth_service.require_permission(current_user, "users:lock")
-    
+
     validated_user_id = validate_object_id(user_id)
     await controller.authentication_service.lock_user_account(validated_user_id)
     await controller.audit_logger.log_user_account_locked(current_user.id, validated_user_id)
-    
+
     return {"message": "User account locked successfully"}
 
 
@@ -1091,9 +1187,9 @@ async def unlock_user_account(
     """Unlock user account."""
     await require_step_up(request, current_user, action="users.unlock")
     await controller.auth_service.require_permission(current_user, "users:unlock")
-    
+
     validated_user_id = validate_object_id(user_id)
     await controller.authentication_service.unlock_user_account(validated_user_id)
     await controller.audit_logger.log_user_account_unlocked(current_user.id, validated_user_id)
-    
+
     return {"message": "User account unlocked successfully"}

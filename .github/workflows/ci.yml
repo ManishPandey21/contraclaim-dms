@@ -4,10 +4,29 @@ on:
   pull_request:
   push:
     branches: [main, master]
+  # R-A8W owner decision (docs/IMAGE_FRESHNESS_POLICY.md): a clean image scan is
+  # a statement about one day. R-A8V went red three times in one day on
+  # Dockerfiles that had not changed, because the advisory database moved. So
+  # the whole pipeline - every image rebuilt `--pull` from the current upstream
+  # base and scanned with the unchanged policy - re-runs weekly on its own.
+  # It builds and scans; it pushes nothing, deploys nothing and holds no
+  # credential that could. GitHub runs `schedule` against the default branch
+  # only, so this takes effect once the workflow is on `main`; until then
+  # `workflow_dispatch` is how the same run is started by hand.
+  schedule:
+    - cron: "23 2 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read
   security-events: write
+  # R-A8T, from the first run this repository ever gave this branch.
+  # `gitleaks-action@v2` calls `GET /repos/{owner}/{repo}/pulls/{n}/commits` to
+  # scope a pull-request scan, and without this it answers
+  # `403 Resource not accessible by integration` and the job dies before
+  # scanning anything - a red `secret-scan` that had found nothing either way.
+  # Read-only, and the narrowest scope that makes the call succeed.
+  pull-requests: read
 
 env:
   PYTHON_VERSION: "3.12"
@@ -69,8 +88,109 @@ jobs:
         run: pre-commit run --all-files --show-diff-on-failure
       - name: Compile backend modules
         run: python -m compileall -q projectDMS/backend/rbac_backend
+      # Twenty-two test modules import `backend.rbac_backend...`, which resolves
+      # only when `projectDMS` is on sys.path. Invoked as `pytest <path>` from
+      # the checkout root it is not, and collection dies with
+      # `ModuleNotFoundError: No module named 'backend'` before a single test
+      # runs. `python -m` puts the working directory on sys.path, so running it
+      # from `projectDMS` reproduces the invocation the repository documents.
       - name: Run backend test suite
-        run: pytest projectDMS/backend/rbac_backend/tests -q
+        working-directory: projectDMS
+        run: python -m pytest backend/rbac_backend/tests -q
+      # The canonical-relationship suites need transactions, which the `mongo`
+      # service above (a standalone mongod) cannot give, so in the step above they
+      # skip. CL-2: a disposable single-node replica set, used by these suites
+      # only, turns that skip into real evidence - and the step fails if they
+      # skip anyway, so a green run can never mean "not exercised".
+      - name: Start a disposable single-node replica set
+        shell: bash
+        run: |
+          docker run -d --name mongo-rs -p 27018:27017 mongo:8.0 --replSet rs0 --bind_ip_all
+          for attempt in $(seq 1 30); do
+            if docker exec mongo-rs mongosh --quiet --eval 'try { rs.status().ok } catch (e) { rs.initiate({_id: "rs0", members: [{_id: 0, host: "localhost:27017"}]}).ok }' 2>/dev/null | grep -q 1; then
+              break
+            fi
+            sleep 2
+          done
+          for attempt in $(seq 1 30); do
+            if docker exec mongo-rs mongosh --quiet --eval 'db.hello().isWritablePrimary' 2>/dev/null | grep -q true; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "the replica set never elected a writable primary" >&2
+          exit 1
+      - name: Run the real-Mongo relationship suites (must run, not skip)
+        working-directory: projectDMS
+        shell: bash
+        env:
+          RELATIONSHIP_CL1_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          RELATIONSHIP_CL2_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          RELATIONSHIP_CL3A_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          RELATIONSHIP_CL3B_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          RELATIONSHIP_CL4A_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          # Contract Master v1. Until the policy-scope fix these suites ran in no
+          # CI job, and the one route suite overrides get_policy - which is how a
+          # dependency importing a nonexistent module shipped green.
+          CONTRACT_MASTER_POLICY_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          CONTRACT_ROUTES_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          CONTRACT_MIGRATION_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          CONTRACT_PROMOTION_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          CONTRACT_POST_PROMOTION_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          CONTRACT_REHEARSAL_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          CONTRACT_UPLOAD_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          CONTRACT_DURABILITY_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          # Reprojection runtime: the promotion -> PENDING -> worker -> CURRENT gate
+          # (2026-09-25 staging NO-GO) and the claim-lease fences it depends on.
+          CONTRACT_MASTER_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          CONTRACT_REPROJECTION_RUNTIME_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          # Contract Master evidence cutover and provenance: exported nowhere until
+          # the inverted coverage rule (test_ci_real_mongo_coverage.py) found them.
+          CONTRACT_EVIDENCE_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          CONTRACT_PROVENANCE_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          # Batched subtag lookup: caller-supplied tag ids must never reach a
+          # foreign tag's subtags (real HTTP, Mongo and RBAC).
+          TAGS_SUBTAG_BATCH_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+        # Every real-Mongo module is in this list or excused by name, with a
+        # reason, in test_ci_real_mongo_coverage.py: a module in neither is red.
+        # That is how the reprojection review, source-mutation and
+        # generic-ingestion suites shipped unexecuted.
+        run: |
+          suites=(
+            backend/rbac_backend/tests/integration/test_document_relationships_cl1_mongo.py
+            backend/rbac_backend/tests/integration/test_variation_relationships_cl2_mongo.py
+            backend/rbac_backend/tests/integration/test_cl3a_variation_hindrance_mongo.py
+            backend/rbac_backend/tests/integration/test_cl3b_programme_chronology_mongo.py
+            backend/rbac_backend/tests/integration/test_chronology_verification_authority_mongo.py
+            backend/rbac_backend/tests/integration/test_cl4a_core_active_scope_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_master_policy_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_master_routes_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_migration_claim_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_promotion_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_post_promotion_mongo.py
+            backend/rbac_backend/tests/integration/test_migration_rehearsal_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_upload_scope_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_upload_durability_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_document_persistence_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_lexical_containment_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_permission_seeding_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_evidence_cutover_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_provenance_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_reprojection_worker_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_reprojection_runtime_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_reprojection_review3_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_source_mutation_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_generic_ingestion_isolation_mongo.py
+            backend/rbac_backend/tests/integration/test_tags_subtag_batch_mongo.py
+          )
+          python -m pytest -q -rs --junitxml=real-mongo-relationships.xml "${suites[@]}" \
+            | tee real-mongo-relationships.log
+          if grep -qE "[0-9]+ skipped" real-mongo-relationships.log; then
+            echo "real-Mongo relationship suites skipped: no transaction evidence" >&2
+            exit 1
+          fi
+          # Per module: at least one test executed and none skipped.
+          python scripts/assert_suites_ran.py real-mongo-relationships.xml "${suites[@]}"
 
   frontend-checks:
     name: Frontend lint, tests, and build
@@ -85,9 +205,26 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: projectDMS/client/package-lock.json
+      # Recorded, not assumed. `client/.npmrc` sets engine-strict so an npm
+      # outside the supported range already fails `npm ci` at the engine check
+      # (F-A8M-4); printing the versions puts the toolchain that produced this
+      # evidence into the log, where a later phase can read it.
+      - name: Record the client toolchain
+        run: node --version && npm --version
       - run: npm ci
+      # `npm ci` must never rewrite the lockfile. Under an npm major that
+      # disagrees with it the install either fails at the engine check
+      # (`client/.npmrc`) or, historically, resolved a different tree - and a
+      # rewritten lockfile is the visible symptom of the second. Asserted here
+      # rather than left to a phase to notice by hand (F-A8M-4).
+      - name: The lockfile is unchanged by installing it
+        run: git diff --exit-code -- package-lock.json
       - run: npm run lint
       - name: Run frontend tests
+        # vitest runs files serially (fileParallelism: false in vitest.config.ts
+        # to avoid a parallel-run deadlock). That reuses one fork worker for the
+        # whole suite, whose V8 heap accumulates across files, so give it headroom
+        # to avoid an end-of-run OOM. Fork workers inherit NODE_OPTIONS.
         env:
           NODE_OPTIONS: --max-old-space-size=6144
         run: npm test -- --run
@@ -104,9 +241,23 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Scan Python dependencies
+        # PYSEC-2026-3740 (CVE-2026-81726, GHSA-8mgp-746c-j5xp) is a path-sandbox
+        # bypass in NLTK's model-artifact APIs with no published fix in any
+        # release. It is accepted for THIS release only, on the reachability
+        # evidence and the review triggers recorded in
+        # projectDMS/docs/NOFIX_ADVISORY_ACCEPTANCE.md, and pinned by
+        # projectDMS/backend/rbac_backend/tests/test_nltk_advisory_reachability.py.
+        #
+        # Exactly one advisory id, never a package or a severity: a second NLTK
+        # advisory, or any other finding, still fails this job. pip-audit prints
+        # "1 ignored" on every run, so the exception stays visible in the log.
+        #
+        # R4 (the four PyMongo 4.16.0 advisories) is RETIRED: pymongo 4.18.2 and
+        # langgraph-checkpoint-mongodb 0.5.1 fix them, so none is ignored here.
+        # See NOFIX_ADVISORY_ACCEPTANCE.md (R4) and #46.
         run: |
           python -m pip install --upgrade pip pip-audit
-          pip-audit -r projectDMS/backend/rbac_backend/requirements.txt
+          pip-audit -r projectDMS/backend/rbac_backend/requirements.txt --ignore-vuln PYSEC-2026-3740
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -114,9 +265,28 @@ jobs:
           cache-dependency-path: projectDMS/client/package-lock.json
       - name: Scan frontend dependencies
         working-directory: projectDMS/client
+        # `npm audit --audit-level=high`, plus ONE time-bound exception: R3,
+        # GHSA-vfj7-8cjw-p6xm (CVE-2026-93687), braces <=3.0.3 with no patched
+        # release, reached only through build/test tooling and absent from the
+        # client runtime image (projectDMS/docs/NOFIX_ADVISORY_ACCEPTANCE.md).
+        # The gate fails on any CRITICAL, on any HIGH not rooted in exactly that
+        # advisory, after 2026-11-05 (R3 renewed 2026-10-07 from 2026-10-10 after a
+        # fresh review), when a patched braces is published, and
+        # on any npm or report failure. Its own tests run first.
         run: |
+          node --version && npm --version
           npm ci
-          npm audit --audit-level=high
+          git diff --exit-code -- package-lock.json
+          python -m pip install pytest
+          python -m pytest -q ../../.github/scripts/test_npm_audit_gate.py
+          python ../../.github/scripts/npm_audit_gate.py --client-dir . --raw-out npm-audit.json
+      - name: Keep the raw npm audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-audit-report
+          path: projectDMS/client/npm-audit.json
+          if-no-files-found: warn
 
   docker-build-and-scan:
     name: Docker build and image scan
@@ -124,50 +294,171 @@ jobs:
     needs: [backend-checks, frontend-checks]
     steps:
       - uses: actions/checkout@v4
-      - name: Build application images
+      # The job built all five images and then scanned all five, and on
+      # 2026-09-09 it died on the first scan with
+      # `write /tmp/trivy-.../docker-export-...: no space left on device` -
+      # Trivy exports a layer to disk to analyse it, and by then five images
+      # were already resident. Nothing about the images had changed; the job had
+      # simply outgrown a hosted runner. Restructured to build, scan and drop
+      # one image at a time, so peak disk holds one image rather than five.
+      #
+      # Coverage is identical: the same five builds, the same client
+      # package-manager class check, and the same five scans at CRITICAL,HIGH
+      # with `exit-code: 1`. Nothing was excluded to make it fit.
+      - name: Reclaim runner disk
+        # A hosted runner ships ~25 GB of toolchains this job never uses. Freed
+        # before the first build rather than between failures.
+        #
+        # `${AGENT_TOOLSDIRECTORY:-}` and not `$AGENT_TOOLSDIRECTORY`
+        # (F-A8T2-9): under `set -u` an unset variable aborts the step on the
+        # expansion itself, before `|| true` can see it. That fails closed - the
+        # job goes red rather than green with a full disk - but it fails for a
+        # reason nobody would recognise, and the runner image is free to stop
+        # exporting the variable at any time. An empty argument to `rm -rf` is
+        # harmless and is covered by the `|| true` that was always there for it.
         run: |
-          docker build -t projectdms-backend:${{ github.sha }} projectDMS/backend
-          docker build -t projectdms-client:${{ github.sha }} projectDMS/client
-          docker build -t projectdms-langgraph:${{ github.sha }} projectDMS/services/langgraph
-          docker build -t projectdms-graphiti:${{ github.sha }} projectDMS/services/graphiti
-          docker build -t projectdms-docling:${{ github.sha }} projectDMS/services/docling
-      - name: Scan images
-        uses: aquasecurity/trivy-action@0.24.0
+          set -euo pipefail
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-}" || true
+          docker system prune -af --volumes || true
+          df -h / | tail -1
+      # langgraph, graphiti and docling are profile-gated in compose, but their
+      # Python runtime is still built on every change so a 3.12 incompatibility
+      # cannot stay hidden until an operator enables the profile.
+      - name: Build the backend image
+        # The scanned image carries its release identity like a deployed one
+        # (backend/Dockerfile, OPERATIONS 7a).
+        run: docker build --pull --build-arg RELEASE_SHA=${{ github.sha }} -t projectdms-backend:${{ github.sha }} projectDMS/backend
+      - name: Scan backend image
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: projectdms-backend:${{ github.sha }}
           format: table
           exit-code: "1"
           ignore-unfixed: true
           severity: CRITICAL,HIGH
+          # A scan that runs out of time has not found nothing - it has found
+          # nothing out. `projectdms-docling` hit the action's 5-minute default
+          # and died with `context deadline exceeded`, which the job correctly
+          # treated as a failure; raising the bound is what lets it reach a
+          # verdict. Nothing about the POLICY moves: --ignore-unfixed,
+          # CRITICAL,HIGH and --exit-code 1 are unchanged, so this cannot turn a
+          # finding into a pass.
+          timeout: 20m
+      - name: Drop the backend image
+        run: docker image rm projectdms-backend:${{ github.sha }}
+      - name: Build the client image
+        run: docker build --pull --build-arg RELEASE_SHA=${{ github.sha }} -t projectdms-client:${{ github.sha }} projectDMS/client
+      - name: Client runtime image carries no package manager
+        # The client image serves static files with `node scripts/serve-dist.mjs`.
+        # node:*-slim bundles npm, corepack and yarn, and npm's vendored
+        # dependency tree was the source of every Node-side finding in this
+        # image - one CRITICAL and nineteen HIGH, none of them from the
+        # application's own dependencies. Trivy gates on severity; this gates on
+        # the class, so the finding cannot come back the moment an advisory is
+        # re-scored or a fix is published.
+        run: |
+          set -euo pipefail
+          image=projectdms-client:${{ github.sha }}
+          for binary in npm npx corepack yarn yarnpkg; do
+            if docker run --rm --user 0 --entrypoint sh "$image" \
+                 -c "command -v $binary" >/dev/null 2>&1; then
+              echo "FAIL: $binary is present in the client runtime image" >&2
+              exit 1
+            fi
+          done
+          remaining=$(docker run --rm --user 0 --entrypoint sh "$image" \
+            -c 'ls -A /usr/local/lib/node_modules 2>/dev/null | wc -l')
+          if [ "$remaining" != "0" ]; then
+            echo "FAIL: /usr/local/lib/node_modules is not empty ($remaining entries)" >&2
+            docker run --rm --user 0 --entrypoint sh "$image" -c 'ls -A /usr/local/lib/node_modules' >&2
+            exit 1
+          fi
+          for leaked in /app/node_modules /app/src /app/package.json /app/package-lock.json; do
+            if docker run --rm --user 0 --entrypoint sh "$image" \
+                 -c "test -e $leaked" >/dev/null 2>&1; then
+              echo "FAIL: builder artefact $leaked reached the runtime image" >&2
+              exit 1
+            fi
+          done
+          docker run --rm --entrypoint node "$image" --version
+          echo "OK: runtime image has node, no package manager, no builder artefacts"
       - name: Scan client image
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: projectdms-client:${{ github.sha }}
           format: table
           exit-code: "1"
           ignore-unfixed: true
           severity: CRITICAL,HIGH
+          # A scan that runs out of time has not found nothing - it has found
+          # nothing out. `projectdms-docling` hit the action's 5-minute default
+          # and died with `context deadline exceeded`, which the job correctly
+          # treated as a failure; raising the bound is what lets it reach a
+          # verdict. Nothing about the POLICY moves: --ignore-unfixed,
+          # CRITICAL,HIGH and --exit-code 1 are unchanged, so this cannot turn a
+          # finding into a pass.
+          timeout: 20m
+      - name: Drop the client image
+        run: docker image rm projectdms-client:${{ github.sha }}
+      - name: Build the LangGraph image
+        run: docker build --pull -t projectdms-langgraph:${{ github.sha }} projectDMS/services/langgraph
       - name: Scan LangGraph image
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: projectdms-langgraph:${{ github.sha }}
           format: table
           exit-code: "1"
           ignore-unfixed: true
           severity: CRITICAL,HIGH
+          # A scan that runs out of time has not found nothing - it has found
+          # nothing out. `projectdms-docling` hit the action's 5-minute default
+          # and died with `context deadline exceeded`, which the job correctly
+          # treated as a failure; raising the bound is what lets it reach a
+          # verdict. Nothing about the POLICY moves: --ignore-unfixed,
+          # CRITICAL,HIGH and --exit-code 1 are unchanged, so this cannot turn a
+          # finding into a pass.
+          timeout: 20m
+      - name: Drop the LangGraph image
+        run: docker image rm projectdms-langgraph:${{ github.sha }}
+      - name: Build the Graphiti image
+        run: docker build --pull -t projectdms-graphiti:${{ github.sha }} projectDMS/services/graphiti
       - name: Scan Graphiti image
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: projectdms-graphiti:${{ github.sha }}
           format: table
           exit-code: "1"
           ignore-unfixed: true
           severity: CRITICAL,HIGH
+          # A scan that runs out of time has not found nothing - it has found
+          # nothing out. `projectdms-docling` hit the action's 5-minute default
+          # and died with `context deadline exceeded`, which the job correctly
+          # treated as a failure; raising the bound is what lets it reach a
+          # verdict. Nothing about the POLICY moves: --ignore-unfixed,
+          # CRITICAL,HIGH and --exit-code 1 are unchanged, so this cannot turn a
+          # finding into a pass.
+          timeout: 20m
+      - name: Drop the Graphiti image
+        run: docker image rm projectdms-graphiti:${{ github.sha }}
+      - name: Build the Docling image
+        run: docker build --pull -t projectdms-docling:${{ github.sha }} projectDMS/services/docling
       - name: Scan Docling image
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: projectdms-docling:${{ github.sha }}
           format: table
           exit-code: "1"
           ignore-unfixed: true
           severity: CRITICAL,HIGH
+          # A scan that runs out of time has not found nothing - it has found
+          # nothing out. `projectdms-docling` hit the action's 5-minute default
+          # and died with `context deadline exceeded`, which the job correctly
+          # treated as a failure; raising the bound is what lets it reach a
+          # verdict. Nothing about the POLICY moves: --ignore-unfixed,
+          # CRITICAL,HIGH and --exit-code 1 are unchanged, so this cannot turn a
+          # finding into a pass.
+          timeout: 20m
+      - name: Drop the Docling image
+        run: docker image rm projectdms-docling:${{ github.sha }}

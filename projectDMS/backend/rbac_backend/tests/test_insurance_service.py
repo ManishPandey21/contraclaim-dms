@@ -102,9 +102,19 @@ async def test_create_then_duplicate_policy_is_rejected():
     from fastapi import HTTPException
 
     svc = InsuranceService(_DB())
+    # Relative to the REAL clock, not to the frozen `NOW`.
+    #
+    # The pure-logic rows above pass `NOW` into `status_of` and are therefore
+    # time-independent. `svc.create` takes no `now` and uses `datetime.utcnow()`,
+    # so an expiry built from `NOW` drifts towards the wall clock at a day per
+    # day. `NOW + 100 days` is 2026-10-08, which on 2026-09-08 is exactly
+    # `EXPIRING_SOON_DAYS` away: this assertion flipped from `active` to
+    # `expiring_soon` overnight and would have stayed red for good. Found by
+    # R-A8N's full-suite run, unrelated to that phase's findings, and fixed
+    # where it lives rather than left to fail every suite from now on.
     payload = InsuranceCreate(
         project_id="p1", contract_id="C1", insurance_type="Marine Cargo Insurance",
-        policy_number="POL-1", date_of_expiry=NOW + timedelta(days=100),
+        policy_number="POL-1", date_of_expiry=datetime.utcnow() + timedelta(days=365),
     )
     created = await svc.create(payload, _user())
     assert created["status"] == InsuranceStatus.ACTIVE.value

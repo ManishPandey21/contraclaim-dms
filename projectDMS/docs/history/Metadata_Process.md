@@ -13,16 +13,16 @@
 - Qdrant sync deletes existing chunks by `document_id` prior to inserting the refreshed payloads, so dual-write stores remain consistent across retries (`backend/rbac_backend/services/langchain_vector_service.py:120`).
 
 ## Issues & Corrective Actions
-1. **PydanticAI dependency gap**  
-   - *Finding*: Runtime logs show `PydanticAI library not available (No module named '_griffe')`, disabling the structured extractor.  
+1. **PydanticAI dependency gap**
+   - *Finding*: Runtime logs show `PydanticAI library not available (No module named '_griffe')`, disabling the structured extractor.
    - *Action*: Ensure `griffe==0.48.0` (now listed in `backend/rbac_backend/requirements.txt`) is installed in every deployment image/venv; rebuild the environment or run `pip install -r backend/rbac_backend/requirements.txt`.
 
-2. **Notification service constructor mismatch**  
-   - *Finding*: The users controller previously instantiated `NotificationService()` without the required database parameter, producing a 500 during profile lookups.  
+2. **Notification service constructor mismatch**
+   - *Finding*: The users controller previously instantiated `NotificationService()` without the required database parameter, producing a 500 during profile lookups.
    - *Action*: Updated `get_user_controller` to pass the Motor database (`NotificationService(db)`); monitor other call sites to keep usage aligned with the constructor (`backend/rbac_backend/routers/users.py:675`).
 
-3. **Qdrant collection bootstrap risk**  
-   - *Finding*: `LangChainVectorService._ensure_collection` calls `recreate_collection` when the initial `get_collection` fails, which would drop vectors if the transient failure occurs on an existing collection.  
+3. **Qdrant collection bootstrap risk**
+   - *Finding*: `LangChainVectorService._ensure_collection` calls `recreate_collection` when the initial `get_collection` fails, which would drop vectors if the transient failure occurs on an existing collection.
    - *Action*: Replace the `recreate_collection` call with a guarded `create_collection` or retry logic so transient connectivity issues do not truncate the Qdrant store (follow-up patch pending).
 
 ## Next Steps

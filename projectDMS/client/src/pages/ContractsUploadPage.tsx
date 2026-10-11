@@ -14,6 +14,8 @@ import {
   getContractStatus,
   UploadResult,
   StatusResponse,
+  ContractJobStatus,
+  isTerminalContractStatus,
 } from "@/services/contracts-api";
 import { extractErrorMessage } from "@/lib/error-logger";
 import { api } from "@/services/api";
@@ -42,6 +44,7 @@ import {
   RotateCcw,
   Upload as UploadIcon,
 } from "lucide-react";
+import { usePinnedPageScope } from "@/hooks/useRegisterProjectScope";
 
 type UploadProgress = {
   file: File;
@@ -49,7 +52,7 @@ type UploadProgress = {
   progress: number; // 0-100
   upload_id?: string;
   document_id?: string;
-  status?: "queued" | "processing" | "completed" | "failed" | "unknown";
+  status?: ContractJobStatus;
   categories?: string[] | null;
   error?: string | null;
   processing_stage?: string | null;
@@ -80,7 +83,7 @@ const statusVariant = (
   s?: UploadProgress["status"]
 ): "primary" | "success" | "danger" | "neutral" => {
   if (s === "completed") return "success";
-  if (s === "failed") return "danger";
+  if (s === "failed" || s === "human_review_required") return "danger";
   if (s === "processing" || s === "queued") return "primary";
   return "neutral";
 };
@@ -90,6 +93,7 @@ const getStatusIcon = (status?: UploadProgress["status"]) => {
     case "completed":
       return <CheckCircle className="h-4 w-4" />;
     case "failed":
+    case "human_review_required":
       return <AlertCircle className="h-4 w-4" />;
     case "processing":
     case "queued":
@@ -112,6 +116,8 @@ const ContractsUploadPage: React.FC = () => {
 const [projId, setProjId] = useState<string>(
   () => window.localStorage.getItem("proj_id") || ""
 );
+  // CL-4A: while the navbar selects a project, this page's picker follows it.
+  usePinnedPageScope(orgId, setOrgId, projId, setProjId);
 
   const parseOrganizationsResponse = useCallback((payload: any): Organization[] => {
     const collection = Array.isArray(payload)
@@ -326,7 +332,7 @@ const [projId, setProjId] = useState<string>(
                 : u
             )
           );
-          if (st.status === "completed" || st.status === "failed") {
+          if (isTerminalContractStatus(st.status)) {
             stopPolling(uploadId);
             // Refresh the "Previously Uploaded" list when an upload completes
             if (st.status === "completed") {
@@ -370,9 +376,7 @@ const [projId, setProjId] = useState<string>(
   // refresh the Previously Uploaded list so the new files appear after page reloads too.
   useEffect(() => {
     if (uploads.length === 0) return;
-    const allDone = uploads.every(
-      (u) => u.status === "completed" || u.status === "failed"
-    );
+    const allDone = uploads.every((u) => isTerminalContractStatus(u.status));
     if (allDone) {
       refreshPrevUploads();
     }
@@ -630,7 +634,7 @@ const [projId, setProjId] = useState<string>(
     setUploadingBatch(false);
     setUploads((prev) =>
       prev.map((upload) =>
-        upload.status === "completed" || upload.status === "failed"
+        isTerminalContractStatus(upload.status)
           ? upload
           : { ...upload, status: "failed", error: upload.error || "Upload canceled by user." }
       )
@@ -1052,7 +1056,7 @@ const [projId, setProjId] = useState<string>(
                       className={`h-2 rounded-full transition-all duration-300 ${
                         upload.status === "completed"
                           ? "bg-green-500"
-                          : upload.status === "failed"
+                          : upload.status === "failed" || upload.status === "human_review_required"
                           ? "bg-red-500"
                           : "bg-blue-500"
                       }`}

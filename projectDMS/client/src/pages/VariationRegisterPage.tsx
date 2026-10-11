@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -45,12 +46,13 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import { Download, Edit, GitCompareArrows, Loader2, PlusCircle, Trash2 } from "lucide-react";
+import { Download, Edit, GitCompareArrows, Link2, Loader2, PlusCircle, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import {
   createVariation,
   deleteVariation,
   exportVariations,
+  getVariation,
   getVariations,
   getVariationSummary,
   updateVariation,
@@ -58,9 +60,13 @@ import {
   VariationPayload,
   VariationSummaryDTO,
 } from "@/services/variations-api";
-import { enhancedApi } from "@/services/enhanced-api";
 import { getContractMasterForProject } from "@/services/contract-master-api";
 import { variationStatusColor, variationStatusLabel, fmtAmount } from "@/lib/contract-controls-helpers";
+import useRBAC from "@/hooks/useRBAC";
+import { useTenant } from "@/contexts/TenantContext";
+import { scopeErrorCode } from "@/services/active-scope";
+import EntityDocumentLinks from "@/components/document-links/EntityDocumentLinks";
+import { VARIATION_DOCUMENT_RELATIONSHIP_ROLES } from "@/services/document-relationships-api";
 
 const STATUS = ["draft", "submitted", "under_review", "recommended", "approved", "rejected", "superseded"];
 const TYPES = ["positive", "negative", "neutral"];
@@ -88,11 +94,32 @@ const Stat: React.FC<{ label: string; value: string; cls?: string }> = ({ label,
   </Card>
 );
 
+/** Why a Variation request was refused by the selected-project boundary, for the user. */
+function scopeRefusal(error: unknown): string | null {
+  const code = scopeErrorCode(error);
+  if (code === "selection_required") return "Select a project in the navbar to open or change a variation.";
+  if (code === "context_forbidden") return "This variation is not in the project selected in the navbar.";
+  return null;
+}
+
 const VariationRegisterPage: React.FC = () => {
+  const { can } = useRBAC();
+  // The navbar selection is the register's scope (CL-3A): the list follows it,
+  // a new Variation is filed in it, and records outside it are refused by the
+  // server. The selection travels as X-Org-Id / X-Proj-Id on every request.
+  const tenant = useTenant();
+  const organizationId = tenant.selectedOrganizationId || "";
+  const projectId = tenant.selectedProjectId || "";
+  const projectName = tenant.selectedProject?.name || "";
+  const [searchParams, setSearchParams] = useSearchParams();
+  const deepLinkId = searchParams.get("variation_id");
+  const openedDeepLink = useRef<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  // The Variation whose correspondence is open. One linking UI: the shared
+  // canonical EntityDocumentLinks component.
+  const [linksFor, setLinksFor] = useState<VariationDTO | null>(null);
   const [items, setItems] = useState<VariationDTO[]>([]);
   const [summary, setSummary] = useState<VariationSummaryDTO | null>(null);
-  const [projects, setProjects] = useState<{ id: string; name: string }[]>([]);
-  const [projectFilter, setProjectFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [typeFilter, setTypeFilter] = useState("all");
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -106,30 +133,68 @@ const VariationRegisterPage: React.FC = () => {
   const [vBaseCurrency, setVBaseCurrency] = useState("INR");
   const [vContractCurrencies, setVContractCurrencies] = useState<{ currency: string; conversion_rate: number }[]>([]);
 
+  const sequence = useRef(0);
+
+  // A project switch drops the previous project's rows and open records at
+  // once, before the new list arrives: no Project-A Variation is ever shown
+  // under Project B. (MainLayout also remounts the page on a switch.)
+  useEffect(() => {
+    setItems([]);
+    setSummary(null);
+    setLinksFor(null);
+    setDialogOpen(false);
+  }, [organizationId, projectId]);
+
   const load = useCallback(async () => {
+    const current = ++sequence.current;
     try {
       const params: Record<string, string> = {};
-      if (projectFilter !== "all") params.project_id = projectFilter;
+      if (projectId) params.project_id = projectId;
       if (statusFilter !== "all") params.status = statusFilter;
       if (typeFilter !== "all") params.type = typeFilter;
-      setItems(await getVariations(params));
-      setSummary(await getVariationSummary(projectFilter !== "all" ? { project_id: projectFilter } : undefined));
-    } catch {
-      toast.error("Failed to load variations");
+      const rows = await getVariations(params);
+      const totals = await getVariationSummary(projectId ? { project_id: projectId } : undefined);
+      if (current !== sequence.current) return;
+      setItems(rows);
+      setSummary(totals);
+    } catch (error) {
+      if (current !== sequence.current) return;
+      setItems([]);
+      setSummary(null);
+      toast.error(scopeRefusal(error) || "Failed to load variations");
+    } finally {
+      if (current === sequence.current) setLoaded(true);
     }
-  }, [projectFilter, statusFilter, typeFilter]);
+  }, [projectId, statusFilter, typeFilter]);
 
-  useEffect(() => { void load(); }, [load]);
   useEffect(() => {
-    let active = true;
-    (async () => {
-      try {
-        const ps = await enhancedApi.getProjects();
-        if (active) setProjects((ps || []).map((p: any) => ({ id: String(p._id || p.id || ""), name: p.name || "Project" })));
-      } catch { /* optional */ }
-    })();
-    return () => { active = false; };
-  }, []);
+    if (tenant.loading) return;
+    void load();
+  }, [load, tenant.loading]);
+
+  // Deep link from a Document's Linked Records: /variations?variation_id=...
+  useEffect(() => {
+    if (!deepLinkId || !loaded || openedDeepLink.current === deepLinkId) return;
+    openedDeepLink.current = deepLinkId;
+    const local = items.find((item) => item.id === deepLinkId);
+    if (local) {
+      setLinksFor(local);
+      return;
+    }
+    void getVariation(deepLinkId)
+      .then(setLinksFor)
+      .catch((error) => toast.error(scopeRefusal(error) || "Linked variation could not be opened"));
+  }, [deepLinkId, items, loaded]);
+
+  const closeLinks = (open: boolean) => {
+    if (open) return;
+    setLinksFor(null);
+    if (searchParams.get("variation_id")) {
+      const next = new URLSearchParams(searchParams);
+      next.delete("variation_id");
+      setSearchParams(next, { replace: true });
+    }
+  };
 
   // Load the contract's currencies for the form's project so a split can be
   // entered in the contract currencies with award-fixed rates.
@@ -151,10 +216,22 @@ const VariationRegisterPage: React.FC = () => {
     cur === vBaseCurrency ? 1 : vContractCurrencies.find((c) => c.currency === cur)?.conversion_rate ?? 1;
 
   const openCreate = () => {
+    if (!projectId) {
+      toast.error("Select a project in the navbar to add a variation");
+      return;
+    }
     setEditingId(null);
-    setForm({ ...EMPTY, project_id: projectFilter !== "all" ? projectFilter : "" });
+    // A new Variation is filed in the selected project; the server refuses any other.
+    setForm({ ...EMPTY, project_id: projectId });
     setCurrencyRows([]);
     setDialogOpen(true);
+    void getContractMasterForProject(projectId)
+      .then((cm) => {
+        if (cm?.original_contract_value != null) {
+          setForm((f) => (f.original_contract_value ? f : { ...f, original_contract_value: String(cm.original_contract_value) }));
+        }
+      })
+      .catch(() => { /* best-effort */ });
   };
   const openEdit = (v: VariationDTO) => {
     setEditingId(v.id);
@@ -215,7 +292,8 @@ const VariationRegisterPage: React.FC = () => {
       toast.success(editingId ? "Variation updated" : "Variation created");
       setDialogOpen(false);
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || "Failed to save variation");
+      const detail = e?.response?.data?.detail;
+      toast.error(scopeRefusal(e) || (typeof detail === "string" ? detail : "Failed to save variation"));
     } finally {
       setSaving(false);
     }
@@ -226,14 +304,14 @@ const VariationRegisterPage: React.FC = () => {
       await deleteVariation(v.id);
       await load();
       toast.success("Variation deleted");
-    } catch {
-      toast.error("Failed to delete variation");
+    } catch (error) {
+      toast.error(scopeRefusal(error) || "Failed to delete variation");
     }
   };
 
   const onExport = async (format: "csv" | "xlsx" | "pdf") => {
     try {
-      const blob = await exportVariations(format, projectFilter !== "all" ? { project_id: projectFilter } : undefined);
+      const blob = await exportVariations(format, projectId ? { project_id: projectId } : undefined);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url; a.download = `variation-register.${format}`; a.click();
@@ -257,7 +335,10 @@ const VariationRegisterPage: React.FC = () => {
           <Button variant="outline" size="sm" onClick={() => onExport("csv")}><Download className="mr-2 h-4 w-4" />CSV</Button>
           <Button variant="outline" size="sm" onClick={() => onExport("xlsx")}><Download className="mr-2 h-4 w-4" />Excel</Button>
           <Button variant="outline" size="sm" onClick={() => onExport("pdf")}><Download className="mr-2 h-4 w-4" />PDF</Button>
-          <Button onClick={openCreate}><PlusCircle className="mr-2 h-4 w-4" />Add Variation</Button>
+          <Button onClick={openCreate} disabled={!projectId}
+            title={projectId ? undefined : "Select a project in the navbar to add a variation"}>
+            <PlusCircle className="mr-2 h-4 w-4" />Add Variation
+          </Button>
         </div>
       </div>
 
@@ -275,14 +356,12 @@ const VariationRegisterPage: React.FC = () => {
       <Card>
         <CardHeader>
           <CardTitle>Variations</CardTitle>
+          <CardDescription data-testid="variation-scope">
+            {projectId
+              ? `Project: ${projectName || projectId}`
+              : "All projects you can access. Select a project in the navbar to open, edit or link a variation."}
+          </CardDescription>
           <div className="flex flex-wrap gap-3 pt-3">
-            <Select value={projectFilter} onValueChange={setProjectFilter}>
-              <SelectTrigger className="w-56"><SelectValue placeholder="Project" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All projects</SelectItem>
-                {projects.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}
-              </SelectContent>
-            </Select>
             <Select value={statusFilter} onValueChange={setStatusFilter}>
               <SelectTrigger className="w-44"><SelectValue placeholder="Status" /></SelectTrigger>
               <SelectContent>
@@ -336,10 +415,14 @@ const VariationRegisterPage: React.FC = () => {
                     <TableCell>{fmtDate(v.approval_date)}</TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-1">
-                        <Button variant="ghost" size="icon" className="h-8 w-8" title="Edit" onClick={() => openEdit(v)}><Edit className="h-4 w-4" /></Button>
+                        <Button variant="ghost" size="icon" className="h-8 w-8" title="Correspondence"
+                          aria-label={`Correspondence for ${v.variation_number || "variation"}`}
+                          disabled={!projectId}
+                          onClick={() => setLinksFor(v)}><Link2 className="h-4 w-4" /></Button>
+                        <Button variant="ghost" size="icon" className="h-8 w-8" title="Edit" disabled={!projectId} onClick={() => openEdit(v)}><Edit className="h-4 w-4" /></Button>
                         <AlertDialog>
                           <AlertDialogTrigger asChild>
-                            <Button variant="ghost" size="icon" className="h-8 w-8" title="Delete"><Trash2 className="h-4 w-4 text-destructive" /></Button>
+                            <Button variant="ghost" size="icon" className="h-8 w-8" title="Delete" disabled={!projectId}><Trash2 className="h-4 w-4 text-destructive" /></Button>
                           </AlertDialogTrigger>
                           <AlertDialogContent>
                             <AlertDialogHeader>
@@ -362,6 +445,29 @@ const VariationRegisterPage: React.FC = () => {
         </CardContent>
       </Card>
 
+      <Dialog open={linksFor !== null} onOpenChange={closeLinks}>
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Correspondence — {linksFor?.variation_number || "Variation"}</DialogTitle>
+            <DialogDescription>
+              Link existing incoming or outgoing letters to this variation. Unlinking removes the
+              relationship only; the letter stays in the register.
+            </DialogDescription>
+          </DialogHeader>
+          {linksFor && (
+            <EntityDocumentLinks
+              targetType="variation"
+              targetId={linksFor.id}
+              organizationId={linksFor.organization_id}
+              projectId={linksFor.project_id}
+              roles={VARIATION_DOCUMENT_RELATIONSHIP_ROLES}
+              defaultRole="correspondence"
+              canManage={can("dms.variation.edit")}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
@@ -372,22 +478,8 @@ const VariationRegisterPage: React.FC = () => {
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <Label>Project</Label>
-                <Select
-                  value={form.project_id}
-                  onValueChange={async (v) => {
-                    setForm((f) => ({ ...f, project_id: v }));
-                    // Auto-fill original contract value from the contract master.
-                    try {
-                      const cm = await getContractMasterForProject(v);
-                      if (cm?.original_contract_value != null) {
-                        setForm((f) => (f.original_contract_value ? f : { ...f, original_contract_value: String(cm.original_contract_value) }));
-                      }
-                    } catch { /* best-effort */ }
-                  }}
-                >
-                  <SelectTrigger><SelectValue placeholder="Select project" /></SelectTrigger>
-                  <SelectContent>{projects.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}</SelectContent>
-                </Select>
+                {/* Fixed to the navbar selection: the server refuses any other project. */}
+                <Input value={form.project_id === projectId ? projectName || projectId : form.project_id} readOnly aria-label="Project" />
               </div>
               <div>
                 <Label>Variation number</Label>

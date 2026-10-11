@@ -40,10 +40,23 @@ class _Collection:
         self.docs.append(deepcopy(doc))
         return None
 
+    def find(self, query=None, _projection=None):
+        """`get_current_user` looks up soft-deleted role references (R-A9B)."""
+        docs = [deepcopy(doc) for doc in self.docs if self._matches(doc, query or {})]
+
+        class _Cursor:
+            async def to_list(self, length=None):
+                return docs if length is None else docs[:length]
+
+        return _Cursor()
+
     @staticmethod
     def _matches(doc, query):
         for key, value in query.items():
-            if doc.get(key) != value:
+            if isinstance(value, dict) and "$in" in value:
+                if doc.get(key) not in value["$in"]:
+                    return False
+            elif doc.get(key) != value:
                 return False
         return True
 

@@ -7,10 +7,18 @@ from uuid import uuid4
 import json
 
 from bson import ObjectId
+from pymongo.errors import DuplicateKeyError
 
 from ..core.config import settings
 from ..core.database import get_database
-from ..core.permissions import LEGACY_PERMISSION_ALIASES, equivalent_permissions
+from ..core.permissions import equivalent_permissions
+from ..core.role_reference import (
+    RoleResolution,
+    normalize_role_key,
+    reference_text,
+    resolve_role_reference,
+    role_is_active as role_is_active,  # re-exported: the soft-delete contract reads it from here
+)
 from ..models.permission import (
     Permission,
     PermissionCreate,
@@ -20,7 +28,7 @@ from ..models.permission import (
     PermissionLevel,
     DEFAULT_PERMISSIONS,
 )
-from ..utils.error_handler import ValidationError
+from ..utils.error_handler import BaseDomainError, ValidationError
 from ..utils.audit_logger import AuditLogger
 from .runtime_state import get_runtime_state
 
@@ -64,10 +72,191 @@ ROLE_ALIASES = {
 }
 
 def _normalize_role_name(value: Any) -> str:
+    """Normalise a role DOCUMENT's display name for the name-based grants.
+
+    Never apply it to a `users.roles` reference: a reference contributes exactly the key
+    `core.role_reference` gives the principal (`RoleResolution.key`), so a spelling only
+    this wider table knows cannot grant by name what the principal does not carry.
+    """
     raw = str(value or "").strip().lower()
     if not raw:
         return ""
     return ROLE_ALIASES.get(raw, raw)
+
+
+#: Moved off `user_perms:{id}` in R-A9B, and off `v2` when legacy role spellings
+#: started resolving one hop. Entries under an old key were computed while
+#: soft-deleted roles and transitive aliases still granted (v1), or with a legacy
+#: spelling's role names but not its document (v2); under a new key no process
+#: reads them, and they expire unread on their own TTL.
+PERMISSION_CACHE_KEY_PREFIX = "user_perms:v3:"
+
+
+def permission_cache_key(user_id: Any) -> str:
+    """The one spelling of a user's cached-permission key; invalidation must use it too."""
+    return f"{PERMISSION_CACHE_KEY_PREFIX}{user_id}"
+
+
+#: How long a computed grant may be served from `permission_cache_key`.
+PERMISSION_CACHE_TTL_SECONDS = 3600
+#: A pending authority change must outlive every cache entry that could predate it,
+#: so a change whose invalidation failed costs cache bypass, never stale authority.
+AUTHORITY_CHANGE_PENDING_TTL_SECONDS = PERMISSION_CACHE_TTL_SECONDS + 300
+AUTHORITY_CHANGE_PENDING_PREFIX = "authz_change_pending:"
+
+
+def authority_change_pending_key(user_id: Any) -> str:
+    return f"{AUTHORITY_CHANGE_PENDING_PREFIX}{user_id}"
+
+
+class AuthorityChangeUnavailableError(BaseDomainError):
+    """An authority change could not be announced to the permission cache, so it was not made."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, 503)
+
+
+def _distinct_user_ids(user_ids: Any) -> List[str]:
+    return list(dict.fromkeys(str(user_id) for user_id in user_ids or [] if str(user_id)))
+
+
+async def begin_authority_change(user_ids: Any) -> None:
+    """Announce an authority change for these users BEFORE it is written (D4-B).
+
+    From here until `complete_authority_change`, no cached grant is served or
+    written for them. Raises `AuthorityChangeUnavailableError` when the
+    announcement cannot be made - the caller must then not make the change,
+    because nothing could stop an entry computed from the old authority being
+    served for the whole cache TTL. A deployment without a runtime Redis has no
+    permission cache, so there is nothing to announce.
+    """
+    ids = _distinct_user_ids(user_ids)
+    if not ids:
+        return
+    runtime = get_runtime_state()
+    try:
+        redis = await runtime.get_redis()
+        if redis is None:
+            if getattr(runtime, "redis_url", None):
+                raise ConnectionError("runtime Redis is configured but unreachable")
+            return
+        for user_id in ids:
+            await redis.set(authority_change_pending_key(user_id), "1", ex=AUTHORITY_CHANGE_PENDING_TTL_SECONDS)
+    except Exception as exc:
+        logger.error("Authority change refused: the permission cache could not be told about it: %s", exc)
+        raise AuthorityChangeUnavailableError(
+            "Authorization cache unavailable; the authority change was not made"
+        ) from exc
+
+
+async def complete_authority_change(user_ids: Any) -> bool:
+    """Invalidate after the write: re-authentication marker, cached grant, then the pending marker.
+
+    The pending marker is removed last, and only once the rest succeeded. On any
+    failure it stays until it expires, which outlasts every entry that could
+    predate the change, so the failure is logged, never silently trusted.
+    """
+    ids = _distinct_user_ids(user_ids)
+    if not ids:
+        return True
+    runtime = get_runtime_state()
+    try:
+        redis = await runtime.get_redis()
+    except Exception as exc:
+        logger.error("Authority change applied; invalidation deferred to the pending marker: %s", exc)
+        return False
+    if redis is None:
+        if getattr(runtime, "redis_url", None):
+            logger.error("Authority change applied; Redis unreachable, invalidation deferred to the pending marker")
+            return False
+        return True
+    now_ts = int(datetime.utcnow().timestamp())
+    complete = True
+    for user_id in ids:
+        try:
+            await redis.set(f"user_jwt_min_iat:{user_id}", now_ts)
+            await redis.delete(permission_cache_key(user_id))
+            await redis.delete(authority_change_pending_key(user_id))
+        except Exception as exc:
+            complete = False
+            logger.error(
+                "Authority change for user %s applied but invalidation failed; its cached grants stay bypassed "
+                "until the pending marker expires: %s",
+                user_id,
+                exc,
+            )
+    return complete
+
+
+async def cancel_authority_change(user_ids: Any) -> None:
+    """The announced change was not made. Best effort: a marker left behind only bypasses the cache."""
+    ids = _distinct_user_ids(user_ids)
+    if not ids:
+        return
+    try:
+        redis = await get_runtime_state().get_redis()
+        if redis is None:
+            return
+        for user_id in ids:
+            await redis.delete(authority_change_pending_key(user_id))
+    except Exception as exc:
+        logger.warning("Could not clear a pending authority change marker: %s", exc)
+
+
+def _id_candidates(text: str) -> List[Any]:
+    candidates: List[Any] = []
+    try:
+        candidates.append(ObjectId(text))
+    except Exception:
+        pass
+    candidates.append(text)
+    return candidates
+
+
+async def load_role_resolution(db: Any, reference: Any) -> RoleResolution:
+    """Fetch what `resolve_role_reference` needs for ONE reference, then resolve it.
+
+    The direct document first; only when there is none, the canonical document the
+    key names and any other document carrying the reference as its exact name (the
+    ambiguity check). Store errors propagate: a lookup that cannot run is not "no role".
+    """
+    text = reference_text(reference)
+    if not text:
+        return resolve_role_reference(text, [])
+    for candidate in _id_candidates(text):
+        direct = await db.roles.find_one({"_id": candidate})
+        if direct is not None:
+            return resolve_role_reference(text, [direct])
+    key = normalize_role_key(text)
+    if key == text:
+        return resolve_role_reference(text, [])
+    target = await db.roles.find_one({"_id": key})
+    if target is None:
+        return resolve_role_reference(text, [])
+    documents = [target]
+    lookalike = await db.roles.find_one({"name": text, "_id": {"$ne": target.get("_id")}})
+    if lookalike is not None:
+        documents.append(lookalike)
+    return resolve_role_reference(text, documents)
+
+
+async def fetch_role_documents(db: Any, references: List[Any]) -> List[Dict[str, Any]]:
+    """Every role document `resolve_role_reference` may need for these references, in one query."""
+    ids: List[Any] = []
+    names: List[str] = []
+    for reference in references or []:
+        text = reference_text(reference)
+        if not text:
+            continue
+        names.append(text)
+        for candidate in dict.fromkeys([text, normalize_role_key(text)]):
+            ids.extend(_id_candidates(candidate))
+    if not names:
+        return []
+    return await db.roles.find(
+        {"$or": [{"_id": {"$in": ids}}, {"name": {"$in": names}}]},
+        {"_id": 1, "name": 1, "is_active": 1, "scope": 1},
+    ).to_list(length=None)
 
 class PermissionServiceError(Exception):
     """Custom exception for permission service errors."""
@@ -121,73 +310,92 @@ class PermissionService:
         "administer": PermissionLevel.ADMIN.value,
         "manage": PermissionLevel.ADMIN.value,
     }
-    
+
     def __init__(self):
         self.db = None
         self.audit_logger = AuditLogger()
-        # Non-document aliases retained for older project/org labels. Document
-        # access is intentionally canonical-only and enforced by PolicyService.
-        self._permission_aliases = {
-            **LEGACY_PERMISSION_ALIASES,
-            # Organizations
-            "organizations:read": ["orgs:view"],
-            "organizations:create": ["orgs:create"],
-            "organizations:update": ["orgs:edit"],
-            "organizations:delete": ["orgs:delete"],
-            # Projects
-            "projects:read": ["projects:view"],
-            "projects:update": ["projects:edit"],
-        }
-        for canonical, aliases in LEGACY_PERMISSION_ALIASES.items():
-            for alias in aliases:
-                self._permission_aliases.setdefault(alias, []).append(canonical)
-        
+        # Legacy names resolve through `equivalent_permissions` only (one hop,
+        # never through a shared alias). Document access is canonical-only and
+        # enforced by PolicyService.
+
     async def _get_db(self):
         """Get database connection."""
         if self.db is None:
             self.db = await get_database()
         return self.db
-    
+
+    @staticmethod
+    async def _cache_entry_is_current(redis: Any, user_id: Any, entry: Dict[str, Any]) -> bool:
+        """Whether a cached grant post-dates the user's last authority change.
+
+        Role mutations set `user_jwt_min_iat:{id}` (whole seconds) and delete the
+        cache key, but a check that read the roles just before the mutation can
+        write its entry just after the delete. Such an entry is stamped before the
+        mutation, so it is refused here instead of being served for the whole TTL.
+        The comparison is on whole seconds and refuses ties: an entry computed in
+        the same second as the invalidation is recomputed, never trusted.
+        """
+        computed_at = entry.get("computed_at")
+        if not isinstance(computed_at, (int, float)):
+            return False
+        if await redis.get(authority_change_pending_key(user_id)) is not None:
+            return False
+        min_iat = await redis.get(f"user_jwt_min_iat:{user_id}")
+        if min_iat is None:
+            return True
+        return int(computed_at) > int(min_iat)
+
+    async def _load_role(self, db: Any, role_ref: Any) -> RoleResolution:
+        """Resolve one `users.roles` entry through `core.role_reference`.
+
+        Every resolver goes through here, so wherever authority is computed a
+        reference contributes role names only when `keeps_role_key` (a soft-deleted
+        role contributes nothing - F-A9A-1) and permissions only from
+        `document`, which is set only when the reference resolves to one active
+        document: its own `_id`, or a legacy spelling one hop to its canonical role.
+        """
+        return await load_role_resolution(db, role_ref)
+
     async def get_permission_by_id(self, permission_id: str) -> Optional[Permission]:
         """Get permission by ID."""
         try:
             db = await self._get_db()
-            
+
             # Handle ObjectId conversion
             try:
                 query_id = ObjectId(permission_id)
             except:
                 query_id = permission_id
-            
+
             permission_doc = await db.permissions.find_one({"_id": query_id})
-            
+
             if not permission_doc:
                 return None
-            
+
             # Convert ObjectId to string
             return self._build_permission_from_doc(permission_doc)
-            
+
         except Exception as e:
             logger.error(f"Failed to get permission {permission_id}: {str(e)}")
             return None
-    
+
     async def get_permission_by_name(self, name: str) -> Optional[Permission]:
         """Get permission by name."""
         try:
             db = await self._get_db()
-            
+
             permission_doc = await db.permissions.find_one({"name": name})
-            
+
             if not permission_doc:
                 return None
-            
+
             # Convert ObjectId to string
             return self._build_permission_from_doc(permission_doc)
-            
+
         except Exception as e:
             logger.error(f"Failed to get permission by name {name}: {str(e)}")
             return None
-    
+
     async def get_permissions_paginated(
         self,
         filters: Dict[str, Any],
@@ -196,46 +404,46 @@ class PermissionService:
         """Get permissions with pagination and filtering."""
         try:
             db = await self._get_db()
-            
+
             # Build query
             query = {}
-            
+
             # Search filter
             if filters.get("search"):
                 query["$or"] = [
                     {"name": {"$regex": filters["search"], "$options": "i"}},
                     {"description": {"$regex": filters["search"], "$options": "i"}}
                 ]
-            
+
             # Category filter
             if filters.get("category"):
                 query["category"] = filters["category"]
-            
+
             # System permission filter
             if filters.get("is_system") is not None:
                 query["is_system"] = filters["is_system"]
-            
+
             # Active filter (treat documents without the flag as active)
             query["is_active"] = {"$ne": False}
-            
+
             # Get total count
             total_count = await db.permissions.count_documents(query)
-            
+
             # Get paginated results
             cursor = db.permissions.find(query).skip(pagination["skip"]).limit(pagination["limit"])
             permission_docs = await cursor.to_list(length=pagination["limit"])
-            
+
             # Convert to Permission objects
             permissions = []
             for doc in permission_docs:
                 permissions.append(self._build_permission_from_doc(doc))
-            
+
             return permissions, total_count
-            
+
         except Exception as e:
             logger.error(f"Failed to get permissions: {str(e)}")
             return [], 0
-    
+
     async def create_permission(
         self,
         permission_data: PermissionCreate,
@@ -244,14 +452,14 @@ class PermissionService:
         """Create a new permission."""
         try:
             db = await self._get_db()
-            
+
             # Check for duplicate permission name
             existing = await self.get_permission_by_name(permission_data.name)
             if existing:
                 raise PermissionServiceError(
                     f"Permission '{permission_data.name}' already exists", 409
                 )
-            
+
             # Create permission document
             permission_doc = {
                 "name": permission_data.name,
@@ -265,20 +473,30 @@ class PermissionService:
                 "updated_at": datetime.utcnow(),
                 "created_by": getattr(created_by, 'id', str(created_by))
             }
-            
+
             # Insert permission
-            result = await db.permissions.insert_one(permission_doc)
+            try:
+                result = await db.permissions.insert_one(permission_doc)
+            except DuplicateKeyError as exc:
+                # The read above and this write are not one operation, so a
+                # concurrent creator can land between them. `uq_permissions_name`
+                # is what turns that into an error instead of a second row; it
+                # must surface as the same 409 the read-path duplicate does, or a
+                # caller cannot tell "already exists" from "creation broke".
+                raise PermissionServiceError(
+                    f"Permission '{permission_data.name}' already exists", 409
+                ) from exc
             permission_id = str(result.inserted_id)
-            
+
             # Return created permission
             return self._build_permission_from_doc(permission_doc)
-            
+
         except PermissionServiceError:
             raise
         except Exception as e:
             logger.error(f"Failed to create permission: {str(e)}")
             raise PermissionServiceError("Permission creation failed")
-    
+
     async def update_permission(
         self,
         permission_id: str,
@@ -288,19 +506,19 @@ class PermissionService:
         """Update permission."""
         try:
             db = await self._get_db()
-            
+
             # Handle ObjectId conversion
             try:
                 query_id = ObjectId(permission_id)
             except:
                 query_id = permission_id
-            
+
             # Build update document
             update_doc = {
                 "updated_at": datetime.utcnow(),
                 "updated_by": getattr(updated_by, 'id', str(updated_by))
             }
-            
+
             # Add fields that are being updated
             if update_data.description is not None:
                 update_doc["description"] = update_data.description
@@ -308,41 +526,41 @@ class PermissionService:
                 update_doc["category"] = update_data.category.value
             if update_data.is_active is not None:
                 update_doc["is_active"] = update_data.is_active
-            
+
             # Update permission
             result = await db.permissions.update_one(
                 {"_id": query_id},
                 {"$set": update_doc}
             )
-            
+
             if result.matched_count == 0:
                 raise PermissionServiceError("Permission not found", 404)
-            
+
             # Return updated permission
             return await self.get_permission_by_id(permission_id)
-            
+
         except PermissionServiceError:
             raise
         except Exception as e:
             logger.error(f"Failed to update permission {permission_id}: {str(e)}")
             raise PermissionServiceError("Permission update failed")
-    
+
     async def delete_permission(self, permission_id: str, deleted_by: Any) -> bool:
         """Soft delete permission."""
         try:
             db = await self._get_db()
-            
+
             # Handle ObjectId conversion
             try:
                 query_id = ObjectId(permission_id)
             except:
                 query_id = permission_id
-            
+
             # Check if permission is system permission
             permission = await self.get_permission_by_id(permission_id)
             if permission and permission.is_system:
                 raise PermissionServiceError("Cannot delete system permission", 400)
-            
+
             # Soft delete (mark as inactive)
             result = await db.permissions.update_one(
                 {"_id": query_id},
@@ -354,34 +572,34 @@ class PermissionService:
                     }
                 }
             )
-            
+
             return result.modified_count > 0
-            
+
         except PermissionServiceError:
             raise
         except Exception as e:
             logger.error(f"Failed to delete permission {permission_id}: {str(e)}")
             return False
-    
+
     async def get_permissions_by_category(self) -> List[PermissionGroup]:
         """Get permissions grouped by category."""
         try:
             db = await self._get_db()
-            
+
             # Get all active permissions
             cursor = db.permissions.find({"is_active": {"$ne": False}})
             permission_docs = await cursor.to_list(length=None)
-            
+
             # Group by category
             category_groups = {}
             for doc in permission_docs:
                 permission = self._build_permission_from_doc(doc)
-                
+
                 category = permission.category
                 if category not in category_groups:
                     category_groups[category] = []
                 category_groups[category].append(permission)
-            
+
             # Create permission groups
             groups = []
             for category, permissions in category_groups.items():
@@ -390,18 +608,18 @@ class PermissionService:
                     permissions=permissions,
                     count=len(permissions)
                 ))
-            
+
             return groups
-            
+
         except Exception as e:
             logger.error(f"Failed to get permissions by category: {str(e)}")
             return []
-    
+
     async def get_permissions_by_ids(self, permission_ids: List[str]) -> List[Permission]:
         """Get multiple permissions by their IDs."""
         try:
             db = await self._get_db()
-            
+
             # Convert to ObjectIds if needed
             query_ids = []
             for pid in permission_ids:
@@ -409,37 +627,62 @@ class PermissionService:
                     query_ids.append(ObjectId(pid))
                 except:
                     query_ids.append(pid)
-            
+
             # Query permissions
             cursor = db.permissions.find({"_id": {"$in": query_ids}})
             permission_docs = await cursor.to_list(length=None)
-            
+
             # Convert to Permission objects
             permissions = []
             for doc in permission_docs:
                 permissions.append(self._build_permission_from_doc(doc))
-            
+
             return permissions
-            
+
         except Exception as e:
             logger.error(f"Failed to get permissions by IDs: {str(e)}")
             return []
-    
+
     async def create_default_permissions(self) -> bool:
-        """Create default system permissions if they don't exist."""
+        """Create default system permissions if they don't exist.
+
+        Two seeders can run against one database at once - a rolling restart, or
+        the web tier and a worker starting together - and the read-then-write this
+        used to be has nothing between the two halves. With
+        `uq_permissions_name` in place the loser of that race now gets a
+        `DuplicateKeyError` instead of writing a second row.
+
+        That error is absorbed *per entry*, and only that error. It means the
+        catalogue entry exists, which is the outcome this method wanted; treating
+        it as fatal would abort the remaining entries and leave the catalogue
+        short of exactly the permissions added most recently, with the whole
+        method returning False into a caller that does not check.
+        """
         try:
             created_count = 0
-            
+            existing_count = 0
+
             for perm_data in DEFAULT_PERMISSIONS:
                 existing = await self.get_permission_by_name(perm_data["name"])
-                if not existing:
-                    permission_create = PermissionCreate(**perm_data)
+                if existing:
+                    existing_count += 1
+                    continue
+                permission_create = PermissionCreate(**perm_data)
+                try:
                     await self.create_permission(permission_create, "system")
                     created_count += 1
-            
-            logger.info(f"Created {created_count} default permissions")
+                except (DuplicateKeyError, PermissionServiceError) as exc:
+                    if isinstance(exc, PermissionServiceError) and getattr(exc, "status_code", None) != 409:
+                        raise
+                    existing_count += 1
+
+            logger.info(
+                "Permission catalog seeded: %s created, %s already present",
+                created_count,
+                existing_count,
+            )
             return True
-            
+
         except Exception as e:
             logger.error(f"Failed to create default permissions: {str(e)}")
             return False
@@ -470,11 +713,7 @@ class PermissionService:
             perm_ids: List[ObjectId] = []
 
             for rid in role_ids:
-                try:
-                    role_qid = ObjectId(rid)
-                except Exception:
-                    role_qid = rid
-                role = await db.roles.find_one({"_id": role_qid})
+                role = (await self._load_role(db, rid)).document
                 if not role:
                     continue
                 rperms = role.get("permissions", []) or []
@@ -537,21 +776,16 @@ class PermissionService:
             role_names: set[str] = set()
 
             for rid in user_doc.get("roles", []) or []:
-                rid_str = str(rid).strip()
-                if rid_str:
-                    role_names.add(rid_str.lower())
-                    normalized_rid = _normalize_role_name(rid_str)
-                    if normalized_rid:
-                        role_names.add(normalized_rid)
+                resolution = await self._load_role(db, rid)
+                if not resolution.keeps_role_key:
+                    continue
+                role = resolution.document
+                # The reference contributes exactly the key the principal carries.
+                if resolution.key:
+                    role_names.add(resolution.key)
                     if "superadmin" in role_names:
                         return ["*"]
 
-                try:
-                    role_qid = ObjectId(rid)
-                except Exception:
-                    role_qid = rid
-
-                role = await db.roles.find_one({"_id": role_qid})
                 if not role:
                     continue
 
@@ -574,14 +808,11 @@ class PermissionService:
             if role_names & {"orgadmin", "orguser", "projectadmin", "projectuser"}:
                 raw_permissions.add("users:read")
 
+            # The alias relation is symmetric, so this advertises exactly what
+            # `user_has_permission` grants for each held name.
             expanded_permissions: set[str] = set(raw_permissions)
-            for permission in list(raw_permissions):
+            for permission in raw_permissions:
                 expanded_permissions.update(equivalent_permissions(permission) or {permission})
-                expanded_permissions.update(self._permission_aliases.get(permission, []))
-                for canonical, alias_list in self._permission_aliases.items():
-                    if permission in alias_list:
-                        expanded_permissions.add(canonical)
-                        expanded_permissions.update(alias_list)
 
             return sorted(expanded_permissions)
         except Exception as e:
@@ -601,17 +832,17 @@ class PermissionService:
             # Fallback minimal structure
             from ..models.permission import PermissionMatrix  # type: ignore
             return PermissionMatrix(resources=[], actions=[], roles=[], matrix={})
-    
+
     async def check_permission_exists(self, permission_name: str) -> bool:
         """Check if a permission exists by name."""
         try:
             permission = await self.get_permission_by_name(permission_name)
             return permission is not None
-            
+
         except Exception as e:
             logger.error(f"Failed to check permission existence: {str(e)}")
             return False
-    
+
     async def get_permissions_for_role(self, role_id: str) -> List[Permission]:
         """Get all permissions assigned to a specific role. Supports wildcard '*' and name/ID mix."""
         try:
@@ -693,31 +924,28 @@ class PermissionService:
         if not permission_key:
             return False
 
-        # Build a set of equivalent permission keys (requested key + aliases + canonical names)
+        # Held names that satisfy this check: the name, its label spellings, and
+        # names it declares or that declare it - one hop, never through a shared
+        # legacy alias (F-A9A-2).
         lookup_keys = equivalent_permissions(permission_key) or {permission_key}
-        aliases = self._permission_aliases.get(permission_key, [])
-        lookup_keys.update(aliases)
-        # If caller passes an alias, also add its canonical target for matching
-        for canonical, alias_list in self._permission_aliases.items():
-            if permission_key in alias_list:
-                lookup_keys.add(canonical)
-                lookup_keys.update(alias_list)
 
         granted = False
         redis = None
-        cache_key = f"user_perms:{user_id}"
-        
+        cache_key = permission_cache_key(user_id)
+
         try:
             runtime = get_runtime_state()
             redis = await runtime.get_redis()
             if redis is not None:
                 cached_data = await redis.get(cache_key)
-                if cached_data:
-                    cache_parsed = json.loads(cached_data)
+                cache_parsed = json.loads(cached_data) if cached_data else None
+                if cache_parsed is not None and not await self._cache_entry_is_current(redis, user_id, cache_parsed):
+                    cache_parsed = None
+                if cache_parsed is not None:
                     raw_permissions = cache_parsed.get("raw_permissions", [])
                     role_names = set(cache_parsed.get("role_names", []))
                     perm_names = set(cache_parsed.get("perm_names", []))
-                    
+
                     if "*" in raw_permissions or permission_key in raw_permissions:
                         granted = True
                     elif lookup_keys and set(raw_permissions) & lookup_keys:
@@ -734,7 +962,7 @@ class PermissionService:
                     if not granted and permission_key == "users:read":
                         if role_names & {"orgadmin", "orguser", "projectadmin", "projectuser"}:
                             granted = True
-                    
+
                     if log:
                         try:
                             await self.audit_logger.log_permission_check(
@@ -747,6 +975,9 @@ class PermissionService:
             logger.warning(f"Failed to read permission cache for {user_id}: {e}")
 
         try:
+            # Stamped BEFORE the read: an entry computed from roles read before an
+            # invalidation must be recognisably older than that invalidation.
+            computed_at = datetime.utcnow().timestamp()
             db = await self._get_db()
             try:
                 user_query_id = ObjectId(user_id)
@@ -758,21 +989,17 @@ class PermissionService:
                 granted = False
             else:
                 role_ids = user_doc.get("roles", []) or []
-                raw_permissions: List[str] = []
-                perm_names: set[str] = set()
-                role_names: set[str] = set()
+                raw_permissions = []
+                perm_names = set()
+                role_names = set()
                 for rid in role_ids:
-                    rid_str = str(rid).lower()
-                    if rid_str:
-                        role_names.add(rid_str)
-                        normalized_rid = _normalize_role_name(rid_str)
-                        if normalized_rid:
-                            role_names.add(normalized_rid)
-                    try:
-                        role_qid = ObjectId(rid)
-                    except Exception:
-                        role_qid = rid
-                    role = await db.roles.find_one({"_id": role_qid})
+                    resolution = await self._load_role(db, rid)
+                    if not resolution.keeps_role_key:
+                        continue
+                    role = resolution.document
+                    # The reference contributes exactly the key the principal carries.
+                    if resolution.key:
+                        role_names.add(resolution.key)
                     if not role:
                         continue
                     role_name = str(role.get("name", "")).lower()
@@ -802,14 +1029,18 @@ class PermissionService:
                 if not granted and permission_key == "users:read":
                     if role_names & {"orgadmin", "orguser", "projectadmin", "projectuser"}:
                         granted = True
-                        
+
                 if redis is not None:
                     try:
-                        await redis.set(cache_key, json.dumps({
-                            "raw_permissions": raw_permissions,
-                            "role_names": list(role_names),
-                            "perm_names": list(perm_names)
-                        }), ex=3600)
+                        # Never cache a decision computed while an authority change
+                        # is pending: it may have read the authority being replaced.
+                        if await redis.get(authority_change_pending_key(user_id)) is None:
+                            await redis.set(cache_key, json.dumps({
+                                "raw_permissions": raw_permissions,
+                                "role_names": list(role_names),
+                                "perm_names": list(perm_names),
+                                "computed_at": computed_at,
+                            }), ex=PERMISSION_CACHE_TTL_SECONDS)
                     except Exception as e:
                         logger.warning(f"Failed to write permission cache for {user_id}: {e}")
         except Exception as exc:
@@ -894,16 +1125,15 @@ class PermissionService:
             role_ids = user_doc.get("roles", []) or []
             is_super_admin = False
             for rid in role_ids:
+                resolution = await self._load_role(db, rid)
+                if not resolution.keeps_role_key:
+                    continue
+                role = resolution.document
                 role_id_str = str(rid).lower()
                 if role_id_str == "superadmin" or role_id_str == "super admin":
                     is_super_admin = True
                     break
-                # Also check by querying the role
-                try:
-                    role_qid = ObjectId(rid)
-                except Exception:
-                    role_qid = rid
-                role = await db.roles.find_one({"_id": role_qid})
+                # Also check by the role's name
                 if role:
                     role_name = str(role.get("name", "")).lower()
                     if role_name == "super admin" or role_name == "superadmin":

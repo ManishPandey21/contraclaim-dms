@@ -127,17 +127,31 @@ def test_reference_cleanup_preserves_desired_edges_and_removes_only_stale_ones(m
         lambda query, params=None, **_kwargs: calls.append((query, params or {})),
     )
 
+    # Reconciliation is scoped to the writing document, so it requires an owner:
+    # a blank owner is a wildcard that would delete other documents' edges.
     svc.upsert_letter_with_refs(
         {"code": "LTR-001", "normCode": "ltr-001"},
         [{"code": "LTR-002", "type": "CITES", "source": "parser"}],
         cleanup=True,
+        owner_document_id="doc-1",
     )
 
-    relationship_merges = [query for query, _params in calls if "MERGE (src)-[e:CITES]" in query]
+    relationship_merges = [query for query, _params in calls if "MERGE (src)-[e:CITES" in query]
     cleanup_calls = [(query, params) for query, params in calls if "DELETE e" in query]
     assert len(relationship_merges) == 1
     assert len(cleanup_calls) == 2
     assert all("NOT (dst.normCode IN $desiredNormCodes)" in query for query, _ in cleanup_calls)
+    # Scoped to this document's own edges, never a peer's.
+    assert all("e.owner_document_id = $ownerDocumentId" in query for query, _ in cleanup_calls)
+    assert all(params["ownerDocumentId"] == "doc-1" for _q, params in cleanup_calls)
+    # Retraction must NOT be gated on the `source` tag. The tag is an open set
+    # (callers pass arbitrary ref["source"]; ingestion emits 'system' for
+    # previous_letter_id), so a tag allow-list leaves unlisted tags permanently
+    # unretractable - a stale graph fact no re-sync can clear.
+    assert not any("e.source" in query for query, _ in cleanup_calls), (
+        "cleanup must scope by owner_document_id only; a source-tag allow-list "
+        "makes 'system' and caller-supplied tags unretractable"
+    )
     cites_cleanup = next(params for query, params in cleanup_calls if "[e:CITES]" in query)
     replies_cleanup = next(params for query, params in cleanup_calls if "[e:REPLIES_TO]" in query)
     assert cites_cleanup["desiredNormCodes"] == ["ltr-002"]

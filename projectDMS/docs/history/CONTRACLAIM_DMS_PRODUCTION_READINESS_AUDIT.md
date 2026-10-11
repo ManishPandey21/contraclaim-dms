@@ -1,7 +1,7 @@
 # Contraclaim DMS Production Readiness Audit Report
 
-Audit date: 2026-05-19  
-Repository root: `c:\SaaS\projectDMS`  
+Audit date: 2026-05-19
+Repository root: `c:\SaaS\projectDMS`
 Scope reviewed: active React routes, FastAPI backend routers/services/models, MongoDB/index code, auth/RBAC, file/email/AI integrations, Docker/CI/deployment scripts, and supporting documentation.
 
 > Important context: this repository currently has a dirty worktree with many modified and untracked files. This report audits the working tree as present on 2026-05-19, not a clean committed baseline.
@@ -166,7 +166,7 @@ Scoring weights used:
 - Add frontend form submission success/failure tests.
 - Validate mobile hero/text contrast and bundle size.
 
-**Estimated Score After Improvements:** 82/100  
+**Estimated Score After Improvements:** 82/100
 **Priority:** Medium
 
 ### Page: Login `/login`
@@ -195,7 +195,7 @@ Scoring weights used:
 - Add CSRF token/header validation for cookie-authenticated unsafe methods.
 - Implement password reset or remove the dead link.
 
-**Estimated Score After Improvements:** 88/100  
+**Estimated Score After Improvements:** 88/100
 **Priority:** Critical
 
 ### Page: Overview `/overview`
@@ -212,7 +212,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Add scoped project/org context, recent work, alerts, and role-aware actions.
 
-**Estimated Score After Improvements:** 78/100  
+**Estimated Score After Improvements:** 78/100
 **Priority:** Medium
 
 ### Page: Dashboard `/dashboard`
@@ -229,7 +229,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Add contract/letter separation, stale-data indicators, and API integration tests for scoped dashboard totals.
 
-**Estimated Score After Improvements:** 88/100  
+**Estimated Score After Improvements:** 88/100
 **Priority:** High
 
 ### Page: Organizations `/organizations`
@@ -246,7 +246,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Add destructive-action step-up, dependency impact modal, and tests for tenant visibility.
 
-**Estimated Score After Improvements:** 90/100  
+**Estimated Score After Improvements:** 90/100
 **Priority:** High
 
 ### Page: Projects `/projects`
@@ -263,7 +263,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Add explicit permission checks for notification settings and destructive-action confirmation with audit entries.
 
-**Estimated Score After Improvements:** 90/100  
+**Estimated Score After Improvements:** 90/100
 **Priority:** High
 
 ### Page: Documents `/documents`, `/documents/legacy`
@@ -287,7 +287,7 @@ Scoring weights used:
 - Require pagination/virtualization across all list variants.
 - Add E2E tests for upload -> process -> view -> share -> export.
 
-**Estimated Score After Improvements:** 91/100  
+**Estimated Score After Improvements:** 91/100
 **Priority:** Critical
 
 ### Page: Enhanced Search `/documentsearch`
@@ -304,7 +304,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Mount `search.router`, remove unsupported frontend endpoints, and add contract tests from `search-api.ts` to backend route inventory.
 
-**Estimated Score After Improvements:** 86/100  
+**Estimated Score After Improvements:** 86/100
 **Priority:** High
 
 ### Page: Tags `/tags`
@@ -321,7 +321,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Add unique scoped tag indexes, stronger validation, and route-level permission dependencies.
 
-**Estimated Score After Improvements:** 88/100  
+**Estimated Score After Improvements:** 88/100
 **Priority:** Medium
 
 ### Page: Profile `/profile`
@@ -338,7 +338,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Add upload validation tests and password-change audit events.
 
-**Estimated Score After Improvements:** 88/100  
+**Estimated Score After Improvements:** 88/100
 **Priority:** Medium
 
 ### Page: Users `/users`
@@ -355,7 +355,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Force step-up for lock/delete/role changes, remove production seed users, add privilege escalation tests.
 
-**Estimated Score After Improvements:** 90/100  
+**Estimated Score After Improvements:** 90/100
 **Priority:** Critical
 
 ### Page: Permissions `/permissions`
@@ -372,7 +372,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Consolidate role endpoints into one router, add step-up, and add tests for forbidden role assignment.
 
-**Estimated Score After Improvements:** 90/100  
+**Estimated Score After Improvements:** 90/100
 **Priority:** Critical
 
 ### Page: Settings `/settings`
@@ -389,7 +389,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Make settings the canonical admin console for storage, SMTP, notifications, security, and feature flags.
 
-**Estimated Score After Improvements:** 80/100  
+**Estimated Score After Improvements:** 80/100
 **Priority:** High
 
 ### Page: Plan Settings `/plan-settings`
@@ -406,7 +406,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Add explicit `plans:*`, `billing:*`, and `entitlements:*` permissions plus audit trail.
 
-**Estimated Score After Improvements:** 88/100  
+**Estimated Score After Improvements:** 88/100
 **Priority:** High
 
 ### Page: Notifications `/notifications`
@@ -423,7 +423,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Gate test router to superadmin/non-production or remove it from production app.
 
-**Estimated Score After Improvements:** 86/100  
+**Estimated Score After Improvements:** 86/100
 **Priority:** Medium
 
 ### Page: Upload `/upload`
@@ -440,7 +440,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Add resumable upload progress, server-side metadata schema validation, and E2E tests for failed/large/invalid uploads.
 
-**Estimated Score After Improvements:** 90/100  
+**Estimated Score After Improvements:** 90/100
 **Priority:** Critical
 
 ### Page: Document Viewer `/documentviewer/:id`
@@ -457,7 +457,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Add viewer E2E tests, revision conflict UI, and CSP/browser validation.
 
-**Estimated Score After Improvements:** 91/100  
+**Estimated Score After Improvements:** 91/100
 **Priority:** Critical
 
 ### Page: Share `/share/:id`
@@ -474,7 +474,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Add token revocation, configurable TTL per share, rate limiting on public downloads, and recipient-scoped audit logs.
 
-**Estimated Score After Improvements:** 90/100  
+**Estimated Score After Improvements:** 90/100
 **Priority:** Critical
 
 ### Page: Register `/register`
@@ -491,7 +491,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Require step-up for privileged roles, display generated permission impact, and add tests for disallowed role assignment.
 
-**Estimated Score After Improvements:** 88/100  
+**Estimated Score After Improvements:** 88/100
 **Priority:** Critical
 
 ### Page: Folders `/folders`
@@ -508,7 +508,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Mount the router or remove route, add path traversal tests, add explicit permissions.
 
-**Estimated Score After Improvements:** 84/100  
+**Estimated Score After Improvements:** 84/100
 **Priority:** Critical
 
 ### Page: Tasks `/tasks`
@@ -525,7 +525,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Mount router, add permissions/audit trail, or remove the page from active routes/sidebar.
 
-**Estimated Score After Improvements:** 82/100  
+**Estimated Score After Improvements:** 82/100
 **Priority:** Critical
 
 ### Page: Parties `/parties`
@@ -542,7 +542,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Add scoped unique indexes and permission dependencies.
 
-**Estimated Score After Improvements:** 89/100  
+**Estimated Score After Improvements:** 89/100
 **Priority:** High
 
 ### Page: Letters `/letters` and Letter Workflow Child Pages
@@ -565,7 +565,7 @@ Scoring weights used:
 - Add role/state transition matrix tests for every drafting action.
 - Add AI prompt/output trace redaction and retention policy.
 
-**Estimated Score After Improvements:** 89/100  
+**Estimated Score After Improvements:** 89/100
 **Priority:** Critical
 
 ### Page: Reports `/reports`
@@ -582,7 +582,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Add `reports:read/export` permissions, export audit events, pagination, and rate limits.
 
-**Estimated Score After Improvements:** 86/100  
+**Estimated Score After Improvements:** 86/100
 **Priority:** High
 
 ### Page: Letter Templates `/letter-templates`, `/letter-templates/:id/edit`
@@ -599,7 +599,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Sanitize template HTML server-side and add preview/sanitization tests.
 
-**Estimated Score After Improvements:** 89/100  
+**Estimated Score After Improvements:** 89/100
 **Priority:** High
 
 ### Page: Representatives `/representatives`
@@ -616,7 +616,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Add explicit permission dependencies and tenant-scope tests.
 
-**Estimated Score After Improvements:** 86/100  
+**Estimated Score After Improvements:** 86/100
 **Priority:** Medium
 
 ### Page: Contracts `/contracts`, `/contracts/upload`, `/contracts/search`, `/contracts/qa`
@@ -633,7 +633,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Add ingestion job dashboards, answer citations enforcement, contract upload E2E tests, and queue dead-letter visibility.
 
-**Estimated Score After Improvements:** 88/100  
+**Estimated Score After Improvements:** 88/100
 **Priority:** Critical for upload, High for search/QA
 
 ### Page: Reference `/reference/:id`
@@ -650,7 +650,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Add graph/reference reconciliation test cases and UI state for stale/missing linked documents.
 
-**Estimated Score After Improvements:** 89/100  
+**Estimated Score After Improvements:** 89/100
 **Priority:** High
 
 ### Page: Health `/health`
@@ -667,7 +667,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Keep liveness public, restrict detailed readiness/observability to internal network or admin token, and redact error strings.
 
-**Estimated Score After Improvements:** 92/100  
+**Estimated Score After Improvements:** 92/100
 **Priority:** Medium
 
 ### Page: Not Found `*`
@@ -682,7 +682,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Add authenticated-safe navigation and telemetry for unknown routes.
 
-**Estimated Score After Improvements:** 85/100  
+**Estimated Score After Improvements:** 85/100
 **Priority:** Low
 
 ---
@@ -737,7 +737,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Add route inventory contract test, mount/remove orphan routers, narrow CORS, and add application-level security headers for non-Apache deployments.
 
-**Estimated Score After Improvements:** 90/100  
+**Estimated Score After Improvements:** 90/100
 **Priority:** Critical
 
 ### Backend Area: Auth and Session Management
@@ -763,7 +763,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Cookie-only sessions, CSRF tokens, Redis-required production rate limits, refresh-token/session rotation policy, and route tests for invalidated sessions.
 
-**Estimated Score After Improvements:** 92/100  
+**Estimated Score After Improvements:** 92/100
 **Priority:** Critical
 
 ### Backend Area: Documents and File Handling
@@ -786,7 +786,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Add antivirus scanning option, transaction boundaries for multi-collection updates, route-level E2E tests, and idempotency keys for upload/process actions.
 
-**Estimated Score After Improvements:** 92/100  
+**Estimated Score After Improvements:** 92/100
 **Priority:** Critical
 
 ### Backend Area: Contracts
@@ -805,7 +805,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Add worker dashboards, dead-letter replay, per-user quotas, and contract-specific RBAC tests.
 
-**Estimated Score After Improvements:** 90/100  
+**Estimated Score After Improvements:** 90/100
 **Priority:** Critical
 
 ### Backend Area: Letters and Letter Drafting
@@ -824,7 +824,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Centralize letter state transition policy, add optimistic locking, add role/action matrix tests.
 
-**Estimated Score After Improvements:** 90/100  
+**Estimated Score After Improvements:** 90/100
 **Priority:** Critical
 
 ### Backend Area: AI Assistant, Deep Planning, Retrieval
@@ -843,7 +843,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Add prompt/data redaction, tenant-filtered vector tests, strict citation/source validation, and cost/rate limits.
 
-**Estimated Score After Improvements:** 87/100  
+**Estimated Score After Improvements:** 87/100
 **Priority:** High
 
 ### Backend Area: Email Sharing and Notifications
@@ -862,7 +862,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Durable email queue, share-token revocation, lower default TTL, recipient audit report, and rate limits.
 
-**Estimated Score After Improvements:** 90/100  
+**Estimated Score After Improvements:** 90/100
 **Priority:** Critical
 
 ### Backend Area: Admin Master Data
@@ -881,7 +881,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Consolidate role APIs, enforce soft-delete/restore consistently, add scoped uniqueness constraints and audit logs.
 
-**Estimated Score After Improvements:** 89/100  
+**Estimated Score After Improvements:** 89/100
 **Priority:** High
 
 ### Backend Area: Unmounted Routers
@@ -900,7 +900,7 @@ Scoring weights used:
 
 **Recommended Improvements:** Decide for each router: mount and harden, replace frontend calls, or delete/archive feature.
 
-**Estimated Score After Improvements:** 85/100  
+**Estimated Score After Improvements:** 85/100
 **Priority:** Critical
 
 ---

@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from ..core.database import get_db
-from ..core.security import get_current_user, CurrentUser, authorize_scope
+from ..core.security import get_current_user, CurrentUser, authorize_scope, build_scope_query
 from ..models.letter import Letter
 from ..models.document import Document
 from typing import List, Optional, Dict, Tuple, Any
@@ -8,6 +8,7 @@ from pydantic import BaseModel, field_validator
 import logging
 from openai import OpenAI, RateLimitError
 from ..core.config import settings
+from ..services.upload_streaming import read_upload_within_limit
 from ..core import templates
 from ..core.constants import OPENAI_MODELS
 from ..services.policy_service import PolicyService
@@ -21,6 +22,16 @@ import hashlib
 import time
 import json
 from ratelimit import limits, sleep_and_retry
+
+# One server-side decision about whether a document's extracted text may be
+# consumed. Planning prompts are a downstream knowledge consumer like any other.
+from ..services.publication_policy import (
+    authoritative_summary,
+    authoritative_text,
+    is_consumable,
+    resolve_document_authority,
+)
+from ..utils.error_handler import BaseDomainError
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -190,6 +201,18 @@ async def _fetch_vector_chunks_for_query(
         cursor = db.document_vectors.find(f).sort("createdAt", -1).limit(max_scan)
         rows = await cursor.to_list(length=max_scan)
 
+        # Resolve authority once per source document. Chunks are
+        # extraction-controlled content and carry document_id, so eligibility
+        # comes from the canonical document rather than the chunk itself.
+        _authority: Dict[str, bool] = {}
+
+        async def _ok(doc_id: str) -> bool:
+            if doc_id not in _authority:
+                _authority[doc_id] = (
+                    await resolve_document_authority(db, doc_id)
+                ).consumable
+            return _authority[doc_id]
+
         # Group by document_id and compute similarities
         by_doc: Dict[str, List[Dict[str, Any]]] = {}
         for r in rows:
@@ -205,6 +228,7 @@ async def _fetch_vector_chunks_for_query(
                 "uploadType": r.get("uploadType", ""),
                 "letterNo": r.get("letterNo"),
                 "createdAt": r.get("createdAt"),
+                "_authority_ok": await _ok(str(r.get("document_id"))),
             }
             by_doc.setdefault(entry["document_id"], []).append(entry)
 
@@ -232,13 +256,13 @@ def _format_vector_chunks_for_prompt(chunks: List[Dict[str, Any]]) -> str:
     """
     if not chunks:
         return ""
-    
+
     def score_key(c: Dict[str, Any]) -> float:
         try:
             return float(c.get("score") or 0.0)
         except Exception:
             return 0.0
-    
+
     try:
         chunks = sorted(chunks, key=score_key, reverse=True)
     except Exception:
@@ -260,7 +284,11 @@ def _format_vector_chunks_for_prompt(chunks: List[Dict[str, Any]]) -> str:
             except Exception:
                 pass
         header = f"[{i}] " + " | ".join(meta) if meta else f"[{i}]"
-        body = (c.get("text") or "").strip()
+        # Chunk text is extraction-controlled. The sibling path
+        # (extract_document_content) is guarded; this one fed vector chunks
+        # straight into the planning prompt. Chunks carry document_id, so
+        # eligibility resolves back to the source document.
+        body = (c.get("text") or "").strip() if c.get("_authority_ok", True) else ""
         if body:
             if len(body) > 1800:
                 body = body[:1800] + " ..."
@@ -277,7 +305,7 @@ async def get_text_embedding(text: str) -> List[float]:
     try:
         rate_limited_openai_call()
         logger.info("Getting text embedding from OpenAI")
-        
+
         response = client.embeddings.create(
             model=OPENAI_MODELS["embedding"],
             input=text
@@ -287,7 +315,7 @@ async def get_text_embedding(text: str) -> List[float]:
     except RateLimitError as e:
         logger.warning(f"OpenAI rate limit exceeded: {str(e)}")
         raise HTTPException(status_code=429, detail="OpenAI rate limit exceeded. Please try again later.")
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error(f"Error getting embedding: {str(e)}")
@@ -329,29 +357,44 @@ def _effective_project_id(current_user) -> Optional[str]:
         pass
     return None
 
-async def validate_document_ids(db, document_ids: List[str], current_user: CurrentUser) -> None:
-    """Validate document IDs and check user access permissions."""
+async def validate_document_ids(db, document_ids: List[str], current_user: Optional[CurrentUser],
+                                organization_id: Optional[str] = None,
+                                project_id: Optional[str] = None) -> None:
+    """Refuse the request unless every document lies inside the caller's tenant scope.
+
+    Scope is `build_scope_query`, narrowed by the organisation the gate
+    authorised and the requested project - the same boundary as the similar
+    letters and the reply target. An organisation match alone is not enough: it
+    let a project-tier caller pull a sibling project's document into the prompt.
+
+    The id and the scope go to Mongo in one filter, so an out-of-scope document
+    is never read and answers exactly like a nonexistent one (404). One bad id
+    refuses the whole request, so no document content is read for drafting
+    unless all of it is authorised. A deny-all scope refuses without a read.
+    """
+    if not document_ids:
+        return
     logger.info(f"Validating document IDs: {document_ids}")
-    
+
+    for doc_id in document_ids:
+        if not ObjectId.is_valid(doc_id):
+            raise HTTPException(status_code=400, detail=f"Invalid document ID format: {doc_id}")
+
+    deny_all: Dict[str, Any] = {"_id": {"$in": []}}
+    scope = deny_all if current_user is None else build_scope_query(
+        current_user,
+        organization_id=organization_id,
+        project_id=project_id,
+    )
+
     for doc_id in document_ids:
         try:
-            # Validate ObjectId format
-            if not ObjectId.is_valid(doc_id):
-                raise HTTPException(status_code=400, detail=f"Invalid document ID format: {doc_id}")
-            
-            # Check if document exists
-            document = await db.documents.find_one({"_id": ObjectId(doc_id)})
+            document = None
+            if scope != deny_all:
+                document = await db.documents.find_one({"$and": [{"_id": ObjectId(doc_id)}, scope]})
             if not document:
                 raise HTTPException(status_code=404, detail=f"Document not found: {doc_id}")
-            
-            # Check user access permissions
-            doc_org_id = document.get('organization_id')
-            user_org_id = getattr(current_user, 'organization_id', None)
-            
-            if doc_org_id != user_org_id:
-                raise HTTPException(status_code=403, detail=f"Access denied to document: {doc_id}")
-                
-        except HTTPException:
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Error validating document {doc_id}: {str(e)}")
@@ -363,7 +406,7 @@ async def validate_document_ids(db, document_ids: List[str], current_user: Curre
 async def extract_document_content(db, document_ids: List[str]) -> str:
     """Extract content from multiple documents for context, including OCR text and summary."""
     content_parts = []
-    
+
     for doc_id in document_ids:
         try:
             logger.info(f"Extracting content from document: {doc_id}")
@@ -375,33 +418,40 @@ async def extract_document_content(db, document_ids: List[str]) -> str:
                 doc_info += f"Date: {document.get('date', 'No date')}\n"
                 doc_info += f"From: {document.get('from_', document.get('from', 'Unknown'))}\n"
                 doc_info += f"To: {document.get('to', 'Unknown')}\n"
-                
-                # Add summary if available
-                summary = document.get('summary')
+
+                # Add summary if available. Gated: the summary is derived
+                # from the same extracted text, so serving it for a blocked
+                # document withholds nothing.
+                summary = authoritative_summary(document)
                 if summary:
                     doc_info += f"Summary: {summary}\n"
-                
-                # Add OCR text if available (truncate if too long)
-                ocr_text = document.get('ocrText')
+
+                # Add OCR text if available (truncate if too long).
+                # Read through the publication policy: a document with
+                # unresolved extraction-quality findings must not reach the
+                # planning prompt. See services/publication_policy.py.
+                ocr_text = authoritative_text(document)
                 if ocr_text:
                     # Limit OCR text length to prevent token overflow
                     max_ocr_length = 4000
                     if len(ocr_text) > max_ocr_length:
                         ocr_text = ocr_text[:max_ocr_length] + "... [truncated]"
-                    doc_info += f"OCR Text: {ocr_text}\n"
-                
+                    # Source text when the document has it, else the LLM's
+                    # Item 25 fallback - so it is not labelled "OCR".
+                    doc_info += f"Document Text: {ocr_text}\n"
+
                 # Add references if available
                 if document.get('references'):
                     doc_info += "References:\n"
                     for ref in document.get('references', []):
                         doc_info += f"  - {ref}\n"
-                
+
                 content_parts.append(doc_info)
                 logger.debug(f"Successfully extracted content from document: {doc_id}")
         except Exception as e:
             logger.warning(f"Error extracting content from document {doc_id}: {e}")
             continue
-    
+
     return "\n\n".join(content_parts)
 
 async def get_vector_store_context(db, query: str, organization_id: str, project_id: Optional[str] = None) -> Optional[str]:
@@ -409,11 +459,11 @@ async def get_vector_store_context(db, query: str, organization_id: str, project
     if not VECTOR_STORE_ENABLED:
         logger.info("Vector store support is disabled")
         return None
-    
+
     try:
         logger.info("Querying vector store for relevant context")
         query_embedding = await get_text_embedding(query)
-        
+
         # Fetch top chunks from document_vectors collection
         top_chunks = await _fetch_vector_chunks_for_query(
             db=db,
@@ -424,53 +474,51 @@ async def get_vector_store_context(db, query: str, organization_id: str, project
             top_docs=5,
             chunks_per_doc=2,
         )
-        
+
         # Format the chunks for inclusion in the prompt
         vector_context = _format_vector_chunks_for_prompt(top_chunks)
-        
+
         if vector_context:
             logger.info(f"Retrieved {len(top_chunks)} vector chunks for context")
             return vector_context
         else:
             logger.info("No relevant vector chunks found")
             return None
-        
+
     except Exception as e:
         logger.error(f"Error querying vector store: {str(e)}")
         return None
 
-async def find_similar_letters(db, subject: str, organization_id: Optional[str] = None, 
+async def find_similar_letters(db, subject: str, organization_id: Optional[str] = None,
                               project_id: Optional[str] = None, current_user: CurrentUser = None) -> List[dict]:
-    """Find similar letters based on subject similarity with proper authorization."""
+    """Find letters similar to `subject` within the caller's authorised tenant scope.
+
+    The candidate set is the caller's row visibility from `build_scope_query`,
+    narrowed by the requested organisation/project; similarity is computed only
+    over that set. These letters reach the drafting prompt, the response body and
+    the persisted draft, so scope is applied here, before any of them see a row.
+    A role outside every scope tier, or a principal with no organisation/project,
+    gets the deny-all filter - never an unfiltered query.
+    """
     try:
+        if current_user is None:
+            return []
+        query_filter = build_scope_query(
+            current_user,
+            organization_id=organization_id,
+            project_id=project_id,
+        )
+        if query_filter == {"_id": {"$in": []}}:
+            return []
+
         logger.info(f"Finding similar letters for subject: {subject}")
         query_embedding = await get_text_embedding(subject)
-        
-        # Build filter based on organization and project with authorization
-        query_filter = {}
-        
-        # Authorization check
-        if "superadmin" not in current_user.roles:
-            if "orgadmin" in current_user.roles or "orguser" in current_user.roles:
-                query_filter["organization_id"] = current_user.organization_id
-            elif "projectadmin" in current_user.roles or "projectuser" in current_user.roles:
-                if getattr(current_user, "projects", None):
-                    query_filter["project_id"] = {"$in": [str(pid) for pid in current_user.projects]}
-                else:
-                    # No project assignments -> no results
-                    query_filter["project_id"] = "__none__"
-        
-        # Add organization and project filters if provided
-        if organization_id:
-            query_filter["organization_id"] = organization_id
-        if project_id:
-            query_filter["project_id"] = project_id
-        
+
         letters_cursor = db.letters.find(query_filter)
         letters = await letters_cursor.to_list(length=None)
-        
+
         similar_letters = []
-        
+
         for letter in letters:
             # Check/generate embedding
             if "embedding" not in letter or not letter["embedding"]:
@@ -496,15 +544,40 @@ async def find_similar_letters(db, subject: str, organization_id: Optional[str] 
                     "similarity_score": similarity,
                     "created_at": (letter.get("created_at") or datetime.now()).isoformat()
                 })
-        
+
         # Sort by similarity score and limit results
         similar_letters.sort(key=lambda x: x["similarity_score"], reverse=True)
         logger.info(f"Found {len(similar_letters)} similar letters")
         return similar_letters[:5]  # Return top 5 similar letters
-        
+
     except Exception as e:
         logger.error(f"Error finding similar letters: {str(e)}")
         return []
+
+async def find_scoped_letter(db, letter_id: Optional[str], current_user: Optional[CurrentUser],
+                             organization_id: Optional[str] = None,
+                             project_id: Optional[str] = None) -> Optional[dict]:
+    """Load one letter by id, only if it lies inside the caller's tenant scope.
+
+    The id and the scope go to Mongo in one filter, so an out-of-scope letter is
+    never read and is indistinguishable from a nonexistent one. Both id forms are
+    tried (ObjectId and the raw string), as the unscoped lookup did. A missing
+    principal or a deny-all scope returns None without touching the database.
+    """
+    if current_user is None or not letter_id:
+        return None
+    scope = build_scope_query(
+        current_user,
+        organization_id=organization_id,
+        project_id=project_id,
+    )
+    if scope == {"_id": {"$in": []}}:
+        return None
+    candidates: List[Any] = []
+    if ObjectId.is_valid(letter_id):
+        candidates.append(ObjectId(letter_id))
+    candidates.append(letter_id)
+    return await db.letters.find_one({"$and": [{"_id": {"$in": candidates}}, scope]})
 
 async def generate_draft_with_ai(
     subject: str,
@@ -519,7 +592,7 @@ async def generate_draft_with_ai(
     """Generate a letter draft using OpenAI with document context, OCR text, and summary."""
     try:
         logger.info("Generating draft with AI")
-        
+
         # Prepare structured sections per protocol
         key_facts_bullets = ""
         if user_context:
@@ -554,7 +627,7 @@ async def generate_draft_with_ai(
                 target_info_block = "\nTarget Letter Intelligence (for reply context):\n" + target_letter_info.strip()
         except Exception:
             target_info_block = ""
-            
+
         # Add vector store context if available
         vector_context_block = ""
         if vector_store_context:
@@ -586,11 +659,11 @@ async def generate_draft_with_ai(
 
         logger.info("Successfully generated draft using Chat Completions API")
         return response.choices[0].message.content.strip()
-        
+
     except RateLimitError as e:
         logger.warning(f"OpenAI rate limit exceeded during draft generation: {str(e)}")
         raise HTTPException(status_code=429, detail="OpenAI rate limit exceeded. Please try again later.")
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error(f"Error generating draft with AI: {str(e)}")
@@ -600,7 +673,7 @@ async def extract_key_points_and_clauses(content: str) -> tuple:
     """Extract key points and quoted clauses from document content using JSON mode."""
     try:
         logger.info("Extracting key points and clauses from document content using JSON mode")
-        
+
         # JSON schema for structured output
         json_schema = {
             "name": "extract_key_points_and_clauses",
@@ -630,7 +703,7 @@ async def extract_key_points_and_clauses(content: str) -> tuple:
                 "required": ["key_points", "quoted_clauses"]
             }
         }
-        
+
         prompt = f"""
 Analyze the following document content and extract key points and quoted clauses.
 Return the response as a JSON object with the following schema:
@@ -639,7 +712,7 @@ Return the response as a JSON object with the following schema:
 CONTENT:
 {content}
 """
-        
+
         rate_limited_openai_call()
         request_payload = {
             "model": OPENAI_MODELS["chat"],
@@ -660,14 +733,14 @@ CONTENT:
             )
         except TypeError:
             response = client.chat.completions.create(**request_payload)
-        
+
         result = response.choices[0].message.content.strip()
-        
+
         # Parse the JSON response
         try:
             parsed = json.loads(result)
             key_points = "\n".join([f"- {point}" for point in parsed.get("key_points", [])])
-            
+
             # Convert to QuotedClause objects
             quoted_clauses = []
             for clause in parsed.get("quoted_clauses", []):
@@ -677,10 +750,10 @@ CONTENT:
                     "line_numbers": clause.get("line_numbers"),
                     "content": clause.get("content", "")
                 })
-            
+
             logger.info("Successfully extracted key points and clauses using JSON mode")
             return key_points, quoted_clauses
-            
+
         except json.JSONDecodeError as e:
             logger.warning(f"Failed to parse JSON response, falling back to plaintext parsing: {str(e)}")
 
@@ -736,7 +809,7 @@ CONTENT:
 
             logger.error("Plaintext fallback parsing also failed for key points/clauses extraction")
             return "Unable to extract key points", []
-        
+
     except Exception as e:
         logger.error(f"Error extracting key points and clauses: {str(e)}")
         return "Unable to extract key points", []
@@ -750,7 +823,7 @@ async def get_enhanced_context(db, letter_id: str, current_user: CurrentUser) ->
     """
     try:
         logger.info(f"Getting enhanced context for letter: {letter_id}")
-        
+
         # Target letter
         letter = await db.letters.find_one({"_id": ObjectId(letter_id)}) or await db.letters.find_one({"_id": letter_id})
         if not letter:
@@ -807,7 +880,7 @@ async def generate_deep_planning_draft(
     """Generate a comprehensive letter draft with deep planning capabilities."""
     try:
         logger.info(f"Generating deep planning draft for subject: {request.subject}")
-        
+
         # Authorization check
         org_id = request.organization_id or getattr(current_user, "organization_id", None)
         proj_id = request.project_id or (getattr(current_user, "projects", []) or [None])[0]
@@ -819,44 +892,54 @@ async def generate_deep_planning_draft(
             organization_id=org_id,
             project_id=proj_id,
         )
-        
-        # Validate document IDs
-        await validate_document_ids(db, request.document_ids, current_user)
-        
+
+        # Same scope as the similar letters and the reply target: refuse before
+        # any driving-document content is read if one id falls outside it.
+        await validate_document_ids(
+            db, request.document_ids, current_user, org_id, request.project_id
+        )
+
         # Extract content from driving documents (including OCR text and summary)
         document_context = await extract_document_content(db, request.document_ids)
-        
+
         # Get vector store context if enabled and requested
         vector_store_context = None
         if request.use_vector_store and VECTOR_STORE_ENABLED:
             vector_store_context = await get_vector_store_context(
-                db, 
+                db,
                 f"{request.subject} {request.context or ''}",
                 request.organization_id or current_user.organization_id,
                 request.project_id
             )
-        
-        # Find similar letters for reference
+
+        # Find similar letters for reference. `org_id` is the organisation the
+        # gate just authorised: the request's, else the principal's - for Super
+        # Admin that is the validated navbar selection, so a selected org bounds
+        # the context and no selection keeps the consolidated view.
         similar_letters = await find_similar_letters(
-            db, 
-            request.subject, 
-            request.organization_id, 
+            db,
+            request.subject,
+            org_id,
             request.project_id,
             current_user
         )
-        
+
         # Extract key points and quoted clauses from document context
         key_points, quoted_clauses = await extract_key_points_and_clauses(document_context)
-        
+
         # Enrich with target letter intelligence if a reply is being drafted
         target_letter_info = ""
         try:
             if request.target_letter_id:
-                tl = None
-                if ObjectId.is_valid(request.target_letter_id):
-                    tl = await db.letters.find_one({"_id": ObjectId(request.target_letter_id)})
-                if not tl:
-                    tl = await db.letters.find_one({"_id": request.target_letter_id})
+                # Same scope as the similar letters: a target outside it is
+                # treated exactly like one that does not exist.
+                tl = await find_scoped_letter(
+                    db,
+                    request.target_letter_id,
+                    current_user,
+                    org_id,
+                    request.project_id,
+                )
                 if tl:
                     parts = []
                     # Summary
@@ -891,6 +974,14 @@ async def generate_deep_planning_draft(
                         if ref_text.strip():
                             parts.append(f"References:\n{ref_text}")
                     # OCR text (excerpts)
+                    # `tl` is a db.letters record. No production code writes
+                    # processing_status/duplicate_status/lifecycle_state to that
+                    # collection, so a publication guard here reads fields that
+                    # never exist and can never block - it looked like a gate
+                    # and was not one. Letters are drafted correspondence, not
+                    # extracted documents, so the extraction-authority policy
+                    # genuinely does not apply; the honest form is to say so
+                    # rather than call a predicate that always returns True.
                     _ocr = (tl.get("ocrText") or tl.get("ocr_text") or "").strip()
                     if _ocr:
                         truncated = _ocr[:1200] + (" ...(truncated)" if len(_ocr) > 1200 else "")
@@ -911,12 +1002,12 @@ async def generate_deep_planning_draft(
             target_letter_info=target_letter_info,
             vector_store_context=vector_store_context
         )
-        
+
         # Generate structure summary
         structure_summary = f"Generated draft based on {len(request.document_ids)} driving documents and {len(similar_letters)} similar letters."
         if vector_store_context:
             structure_summary += " Enhanced with vector store context."
-        
+
         # Store the generated draft in the database for future reference.
         # This is best-effort and must not block draft delivery.
         effective_org_id = request.organization_id or getattr(current_user, "organization_id", None)
@@ -955,8 +1046,8 @@ async def generate_deep_planning_draft(
             similar_letters=similar_letters,
             structure_summary=structure_summary
         )
-        
-    except HTTPException:
+
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error(f"Error in deep planning draft generation: {str(e)}")
@@ -982,7 +1073,7 @@ async def get_deep_planning_history(
             organization_id=org_id,
             project_id=proj_id,
         )
-        
+
         query_filter: Dict[str, Any] = {"generated_by": current_user.id}
 
         # Authorization check
@@ -1001,7 +1092,7 @@ async def get_deep_planning_history(
         logger.info(f"Retrieved {len(drafts)} history items")
         return {"drafts": drafts}
 
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error(f"Error getting deep planning history: {str(e)}")
@@ -1025,22 +1116,25 @@ async def analyze_document(
             organization_id=org_id,
             project_id=proj_id,
         )
-        
-        # Read file content
-        content = await file.read()
+
+        # Read file content, capped while reading. This had no application-level
+        # size limit at all before R-A8S.
+        content = await read_upload_within_limit(
+            file, max(1, int(settings.GENERAL_UPLOAD_MAX_FILE_SIZE_MB)) * 1024 * 1024
+        )
         text_content = content.decode('utf-8', errors='ignore')
-        
+
         # Extract key points and clauses
         key_points, quoted_clauses = await extract_key_points_and_clauses(text_content)
-        
+
         logger.info("Successfully analyzed document")
         return {
             "filename": file.filename,
             "key_points": key_points,
             "quoted_clauses": quoted_clauses
         }
-        
-    except HTTPException:
+
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error(f"Error analyzing document: {str(e)}")

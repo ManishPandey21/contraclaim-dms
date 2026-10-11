@@ -22,7 +22,7 @@ from ..models.user_models import (
     LoginRequest, LoginResponse, TokenResponse, RefreshTokenRequest, UserResponse
 )
 from ..utils.validation import validate_email, validate_input
-from ..utils.error_handler import handle_exceptions, AuthenticationError
+from ..utils.error_handler import BaseDomainError, handle_exceptions, AuthenticationError
 from ..utils.rate_limiter import RateLimiter
 from ..utils.audit_logger import AuditLogger
 from ..services.step_up_service import StepUpService, STEP_UP_TTL_MINUTES
@@ -75,7 +75,7 @@ class CsrfTokenResponse(BaseModel):
 
 class AuthController:
     """Secure authentication controller with comprehensive security measures."""
-    
+
     def __init__(
         self,
         auth_service: AuthenticationService,
@@ -120,7 +120,7 @@ class AuthController:
                 window_seconds=settings.LOGIN_IP_RATE_LIMIT_WINDOW,
                 max_requests=settings.LOGIN_IP_RATE_LIMIT_REQUESTS,
             )
-            
+
             # Email-based rate limiting
             await self.rate_limiter.check_email_limit(
                 login_data.email,
@@ -128,16 +128,16 @@ class AuthController:
                 window_seconds=settings.LOGIN_EMAIL_RATE_LIMIT_WINDOW,
                 max_requests=settings.LOGIN_EMAIL_RATE_LIMIT_REQUESTS,
             )
-            
+
             # Validate input
             validated_email = validate_email(login_data.email)
             password = validate_input(login_data.password, max_length=200, required=True)
-            
+
             # Authenticate user with secure methods
             user = await self.auth_service.authenticate_user_secure(
                 validated_email, password
             )
-            
+
             # Check account status
             if not user:
                 # SECURITY (H5): increment the per-account failed-attempt counter
@@ -164,7 +164,7 @@ class AuthController:
                     "Invalid email or password",
                     status.HTTP_401_UNAUTHORIZED
                 )
-            
+
             # Check if account is locked
             if await self.auth_service.is_account_locked(user.id):
                 await self.audit_logger.log_login_failed(
@@ -176,7 +176,7 @@ class AuthController:
                     "Account is temporarily locked",
                     status.HTTP_423_LOCKED
                 )
-            
+
             # Check if account is disabled
             if user.disabled:
                 await self.audit_logger.log_login_failed(
@@ -188,10 +188,10 @@ class AuthController:
                     "Account is disabled",
                     status.HTTP_401_UNAUTHORIZED
                 )
-            
+
             # Reset failed attempts on successful login
             await self.auth_service.reset_failed_attempts(user.id)
-            
+
             # Create access token bound to a single session token
             access_token_expires = timedelta(minutes=60)  # Configurable
             session_id = await self.auth_service.create_user_session(
@@ -206,10 +206,10 @@ class AuthController:
                 },
                 expires_delta=access_token_expires
             )
-            
+
             # Update last login
             await self.user_service.update_last_login(user.id)
-            
+
             # Audit log successful login
             await self.audit_logger.log_login_successful(
                 user.id,
@@ -217,18 +217,18 @@ class AuthController:
                 client_ip=client_ip,
                 session_id=session_id,
             )
-            
+
             # Build user response
             user_info = await self._build_user_response(user)
-            
+
             return LoginResponse(
                 access_token=access_token,
                 token_type="bearer",
                 expires_in=3600,
                 user=user_info
             )
-            
-        except (AuthenticationError, HTTPException):
+
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Login failed: {str(e)}")
@@ -256,7 +256,7 @@ class AuthController:
                     "Session has expired",
                     status.HTTP_401_UNAUTHORIZED
                 )
-            
+
             # Validate current user is still active
             user = await self.user_service.get_user_by_id(current_user.id)
             if not user or user.disabled:
@@ -267,7 +267,7 @@ class AuthController:
                     "User account is no longer active",
                     status.HTTP_401_UNAUTHORIZED
                 )
-            
+
             # Validate session is still active
             if not await self.auth_service.is_session_active(session_id):
                 await self.audit_logger.log_token_refresh_failed(
@@ -277,7 +277,7 @@ class AuthController:
                     "Session has expired",
                     status.HTTP_401_UNAUTHORIZED
                 )
-            
+
             # Create new access token
             access_token_expires = timedelta(minutes=60)
             access_token = create_access_token(
@@ -289,20 +289,23 @@ class AuthController:
                 },
                 expires_delta=access_token_expires
             )
-            
+
             # Extend session
             await self.auth_service.extend_session(session_id, access_token_expires)
-            
-            # Audit log
-            await self.audit_logger.log_token_refreshed(current_user.id)
-            
+
+            # Audit log. The token is issued and the session extended, so from
+            # here on nothing may turn this request into a failure: a 500 would
+            # deny the client a token the server has in fact granted, and leave
+            # the two disagreeing about the session (F-A8M-6).
+            await self._audit_token_refreshed(current_user.id, session_id)
+
             return TokenResponse(
                 access_token=access_token,
                 token_type="bearer",
                 expires_in=3600
             )
-            
-        except (AuthenticationError, HTTPException):
+
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Token refresh failed: {str(e)}")
@@ -310,6 +313,28 @@ class AuthController:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Token refresh service temporarily unavailable"
             )
+
+    async def _audit_token_refreshed(self, user_id: str, session_id: str) -> bool:
+        """Record a completed refresh, without being able to undo it.
+
+        ``AuditLogger._write_record`` already treats a persistence failure as
+        operational rather than fatal — it warns and returns ``False``. This
+        applies the same rule one level up, to the call itself, because the
+        caller has already mutated state: after ``extend_session`` there is no
+        honest failure left to report. The failure is made loud in the log
+        rather than silent, and the request still answers with the token it
+        genuinely issued.
+        """
+        try:
+            return await self.audit_logger.log_token_refreshed(user_id, session_id)
+        except Exception:
+            logger.exception(
+                "Token refresh audit failed AFTER the session was extended "
+                "(user=%s, session=%s); the refresh itself succeeded",
+                user_id,
+                session_id,
+            )
+            return False
 
     async def logout_user(
         self,
@@ -322,15 +347,15 @@ class AuthController:
             # Invalidate session
             if session_id:
                 await self.auth_service.invalidate_session(session_id)
-            
+
             # Audit log
             await self.audit_logger.log_user_logged_out(
                 current_user.id, current_user.email
             )
-            
+
             return {"message": "Logged out successfully"}
-            
-        except HTTPException:
+
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Logout failed: {str(e)}")
@@ -356,8 +381,8 @@ class AuthController:
                 )
 
             return await self._build_user_response(user)
-            
-        except (AuthenticationError, HTTPException):
+
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Get user info failed: {str(e)}")
@@ -454,7 +479,7 @@ async def login(
     """Login user with comprehensive security validation."""
     client_ip = request.client.host
     user_agent = request.headers.get("user-agent", "unknown")
-    
+
     login_response = await controller.login_user(login_data, client_ip, user_agent)
     _set_auth_cookie(response, login_response.access_token, login_response.expires_in)
     return login_response

@@ -1,0 +1,340 @@
+"""G28 against a real Qdrant: purge works, and denial holds when it does not.
+
+The point of this suite is the second half. Physical deletion is easy to test
+and easy to believe in; the property that actually matters is that a stale point
+which survives deletion is still unusable, because containment must not depend
+on a remote delete succeeding. A Qdrant outage at exactly the wrong moment must
+not reopen the hole.
+
+Run with a local Qdrant:
+
+    QDRANT_TEST_URL=http://localhost:6333 pytest backend/rbac_backend/tests/integration/test_qdrant_containment_live.py
+"""
+
+from __future__ import annotations
+
+import os
+import uuid
+from typing import Any, Dict, List
+
+import pytest
+
+from rbac_backend.tests import staging_gate
+
+# 127.0.0.1, not localhost. On Windows `localhost` resolves to ::1 first and
+# the IPv6 hop to a Docker Desktop port binding can stall past a short timeout -
+# which is what made this suite skip intermittently while the container was
+# healthy and serving the same request in ~50ms.
+#
+# That default is a developer convenience and a staging hazard: on this machine
+# it is the running `contract-ai-qdrant-1` dev container, so a staging Gate-2
+# run that forgot the override would measure the wrong engine and report it as
+# staging evidence. `staging_gate` refuses the default outright under
+# CONTRACLAIM_STAGING_GATE.
+QDRANT_DEV_URL_DEFAULT = "http://127.0.0.1:6333"
+QDRANT_URL = staging_gate.resolve_url("QDRANT_TEST_URL", QDRANT_DEV_URL_DEFAULT)
+
+#: Collection creation on a loaded host has been measured at 1.9-2.7s, so the
+#: probe timeout is generous enough not to mistake slowness for absence.
+_TIMEOUT = int(os.environ.get("QDRANT_TEST_TIMEOUT", "30"))
+
+
+def _api_key() -> str:
+    """The Qdrant key: from the environment, and in staging mode ONLY from there.
+
+    The checkout fallback below exists so a developer does not have to export
+    the local key by hand. It is also how a staging run picks up the DEV key
+    without anyone noticing: the file is present in every worktree, so a
+    forgotten `QDRANT_API_KEY` produces an authenticated request against
+    whatever endpoint is configured, using a credential nobody chose.
+    `staging_gate` closes that path under CONTRACLAIM_STAGING_GATE, where the
+    key must come from the explicitly supplied staging environment.
+    """
+    key = os.environ.get("QDRANT_API_KEY") or os.environ.get("QDRANT_TEST_API_KEY")
+    if key:
+        return key
+    from pathlib import Path
+
+    for candidate in (
+        Path(__file__).resolve().parents[4] / "config" / "secrets" / "qdrant_api_key",
+        Path(__file__).resolve().parents[3] / "config" / "secrets" / "qdrant_api_key",
+    ):
+        if not candidate.is_file():
+            continue
+        if staging_gate.checkout_secret_is_forbidden(candidate):
+            raise staging_gate.StagingGateConfigurationError(
+                f"{staging_gate.STAGING_GATE_ENV} is set, so this run is staging "
+                "Gate-2 evidence and the Qdrant key may not be read from the "
+                "checkout-local development secret. Export QDRANT_API_KEY (or "
+                "QDRANT_TEST_API_KEY) from staging secret management instead."
+            )
+        return candidate.read_text(encoding="utf-8").strip()
+    return ""
+
+
+_HEADERS = {"api-key": _api_key()} if _api_key() else {}
+
+pytestmark = pytest.mark.integration
+
+
+def _client():
+    requests = pytest.importorskip("requests")
+    try:
+        response = requests.get(
+            f"{QDRANT_URL}/collections", timeout=_TIMEOUT, headers=_HEADERS
+        )
+        response.raise_for_status()
+    except Exception as exc:  # pragma: no cover - environment dependent
+        pytest.skip(f"Qdrant not reachable at {QDRANT_URL}: {exc}")
+    return requests
+
+
+@pytest.fixture()
+def collection():
+    requests = _client()
+    name = f"g28_{uuid.uuid4().hex[:10]}"
+    requests.put(
+        f"{QDRANT_URL}/collections/{name}",
+        json={"vectors": {"size": 4, "distance": "Cosine"}},
+        timeout=_TIMEOUT,
+        headers=_HEADERS,
+    ).raise_for_status()
+
+    yield name, requests
+
+    try:
+        requests.delete(f"{QDRANT_URL}/collections/{name}", timeout=_TIMEOUT, headers=_HEADERS)
+    except Exception:
+        pass
+
+
+def _upsert(requests, name: str, points: List[Dict[str, Any]]) -> None:
+    requests.put(
+        f"{QDRANT_URL}/collections/{name}/points?wait=true",
+        json={"points": points},
+        timeout=_TIMEOUT,
+        headers=_HEADERS,
+    ).raise_for_status()
+
+
+def _search_document_ids(requests, name: str) -> List[str]:
+    response = requests.post(
+        f"{QDRANT_URL}/collections/{name}/points/search",
+        json={"vector": [0.1, 0.1, 0.1, 0.1], "limit": 10, "with_payload": True},
+        timeout=_TIMEOUT,
+        headers=_HEADERS,
+    )
+    response.raise_for_status()
+    return [
+        hit["payload"]["document_id"] for hit in response.json()["result"]
+    ]
+
+
+def test_a_published_document_is_retrievable(collection) -> None:
+    name, requests = collection
+    _upsert(
+        requests,
+        name,
+        [{"id": 1, "vector": [0.1, 0.1, 0.1, 0.1], "payload": {"document_id": "docA"}}],
+    )
+
+    assert _search_document_ids(requests, name) == ["docA"]
+
+
+def test_purging_by_document_id_removes_only_that_document(collection) -> None:
+    """Physical cleanup, and it must not take the peer document with it."""
+    name, requests = collection
+    _upsert(
+        requests,
+        name,
+        [
+            {"id": 1, "vector": [0.1, 0.1, 0.1, 0.1], "payload": {"document_id": "docA"}},
+            {"id": 2, "vector": [0.1, 0.1, 0.1, 0.2], "payload": {"document_id": "docB"}},
+        ],
+    )
+
+    requests.post(
+        f"{QDRANT_URL}/collections/{name}/points/delete?wait=true",
+        json={
+            "filter": {
+                "must": [{"key": "document_id", "match": {"value": "docA"}}]
+            }
+        },
+        timeout=_TIMEOUT,
+        headers=_HEADERS,
+    ).raise_for_status()
+
+    assert _search_document_ids(requests, name) == ["docB"]
+
+
+def test_a_surviving_stale_point_is_still_denied(collection) -> None:
+    """The defence-in-depth property, proved with a real surviving point.
+
+    The purge is deliberately NOT run here - this simulates it failing or not
+    having happened yet. The document is blocked, so the eligibility filter must
+    refuse the hit regardless of the vector still being there.
+    """
+    from rbac_backend.models.processing_state import ProcessingState
+    from rbac_backend.services.publication_policy import is_consumable
+
+    name, requests = collection
+    _upsert(
+        requests,
+        name,
+        [{"id": 1, "vector": [0.1, 0.1, 0.1, 0.1], "payload": {"document_id": "docA"}}],
+    )
+
+    # The point is genuinely still in Qdrant.
+    assert _search_document_ids(requests, name) == ["docA"]
+
+    blocked = {
+        "_id": "docA",
+        "processing_status": ProcessingState.HUMAN_REVIEW_REQUIRED.value,
+    }
+    hits = _search_document_ids(requests, name)
+    usable = [doc_id for doc_id in hits if is_consumable(blocked)]
+
+    assert usable == [], (
+        "a stale vector survived the purge and the eligibility filter did not "
+        "refuse it - containment would depend on the delete succeeding"
+    )
+
+
+def test_a_clean_document_is_not_denied(collection) -> None:
+    from rbac_backend.models.processing_state import ProcessingState
+    from rbac_backend.services.publication_policy import is_consumable
+
+    name, requests = collection
+    _upsert(
+        requests,
+        name,
+        [{"id": 1, "vector": [0.1, 0.1, 0.1, 0.1], "payload": {"document_id": "docA"}}],
+    )
+
+    clean = {"_id": "docA", "processing_status": ProcessingState.COMPLETED.value}
+    usable = [d for d in _search_document_ids(requests, name) if is_consumable(clean)]
+
+    assert usable == ["docA"]
+
+
+def test_purging_an_absent_document_is_idempotent(collection) -> None:
+    name, requests = collection
+
+    for _ in range(2):
+        response = requests.post(
+            f"{QDRANT_URL}/collections/{name}/points/delete?wait=true",
+            json={
+                "filter": {
+                    "must": [{"key": "document_id", "match": {"value": "ghost"}}]
+                }
+            },
+            timeout=_TIMEOUT,
+            headers=_HEADERS,
+        )
+        response.raise_for_status()
+
+
+# --- the remaining certification cases, against the real engine ----------------
+#
+# The suite proved physical containment (purge, stale point, idempotence). These
+# four close the LOGICAL half: what a live retrieval is allowed to return once
+# the points are actually there. Each one upserts a real point, searches the
+# real collection, and then applies the production predicate to the hit - so a
+# regression in either layer fails here.
+
+
+def _consumable_hits(requests, name: str, documents: Dict[str, Dict[str, Any]]) -> List[str]:
+    """Live Qdrant hits filtered by the production publication predicate."""
+    from rbac_backend.services.publication_policy import is_consumable
+
+    return [
+        doc_id
+        for doc_id in _search_document_ids(requests, name)
+        if is_consumable(documents.get(doc_id))
+    ]
+
+
+def test_an_operationally_failed_document_still_returns_last_known_good(collection) -> None:
+    """Model B against the real engine: a worker crash is not a verdict."""
+    name, requests = collection
+    _upsert(
+        requests,
+        name,
+        [{"id": 1, "vector": [0.1, 0.1, 0.1, 0.1], "payload": {"document_id": "docA"}}],
+    )
+    documents = {"docA": {"_id": "docA", "processing_status": "failed"}}
+
+    assert _consumable_hits(requests, name, documents) == ["docA"]
+
+
+def test_a_quarantined_duplicate_is_denied_even_though_its_points_remain(
+    collection,
+) -> None:
+    """Quarantine never touches processing_status, so the vectors survive."""
+    name, requests = collection
+    _upsert(
+        requests,
+        name,
+        [{"id": 1, "vector": [0.1, 0.1, 0.1, 0.1], "payload": {"document_id": "docA"}}],
+    )
+    documents = {
+        "docA": {
+            "_id": "docA",
+            "processing_status": "metadata_extracted",
+            "duplicate_status": "duplicate",
+        }
+    }
+
+    assert _search_document_ids(requests, name) == ["docA"], "the point is present"
+    assert _consumable_hits(requests, name, documents) == []
+
+
+def test_a_hit_with_no_surviving_source_document_is_denied(collection) -> None:
+    """An orphaned vector outlived its Mongo record; it cannot be authorised."""
+    name, requests = collection
+    _upsert(
+        requests,
+        name,
+        [{"id": 1, "vector": [0.1, 0.1, 0.1, 0.1], "payload": {"document_id": "ghost"}}],
+    )
+
+    assert _search_document_ids(requests, name) == ["ghost"]
+    assert _consumable_hits(requests, name, {}) == []
+
+
+def test_a_foreign_tenants_points_are_excluded_by_the_scoped_filter(collection) -> None:
+    """Tenant scope is a filter on the query, not a post-hoc trim."""
+    name, requests = collection
+    _upsert(
+        requests,
+        name,
+        [
+            {
+                "id": 1,
+                "vector": [0.1, 0.1, 0.1, 0.1],
+                "payload": {"document_id": "docA", "organization_id": "org-1"},
+            },
+            {
+                "id": 2,
+                "vector": [0.1, 0.1, 0.1, 0.2],
+                "payload": {"document_id": "docFOREIGN", "organization_id": "org-2"},
+            },
+        ],
+    )
+
+    response = requests.post(
+        f"{QDRANT_URL}/collections/{name}/points/search",
+        json={
+            "vector": [0.1, 0.1, 0.1, 0.1],
+            "limit": 10,
+            "with_payload": True,
+            "filter": {"must": [{"key": "organization_id", "match": {"value": "org-1"}}]},
+        },
+        timeout=_TIMEOUT,
+        headers=_HEADERS,
+    )
+    response.raise_for_status()
+    returned = [hit["payload"]["document_id"] for hit in response.json()["result"]]
+
+    assert returned == ["docA"]
+    assert "docFOREIGN" not in returned

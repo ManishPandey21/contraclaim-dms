@@ -29,6 +29,7 @@ export interface BGDTO {
   remarks?: string | null;
   contract_id?: string | null;
   project_id?: string | null;
+  organization_id?: string | null;
   linked_document_ids: string[];
   current_revision: number;
   extension_required?: boolean | null;
@@ -78,6 +79,31 @@ export interface BGHistoryDTO {
   extension_letter_reference?: string | null;
   extension_date?: string | null;
   remarks?: string | null;
+  created_at?: string | null;
+}
+
+export type BGEventType = "original" | "submission" | "extension" | "release";
+
+export interface BGEventDTO {
+  id: string;
+  bank_guarantee_id: string;
+  organization_id: string;
+  project_id: string;
+  event_type: BGEventType;
+  event_date?: string | null;
+  sequence: number;
+  revision_number?: number | null;
+  amount_before?: number | null;
+  amount_after?: number | null;
+  expiry_before?: string | null;
+  expiry_after?: string | null;
+  claim_expiry_before?: string | null;
+  claim_expiry_after?: string | null;
+  required_up_to_before?: string | null;
+  required_up_to_after?: string | null;
+  reference?: string | null;
+  remarks?: string | null;
+  created_by?: string | null;
   created_at?: string | null;
 }
 
@@ -139,6 +165,19 @@ export async function updateBG(id: string, payload: Partial<BGPayload>): Promise
   return norm(data);
 }
 
+export async function transitionBGStatus(
+  id: string,
+  payload: {
+    target_status: "submitted" | "valid";
+    submission_date?: string;
+    reference?: string;
+    remarks?: string;
+  },
+): Promise<BGDTO> {
+  const { data } = await api.post(`/bank-guarantees/${id}/status`, payload);
+  return norm(data);
+}
+
 export async function deleteBG(id: string): Promise<void> {
   await api.delete(`/bank-guarantees/${id}`);
 }
@@ -158,14 +197,28 @@ export async function extendBG(
   return norm(data);
 }
 
-export async function releaseBG(id: string, remarks?: string): Promise<BGDTO> {
-  const { data } = await api.post(`/bank-guarantees/${id}/release`, { remarks });
+export async function releaseBG(
+  id: string,
+  payload: {
+    release_date?: string;
+    release_letter_reference?: string;
+    remarks?: string;
+  },
+): Promise<BGDTO> {
+  const { data } = await api.post(`/bank-guarantees/${id}/release`, payload);
   return norm(data);
 }
 
 export async function getBGHistory(id: string): Promise<BGHistoryDTO[]> {
   const { data } = await api.get(`/bank-guarantees/${id}/history`);
   return Array.isArray(data) ? (data as BGHistoryDTO[]) : [];
+}
+
+export async function getBGEvents(id: string): Promise<BGEventDTO[]> {
+  const { data } = await api.get(`/bank-guarantees/${id}/events`);
+  return Array.isArray(data)
+    ? data.map((event: any) => ({ ...event, id: event?._id ?? event?.id }))
+    : [];
 }
 
 export async function exportBGs(format: "csv" | "xlsx" | "pdf", params?: { project_id?: string }): Promise<Blob> {

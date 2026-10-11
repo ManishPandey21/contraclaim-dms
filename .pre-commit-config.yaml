@@ -1,0 +1,81 @@
+# pre-commit is scoped to the git repository, not to a subdirectory: it chdirs
+# to `git rev-parse --show-toplevel` and every path it hands a hook is relative
+# to that root. This repository's root holds `projectDMS/`, so the config lives
+# here (the tool looks for it at the root and nowhere else) and every `files:`
+# pattern is anchored at `projectDMS/...`. Anchoring them at `^backend/` - the
+# layout from when projectDMS was its own repository - silently matched zero
+# files, and a static or security hook that matches nothing still reports
+# success. `tests/test_ci_static_gates.py` fails if either regresses.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.9.2
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+        files: "^projectDMS/backend/rbac_backend/(ingestion|retrieval|agents|observability)/.*\\.py$|^projectDMS/backend/rbac_backend/routers/retrieval_engine.py$|^projectDMS/backend/rbac_backend/tests/test_retrieval_engine_basics.py$"
+      - id: ruff-format
+        files: "^projectDMS/backend/rbac_backend/(ingestion|retrieval|agents|observability)/.*\\.py$|^projectDMS/backend/rbac_backend/routers/retrieval_engine.py$|^projectDMS/backend/rbac_backend/tests/test_retrieval_engine_basics.py$"
+
+  # mypy runs through a gate rather than directly. Repairing this config's file
+  # scope switched mypy on for the first time and it found a historical backlog;
+  # the gate keeps every one of those findings visible and fails on any NEW one,
+  # which disabling error codes or excluding files would not. See
+  # scripts/mypy_staged_gate.py and backend/mypy-baseline.txt.
+  - repo: local
+    hooks:
+      - id: mypy
+        name: "mypy (staged baseline gate)"
+        entry: python projectDMS/scripts/mypy_staged_gate.py
+        language: python
+        types_or: [python, pyi]
+        require_serial: true
+        files: "^projectDMS/backend/rbac_backend/(ingestion|retrieval|agents|observability)/"
+        # The gate shells out to mypy, so mypy and the type information for the
+        # third-party packages this code imports both live here. Each entry is
+        # whichever form carries types for the version the repository pins:
+        #   redis 7.0.1  ships py.typed, so the real package IS the types
+        #                (types-redis is deprecated for redis>=5 for that reason)
+        #   requests 2.33.0  does not - py.typed arrived after this pin
+        #   bleach 6.4.0     ships none
+        # Stub packages are static-only and must never reach the runtime
+        # requirements. Versions track backend/rbac_backend/requirements.txt
+        # and have to be updated with it.
+        additional_dependencies:
+          - "mypy==1.13.0"
+          - "redis==7.0.1"
+          - "types-requests==2.33.0.20260712"
+          - "types-bleach==6.2.0.20241123"
+
+  - repo: local
+    hooks:
+      - id: forbid-print
+        name: "Forbid print in backend"
+        entry: python -c "import sys,pathlib; bad=[p for p in sys.argv[1:] if pathlib.Path(p).suffix=='.py' and 'print(' in pathlib.Path(p).read_text()]; sys.exit(1 if bad else 0)"
+        language: system
+        types: [python]
+        files: "^projectDMS/backend/rbac_backend/(ingestion|retrieval|agents|observability)/.*\\.py$"
+
+      # Prevents reintroducing the archived/scratch/duplicate files removed in the
+      # hotfix #2 dead-code cleanup. Fails if any matching path is staged.
+      - id: forbid-dead-code-paths
+        name: "Forbid archived/scratch/duplicate files"
+        entry: "Reintroducing archived, scratch, or duplicated files is not allowed (see hotfix #2 cleanup)"
+        language: fail
+        files: '(^|/)archive/|(^|/)main_minimal\.py$|New Text Document| - Copy| copy\.py$|_1509\.|_1511\.|_tranculated\.|(^|/)UploadPage1\.|(^|/)UploadPage_check\.|(^|/)DocumentViewerPageOriginal\.|(^|/)PermissionsPageImproved\.|(^|/)Dashboard1\.|(^|/)useLetterWorkflow[0-9]\.'
+
+      # Week-1 authz consolidation: forbid reintroducing the removed legacy
+      # has_permission dependency and any import of the deleted archive package.
+      # Use require_permission / PolicyService instead (see docs/AUTHZ.md).
+      - id: forbid-legacy-authz
+        name: "Forbid legacy has_permission dependency and archive imports"
+        entry: 'Depends\(has_permission\(|(from|import) [\w.]*\barchive\b'
+        language: pygrep
+        files: '\.(py|ts|tsx)$'

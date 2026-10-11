@@ -16,6 +16,7 @@ from ..models.evidence_graph import (
     ProjectEventType,
 )
 from .evidence_graph_service import EvidenceGraphService
+from .publication_policy import resolve_document_authority
 
 
 async def _collect_cursor(cursor: Any) -> List[Dict[str, Any]]:
@@ -131,6 +132,7 @@ class EvidenceGraphBackfillService:
             cursor = db[collection_name].find(query).limit(limit_per_collection)
             rows = await _collect_cursor(cursor)
             missing = []
+            authority_blocked = 0
             for row in rows:
                 entity_id = str(row.get("_id"))
                 existing = await db.project_events.find_one(
@@ -138,14 +140,26 @@ class EvidenceGraphBackfillService:
                 )
                 if existing:
                     continue
+                if collection_name == "documents":
+                    authority = await resolve_document_authority(db, entity_id)
+                    if not authority.consumable:
+                        authority_blocked += 1
+                        continue
                 missing.append(row)
                 if dry_run:
                     continue
+                event_type = spec["event_type"]
+                if collection_name == "delay_events":
+                    # One mapping for the register and its backfill: a hindrance
+                    # or constraint is not presumed to be a delay.
+                    from .hindrance_register_service import event_type_of, project_event_type_for
+
+                    event_type = project_event_type_for(event_type_of(row))
                 event = await graph.create_project_event(
                     ProjectEventCreate(
                         organization_id=row.get("organization_id"),
                         project_id=row.get("project_id"),
-                        event_type=spec["event_type"],
+                        event_type=event_type,
                         event_date=self._event_date(row, spec["date_fields"]),
                         title=self._title(row, spec["title_fields"], fallback=collection_name),
                         description=row.get("description") or row.get("summary"),
@@ -190,6 +204,7 @@ class EvidenceGraphBackfillService:
             report["sources"][collection_name] = {
                 "scanned": len(rows),
                 "missing_project_events": len(missing),
+                "authority_blocked": authority_blocked,
                 "limited": len(rows) >= limit_per_collection,
             }
         return report

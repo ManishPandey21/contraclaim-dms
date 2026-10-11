@@ -6,6 +6,13 @@ from textwrap import shorten
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ....models.arbitration_drafting import ArbitrationMatrixRow
+from ...publication_policy import (
+    consumable_derived_text,
+    is_consumable,
+    resolve_document_authority,
+    synthetic_case_clause_id,
+)
+from ...document_relationship_service import DocumentRelationshipService
 from ..matrix_registry import MATRIX_COLLECTIONS
 from ..repository import _collect, _jsonable
 
@@ -61,6 +68,33 @@ DISPUTE_ISSUE_TEMPLATES: Dict[str, Dict[str, str]] = {
         ),
         "required_finding": "Tribunal finding on attribution of delay and validity of the deduction.",
     },
+}
+
+
+#: Per-matrix map of (derived field, id field naming its source document).
+#:
+#: `None` for the id field means infer from the row, which is right for
+#: document-index rows. Declaring this per matrix is what stops the next
+#: derived column being read raw: the earlier version hardcoded
+#: `document-index` and returned early for every other matrix, so the
+#: chronology matrix's `event` - the same extracted span text, one matrix over -
+#: was never checked.
+#: Entries are (derived field, source_type override, id field).
+_DERIVED_MATRIX_FIELDS: Dict[str, Tuple[Tuple[str, Optional[str], Optional[str]], ...]] = {
+    # `document_type` belongs here for the same reason `relevance_note` does:
+    # `_document_type` keyword-scans title/subject/summary/extracted_text, and
+    # on the LLM path both come out of ONE model response built from
+    # full_content. `documents` rows carry no document_type of their own, so the
+    # scan over extracted text is what decides. Leaving it off the registry let
+    # a stale classification keep asserting that a contractual notice was
+    # served, on a document the quality gate had rejected.
+    "document-index": (
+        ("relevance_note", None, None),
+        ("summary", None, None),
+        ("document_type", None, None),
+    ),
+    "chronology-matrix": (("event", None, "source_document_id"),),
+    "clause-matrix": (("clause_text_excerpt", "clause", "clause_source_id"),),
 }
 
 
@@ -202,6 +236,10 @@ class DeterministicArbitrationAgent:
                 "date": _first(event, "event_date", "date", "start_date", "created_at"),
                 "event": _condense(f"{title}. {_first(event, 'description', 'details') or ''}", 500),
                 "document_ref": _first(event, "document_ref", "source_document_id", "source_id"),
+                # Explicit provenance. `document_ref` is a display reference and
+                # may hold a letter number rather than an id, so read-time
+                # authority needs its own field to resolve against.
+                "source_document_id": _first(event, "source_document_id", "document_id"),
                 "party_responsible": _first(event, "responsible_party", "party_responsible", "delay_owner"),
                 "clause": _first(event, "clause", "clause_number") or ", ".join(_string_list(event.get("contract_clauses"))),
                 "impact": _first(event, "impact", "delay_impact", "effect"),
@@ -224,7 +262,7 @@ class DeterministicArbitrationAgent:
         if not clauses and self.case.get("arbitration_clause"):
             clauses = [
                 {
-                    "_id": f"case:{self.case_id}:arbitration_clause",
+                    "_id": synthetic_case_clause_id(self.case_id),
                     "topic": "Arbitration agreement",
                     "clause_number": "Arbitration clause",
                     "clause_text_excerpt": self.case.get("arbitration_clause"),
@@ -298,8 +336,27 @@ class DeterministicArbitrationAgent:
 
     async def _quantum(self, agent_type: str) -> None:
         candidates: List[Tuple[str, Dict[str, Any]]] = []
+        authorized_ipc_documents: Dict[str, List[str]] = {}
         for collection_name in ["claims", "variations", "ipc_bills"]:
-            for row in await self._find_source_rows(collection_name, limit=int(self.options.get("quantum_limit") or 50)):
+            source_rows = await self._find_source_rows(
+                collection_name,
+                limit=int(self.options.get("quantum_limit") or 50),
+            )
+            if collection_name == "ipc_bills" and source_rows:
+                try:
+                    authorized_ipc_documents = await DocumentRelationshipService(
+                        self.db
+                    ).authorized_document_ids_for_targets(
+                        self.current_user,
+                        "ipc_bill",
+                        source_rows,
+                    )
+                except Exception:
+                    authorized_ipc_documents = {}
+                    self.warnings.append(
+                        "IPC document relationships could not be re-authorized and were omitted."
+                    )
+            for row in source_rows:
                 candidates.append((collection_name, row))
         chronology_rows = await self._matrix_rows("chronology-matrix")
         created_any = False
@@ -341,8 +398,18 @@ class DeterministicArbitrationAgent:
                 "tax_treatment": _first(source, "tax_treatment"),
                 "checked_by": _first(source, "checked_by"),
                 "cost_head": _cost_head(source, collection_name),
-                "evidence_ids": _string_list(
-                    _first(source, "evidence_ids", "supporting_document_ids", "document_ids", "linked_document_ids")
+                "evidence_ids": (
+                    authorized_ipc_documents.get(source_id, [])
+                    if collection_name == "ipc_bills"
+                    else _string_list(
+                        _first(
+                            source,
+                            "evidence_ids",
+                            "supporting_document_ids",
+                            "document_ids",
+                            "linked_document_ids",
+                        )
+                    )
                 ),
                 "delay_event_ids": delay_event_ids,
                 "delay_period_start": _iso_date(_parse_date(_first(source, "delay_start_date", "period_start"))),
@@ -980,7 +1047,58 @@ class DeterministicArbitrationAgent:
         except Exception as exc:
             self.warnings.append(f"Unable to read {collection_name}: {exc}")
             return []
-        return [row for row in rows if _in_case_scope(row, self.case)]
+        scoped = [row for row in rows if _in_case_scope(row, self.case)]
+        return await self._authorised_source_rows(collection_name, scoped)
+
+    async def _authorised_source_rows(
+        self, collection_name: str, rows: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Drop rows whose originating document is no longer publishable.
+
+        Both agents build their matrices from here, and both used to condense
+        `full_content`/`extracted_text` into `relevance_note` (deterministic
+        `:171`) or into the LLM prompt (`llm.py:563`) with no authority check at
+        all. Read-time gating cannot cover that: it stops a stale derivative
+        being *used*, not a blocked source being *summarised into a new one*.
+
+        Only extraction-controlled collections are filtered. Claims, variations,
+        chronology events and the rest are independent application records whose
+        `_id` names no document - filtering them here would hide legitimate
+        content that document authority was never meant to govern.
+        """
+        if not rows:
+            return rows
+        if collection_name == "documents":
+            # Canonical records: the authority fields are on the row itself.
+            return [row for row in rows if is_consumable(row)]
+        if collection_name in {"document_vectors", "contract_clauses"}:
+            # Partial records carrying no authority fields of their own, so
+            # asking THEM is vacuous (G34). Resolve back to the parent.
+            kept: List[Dict[str, Any]] = []
+            for row in rows:
+                parent = row.get("document_id") or row.get("documentId")
+                if (await resolve_document_authority(self.db, parent)).consumable:
+                    kept.append(row)
+            return kept
+        if collection_name == "matter_chronology_events":
+            # A chronology event is an application record, but an AI-SUGGESTED
+            # one is not independent of the document it was lifted from: both
+            # its title and its description are span text taken straight out of
+            # the extraction (`chronology.py:517`, `:529`). Letting the adapter
+            # summarise one into a fresh matrix row gave a rejected extraction a
+            # new home with independent-looking authority.
+            #
+            # An event with no `source_document_id` is a manual entry that
+            # document authority has no jurisdiction over, so it passes through.
+            kept = []
+            for row in rows:
+                parent = row.get("source_document_id")
+                if not parent or (
+                    await resolve_document_authority(self.db, parent)
+                ).consumable:
+                    kept.append(row)
+            return kept
+        return rows
 
     async def _matrix_rows(self, matrix_slug: str) -> List[Dict[str, Any]]:
         collection_name = MATRIX_COLLECTIONS[matrix_slug]
@@ -990,7 +1108,48 @@ class DeterministicArbitrationAgent:
         cursor = collection.find({"case_id": self.case_id, "deleted_at": {"$exists": False}})
         if hasattr(cursor, "sort"):
             cursor = cursor.sort("created_at", 1)
-        return await _collect(cursor)
+        return await self._authorised_matrix_rows(matrix_slug, await _collect(cursor))
+
+    async def _authorised_matrix_rows(
+        self, matrix_slug: str, rows: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Re-gate the derived text on a PERSISTED matrix row before reading it.
+
+        `_authorised_source_rows` covers raw source collections. This is its
+        twin, and its absence left the same hole open one layer up: a
+        `document-index` row keeps the `relevance_note` an earlier run condensed
+        from the document body, and nothing revisits it when the document is
+        later rejected - `_insert_matrix_row` returns early on an existing row
+        and never deletes.
+
+        Three agents then decide with it and none of them display it, which is
+        why it survived review: `_looks_like_notice` decides whether a
+        notice-compliance row exists at all, `_expert_report_documents`
+        nominates the expert report source, and `_review_consistency` raises
+        `final_bill_or_no_dues_waiver_risk`. Authority governs influence, not
+        just disclosure.
+
+        The row is not rewritten in Mongo - only the copy handed to the caller
+        is blanked, so authority returning restores the note.
+        """
+        fields = _DERIVED_MATRIX_FIELDS.get(matrix_slug)
+        if not fields or not rows:
+            return rows
+        gated: List[Dict[str, Any]] = []
+        for row in rows:
+            derived = {
+                field: await consumable_derived_text(
+                    self.db,
+                    row,
+                    field,
+                    source_type=source_type,
+                    source_id=row.get(id_field) if id_field else None,
+                )
+                for field, source_type, id_field in fields
+                if field in row
+            }
+            gated.append({**row, **derived} if derived else row)
+        return gated
 
     async def _paragraph_responses(self) -> List[Dict[str, Any]]:
         if not self.draft_id:

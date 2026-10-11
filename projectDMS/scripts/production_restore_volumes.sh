@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR=${ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
-ENV_FILE=${ENV_FILE:-"$ROOT_DIR/.env"}
+# shellcheck source=scripts/lib/docker_paths.sh
+. "$ROOT_DIR/scripts/lib/docker_paths.sh"
 APPLY=false
 
 usage() {
@@ -41,17 +42,10 @@ if ! tar -tzf "$archive" >/dev/null; then
   exit 1
 fi
 
-if [[ -f "$ENV_FILE" ]]; then
-  set -a
-  # shellcheck disable=SC1090
-  source "$ENV_FILE"
-  set +a
-fi
-
 echo "Restoring $archive into Docker volume $volume"
-docker run --rm \
+docker_run --rm \
   -v "${volume}:/target" \
-  -v "$(dirname "$archive"):/backup:ro" \
+  -v "$(docker_host_path "$(cd "$(dirname "$archive")" && pwd)"):/backup:ro" \
   busybox sh -c "rm -rf /target/* /target/.[!.]* /target/..?* 2>/dev/null || true; cd /target && tar -xzf /backup/$(basename "$archive")"
 
 echo "Restore complete for volume $volume"

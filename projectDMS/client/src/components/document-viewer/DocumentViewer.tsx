@@ -4,7 +4,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { AlertTriangle, ExternalLink, FileText, Loader2 } from "lucide-react";
 import { useParams } from "react-router-dom";
 import { joinApiUrl } from "@/config/api";
-import { authenticatedFetch } from "@/services/http";
+import { fetchApiFileBlob } from "@/services/http";
 
 import type { LocalDocument as Document } from "../../pages/DocumentViewerPage";
 
@@ -88,18 +88,7 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ document }) => {
           return;
         }
 
-        const fileResp = await authenticatedFetch(
-          joinApiUrl(`/documents/${documentId}/download`),
-        );
-        if (!fileResp.ok) {
-          const errorText = await fileResp.text().catch(() => "");
-          throw new Error(
-            errorText ||
-            `Failed to fetch PDF bytes (${fileResp.status} ${fileResp.statusText})`,
-          );
-        }
-
-        const blob = await fileResp.blob();
+        const blob = await fetchApiFileBlob(joinApiUrl(`/documents/${documentId}/download`));
         if (blob.size === 0) {
           throw new Error("The downloaded PDF file is empty");
         }

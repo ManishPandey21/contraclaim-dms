@@ -124,6 +124,49 @@ async def get_database():
         database = client[_database_name()]
     return database
 
+class UnresolvedDatabaseError(RuntimeError):
+    """A write was about to run against a database nobody named."""
+
+
+async def resolve_database(explicit=None):
+    """Return the caller's database handle. Refuse if there isn't one.
+
+    F-A8M-5. Several module-level helpers answered ``database=None`` with
+
+        from ..core.database import database
+
+    which binds the module global **at import time**: ``None`` before anything
+    connects, and still ``None`` afterwards, because the local name is a
+    snapshot and not a reference to the global. R-A8M measured the consequence -
+    ``initialize_all_data()`` returned all zeros while logging
+    ``'NoneType' object has no attribute 'projects'`` once per record, and the
+    per-record ``except Exception: continue`` above it turned that into a
+    successful-looking run that seeded nothing.
+
+    **``None`` is refused, not resolved.** Resolving it through
+    :func:`get_database` would work, and on a production host it would work by
+    seeding production - which is precisely the outcome the finding says must be
+    impossible: "do not let None silently select a default production DB". A
+    caller who wants this process's own connection says so in one line,
+
+        await initialize_all_data(await get_database())
+
+    and that line is auditable in a way an omitted argument is not. Nothing
+    depended on the old behaviour, because the old behaviour never worked.
+
+    The refusal is an exception and not a return, because every caller is about
+    to write seed data: the one outcome that must be impossible is writing it
+    somewhere nobody chose.
+    """
+    if explicit is not None:
+        return explicit
+    raise UnresolvedDatabaseError(
+        "No database handle was given. This helper will not pick one for you: "
+        "an omitted argument on a production host would seed production. Pass "
+        "the target explicitly - `await get_database()` for this process's own "
+        "connection, or a disposable handle for a drill."
+    )
+
 async def ensure_indexes(db):
     """Create indexes to improve RBAC scoped queries and general performance."""
 
@@ -132,6 +175,17 @@ async def ensure_indexes(db):
     await db.users.create_index("roles", background=True)
     await db.users.create_index("projects", background=True)
     await db.users.create_index("account_type", background=True)
+
+    # Permissions
+    # `name` is the catalogue's identity: `get_permission_by_name` reads by it and
+    # roles grant by it. It carried no index at all, so R-A8I's restore drill put
+    # 396 rows in here for 198 distinct names and the only trace was one line in
+    # the restore log. A new deployment gets the constraint here; deployments that
+    # already exist get it, and their duplicates collapsed first, from migration
+    # 20260906_0001.
+    await db.permissions.create_index(
+        "name", name="uq_permissions_name", unique=True, background=True
+    )
 
     # Organizations
     # _id is implicitly indexed by MongoDB; do not attempt to create an _id index with options
@@ -494,6 +548,14 @@ async def ensure_indexes(db):
         [("chronology_id", 1), ("event_classification", 1), ("supports_party", 1), ("pleading_use", 1)],
         background=True,
     )
+    # CL-3B: the Document reverse lookup reads events by their source / related
+    # Document (legacy read-through of chronology_event relationships).
+    await db.matter_chronology_events.create_index(
+        [("source_document_id", 1), ("chronology_id", 1)], background=True
+    )
+    await db.matter_chronology_events.create_index(
+        [("related_document_ids", 1), ("chronology_id", 1)], background=True
+    )
     await db.matter_chronology_event_revisions.create_index(
         [("chronology_id", 1), ("event_id", 1), ("revision", 1)],
         unique=True,
@@ -557,6 +619,22 @@ async def ensure_indexes(db):
     await db.bg_extension_history.create_index(
         [("bg_id", 1), ("revision_number", 1)], background=True
     )
+    await db.bank_guarantee_events.create_index(
+        [
+            ("organization_id", 1),
+            ("project_id", 1),
+            ("bank_guarantee_id", 1),
+            ("sequence", 1),
+        ],
+        name="uq_bank_guarantee_event_sequence",
+        unique=True,
+        background=True,
+    )
+    await db.bank_guarantee_events.create_index(
+        [("bank_guarantee_id", 1), ("event_type", 1), ("event_date", 1)],
+        name="ix_bank_guarantee_event_timeline",
+        background=True,
+    )
     await db.bg_notifications.create_index(
         [("bg_id", 1), ("notification_type", 1)], background=True
     )
@@ -594,6 +672,59 @@ async def ensure_indexes(db):
     await db.claims.create_index("response_due_date", background=True)
     await db.claims.create_index("event_date", background=True)
     await db.claims.create_index("claim_ref", background=True)
+
+    # Canonical entity/event-to-Document relationships. Active links always
+    # store removed_at=None; history is append/soft-remove rather than delete.
+    await db.entity_document_links.create_index(
+        [
+            ("organization_id", 1),
+            ("project_id", 1),
+            ("target_type", 1),
+            ("target_id", 1),
+            ("document_id", 1),
+            ("relationship_role", 1),
+        ],
+        name="uq_entity_document_links_active",
+        unique=True,
+        background=True,
+        partialFilterExpression={"removed_at": None},
+    )
+    await db.entity_document_links.create_index(
+        [
+            ("organization_id", 1),
+            ("project_id", 1),
+            ("target_type", 1),
+            ("target_id", 1),
+            ("removed_at", 1),
+        ],
+        name="ix_entity_document_links_forward",
+        background=True,
+    )
+    await db.entity_document_links.create_index(
+        [
+            ("organization_id", 1),
+            ("project_id", 1),
+            ("document_id", 1),
+            ("removed_at", 1),
+        ],
+        name="ix_entity_document_links_reverse",
+        background=True,
+    )
+    await db.entity_document_links.create_index(
+        [("parent_type", 1), ("parent_id", 1), ("removed_at", 1)],
+        name="ix_entity_document_links_parent",
+        background=True,
+    )
+    await db.entity_document_links.create_index(
+        [("target_type", 1), ("target_id", 1), ("created_at", -1)],
+        name="ix_entity_document_links_target_history",
+        background=True,
+    )
+    await db.entity_document_links.create_index(
+        [("document_id", 1), ("created_at", -1)],
+        name="ix_entity_document_links_document_history",
+        background=True,
+    )
     await db.claim_assessments.create_index(
         [("claim_id", 1), ("created_at", -1)], background=True
     )
@@ -646,6 +777,45 @@ async def ensure_indexes(db):
     )
     await db.delay_events.create_index(
         [("organization_id", 1), ("project_id", 1), ("location", 1)], background=True
+    )
+    # Hindrance & Constraint Register. The generated reference is unique within
+    # a project; rows that predate it carry none, so the index is partial.
+    await db.delay_events.create_index(
+        [("organization_id", 1), ("project_id", 1), ("hindrance_ref", 1)],
+        name="uq_delay_events_project_reference",
+        unique=True,
+        background=True,
+        partialFilterExpression={"hindrance_ref": {"$type": "string"}},
+    )
+    await db.delay_events.create_index(
+        [("organization_id", 1), ("project_id", 1), ("archived_at", 1), ("start_date", -1)],
+        name="ix_delay_events_register_listing",
+        background=True,
+    )
+    await db.delay_events.create_index(
+        [("organization_id", 1), ("project_id", 1), ("linked_document_ids", 1)],
+        name="ix_delay_events_document_reverse",
+        background=True,
+    )
+    # Structured hindrance -> activity / key date / EOT relationships. Active
+    # links carry removed_at=None; removal is soft so history survives.
+    await db.delay_event_links.create_index(
+        [
+            ("organization_id", 1),
+            ("project_id", 1),
+            ("delay_event_id", 1),
+            ("target_type", 1),
+            ("target_id", 1),
+        ],
+        name="uq_delay_event_links_active",
+        unique=True,
+        background=True,
+        partialFilterExpression={"removed_at": None},
+    )
+    await db.delay_event_links.create_index(
+        [("organization_id", 1), ("project_id", 1), ("target_type", 1), ("target_id", 1), ("removed_at", 1)],
+        name="ix_delay_event_links_reverse",
+        background=True,
     )
     await db.programme_milestones.create_index(
         [("organization_id", 1), ("project_id", 1), ("planned_date", -1)], background=True
@@ -851,6 +1021,12 @@ async def ensure_indexes(db):
     await db.rag_runs.create_index([("org_id", 1), ("project_id", 1), ("run_type", 1), ("created_at", -1)], background=True)
     await db.agent_conversations.create_index("conversation_id", unique=True, background=True)
     await db.agent_messages.create_index([("conversation_id", 1), ("created_at", -1)], background=True)
+
+    # Contract Master authoritative storage. Imported here rather than at module
+    # scope so the persistence module stays independent of database bootstrap.
+    from ..services.contract_document_store import ensure_contract_document_indexes
+
+    await ensure_contract_document_indexes(db)
 
 
 async def ensure_indexes_with_retry(db, attempts: int = INDEX_CREATION_ATTEMPTS) -> None:

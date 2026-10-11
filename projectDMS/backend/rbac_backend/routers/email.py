@@ -31,7 +31,7 @@ from ..models.email_models import (
     EmailRequest, EmailResponse, EmailTemplate, EmailAttachment
 )
 from ..utils.validation import validate_input, sanitize_html, validate_email
-from ..utils.error_handler import handle_exceptions, EmailError
+from ..utils.error_handler import BaseDomainError, handle_exceptions, EmailError
 from ..utils.rate_limiter import RateLimiter
 from ..utils.audit_logger import AuditLogger
 
@@ -41,7 +41,7 @@ router = APIRouter()
 
 class EmailController:
     """Secure email controller with comprehensive validation and rate limiting."""
-    
+
     def __init__(
         self,
         email_service: EmailService,
@@ -66,35 +66,35 @@ class EmailController:
         try:
             # Rate limiting - email sending is expensive
             await self.rate_limiter.check_user_limit(
-                current_user.id, 
+                current_user.id,
                 cost=5,  # High cost for email sending
                 window_seconds=3600,  # 1 hour window
                 max_requests=20  # Max 20 emails per hour per user
             )
-            
+
             # Authorization check
             await self.auth_service.require_permission(
                 current_user, "emails:send"
             )
-            
+
             # Validate and sanitize email request
             validated_request = await self._validate_email_request(email_request)
-            
+
             # Verify document access
             document = await self._verify_document_access(
                 validated_request.document_id, current_user
             )
-            
+
             # Generate secure URLs with expiration
             document_urls = await self.email_service.generate_secure_document_urls(
                 document, expire_hours=72
             )
-            
+
             # Build email content using secure templates
             email_content = await self._build_secure_email_content(
                 validated_request, document, document_urls, current_user
             )
-            
+
             # Queue email for background sending
             background_tasks.add_task(
                 self._send_email_async,
@@ -103,22 +103,27 @@ class EmailController:
                 current_user.id,
                 validated_request.document_id
             )
-            
+
             # Audit log
+            # `subject` is the wrapper's second positional and renders into the
+            # audit message, so it has to be the subject. The old call put the
+            # recipient list there - and never bound at all, so nothing was
+            # recorded. The kind of email stays, as the detail it always was.
             await self.audit_logger.log_email_sent(
                 current_user.id,
-                validated_request.recipients,
-                document.get("id"),
-                "document_share"
+                email_content.get("subject", "Document Shared"),
+                email_type="document_share",
+                recipients=validated_request.recipients,
+                document_id=document.get("id"),
             )
-            
+
             return EmailResponse(
                 message="Email queued for delivery",
                 recipients=validated_request.recipients,
                 status="queued"
             )
-            
-        except (EmailError, HTTPException):
+
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Email sending failed: {str(e)}")
@@ -139,16 +144,16 @@ class EmailController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id, cost=3)
-            
+
             # Authorization check
             await self.auth_service.require_permission(
                 current_user, "emails:send_notifications"
             )
-            
+
             # Validate inputs
             validated_recipients = [validate_email(email) for email in recipients]
             sanitized_data = await self._sanitize_template_data(template_data)
-            
+
             # Get and validate template
             template = await self.template_service.get_template(template_name)
             if not template:
@@ -156,12 +161,12 @@ class EmailController:
                     f"Template '{template_name}' not found",
                     status.HTTP_404_NOT_FOUND
                 )
-            
+
             # Render email content securely
             email_content = await self.template_service.render_secure_template(
                 template, sanitized_data
             )
-            
+
             # Queue email
             background_tasks.add_task(
                 self._send_template_email_async,
@@ -170,14 +175,14 @@ class EmailController:
                 current_user.id,
                 template_name
             )
-            
+
             return EmailResponse(
                 message="Notification email queued",
                 recipients=validated_recipients,
                 status="queued"
             )
-            
-        except (EmailError, HTTPException):
+
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Notification email failed: {str(e)}")
@@ -193,20 +198,20 @@ class EmailController:
         for email in request.recipients:
             validated_email = validate_email(email)
             validated_recipients.append(validated_email)
-        
+
         # Validate and sanitize subject
         safe_subject = sanitize_html(
             validate_input(request.subject, max_length=200)
         )
-        
+
         # Validate and sanitize message
         safe_message = sanitize_html(
             validate_input(request.message, max_length=5000)
         )
-        
+
         # Validate document ID
         document_id = validate_input(request.document_id, required=True)
-        
+
         return EmailRequest(
             recipients=validated_recipients,
             subject=safe_subject,
@@ -223,14 +228,14 @@ class EmailController:
         document = await self.email_service.get_document_by_id(document_id)
         if not document:
             raise EmailError("Document not found", status.HTTP_404_NOT_FOUND)
-        
+
         await PolicyService().authorize_document(
             current_user,
             Permissions.DOCUMENT_SHARE,
             document,
             resource_type="document_share",
         )
-        
+
         return document
 
     async def _build_secure_email_content(
@@ -241,7 +246,7 @@ class EmailController:
         current_user: CurrentUser
     ) -> Dict[str, str]:
         """Build email content using secure templates."""
-        
+
         # Prepare template data with sanitization
         template_data = {
             'recipient_message': bleach.clean(
@@ -259,7 +264,7 @@ class EmailController:
             'company_name': html.escape(settings.email.COMPANY_NAME),
             'support_email': html.escape(settings.email.SUPPORT_EMAIL)
         }
-        
+
         # Use secure template rendering
         template_name = request.template_name or 'document_share'
         return await self.template_service.render_secure_template(
@@ -276,12 +281,12 @@ class EmailController:
                 sanitized[key] = await self._sanitize_template_data(value)
             elif isinstance(value, list):
                 sanitized[key] = [
-                    html.escape(str(item)) if isinstance(item, str) else item 
+                    html.escape(str(item)) if isinstance(item, str) else item
                     for item in value
                 ]
             else:
                 sanitized[key] = value
-        
+
         return sanitized
 
     async def _send_email_async(
@@ -300,16 +305,23 @@ class EmailController:
                 text_content=content.get('text_body', ''),
                 sender_user_id=sender_user_id
             )
-            
+
             # Log successful delivery
             await self.audit_logger.log_email_delivered(
-                sender_user_id, recipients, document_id
+                sender_user_id,
+                content.get('subject', 'Document Shared'),
+                recipients=recipients,
+                document_id=document_id,
             )
-            
+
         except Exception as e:
             logger.error(f"Async email sending failed: {str(e)}")
             await self.audit_logger.log_email_failed(
-                sender_user_id, recipients, str(e)
+                sender_user_id,
+                content.get('subject', 'Document Shared'),
+                str(e),
+                recipients=recipients,
+                document_id=document_id,
             )
 
     async def _send_template_email_async(
@@ -328,15 +340,19 @@ class EmailController:
                 text_content=content.get('text_body', ''),
                 sender_user_id=sender_user_id
             )
-            
+
             await self.audit_logger.log_template_email_sent(
-                sender_user_id, recipients, template_name
+                sender_user_id, template_name, recipients=recipients
             )
-            
+
         except Exception as e:
             logger.error(f"Template email sending failed: {str(e)}")
             await self.audit_logger.log_email_failed(
-                sender_user_id, recipients, str(e)
+                sender_user_id,
+                content.get('subject', 'Notification'),
+                str(e),
+                recipients=recipients,
+                template_name=template_name,
             )
 
 
@@ -352,9 +368,9 @@ async def get_email_controller() -> EmailController:
         scope="email",
     )
     audit_logger = AuditLogger()
-    
+
     return EmailController(
-        email_service, auth_service, template_service, 
+        email_service, auth_service, template_service,
         rate_limiter, audit_logger
     )
 

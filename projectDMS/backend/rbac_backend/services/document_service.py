@@ -22,6 +22,12 @@ from ..models.document import (
     ReferenceCreate,
 )
 from ..models.document_metadata import extracted_metadata_updates
+from ..models.processing_state import ProcessingState, build_attempt_outcome
+from .pipeline_routing import (
+    claim_filter_for,
+    pipeline_version_of,
+    resolve_pipeline_version,
+)
 from ..utils.file_validation import sniff_mime_from_bytes
 from ..utils.date_parser import format_date_ddmmyyyy, parse_date_safely
 from .common import fetch_paginated, validate_pagination
@@ -32,6 +38,14 @@ from ..utils.notification_service import NotificationService
 from ..models.notification import NotificationContext, NotificationType
 from ..utils.pipeline_logging import configure_pipeline_logger
 from .reference_sync_service import ReferenceSyncService, ReferenceSyncError
+from .metadata_integrity import (
+    assess_metadata_quality,
+    keep_stored_values_on_degraded_source,
+    merge_degraded_snapshot,
+    merge_human_edited_fields,
+    metadata_for_publication,
+    protect_human_edited_fields,
+)
 from .duplicate_detection_service import (
     CLASSIFICATION_DUPLICATE,
     DuplicateDetectionService,
@@ -39,9 +53,58 @@ from .duplicate_detection_service import (
 from .falkor_graph_service import normalize_letter_code
 from .evidence_graph_service import EvidenceGraphService
 from .reference_parser import parse_legacy_reference_text
+from .source_text import full_text_updates
 
 logger = logging.getLogger(__name__)
 configure_pipeline_logger(logger)
+
+#: ``vector_sync_status.sync_status`` values that mean a run's indexing did not
+#: finish. ``disabled`` (switched off by configuration) and ``empty`` (nothing
+#: to index) are outcomes, not failures. ``deferred`` counts unless the
+#: document is a confirmed duplicate; ``unknown`` is an unreadable row.
+_UNFINISHED_VECTOR_SYNC = frozenset({"error", "mismatch", "pending", "deferred", "unknown"})
+
+
+def _human_review_message(unresolved: List[int], quality: List[int]) -> str:
+    """Name every page a person must look at, and why."""
+
+    def _listed(pages: List[int]) -> str:
+        return ", ".join(str(page) for page in pages)
+
+    if not unresolved and not quality:
+        # A checkpoint from before review pages were recorded. Say so rather
+        # than report a count of zero for a review that did happen.
+        return "Extraction needs human review; the affected pages were not recorded"
+    total = len(set(unresolved) | set(quality))
+    reasons = []
+    if unresolved:
+        reasons.append(f"could not be extracted automatically: page(s) {_listed(unresolved)}")
+    if quality:
+        reasons.append(f"failed the extraction quality check: page(s) {_listed(quality)}")
+    return f"{total} page(s) need review ({'; '.join(reasons)})"
+
+
+def _page_extraction_record(result: Any) -> Optional[Dict[str, Dict[str, Any]]]:
+    """How each page of `result` was read, keyed by page number.
+
+    `None` when the extractor kept no per-page record - the legacy path decides
+    once per document, and inventing page methods for it would claim evidence
+    that does not exist.
+    """
+    extraction = getattr(result, "extraction_result", None)
+    pages = getattr(extraction, "pages", None)
+    if not pages:
+        return None
+    record: Dict[str, Dict[str, Any]] = {}
+    for page in pages:
+        source = getattr(page, "source", None)
+        status = getattr(page, "status", None)
+        record[str(getattr(page, "number", len(record) + 1))] = {
+            "source": getattr(source, "value", source),
+            "status": getattr(status, "value", status),
+        }
+    return record
+
 
 class DocumentServiceError(Exception):
     """Custom exception for document service errors"""
@@ -68,6 +131,16 @@ class DocumentConflictError(DocumentServiceError):
         self.current_revision = current_revision
 
 
+class DocumentDependencyError(DocumentServiceError):
+    """Raised when deletion would orphan active entity-document relationships."""
+
+    def __init__(self, active_relationship_count: int) -> None:
+        super().__init__(
+            f"Document has {active_relationship_count} active entity relationship(s)"
+        )
+        self.active_relationship_count = active_relationship_count
+
+
 class DocumentDeletionResult:
     """Outcome of a document deletion plus its cascading cleanup.
 
@@ -85,7 +158,7 @@ class DocumentDeletionResult:
 
 class DocumentService:
     """Async service for document CRUD operations with proper error handling"""
-    
+
     def __init__(self, db: Optional[Database] = None, notification_service: Optional[NotificationService] = None):
         # Allow None for routers that do not pass DB; resolve lazily
         self.db = db
@@ -101,6 +174,97 @@ class DocumentService:
         # Lazy import to avoid circulars
         from ..core.database import get_database
         return await get_database()
+
+    async def _current_publication_payload(
+        self,
+        document_id: str,
+        extracted_payload: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Merge extracted fields with the current canonical authority axes."""
+        from .publication_policy import (
+            _TEXT_FIELDS,
+            _TEXT_PROVENANCE_FIELDS,
+            is_consumable,
+            resolve_canonical_document,
+        )
+
+        db = await self._get_db()
+        current = await resolve_canonical_document(db, document_id)
+        if not is_consumable(current):
+            logger.info(
+                "[document_pipeline] Withholding derived publication for %s: "
+                "current canonical source is not consumable",
+                document_id,
+            )
+            return None
+
+        # The extraction payload contains fields not persisted until later in
+        # this method.  Keep those fields, but authority must come exclusively
+        # from the full current Mongo row rather than the earlier Pydantic dump.
+        payload = dict(current)
+        payload.update(extracted_payload)
+        # The body and its provenance come from the row as written, too: the
+        # extracted payload starts from a Document dumped BEFORE processing,
+        # whose stale `ocrText`/markers would otherwise hide the source text
+        # this run stored and hand Item 25 to evidence derivation.
+        for field in (*_TEXT_FIELDS, *_TEXT_PROVENANCE_FIELDS):
+            if field in current:
+                payload[field] = current[field]
+        for field in ("processing_status", "duplicate_status", "lifecycle_state"):
+            if field in current:
+                payload[field] = current[field]
+            else:
+                payload.pop(field, None)
+        return payload
+
+    async def _publish_graph_and_evidence_from_current(
+        self,
+        *,
+        document_id: str,
+        extracted_payload: Dict[str, Any],
+        metadata: Any,
+        metadata_source: Optional[str],
+        upload_type: Optional[str],
+    ) -> bool:
+        """Publish only while each independent store has current authority."""
+        graph_payload = await self._current_publication_payload(
+            document_id, extracted_payload
+        )
+        if graph_payload is None:
+            return False
+
+        try:
+            await self.graph_ingestion.ingest_document(
+                document_id=document_id,
+                document_data=graph_payload,
+                metadata=metadata,
+                metadata_source=metadata_source,
+                upload_type=upload_type,
+            )
+        except Exception:
+            logger.debug("Graph ingestion failed for %s", document_id, exc_info=True)
+
+        # Falkor and Mongo evidence are sequential, independent stores.  A
+        # decision made before the first write cannot authorize the second.
+        evidence_payload = await self._current_publication_payload(
+            document_id, extracted_payload
+        )
+        if evidence_payload is None:
+            return False
+
+        try:
+            await self.evidence_graph.ingest_document_metadata(
+                document_id=document_id,
+                document_data=evidence_payload,
+                metadata=metadata,
+                metadata_source=metadata_source,
+                upload_type=upload_type,
+            )
+        except Exception:
+            logger.debug(
+                "Evidence graph extraction failed for %s", document_id, exc_info=True
+            )
+        return True
 
     async def _sync_current_document_to_falkor(
         self,
@@ -118,6 +282,14 @@ class DocumentService:
                     raise DocumentNotFoundError("Document not found while refreshing reference graph")
                 return
             payload = current.model_dump(by_alias=True)
+
+            # G31/G33: a writer-side eligibility guard belongs here, but it
+            # cannot use the current publication policy yet. See G33: the
+            # real processing_status vocabulary includes metadata_extracted,
+            # retrying and skipped, none of which ProcessingState defines, so
+            # the policy's unknown-fails-closed rule refuses legitimate
+            # in-flight syncs. Guarding here before that is reconciled blocks
+            # normal publication - verified by 4 regressions.
             self.graph_ingestion.sync_document_to_falkor(
                 document_id=current.id,
                 document=payload,
@@ -139,28 +311,28 @@ class DocumentService:
             document_id,
             raise_on_error=True,
         )
-    
+
     def _validate_document_id(self, document_id: str) -> ObjectId:
         """
         Validate and convert document ID to ObjectId.
-        
+
         Args:
             document_id: Document ID string to validate
-            
+
         Returns:
             ObjectId instance
-            
+
         Raises:
             InvalidDocumentIdError: If ID format is invalid
         """
         if not document_id or not isinstance(document_id, str):
             raise InvalidDocumentIdError(f"Invalid document ID: {document_id}")
-        
+
         try:
             return ObjectId(document_id)
         except InvalidId as e:
             raise InvalidDocumentIdError(f"Invalid ObjectId format: {document_id}") from e
-    
+
     def _coerce_reference_entry(self, value: Any) -> Optional[Dict[str, Any]]:
         """Normalize raw reference payloads into a consistent dictionary."""
         if value is None:
@@ -268,14 +440,14 @@ class DocumentService:
     async def get_documents(self, skip: int = 0, limit: int = 50) -> List[Optional[Document]]:
         """
         Retrieve multiple documents with pagination.
-        
+
         Args:
             skip: Number of documents to skip (default: 0)
             limit: Maximum number of documents to return (default: 50)
-            
+
         Returns:
             List of Document instances
-            
+
         Raises:
             DocumentServiceError: If retrieval fails
         """
@@ -303,16 +475,16 @@ class DocumentService:
                         e,
                     )
                     documents.append(None)  # Keep position but mark as failed
-            
+
             logger.info(f"Retrieved {len(documents)} documents")
             return documents
-            
+
         except ValueError:
             raise
         except Exception as e:
             logger.error(f"Failed to retrieve documents: {e}")
             raise DocumentServiceError(f"Document retrieval failed: {str(e)}")
-    
+
     async def get_document(self, document_id: str) -> Optional[Document]:
         """
         Retrieve a single document by ID.
@@ -375,7 +547,7 @@ class DocumentService:
             "organization_id": getattr(document, "organization_id", None),
             "project_id": getattr(document, "project_id", None),
         }
-    
+
     async def create_document(
         self,
         document: Optional[Document] = None,
@@ -563,7 +735,7 @@ class DocumentService:
             logger.error(f"Failed to create document: {e}")
             raise DocumentServiceError(f"Document creation failed: {str(e)}")
 
-    
+
     async def get_document_by_id(self, document_id: str) -> Optional[Document]:
         return await self.get_document(document_id)
 
@@ -618,7 +790,7 @@ class DocumentService:
             try:
                 original_subtags = list(document.subTags or [])
                 obj_ids = []
-                name_map: Dict[str, str] = {}
+                name_map = {}
                 for st in original_subtags:
                     if isinstance(st, str) and len(st) == 24:
                         try:
@@ -790,7 +962,7 @@ class DocumentService:
                 return job_id
 
         job_id = str(ObjectId())
-        job = {
+        job: Dict[str, Any] = {
             "_id": job_id,
             "document_id": document.id,
             "file_path": file_path,
@@ -798,6 +970,17 @@ class DocumentService:
             "organization_id": document.organization_id,
             "project_id": document.project_id,
             "upload_type": document.uploadType,
+            # The validated MIME from intake, carried so the worker dispatches
+            # on what the bytes actually are rather than re-sniffing them
+            # without the filename context intake had.
+            "source_mime": getattr(document, "filetype", None),
+            # Decided once, here, and honoured by every reader. Changing the
+            # flag or allowlist later affects only new work, never this job.
+            "pipeline_version": resolve_pipeline_version(
+                organization_id=document.organization_id,
+                enabled=bool(settings.UNIFIED_EXTRACTION_ENABLED),
+                canary_org_ids=settings.canary_org_id_set(),
+            ),
             "status": "queued",
             "stage": "queued",
             "attempts": 0,
@@ -806,6 +989,16 @@ class DocumentService:
             "created_at": now,
             "queued_at": now,
             "updated_at": now,
+            # Page-level resumability checkpoint. Populated after each
+            # extraction attempt so a resumed job knows exactly which pages it
+            # still owes instead of re-running the whole document.
+            "processing_state": ProcessingState.QUEUED.value,
+            "expected_page_numbers": [],
+            "resolved_page_numbers": [],
+            "remaining_page_numbers": [],
+            "review_page_numbers": [],
+            "page_attempts": {},
+            "resume_count": 0,
         }
         await db.document_processing_jobs.insert_one(job)
         await db.documents.update_one(
@@ -855,30 +1048,46 @@ class DocumentService:
             }
         return job
 
-    async def process_next_processing_jobs(self, *, limit: int = 3) -> int:
+    async def process_next_processing_jobs(
+        self, *, limit: int = 3, pipeline_versions: Optional[Set[str]] = None
+    ) -> int:
         """Claim and process queued durable jobs. Intended for worker/background loops."""
 
         await self.recover_stale_processing_jobs(limit=max(1, limit))
         processed = 0
         for _ in range(max(1, limit)):
-            job = await self._claim_next_processing_job()
+            job = await self._claim_next_processing_job(
+                pipeline_versions=pipeline_versions
+            )
             if not job:
                 break
             await self.process_document_job(str(job["_id"]), claimed_job=job)
             processed += 1
         return processed
 
-    async def _claim_next_processing_job(self) -> Optional[Dict[str, Any]]:
+    async def _claim_next_processing_job(
+        self, *, pipeline_versions: Optional[Set[str]] = None
+    ) -> Optional[Dict[str, Any]]:
         db = await self._get_db()
         now = datetime.utcnow()
+        # A restricted worker physically cannot claim the other pipeline's
+        # jobs. This is what makes a per-tenant canary real rather than a
+        # label: without it, one worker drains every tenant's queue.
+        query: Dict[str, Any] = {
+            "status": {"$in": ["queued", "retrying"]},
+            "$or": [
+                {"run_after": {"$exists": False}},
+                {"run_after": {"$lte": now}},
+            ],
+        }
+        restriction = claim_filter_for(pipeline_versions)
+        if restriction:
+            # Only wrap when actually restricting, so the unrestricted claim
+            # keeps exactly the shape it had before pipeline versioning.
+            query = {"$and": [query, restriction]}
+
         return await db.document_processing_jobs.find_one_and_update(
-            {
-                "status": {"$in": ["queued", "retrying"]},
-                "$or": [
-                    {"run_after": {"$exists": False}},
-                    {"run_after": {"$lte": now}},
-                ],
-            },
+            query,
             {
                 "$set": {
                     "status": "processing",
@@ -1016,6 +1225,39 @@ class DocumentService:
 
         document_id = str(job["document_id"])
         now = datetime.utcnow()
+        from .contract_source import is_contract_source
+        from .publication_policy import resolve_canonical_document
+
+        entry_document = await resolve_canonical_document(db, document_id)
+        if await is_contract_source(db, document_id, entry_document):
+            # Refused before anything is written: marking the document
+            # `processing` would make the projection builder see an ingest in
+            # flight, and a retried refusal would walk the job to dead-letter
+            # while holding it there. Closed once, terminally; the contract
+            # reindex is the path that re-reads a contract, promoted or not.
+            message = (
+                "Document is a contract source (a contract upload, or governed by a "
+                "Contract Master instrument); reprocess it through the contract reindex"
+            )
+            logger.warning("Document %s: %s", document_id, message)
+            await db.document_processing_jobs.update_one(
+                {"_id": job_id},
+                {
+                    "$set": {
+                        "status": "dead_lettered",
+                        "stage": "skipped_governed_contract",
+                        "error": {"message": message, "timestamp": now, "terminal": True},
+                        "updated_at": now,
+                    }
+                },
+            )
+            return False
+        # What this run is about to overwrite, so a run that turns out to be
+        # on a contract source can hand the document back as it found it.
+        await db.document_processing_jobs.update_one(
+            {"_id": job_id},
+            {"$set": {"previous_processing_status": (entry_document or {}).get("processing_status")}},
+        )
         await db.documents.update_one(
             {"_id": self._validate_document_id(document_id)},
             {
@@ -1028,6 +1270,7 @@ class DocumentService:
             },
         )
         heartbeat_task = asyncio.create_task(self._heartbeat_processing_job(job_id))
+        failure: Optional[str] = None
         try:
             ok = await self.process_document_async(
                 document_id=document_id,
@@ -1040,13 +1283,58 @@ class DocumentService:
         except Exception as exc:
             logger.exception("Document processing job failed document_id=%s job_id=%s", document_id, job_id)
             ok = False
-            await self._mark_processing_failure(job, str(exc))
+            failure = str(exc)
         finally:
             heartbeat_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await heartbeat_task
 
+        # Every status this run writes from here on - completed, retrying,
+        # failed, resumed, stored-only, human review - is decided by a check
+        # made minutes ago. The document may have become a contract source
+        # since (promotion, an upload-type edit); its status then belongs to
+        # the contract writers, and a contract extraction hold must not be
+        # lifted by this run's verdict.
+        if await self._release_run_for_contract_source(db, job_id, document_id):
+            return False
+        if failure is not None:
+            await self._mark_processing_failure(job, failure)
+
         if ok:
+            # A successful processor return may still carry deferred, failed,
+            # or unrenderable pages. Trust the durable checkpoint over the
+            # boolean: marking such a document `completed` is exactly the
+            # silent-success failure this pipeline must not repeat.
+            checkpoint = await db.document_processing_jobs.find_one({"_id": job_id}) or {}
+            checkpoint_state = checkpoint.get("processing_state")
+            if checkpoint_state == ProcessingState.PARTIALLY_PROCESSED.value:
+                if not list(checkpoint.get("remaining_page_numbers") or []):
+                    # Partial with nothing outstanding means the quality gate,
+                    # not an unextracted page, held this document back. A
+                    # resume would re-extract every page of the run to reach
+                    # the same verdict - and a resumed attempt with no retry
+                    # set rewrites every row of the run to do it. That is the
+                    # page-loss path this pipeline must not have, so it goes to
+                    # the person the gate was asking for.
+                    await self._mark_human_review(job_id, document_id, checkpoint)
+                    return False
+                await self._schedule_page_resume(job_id, document_id, checkpoint)
+                return False
+            if checkpoint_state == ProcessingState.HUMAN_REVIEW_REQUIRED.value:
+                await self._mark_human_review(job_id, document_id, checkpoint)
+                return False
+            if checkpoint_state == ProcessingState.STORED_ONLY.value:
+                await self._mark_stored_only(job_id, document_id)
+                return False
+            # Extraction finished, but `completed` also claims the indexing
+            # this run attempted finished. Embedding failures are recorded as
+            # partial failures and swallowed so the extracted text survives;
+            # reading only the checkpoint reported such a run `completed`.
+            unfinished = await self._unfinished_indexing(db, checkpoint, document_id)
+            if unfinished:
+                await self._mark_indexing_incomplete(job_id, document_id, unfinished)
+                return False
+
             completed_at = datetime.utcnow()
             await db.document_processing_jobs.update_one(
                 {"_id": job_id},
@@ -1094,6 +1382,17 @@ class DocumentService:
             return True
 
         latest = await db.document_processing_jobs.find_one({"_id": job_id})
+        if (
+            latest
+            and latest.get("processing_state")
+            == ProcessingState.HUMAN_REVIEW_REQUIRED.value
+        ):
+            # The attempt failed in a way no retry can heal - an extraction run
+            # whose page evidence and checkpoint disagree. Retrying would burn
+            # the remaining attempts re-deriving the same answer, so this goes
+            # straight to the terminal state a person can act on.
+            await self._mark_human_review(job_id, document_id, latest)
+            return False
         if latest and latest.get("status") not in {"failed", "retrying", "dead_lettered"}:
             failure_message = "Document processing failed"
             latest_error = latest.get("error")
@@ -1109,6 +1408,537 @@ class DocumentService:
                     failure_message = str(document_error["message"])
             await self._mark_processing_failure(latest, failure_message)
         return False
+
+    async def _release_run_for_contract_source(
+        self, db: Any, job_id: str, document_id: str
+    ) -> bool:
+        """End a run whose document became a contract source while it worked.
+
+        Asks ``services.contract_source`` with the document read now. If it is
+        a contract source, the job is closed the way the entry check closes it
+        and the document gets back the status this run found - only while it
+        still carries this run's own ``processing`` marker, so a status a
+        contract writer set meanwhile (an extraction hold, a reindex) is never
+        overwritten. Returns whether the run was ended. Raises like the entry
+        check if governance cannot be read: nothing is written then.
+        """
+        from .contract_source import is_contract_source
+        from .publication_policy import resolve_canonical_document
+
+        document = await resolve_canonical_document(db, document_id)
+        if not await is_contract_source(db, document_id, document):
+            return False
+        now = datetime.utcnow()
+        job = await db.document_processing_jobs.find_one({"_id": job_id}) or {}
+        await db.document_processing_jobs.update_one(
+            {"_id": job_id},
+            {
+                "$set": {
+                    "status": "dead_lettered",
+                    "stage": "skipped_governed_contract",
+                    "error": {
+                        "message": (
+                            "Document became a contract source (a contract upload, or "
+                            "governed by a Contract Master instrument) during processing; "
+                            "reprocess it through the contract reindex"
+                        ),
+                        "timestamp": now,
+                        "terminal": True,
+                    },
+                    "updated_at": now,
+                }
+            },
+        )
+        if document is not None:
+            # "processing" is what the contract projection reads as an ingest
+            # in flight; left behind by a dead-lettered run it would block the
+            # projection with nothing ever clearing it.
+            await db.documents.update_one(
+                {
+                    "_id": document["_id"],
+                    "processing_status": "processing",
+                    "processing_job_id": job_id,
+                },
+                {
+                    "$set": {
+                        "processing_status": job.get("previous_processing_status") or "queued",
+                        "updatedAt": now,
+                    }
+                },
+            )
+        logger.warning(
+            "[document_pipeline] Document %s became a contract source during "
+            "processing; the run was closed without writing its verdict",
+            document_id,
+        )
+        return True
+
+    async def _verdict_withheld_for_contract_source(
+        self,
+        db: Any,
+        document_id: str,
+        doc_oid: Any,
+        job_id: Optional[str],
+        run_marker_job_id: Optional[str],
+        status_before_run: Optional[str],
+    ) -> bool:
+        """Should process_document_async write no verdict onto this document?
+
+        Asked immediately before its terminal document write: the run's entry
+        check is minutes old, and a document that became a contract source
+        since (promotion, an upload-type edit) has its status and error owned
+        by the contract writers - a contract extraction hold must survive.
+        True means nothing was written; on the no-job path the document gets
+        back the status this run found, only while it still carries this
+        run's "processing" marker. A job's own end-of-run step
+        (``_release_run_for_contract_source``) does that for the job path.
+        """
+        from .contract_source import is_contract_source
+        from .publication_policy import resolve_canonical_document
+
+        document = await resolve_canonical_document(db, document_id)
+        if not await is_contract_source(db, document_id, document):
+            return False
+        logger.warning(
+            "[document_pipeline] Document %s became a contract source during "
+            "processing; its verdict was not written",
+            document_id,
+        )
+        if not job_id:
+            marker = {"_id": doc_oid, "processing_status": "processing"}
+            marker["processing_job_id"] = run_marker_job_id
+            await db.documents.update_one(
+                marker,
+                {
+                    "$set": {
+                        "processing_status": status_before_run or "completed",
+                        "updatedAt": datetime.utcnow(),
+                    }
+                },
+            )
+        return True
+
+    async def _schedule_page_resume(
+        self, job_id: str, document_id: str, checkpoint: Dict[str, Any]
+    ) -> None:
+        """Requeue a job that resolved some pages but still owes others."""
+        db = await self._get_db()
+        now = datetime.utcnow()
+        remaining = list(checkpoint.get("remaining_page_numbers") or [])
+        await db.document_processing_jobs.update_one(
+            {"_id": job_id},
+            {
+                "$set": {
+                    "status": "retrying",
+                    "stage": "awaiting_page_resume",
+                    "run_after": now + timedelta(seconds=5),
+                    "updated_at": now,
+                    "error": None,
+                },
+                "$inc": {"resume_count": 1},
+            },
+        )
+        # `partially_processed` is a consumable status, so it must never be
+        # written over a block the quality gate just decided: between resume
+        # attempts the document's text would otherwise be served to retrieval
+        # and drafting while a page was still failing review.
+        await db.documents.update_one(
+            {
+                "_id": self._validate_document_id(document_id),
+                "processing_status": {
+                    "$ne": ProcessingState.HUMAN_REVIEW_REQUIRED.value
+                },
+            },
+            {
+                "$set": {
+                    "processing_status": ProcessingState.PARTIALLY_PROCESSED.value,
+                    "processing_job_id": job_id,
+                    "updatedAt": now,
+                }
+            },
+        )
+        logger.info(
+            "[document_pipeline] Document %s partially processed; %s page(s) remaining %s",
+            document_id,
+            len(remaining),
+            remaining,
+        )
+
+    async def _invalidate_stale_publication(self, document_id: str) -> None:
+        """Purge artifacts an EARLIER successful run published for this document.
+
+        Defence-in-depth, deliberately not the primary containment. The
+        publication policy already denies a blocked document at every read
+        boundary - retrieval, drafting, planning, arbitration - so a stale point
+        that survives this purge is still unusable. That ordering matters: if
+        containment depended on a remote delete succeeding, a Qdrant outage
+        would silently reopen the hole this closes.
+
+        Best effort by design. A failure here is logged and swallowed rather
+        than raised, because raising would abort the transition into
+        human_review_required and leave the document in a worse state - still
+        blocked in fact, but not marked as such.
+        """
+        try:
+            db = await self._get_db()
+            raw_doc = await db.documents.find_one(
+                {"_id": self._validate_document_id(document_id)}
+            )
+            if not raw_doc:
+                return
+            from .contract_source import is_contract_source
+
+            if await is_contract_source(db, str(document_id), raw_doc):
+                # Asked again here, not trusted from the run's start: the
+                # document became a contract (or was promoted) while this run
+                # extracted, and its points and clause rows are the contract
+                # writers' - never this pipeline's to purge. An unreadable
+                # instrument collection raises, and the except below then
+                # leaves everything in place too.
+                logger.warning(
+                    "[document_pipeline] Not purging %s: it is a contract source",
+                    document_id,
+                )
+                return
+            await self._delete_qdrant_vectors(raw_doc, str(document_id))
+            await db.document_vectors.delete_many({"document_id": str(document_id)})
+            logger.info(
+                "[document_pipeline] Purged stale published vectors for %s "
+                "after a blocking extraction result",
+                document_id,
+            )
+            await self._invalidate_graph_contribution(db, raw_doc, str(document_id))
+        except Exception as exc:
+            # Logical containment still holds; this is hygiene.
+            logger.warning(
+                "[document_pipeline] Could not purge stale vectors for %s: %s. "
+                "The document remains logically non-consumable.",
+                document_id,
+                exc,
+            )
+
+    async def _invalidate_graph_contribution(
+        self, db: Any, raw_doc: Dict[str, Any], document_id: str
+    ) -> None:
+        """Remove this document's graph node only if nothing else supports it.
+
+        The node is merged on ``normCode`` alone and carries no ``document_id``,
+        so a `DETACH DELETE` keyed on the code would take every other
+        document's contribution with it - including other organisations',
+        because the key is global. Verified against a real FalkorDB in
+        `tests/integration/test_graph_invalidation_falkor.py`: deleting a shared
+        node destroyed the peer document's REPLIES_TO edge.
+
+        So deletion is conditional on there being no consumable supporter left.
+        This is the existing letter-deletion rule ("still owned by another live
+        record") plus publication state.
+
+        Logical denial is the primary containment and does not depend on this
+        succeeding: graph results are filtered by the same supporter rule at
+        read time, so a node that survives here is still not consumable.
+        """
+        from .falkor_graph_service import FalkorGraphService, normalize_letter_code
+        from .publication_policy import has_consumable_supporter
+
+        letter_no = (
+            raw_doc.get("letterNoNormalized")
+            or raw_doc.get("letterNo")
+            or raw_doc.get("letter_no")
+        )
+        norm_code = normalize_letter_code(str(letter_no or ""))
+        if not norm_code:
+            return
+
+        if await has_consumable_supporter(db, norm_code):
+            logger.info(
+                "[document_pipeline] Keeping graph node %s after blocking %s: "
+                "another consumable document still supports it",
+                norm_code,
+                document_id,
+            )
+            return
+
+        FalkorGraphService().delete_letter(norm_code)
+        logger.info(
+            "[document_pipeline] Removed graph node %s: its last consumable "
+            "supporter (%s) is now blocked",
+            norm_code,
+            document_id,
+        )
+
+    async def _mark_human_review(
+        self, job_id: str, document_id: str, checkpoint: Dict[str, Any]
+    ) -> None:
+        """Terminal, non-success state: automated recovery cannot finish this."""
+        db = await self._get_db()
+        now = datetime.utcnow()
+        if await self._release_run_for_contract_source(db, job_id, document_id):
+            # Its status and evidence belong to the contract writers: not
+            # marked for review, not purged.
+            return
+        # Two reasons a page reaches a person, recorded separately: extraction
+        # still owes it (remaining), or the quality gate failed what extraction
+        # produced (review). A gate-failed page is never in `remaining`, so a
+        # message built from that list alone reported "0 page(s)" for a review
+        # the gate raised.
+        unresolved = sorted({int(n) for n in checkpoint.get("remaining_page_numbers") or []})
+        quality = sorted({int(n) for n in checkpoint.get("review_page_numbers") or []})
+        pages = sorted(set(unresolved) | set(quality))
+        await db.document_processing_jobs.update_one(
+            {"_id": job_id},
+            {
+                "$set": {
+                    "status": ProcessingState.HUMAN_REVIEW_REQUIRED.value,
+                    "stage": ProcessingState.HUMAN_REVIEW_REQUIRED.value,
+                    "updated_at": now,
+                    "completed_at": now,
+                }
+            },
+        )
+        await db.documents.update_one(
+            {"_id": self._validate_document_id(document_id)},
+            {
+                "$set": {
+                    "processing_status": ProcessingState.HUMAN_REVIEW_REQUIRED.value,
+                    "processing_job_id": job_id,
+                    "updatedAt": now,
+                    "processing_error": {
+                        "message": _human_review_message(unresolved, quality),
+                        "pages": pages,
+                        "unresolved_pages": unresolved,
+                        "quality_review_pages": quality,
+                        "timestamp": now,
+                        "terminal": True,
+                    },
+                }
+            },
+        )
+        logger.warning(
+            "[document_pipeline] Document %s needs human review; pages %s "
+            "(unresolved %s, quality review %s)",
+            document_id,
+            pages,
+            unresolved,
+            quality,
+        )
+
+        # Only after the blocking state is durably persisted. If this ran first
+        # and then crashed, the document would be physically unpublished but
+        # still marked consumable - stale-safe, but wrong in the other
+        # direction. Persisting the block first means every intermediate state
+        # is non-consumable.
+        await self._invalidate_stale_publication(document_id)
+
+    async def _mark_stored_only(self, job_id: str, document_id: str) -> None:
+        """Terminal, non-success: stored deliberately, never extracted."""
+        db = await self._get_db()
+        now = datetime.utcnow()
+        await db.document_processing_jobs.update_one(
+            {"_id": job_id},
+            {
+                "$set": {
+                    "status": ProcessingState.STORED_ONLY.value,
+                    "stage": ProcessingState.STORED_ONLY.value,
+                    "completed_at": now,
+                    "updated_at": now,
+                    "error": None,
+                }
+            },
+        )
+        await db.documents.update_one(
+            {"_id": self._validate_document_id(document_id)},
+            {
+                "$set": {
+                    "processing_status": ProcessingState.STORED_ONLY.value,
+                    "processing_job_id": job_id,
+                    "processing_error": None,
+                    "updatedAt": now,
+                }
+            },
+        )
+        logger.info(
+            "[document_pipeline] Document %s stored without extraction", document_id
+        )
+
+    async def _unfinished_indexing(
+        self, db: Any, job: Dict[str, Any], document_id: str
+    ) -> Dict[str, str]:
+        """The downstream stages this run recorded as not finished.
+
+        Read from what the run itself wrote: the embedding failure kept in the
+        job's ``metadata.partial_failures``, and the document's
+        ``vector_sync_status`` row. Empty means indexing finished, or was not
+        required (switched off, nothing to index, a confirmed duplicate).
+        """
+        stages: Dict[str, str] = {}
+        partial = (job.get("metadata") or {}).get("partial_failures") or {}
+        if isinstance(partial, dict) and partial.get("embeddings"):
+            stages["embeddings"] = "failed"
+
+        collection = getattr(db, "vector_sync_status", None)
+        if collection is None:
+            return stages
+        try:
+            row = await collection.find_one({"document_id": str(document_id)})
+            sync_status = str((row or {}).get("sync_status") or "")
+            if sync_status == "deferred":
+                stored = await db.documents.find_one(
+                    {"_id": self._validate_document_id(document_id)},
+                    {"duplicate_status": 1},
+                )
+                # A confirmed duplicate is never indexed: deferred is final.
+                if (stored or {}).get("duplicate_status") == CLASSIFICATION_DUPLICATE:
+                    sync_status = ""
+        except Exception:
+            logger.warning(
+                "[document_pipeline] Could not read the vector sync outcome for %s",
+                document_id,
+                exc_info=True,
+            )
+            sync_status = "unknown"
+        if sync_status in _UNFINISHED_VECTOR_SYNC:
+            stages["vector_sync"] = sync_status
+        return stages
+
+    async def _mark_indexing_incomplete(
+        self, job_id: str, document_id: str, stages: Dict[str, str]
+    ) -> None:
+        """Terminal, non-success: text extracted, indexing did not finish.
+
+        ``partially_processed`` is the existing state for "usable extraction,
+        required processing incomplete". It is deliberately not human review:
+        nothing was judged wrong with the content, so the document stays
+        consumable and no earlier publication is retracted. The job is not
+        retried, because a retry would re-run the whole extraction.
+        """
+        db = await self._get_db()
+        now = datetime.utcnow()
+        detail = "; ".join(f"{stage}: {outcome}" for stage, outcome in sorted(stages.items()))
+        error = {
+            "message": (
+                f"Text was extracted, but indexing did not finish ({detail}). "
+                "Reprocess the document once the cause is fixed."
+            ),
+            "stages": dict(stages),
+            "timestamp": now,
+            "terminal": True,
+        }
+        await db.document_processing_jobs.update_one(
+            {"_id": job_id},
+            {
+                "$set": {
+                    "status": ProcessingState.PARTIALLY_PROCESSED.value,
+                    "stage": "indexing_incomplete",
+                    "completed_at": now,
+                    "updated_at": now,
+                    "error": error,
+                }
+            },
+        )
+        await db.documents.update_one(
+            {"_id": self._validate_document_id(document_id)},
+            {
+                "$set": {
+                    "processing_status": ProcessingState.PARTIALLY_PROCESSED.value,
+                    "processing_job_id": job_id,
+                    "processing_error": error,
+                    "updatedAt": now,
+                }
+            },
+        )
+        logger.warning(
+            "[document_pipeline] Document %s extracted but indexing incomplete: %s",
+            document_id,
+            detail,
+        )
+
+    async def _checkpoint_extraction_attempt(
+        self,
+        db: Any,
+        job_id: Optional[str],
+        job_record: Dict[str, Any],
+        result: Any,
+    ) -> None:
+        """Persist what this extraction attempt resolved and what it still owes.
+
+        Written before the job's terminal status is decided, so a crash between
+        the two leaves the checkpoint authoritative and the job reclaimable -
+        the resumed attempt re-runs only the remaining pages into the same
+        extraction run.
+        """
+        if not job_id or db is None:
+            return
+
+        # An archive is stored deliberately without extraction. Record that as
+        # its own terminal state so nothing later reads it as a completion.
+        if getattr(result, "processing_state", None) == ProcessingState.STORED_ONLY.value:
+            try:
+                await db.document_processing_jobs.update_one(
+                    {"_id": job_id},
+                    {
+                        "$set": {
+                            "processing_state": ProcessingState.STORED_ONLY.value,
+                            "updated_at": datetime.utcnow(),
+                        }
+                    },
+                )
+            except Exception:
+                logger.exception(
+                    "Unable to persist stored-only state for job %s", job_id
+                )
+            return
+
+        # A processor-declared terminal review state, such as an extraction run
+        # whose page evidence contradicts this job's checkpoint. Recorded with
+        # the pages it could not account for, and deliberately not retried:
+        # every further attempt would reach the same contradiction.
+        if (
+            getattr(result, "processing_state", None)
+            == ProcessingState.HUMAN_REVIEW_REQUIRED.value
+        ):
+            try:
+                await db.document_processing_jobs.update_one(
+                    {"_id": job_id},
+                    {
+                        "$set": {
+                            "processing_state": (
+                                ProcessingState.HUMAN_REVIEW_REQUIRED.value
+                            ),
+                            "remaining_page_numbers": list(
+                                getattr(result, "pages_human_review", []) or []
+                            ),
+                            "updated_at": datetime.utcnow(),
+                        }
+                    },
+                )
+            except Exception:
+                logger.exception(
+                    "Unable to persist human-review state for job %s", job_id
+                )
+            return
+
+        extraction = getattr(result, "extraction_result", None)
+        if extraction is None:
+            return
+
+        attempts = int(job_record.get("attempts") or 0)
+        max_attempts = int(job_record.get("max_attempts") or 3)
+        outcome = build_attempt_outcome(
+            extraction,
+            prior_page_attempts=job_record.get("page_attempts") or {},
+            attempts_exhausted=attempts >= max_attempts,
+        )
+
+        checkpoint = outcome.to_checkpoint()
+        checkpoint["updated_at"] = datetime.utcnow()
+        try:
+            await db.document_processing_jobs.update_one(
+                {"_id": job_id}, {"$set": checkpoint}
+            )
+        except Exception:
+            logger.exception(
+                "Unable to persist extraction checkpoint for job %s", job_id
+            )
 
     async def _mark_processing_failure(self, job: Dict[str, Any], message: str) -> None:
         db = await self._get_db()
@@ -1163,6 +1993,16 @@ class DocumentService:
         except Exception:
             logger.debug("Failed to emit processing failure audit for %s", job.get("document_id"), exc_info=True)
 
+    async def is_governed_contract(self, document_id: str) -> bool:
+        """True for a contract source: a contract upload, or a document a
+        Contract Master instrument names (``services.contract_source``)."""
+        from .contract_source import is_contract_source
+        from .publication_policy import resolve_canonical_document
+
+        db = await self._get_db()
+        document = await resolve_canonical_document(db, document_id)
+        return await is_contract_source(db, document_id, document)
+
     async def process_document_async(
         self,
         document_id: str,
@@ -1184,14 +2024,51 @@ class DocumentService:
         metadata = None
         metadata_source: Optional[str] = None
         metadata_references: List[Dict[str, Any]] = []
+        references_authoritative = False
+        # The extraction result as published to graph/evidence stores: the
+        # parsed metadata with human-edited and kept stored values put back.
+        publication_metadata: Any = None
+        derived_publication_authorized = False
+        initial_publication_source: Optional[Dict[str, Any]] = None
+        initial_publication_authorized = False
         db: Optional[Database] = None
         doc_oid: Optional[ObjectId] = None
+        status_before_run: Optional[str] = None
+        run_marker_job_id: Optional[str] = None
         try:
             db = await self._get_db()
             doc_oid = self._validate_document_id(document_id)
             stored = await db.documents.find_one({"_id": doc_oid})
             if not stored:
                 logger.warning("Document %s not found for processing", document_id)
+                return False
+            from .publication_policy import held_by_contract_extraction
+
+            if held_by_contract_extraction(stored):
+                # The general pipeline would write `processing` and then a
+                # settled state over the hold, making a contract with unread
+                # pages consumable. Only the contract path's own extraction may
+                # lift that hold. Nothing is written here, deliberately.
+                logger.warning(
+                    "Document %s is held by contract extraction; the general "
+                    "pipeline will not reprocess it",
+                    document_id,
+                )
+                return False
+            from .contract_source import is_contract_source
+
+            if await is_contract_source(db, document_id, stored):
+                # The general pipeline would replace the clause rows evidence
+                # reads with token chunks - while the instrument stays CURRENT
+                # (evidence answering empty from a "current" projection), or,
+                # before promotion, deleting the clause points and their page
+                # provenance. A contract is re-read by the contract reindex,
+                # whose completion re-opens the reprojection.
+                logger.warning(
+                    "Document %s is a contract source; the general pipeline will "
+                    "not reprocess it",
+                    document_id,
+                )
                 return False
             if stored.get("lifecycle_state") == "deleted":
                 now = datetime.utcnow()
@@ -1229,6 +2106,11 @@ class DocumentService:
                 )
                 return False
 
+            from .publication_policy import is_consumable
+
+            initial_publication_source = stored
+            initial_publication_authorized = is_consumable(stored)
+
             document = Document(**stored)
             org_id = organization_id or document.organization_id
             proj_id = project_id or document.project_id
@@ -1246,12 +2128,17 @@ class DocumentService:
                 upload,
             )
             now = datetime.utcnow()
+            # Handed back if the document turns out to be a contract source by
+            # the time this run would write its verdict (no-job path only; a
+            # job hands back what it recorded at claim).
+            status_before_run = getattr(document, "processing_status", None)
+            run_marker_job_id = job_id or getattr(document, "processing_job_id", None)
             await db.documents.update_one(
                 {"_id": doc_oid},
                 {
                     "$set": {
                         "processing_status": "processing",
-                        "processing_job_id": job_id or getattr(document, "processing_job_id", None),
+                        "processing_job_id": run_marker_job_id,
                         "updatedAt": now,
                     }
                 },
@@ -1295,12 +2182,38 @@ class DocumentService:
                     document_id,
                     f"{org_id}/{proj_id}",
                 )
+                job_record = (
+                    await db.document_processing_jobs.find_one({"_id": job_id})
+                    if job_id
+                    else None
+                ) or {}
+                # Only re-run the pages this job still owes. On the first
+                # attempt this is empty, meaning "decide per page as usual".
+                remaining_pages = list(job_record.get("remaining_page_numbers") or [])
+
                 result = await processor.process_document(
                     pdf_path=file_path,
                     path_structure=f"{org_id}/{proj_id}",
                     upload_type=upload,
                     document_id=document_id,
                     skip_embeddings=duplicate_pending,
+                    organization_id=org_id,
+                    project_id=proj_id,
+                    # Stable across retries of the same job, so a resumed
+                    # attempt upserts into the same extraction run rather than
+                    # starting a fresh one and orphaning the earlier pages.
+                    extraction_run_id=str(job_id) if job_id else None,
+                    retry_pages=remaining_pages or None,
+                    source_mime=(
+                        job_record.get("source_mime")
+                        or getattr(document, "filetype", None)
+                    ),
+                    # Routing boundary: the job's persisted version decides the
+                    # extractor, never current configuration.
+                    pipeline_version=pipeline_version_of(job_record),
+                )
+                await self._checkpoint_extraction_attempt(
+                    db, job_id, job_record, result
                 )
             except DocumentProcessorError as exc:
                 logger.error("Document processor failed for %s: %s", document_id, exc)
@@ -1327,19 +2240,75 @@ class DocumentService:
                 )
                 metadata = getattr(result, "metadata", None)
                 update_fields["ocrEnabled"] = True
-                update_fields["processing_status"] = "metadata_extracted"
+                # `success` means extraction ran; `publishable` means the gate
+                # raised no unresolved blocking finding. Writing the settled
+                # state on `success` alone marked a blocked document
+                # `metadata_extracted` - a consumable state - and, on the
+                # no-job path below, nothing ever corrected it.
+                #
+                # That path is reachable: POST /documents/{id}/process and the
+                # internal variant call process_document_async without a
+                # job_id, and _checkpoint_extraction_attempt returns early
+                # without one, so _mark_human_review never runs. The document
+                # stayed draftable forever.
+                if getattr(result, "publishable", True):
+                    update_fields["processing_status"] = "metadata_extracted"
+                else:
+                    update_fields["processing_status"] = (
+                        ProcessingState.HUMAN_REVIEW_REQUIRED.value
+                    )
+                    update_fields["processing_error"] = {
+                        "message": (
+                            f"{len(getattr(result, 'pages_human_review', []) or [])} "
+                            "page(s) need review; publication withheld"
+                        ),
+                        "pages": list(getattr(result, "pages_human_review", []) or []),
+                        "timestamp": datetime.utcnow(),
+                        "terminal": True,
+                    }
+                    logger.warning(
+                        "[document_pipeline] %s extracted but not publishable; "
+                        "marking human_review_required",
+                        document_id,
+                    )
                 update_fields["metadata_source"] = metadata_source
                 update_fields["processing_metadata"] = {
                     "processed_at": datetime.utcnow(),
                     "processing_time": getattr(result, "processing_time", None),
                     "chunks_created": getattr(result, "chunks_created", None),
                     "metadata_source": metadata_source,
+                    # Which pipeline produced this text, and how each page was
+                    # read. A canary is audited from these; without them an OCR
+                    # failure and a native page look the same on the record.
+                    "pipeline_version": getattr(result, "pipeline_version", None),
+                    "page_extraction": _page_extraction_record(result),
                 }
                 partial_failures = getattr(result, "partial_failures", None) or {}
                 if partial_failures:
                     update_fields["processing_metadata"]["partial_failures"] = partial_failures
 
             if metadata:
+                metadata_quality = assess_metadata_quality(
+                    metadata,
+                    metadata_source=metadata_source,
+                    partial_failures=getattr(result, "partial_failures", None),
+                )
+                references_authoritative = metadata_quality["references_authoritative"]
+                update_fields["metadata_quality"] = metadata_quality
+                if metadata_quality["degraded"]:
+                    logger.warning(
+                        "[document_pipeline] Metadata for %s is degraded (%s); "
+                        "existing reference links are kept unless references were authoritative",
+                        document_id,
+                        ", ".join(metadata_quality["warnings"]),
+                    )
+                    processing_metadata = update_fields.get("processing_metadata")
+                    if isinstance(processing_metadata, dict):
+                        processing_metadata.setdefault("partial_failures", {})["metadata_parse"] = {
+                            "status": metadata_quality["status"],
+                            "warnings": metadata_quality["warnings"],
+                            "field_failures": metadata_quality["field_failures"],
+                        }
                 if getattr(metadata, "summary", None):
                     update_fields["summary"] = metadata.summary
                 if getattr(metadata, "keywords", None):
@@ -1351,10 +2320,14 @@ class DocumentService:
                     normalized_refs = self._normalize_metadata_references(
                         metadata_reference_values
                     )
-                    update_fields["reference"] = normalized_refs
-                    metadata_references = normalized_refs
-                if getattr(metadata, "full_content", None):
-                    update_fields["full_text"] = metadata.full_content
+                    # A degraded extraction's references are "unknown", not
+                    # "cites nothing": the stored list and links stay as-is.
+                    if references_authoritative:
+                        update_fields["reference"] = normalized_refs
+                        metadata_references = normalized_refs
+                # Source text when it was complete, the report's Item 25 only
+                # as the fallback - one rule shared with DatabaseService.
+                update_fields.update(full_text_updates(metadata))
                 if getattr(metadata, "subject", None):
                     update_fields["subject"] = metadata.subject
                 if getattr(metadata, "letter_no", None):
@@ -1370,31 +2343,57 @@ class DocumentService:
                     except Exception:
                         logger.debug("Unable to parse metadata date for %s", document_id)
                 update_fields.update(extracted_metadata_updates(metadata))
+                # Re-read: OCR and LLM work takes minutes, and a person may have
+                # edited the document meanwhile. Protection must see that edit.
+                current_stored = await db.documents.find_one({"_id": doc_oid}) or stored
+                kept_keys: List[str] = []
+                merge_degraded_snapshot(update_fields, current_stored, metadata_quality)
+                kept_human_fields = protect_human_edited_fields(
+                    update_fields, current_stored, dropped_keys=kept_keys
+                )
+                kept_on_degraded = keep_stored_values_on_degraded_source(
+                    update_fields, current_stored, metadata_quality, dropped_keys=kept_keys
+                )
+                publication_metadata = metadata_for_publication(
+                    metadata, current_stored, kept_keys
+                )
+                if kept_human_fields or kept_on_degraded:
+                    logger.info(
+                        "[document_pipeline] Kept stored values for %s: human-edited=%s, "
+                        "degraded-source=%s",
+                        document_id,
+                        ", ".join(kept_human_fields) or "-",
+                        ", ".join(kept_on_degraded) or "-",
+                    )
 
                 graph_document_payload = document.model_dump(by_alias=True)
                 graph_document_payload.update(update_fields)
-                if not duplicate_pending:
-                    try:
-                        await self.graph_ingestion.ingest_document(
+                # The second publication boundary. The processor already
+                # decided publishability from the quality outcome; this honours
+                # the same decision rather than re-deriving it, so a page the
+                # gate failed cannot be graph-published while its review flag
+                # is still being written.
+                publishable = getattr(result, "publishable", True)
+                if not publishable:
+                    logger.warning(
+                        "[document_pipeline] Withholding graph publication for %s: "
+                        "unresolved extraction-quality findings",
+                        document_id,
+                    )
+                if (
+                    not duplicate_pending
+                    and publishable
+                    and initial_publication_authorized
+                ):
+                    derived_publication_authorized = (
+                        await self._publish_graph_and_evidence_from_current(
                             document_id=document_id,
-                            document_data=graph_document_payload,
-                            metadata=metadata,
+                            extracted_payload=graph_document_payload,
+                            metadata=publication_metadata or metadata,
                             metadata_source=metadata_source,
                             upload_type=upload,
                         )
-                    except Exception:
-                        logger.debug("Graph ingestion failed for %s", document_id, exc_info=True)
-
-                    try:
-                        await self.evidence_graph.ingest_document_metadata(
-                            document_id=document_id,
-                            document_data=graph_document_payload,
-                            metadata=metadata,
-                            metadata_source=metadata_source,
-                            upload_type=upload,
-                        )
-                    except Exception:
-                        logger.debug("Evidence graph extraction failed for %s", document_id, exc_info=True)
+                    )
 
                 if getattr(result, "processed_path", None):
                     update_fields["processed_path"] = result.processed_path
@@ -1403,8 +2402,41 @@ class DocumentService:
                 update_fields["processing_error"] = {
                     "message": getattr(result, "error", "Document processing failed"),
                     "timestamp": datetime.utcnow(),
+                    "pipeline_version": getattr(result, "pipeline_version", None),
                 }
 
+            if metadata is not None and publishable and not derived_publication_authorized:
+                # A terminal authority decision may have arrived after the
+                # extractor's earlier snapshot.  Do not overwrite that current
+                # decision with the stale successful-run status, or the later
+                # reference/Falkor refresh would re-authorize the blocked source.
+                from .publication_policy import is_consumable, resolve_canonical_document
+
+                current = await resolve_canonical_document(db, document_id)
+                authority_source = (
+                    current
+                    if current is not None and not is_consumable(current)
+                    else initial_publication_source
+                    if initial_publication_source is not None
+                    and not initial_publication_authorized
+                    else None
+                )
+                if authority_source is not None:
+                    for field in (
+                        "processing_status",
+                        "duplicate_status",
+                        "lifecycle_state",
+                        "processing_error",
+                    ):
+                        if field in authority_source:
+                            update_fields[field] = authority_source[field]
+                        else:
+                            update_fields.pop(field, None)
+
+            if await self._verdict_withheld_for_contract_source(
+                db, document_id, doc_oid, job_id, run_marker_job_id, status_before_run
+            ):
+                return False
             await db.documents.update_one({"_id": doc_oid}, {"$set": update_fields})
             logger.info("[document_pipeline] Database record updated for %s", document_id)
             if job_id:
@@ -1455,41 +2487,39 @@ class DocumentService:
                 except Exception:
                     logger.exception("Deferred embedding creation failed for %s", document_id)
                 if metadata:
-                    try:
-                        await self.graph_ingestion.ingest_document(
+                    derived_publication_authorized = (
+                        await self._publish_graph_and_evidence_from_current(
                             document_id=document_id,
-                            document_data=graph_document_payload,
-                            metadata=metadata,
+                            extracted_payload=graph_document_payload,
+                            metadata=publication_metadata or metadata,
                             metadata_source=metadata_source,
                             upload_type=upload,
                         )
-                    except Exception:
-                        logger.debug("Graph ingestion failed for %s", document_id, exc_info=True)
-                    try:
-                        await self.evidence_graph.ingest_document_metadata(
-                            document_id=document_id,
-                            document_data=graph_document_payload,
-                            metadata=metadata,
-                            metadata_source=metadata_source,
-                            upload_type=upload,
-                        )
-                    except Exception:
-                        logger.debug("Evidence graph extraction failed for %s", document_id, exc_info=True)
+                    )
 
-            if metadata is not None:
+            if metadata is not None and derived_publication_authorized:
                 try:
                     if job_id:
                         await db.document_processing_jobs.update_one(
                             {"_id": job_id},
                             {"$set": {"stage": "syncing_references", "updated_at": datetime.utcnow()}},
                         )
-                    await self.reference_sync_service.sync_bidirectional(
-                        document_id=document_id,
-                        references=metadata_references,
-                        source="parser",
-                        default_link_type="indirect",
-                        clear_existing=True,
-                    )
+                    if references_authoritative:
+                        # Bucket-replace: only an authoritative result may
+                        # remove or clear existing parser links.
+                        await self.reference_sync_service.sync_bidirectional(
+                            document_id=document_id,
+                            references=metadata_references,
+                            source="parser",
+                            default_link_type="indirect",
+                            clear_existing=True,
+                        )
+                    else:
+                        logger.warning(
+                            "[document_pipeline] Reference extraction for %s was not "
+                            "authoritative; existing reference links kept",
+                            document_id,
+                        )
                 except ReferenceSyncError as exc:
                     raise DocumentProcessingError(
                         "Metadata was saved, but the extracted references could not be linked. "
@@ -1512,7 +2542,7 @@ class DocumentService:
                     )
                 await self._sync_current_document_to_falkor(
                     document_id,
-                    metadata=metadata,
+                    metadata=publication_metadata or metadata,
                     upload_type=upload,
                     raise_on_error=True,
                 )
@@ -1524,7 +2554,18 @@ class DocumentService:
                 "timestamp": datetime.utcnow(),
             }
             try:
-                if db is not None and doc_oid is not None:
+                if (
+                    db is not None
+                    and doc_oid is not None
+                    and not await self._verdict_withheld_for_contract_source(
+                        db,
+                        document_id,
+                        doc_oid,
+                        job_id,
+                        run_marker_job_id,
+                        status_before_run,
+                    )
+                ):
                     await db.documents.update_one(
                         {"_id": doc_oid},
                         {
@@ -1636,7 +2677,7 @@ class DocumentService:
             except InvalidDocumentIdError:
                 target_data = await db.documents.find_one({"_id": ref.documentId})
 
-            entry: Dict[str, Any] = {
+            entry = {
                 "id": ref.documentId,
                 "documentId": ref.documentId,
                 "linkType": ref.linkType,
@@ -1802,15 +2843,16 @@ class DocumentService:
         references = await self.list_references(document_id)
         return list(references.get("linked", []))
 
-    async def get_documents_by_ids(self, document_ids: List[str]) -> List[Document]:
-        """Fetch documents for the provided identifiers preserving the requested order."""
-        if not document_ids:
-            return []
+    def _id_match_query(self, document_ids: List[str]) -> Optional[Dict[str, Any]]:
+        """Build the `_id` clause for a list of identifiers, or None if empty.
 
-        db = await self._get_db()
+        Mongo stores document ids in two shapes here, so both are matched. Kept
+        as one helper because the scoped and unscoped readers must agree on
+        which rows an id list means; two copies would drift.
+        """
         normalized_ids: List[ObjectId] = []
         string_ids: List[str] = []
-        for raw_id in document_ids:
+        for raw_id in document_ids or []:
             if not raw_id:
                 continue
             try:
@@ -1825,9 +2867,153 @@ class DocumentService:
             filters.append({"_id": {"$in": string_ids}})
 
         if not filters:
+            return None
+        return {"$or": filters} if len(filters) > 1 else filters[0]
+
+    def _actor_scope_filter(
+        self,
+        current_user: Any,
+        *,
+        organization_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Canonical row visibility for `documents`, or None meaning deny all.
+
+        Authority comes from the ACTOR's entitlement through
+        `core.security.build_scope_query`, the single row-visibility primitive.
+        `organization_id` / `project_id` are narrowing INSIDE that entitlement -
+        a value outside it denies every row - and are never the authority
+        source. No role name is read here.
+        """
+        if current_user is None:
+            return None
+
+        from ..core.security import build_scope_query
+
+        return build_scope_query(
+            current_user,
+            organization_id=organization_id,
+            project_id=project_id,
+        )
+
+    async def _authorized_documents(
+        self,
+        match: Dict[str, Any],
+        current_user: Any,
+        *,
+        organization_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+        sort_field: Optional[str] = None,
+        sort_direction: int = -1,
+        limit: Optional[int] = None,
+    ) -> List[Document]:
+        """Rows matching `match` that the actor may see AND may consume.
+
+        Two INDEPENDENT gates, neither a substitute for the other:
+
+        * scope - canonical entitlement, applied in the query itself;
+        * publication authority - canonical `is_consumable`, applied to the raw
+          Mongo row before anything is parsed or serialized.
+
+        `is_consumable` reads the CANONICAL `documents` row here, so it is the
+        correct positive primitive; `resolve_document_authority` exists for
+        derived records that carry only a `document_id` and would otherwise
+        make the guard vacuous.
+
+        Filtering happens before serialization, deliberately. Stripping fields
+        from an unauthorised row still discloses its id, filename and
+        existence.
+        """
+        from .publication_policy import is_consumable
+
+        scope = self._actor_scope_filter(
+            current_user,
+            organization_id=organization_id,
+            project_id=project_id,
+        )
+        if scope is None:
             return []
 
-        query = {"$or": filters} if len(filters) > 1 else filters[0]
+        query: Dict[str, Any] = {"$and": [match, scope]} if scope else dict(match)
+
+        db = await self._get_db()
+        cursor = db.documents.find(query)
+        if sort_field:
+            cursor = cursor.sort(sort_field, sort_direction)
+        # Over-fetch: the publication gate runs after the query, so a blocked
+        # row must not consume one of the caller's slots.
+        fetch = None if limit is None else max(limit * 4, limit)
+        if fetch is not None:
+            cursor = cursor.limit(fetch)
+        raw_documents = await cursor.to_list(length=fetch)
+
+        documents: List[Document] = []
+        for raw in raw_documents:
+            if not is_consumable(raw):
+                continue
+            try:
+                documents.append(Document(**raw))
+            except Exception:
+                continue
+            if limit is not None and len(documents) >= limit:
+                break
+        return documents
+
+    async def get_documents_by_ids_in_scope(
+        self,
+        document_ids: List[str],
+        current_user: Any,
+        organization_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> List[Document]:
+        """`get_documents_by_ids` bounded by actor scope and publication authority.
+
+        A curated id list is not authority: whoever stored it is not
+        necessarily the caller reading it, and a document's publication state
+        can turn adverse after it was curated. Ids that resolve to no
+        authorised row simply vanish - fail closed, no placeholder.
+        """
+        if not document_ids:
+            return []
+
+        id_query = self._id_match_query(document_ids)
+        if id_query is None:
+            return []
+
+        documents = await self._authorized_documents(
+            id_query,
+            current_user,
+            organization_id=organization_id,
+            project_id=project_id,
+        )
+
+        by_id: Dict[str, Document] = {str(doc.id): doc for doc in documents}
+        ordered: List[Document] = []
+        for identifier in document_ids:
+            doc = by_id.get(str(identifier))
+            if doc:
+                ordered.append(doc)
+        return ordered
+
+    async def get_documents_by_ids(self, document_ids: List[str]) -> List[Document]:
+        """Fetch documents for the provided identifiers preserving the requested order.
+
+        NOT scope-bounded. Callers that serve the result to a human must use
+        `get_documents_by_ids_in_scope` instead.
+        """
+        if not document_ids:
+            return []
+
+        db = await self._get_db()
+        id_query = self._id_match_query(document_ids)
+        if id_query is None:
+            return []
+
+        # Exclude soft-deleted rows, for parity with `get_document`. Without
+        # this, a stored `context_document_ids` list kept resurrecting deleted
+        # documents into downstream consumers long after the deletion cascade
+        # purged them.
+        query = {"$and": [id_query, {"lifecycle_state": {"$ne": "deleted"}}]}
         cursor = db.documents.find(query)
         raw_documents = await cursor.to_list(length=None)
 
@@ -1849,26 +3035,35 @@ class DocumentService:
     async def list_documents_by_letter_no(
         self,
         letter_no: str,
+        current_user: Any,
         limit: int = 10,
+        organization_id: Optional[str] = None,
+        project_id: Optional[str] = None,
     ) -> List[Document]:
-        """Return recent documents that share the given letter number."""
+        """Recent AUTHORISED documents that share the given letter number.
+
+        `letterNo` is a global string. It collides across projects and across
+        organisations, so matching it is an association, never tenant
+        authority: this used to be `db.documents.find({"letterNo": letter_no})`
+        with no actor at all, and a caller authorised for one letter received
+        every colliding document in every tenant, summaries included.
+
+        `current_user` therefore carries NO DEFAULT. A generic reader over a
+        global key must fail closed by construction rather than by each caller
+        remembering to pass a filter.
+        """
         if not letter_no:
             return []
 
-        db = await self._get_db()
-        cursor = (
-            db.documents.find({"letterNo": letter_no})
-            .sort("createdAt", -1)
-            .limit(limit)
+        return await self._authorized_documents(
+            {"letterNo": letter_no},
+            current_user,
+            organization_id=organization_id,
+            project_id=project_id,
+            sort_field="createdAt",
+            sort_direction=-1,
+            limit=limit,
         )
-        raw_documents = await cursor.to_list(length=limit)
-        documents: List[Document] = []
-        for raw in raw_documents:
-            try:
-                documents.append(Document(**raw))
-            except Exception:
-                continue
-        return documents
 
     # ---------------------------------------------
     # Comments support for documents (used by FE)
@@ -2017,26 +3212,26 @@ class DocumentService:
     ) -> Optional[Document]:
         """
         Update an existing document.
-        
+
         Args:
             document_id: Document ID string
             updated_document: Document with updated data
-            
+
         Returns:
             Updated document if successful, None if document not found
-            
+
         Raises:
             DocumentServiceError: If update fails
             InvalidDocumentIdError: If document ID is invalid
         """
         try:
             doc_oid = self._validate_document_id(document_id)
-            
+
             if not isinstance(updated_document, Document):
                 raise ValueError("updated_document must be a Document instance")
-            
+
             logger.info(f"Updating document: {document_id}")
-            
+
             # Convert to dict and exclude unset values
             update_dict = updated_document.model_dump(
                 by_alias=True,
@@ -2053,11 +3248,11 @@ class DocumentService:
                 update_dict["letterNoNormalized"] = (
                     normalize_letter_code(str(letter_value)) if letter_value else None
                 )
-            
+
             if not update_dict:
                 logger.warning(f"No fields to update for document: {document_id}")
                 return await self.get_document(document_id)
-            
+
             db = await self._get_db()
             update_dict["updatedAt"] = datetime.utcnow()
             query: Dict[str, Any] = {"_id": doc_oid, "lifecycle_state": {"$ne": "deleted"}}
@@ -2067,7 +3262,7 @@ class DocumentService:
                 query,
                 {"$set": update_dict, "$inc": {"_revision": 1}}
             )
-            
+
             if result.matched_count == 0:
                 if expected_revision is not None:
                     current_revision = await self.get_document_revision(document_id)
@@ -2078,15 +3273,15 @@ class DocumentService:
                         )
                 logger.info(f"Document not found for update: {document_id}")
                 return None
-            
+
             if result.modified_count == 0:
                 logger.info(f"Document not modified (no changes): {document_id}")
             else:
                 logger.info(f"Updated document: {document_id}")
-            
+
             # Return the updated document
             return await self.get_document(document_id)
-            
+
         except InvalidDocumentIdError:
             raise
         except ValueError:
@@ -2115,6 +3310,14 @@ class DocumentService:
             except Exception:
                 pass
 
+            db = await self._get_db()
+            existing: Dict[str, Any] = {}
+            for candidate in candidates:
+                found = await db.documents.find_one({"_id": candidate})
+                if found:
+                    existing = found
+                    break
+
             now = datetime.utcnow()
             set_payload: Dict[str, Any] = {
                 **update_fields,
@@ -2122,12 +3325,15 @@ class DocumentService:
                 "updated_at": now,
                 "summary_metadata_updated_at": now,
                 "manual_summary_metadata_override": True,
+                # Per-field marker: reprocessing keeps exactly these fields.
+                "human_edited_fields": merge_human_edited_fields(
+                    existing, update_fields.keys()
+                ),
             }
             if updated_by:
                 set_payload["updated_by"] = updated_by
                 set_payload["summary_metadata_updated_by"] = updated_by
 
-            db = await self._get_db()
             result = await db.documents.update_one(
                 {"_id": {"$in": candidates}, "lifecycle_state": {"$ne": "deleted"}},
                 {"$set": set_payload, "$inc": {"_revision": 1}},
@@ -2138,7 +3344,7 @@ class DocumentService:
         except Exception as e:
             logger.error("Failed to update summary metadata for document %s: %s", document_id, e)
             raise DocumentServiceError(f"Document summary metadata update failed: {str(e)}")
-    
+
     async def delete_document(
         self,
         document_id: str,
@@ -2170,22 +3376,100 @@ class DocumentService:
             logger.info(f"Deleting document: {document_id}")
 
             db = await self._get_db()
-            query: Dict[str, Any] = {"_id": doc_oid, "lifecycle_state": {"$ne": "deleted"}}
-            if expected_revision is not None:
-                query["_revision"] = int(expected_revision)
-            result = await db.documents.update_one(
-                query,
-                {
-                    "$set": {
-                        "lifecycle_state": "deleted",
-                        "deletedAt": datetime.utcnow(),
-                        "updatedAt": datetime.utcnow(),
-                    },
-                    "$inc": {"_revision": 1},
-                },
-            )
+            from .entity_adapter_registry import EntityAdapterRegistry
+            from .publication_policy import is_consumable, resolve_canonical_document
 
-            success = result.matched_count > 0
+            async def relationship_count(
+                current_document: Optional[Dict[str, Any]],
+                *,
+                session: Any = None,
+            ) -> int:
+                session_kwargs = {"session": session} if session is not None else {}
+                count = await db.entity_document_links.count_documents(
+                    {"document_id": str(doc_oid), "removed_at": None},
+                    **session_kwargs,
+                )
+                if count:
+                    return count
+                organization_id = str((current_document or {}).get("organization_id") or "")
+                project_id = str((current_document or {}).get("project_id") or "")
+                if (
+                    current_document
+                    and is_consumable(current_document)
+                    and organization_id
+                    and project_id
+                ):
+                    for adapter in EntityAdapterRegistry().adapters():
+                        if not adapter.legacy_blocks_document_deletion:
+                            continue
+                        count += len(
+                            await adapter.legacy_targets_for_document(
+                                db,
+                                document_id=str(doc_oid),
+                                organization_id=organization_id,
+                                project_id=project_id,
+                                session=session,
+                            )
+                        )
+                return count
+
+            current_document = await resolve_canonical_document(db, str(doc_oid))
+            active_relationship_count = await relationship_count(current_document)
+            if active_relationship_count:
+                raise DocumentDependencyError(active_relationship_count)
+
+            async def persist_delete(session: Any) -> bool:
+                session_kwargs = {"session": session} if session is not None else {}
+                transactional_document = await resolve_canonical_document(
+                    db,
+                    str(doc_oid),
+                    session=session,
+                )
+                if not transactional_document:
+                    return False
+                query: Dict[str, Any] = {
+                    "_id": doc_oid,
+                    "lifecycle_state": {"$ne": "deleted"},
+                }
+                if expected_revision is not None:
+                    query["_revision"] = int(expected_revision)
+                now = datetime.utcnow()
+                result = await db.documents.update_one(
+                    query,
+                    {
+                        "$set": {
+                            "lifecycle_state": "deleted",
+                            "deletedAt": now,
+                            "updatedAt": now,
+                        },
+                        "$inc": {"_revision": 1},
+                    },
+                    **session_kwargs,
+                )
+                if not result.matched_count:
+                    return False
+                active_count = await relationship_count(
+                    transactional_document,
+                    session=session,
+                )
+                if active_count:
+                    raise DocumentDependencyError(active_count)
+                return True
+
+            client = getattr(db, "client", None)
+            start_session = getattr(client, "start_session", None)
+            if callable(start_session):
+                session = await start_session()
+                async with session:
+                    with_transaction = getattr(session, "with_transaction", None)
+                    if callable(with_transaction):
+                        success = await with_transaction(persist_delete)
+                    else:
+                        async with session.start_transaction():
+                            success = await persist_delete(session)
+            else:
+                success = await persist_delete(None)
+
             if not success and expected_revision is not None:
                 current_revision = await self.get_document_revision(document_id)
                 if current_revision is not None:
@@ -2205,6 +3489,8 @@ class DocumentService:
         except InvalidDocumentIdError:
             raise
         except DocumentConflictError:
+            raise
+        except DocumentDependencyError:
             raise
         except Exception as e:
             logger.error(f"Failed to delete document {document_id}: {e}")
@@ -2399,87 +3685,44 @@ class DocumentService:
             organization_id=str(organization_id) if organization_id else None,
             project_id=str(project_id) if project_id else None,
         )
-    
+
     async def document_exists(self, document_id: str) -> bool:
         """
         Check if a document exists.
-        
+
         Args:
             document_id: Document ID string
-            
+
         Returns:
             True if document exists, False otherwise
-            
+
         Raises:
             DocumentServiceError: If check fails
             InvalidDocumentIdError: If document ID is invalid
         """
         try:
             doc_oid = self._validate_document_id(document_id)
-            
+
             db = await self._get_db()
             count = await db.documents.count_documents({"_id": doc_oid}, limit=1)
             return count > 0
-            
+
         except InvalidDocumentIdError:
             raise
         except Exception as e:
             logger.error(f"Failed to check document existence {document_id}: {e}")
             raise DocumentServiceError(f"Document existence check failed: {str(e)}")
-    
-    def _normalize_metadata_references(self, references: Any) -> List[Dict[str, Any]]:
-        normalized: List[Dict[str, Any]] = []
-        if not references:
-            return normalized
 
-        seen: Set[Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]] = set()
-        for ref in references:
-            entry = self._coerce_reference_entry(ref)
-            if not entry:
-                continue
-
-            date_value = entry.get("date")
-            if date_value:
-                try:
-                    formatted = format_date_ddmmyyyy(date_value)
-                    if formatted:
-                        entry = dict(entry)
-                        entry["date"] = formatted
-                except Exception:
-                    pass
-
-            key = (
-                entry.get("letterNo"),
-                entry.get("date"),
-                entry.get("text"),
-                entry.get("raw"),
-            )
-            if key in seen:
-                continue
-            seen.add(key)
-
-            has_structured_fields = any(
-                entry.get(field) for field in ("letterNo", "letter_no", "date", "text")
-            )
-            if "raw" in entry and not has_structured_fields:
-                entry = dict(entry)
-                entry.pop("raw", None)
-                if not entry:
-                    continue
-
-            normalized.append(entry)
-
-        return normalized
     async def get_documents_count(self, filter_dict: Optional[Dict[str, Any]] = None) -> int:
         """
         Get count of documents matching filter.
-        
+
         Args:
             filter_dict: Optional filter dictionary
-            
+
         Returns:
             Number of matching documents
-            
+
         Raises:
             DocumentServiceError: If count fails
         """
@@ -2489,34 +3732,34 @@ class DocumentService:
             count = await db.documents.count_documents(filter_dict)
             logger.debug(f"Document count: {count}")
             return count
-            
+
         except Exception as e:
             logger.error(f"Failed to count documents: {e}")
             raise DocumentServiceError(f"Document count failed: {str(e)}")
-    
+
     async def search_documents(self, query: Dict[str, Any], skip: int = 0, limit: int = 50) -> List[Optional[Document]]:
         """
         Search documents with a query.
-        
+
         Args:
             query: MongoDB query dictionary
             skip: Number of documents to skip
             limit: Maximum number of documents to return
-            
+
         Returns:
             List of matching Document instances
-            
+
         Raises:
             DocumentServiceError: If search fails
         """
         try:
             skip, limit = validate_pagination(skip, limit)
-            
+
             if not isinstance(query, dict):
                 raise ValueError("Query must be a dictionary")
-            
+
             logger.info(f"Searching documents with query: skip={skip}, limit={limit}")
-            
+
             db = await self._get_db()
             raw_documents, _ = await fetch_paginated(
                 db.documents,
@@ -2537,10 +3780,10 @@ class DocumentService:
                         e,
                     )
                     documents.append(None)
-            
+
             logger.info(f"Found {len(documents)} documents")
             return documents
-            
+
         except ValueError:
             raise
         except Exception as e:
@@ -2551,3 +3794,28 @@ class DocumentService:
 def create_document_service(db: Database) -> DocumentService:
     """Create document service instance"""
     return DocumentService(db)
+
+
+async def governed_by_contract_master(db: Any, document_id: Any, stored_id: Any = None) -> bool:
+    """Whether a Contract Master instrument names this document.
+
+    Such a document's derived rows and vectors have one writer: the
+    contract-worker's reprojection (fed by the contract ingest). Any other
+    pipeline that rewrites them leaves a CURRENT projection describing rows that
+    no longer exist.
+    """
+    from .contract_document_store import CONTRACT_DOCUMENTS_COLLECTION
+    from .publication_policy import _collection
+
+    ids = sorted({str(value) for value in (document_id, stored_id) if value is not None})
+    if not ids:
+        return False
+    instruments = _collection(db, CONTRACT_DOCUMENTS_COLLECTION)
+    if instruments is None:
+        # Unknown is not "ungoverned": answering False here would hand a
+        # governed contract to a pipeline that rewrites its evidence.
+        raise RuntimeError("Contract Master instruments are not readable; governance unknown")
+    return (
+        await instruments.find_one({"document_id": {"$in": ids}}, {"_id": 1})
+        is not None
+    )

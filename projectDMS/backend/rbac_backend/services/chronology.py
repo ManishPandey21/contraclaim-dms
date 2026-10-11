@@ -11,6 +11,7 @@ from xml.sax.saxutils import escape
 
 from fastapi import HTTPException, status
 
+from ..core.permissions import Permissions
 from ..models.arbitration_drafting import (
     ArbitrationSelectedReference,
     ArbitrationSourceType,
@@ -55,6 +56,42 @@ from .evidence_graph_service import EvidenceGraphService
 
 def _actor_id(user: Any) -> Optional[str]:
     return getattr(user, "id", None) or getattr(user, "email", None)
+
+
+#: The chronology-event fields that carry AUTHORITY rather than metadata.
+#:
+#: `PolicyService.authorize_document` resolves a resource's authority from
+#: `organization_id` and `project_id` and nothing else, so these two — and only
+#: these two — decide which tenant an event, its `project_events` row, its
+#: `event_links` and its `audit_events` land in, and which tenant's
+#: `build_scope_query` reads them back. `contract_id` / `matter_id` / `claim_id`
+#: are list-filter metadata that no gate reads; `MatterChronologyUpdate` already
+#: lets a chronology change all three under an org/project-only gate, so they
+#: stay caller-settable.
+_EVENT_AUTHORITY_FIELDS = ("organization_id", "project_id")
+
+#: The states in which drafting treats an event as authoritative.
+_VERIFIED_STATES = frozenset(
+    {ChronologyVerificationStatus.VERIFIED.value, ChronologyVerificationStatus.EDITED_VERIFIED.value}
+)
+
+#: Review decisions. Only the explicit transitions write them: `verify_event`,
+#: `reject_event` and `mark_duplicate`. Create and the generic update never do,
+#: whatever permission the caller holds.
+_DECISION_STATES = _VERIFIED_STATES | {
+    ChronologyVerificationStatus.REJECTED.value,
+    ChronologyVerificationStatus.DUPLICATE.value,
+}
+
+#: Sync state the server writes when it publishes a verified event. A client
+#: value here could forge or suppress that publication (`_sync_verified_event`).
+_SERVER_OWNED_EVENT_FIELDS = ("project_event_id", "event_link_ids", "ai_extraction_id")
+
+#: Event fields that nothing downstream reads: not drafting, not arbitration, not
+#: exports, not the evidence graph. Editing only these keeps a verified event
+#: verified (as `edited_verified`). Every other field is material, so a new field
+#: is material until someone shows otherwise.
+_PRESENTATION_ONLY_EVENT_FIELDS = frozenset({"annexure_no", "legal_relevance"})
 
 
 def _enum_value(value: Any) -> Any:
@@ -154,12 +191,47 @@ class ChronologyService:
         await self._emit("updated", before, current_user, before=before, after=updated)
         return dict(updated)
 
-    async def delete_chronology(self, chronology_id: str, current_user: Any) -> None:
+    async def delete_chronology(
+        self, chronology_id: str, current_user: Any, *, relationships: Any = None
+    ) -> None:
+        """Soft-delete a chronology.
+
+        With ``relationships`` (a ``DocumentRelationshipService``) the canonical
+        Document links of its events are retired in the same transaction, so no
+        active link is left pointing at an event of a deleted chronology (CL-3B).
+        The events and every Document stay untouched.
+        """
         doc = await self.get_chronology(chronology_id)
-        await self.db.matter_chronologies.update_one(
-            {"_id": chronology_id},
-            {"$set": {"deleted_at": datetime.utcnow(), "deleted_by": _actor_id(current_user), "updated_at": datetime.utcnow()}},
-        )
+
+        async def soft_delete(session: Any = None) -> None:
+            now = datetime.utcnow()
+            kwargs = {"session": session} if session is not None else {}
+            result = await self.db.matter_chronologies.update_one(
+                {"_id": chronology_id, "deleted_at": {"$exists": False}},
+                {"$set": {"deleted_at": now, "deleted_by": _actor_id(current_user), "updated_at": now}},
+                **kwargs,
+            )
+            if not getattr(result, "matched_count", 0):
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Chronology changed during deletion")
+
+        if relationships is None:
+            await soft_delete()
+        else:
+
+            async def event_ids(session: Any) -> List[str]:
+                kwargs = {"session": session} if session is not None else {}
+                cursor = self.db.matter_chronology_events.find({"chronology_id": chronology_id}, {"_id": 1}, **kwargs)
+                return [str(row.get("_id")) async for row in cursor if row.get("_id")]
+
+            await relationships.retire_target_links(
+                current_user,
+                "chronology_event",
+                organization_id=str(doc.get("organization_id") or ""),
+                project_id=str(doc.get("project_id") or ""),
+                target_ids=event_ids,
+                reason="Chronology deleted",
+                before=soft_delete,
+            )
         await self._emit("deleted", doc, current_user)
 
     async def list_events(
@@ -198,13 +270,69 @@ class ChronologyService:
                 range_query["$lte"] = filters["date_to"]
             query["event_date"] = range_query
         cursor = self.db.matter_chronology_events.find(query).sort([("event_date", 1), ("created_at", 1)]).skip(skip).limit(limit)
-        return await _collect(cursor)
+        events = await _collect(cursor)
+        # `description`/`title`/`source_spans` are span text lifted from the
+        # source document (`chronology.py:530`). One shared projection withholds
+        # them when the originating document is no longer consumable; manual
+        # events (no source_document_id) are untouched.
+        from .publication_policy import safe_event_records
+
+        return await safe_event_records(
+            self.db, events, ("description", "title"), span_fields=("source_spans",)
+        )
+
+    def _apply_chronology_authority_scope(self, data: Dict[str, Any], chronology: Dict[str, Any]) -> None:
+        """Anchor an event's authority scope to its already-authorized parent.
+
+        The route authorizes the PARENT CHRONOLOGY — `_load_and_authorize_chronology`
+        hands the policy the chronology row, so nothing in the request body is ever
+        authorized. Resolving scope as `payload_value or chronology_value` therefore
+        let a caller redirect the event, and everything derived from it, into a
+        tenant the request was never checked against.
+
+        Authority is the parent chronology intersected with the actor's entitlement,
+        and the route has already established the second half. A request field may
+        restate that scope but never replace it: a conflicting value is refused
+        rather than silently rewritten, so a caller that believes it is writing
+        somewhere else finds out. Actor entitlement is not parent identity — a
+        globally entitled actor is refused here too, because this API has no
+        relocation semantics.
+        """
+        for field in _EVENT_AUTHORITY_FIELDS:
+            authorized = chronology.get(field)
+            requested = data.get(field)
+            if requested is not None and str(requested) != str(authorized):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=(
+                        f"Chronology event {field} must match its chronology; "
+                        "an event cannot be created outside the authorized chronology scope."
+                    ),
+                )
+            data[field] = authorized
 
     async def create_event(self, payload: MatterChronologyEventCreate, current_user: Any) -> Dict[str, Any]:
+        """Create a candidate event. Never a decided one, and never with sync state."""
+        forged = [field for field in _SERVER_OWNED_EVENT_FIELDS if field in payload.model_fields_set and getattr(payload, field)]
+        if forged:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Server-owned chronology event fields cannot be set by the client: {', '.join(forged)}",
+            )
+        if _enum_value(payload.verification_status) in _DECISION_STATES:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="A chronology event is created as a candidate; verify, reject or mark it duplicate explicitly",
+            )
+        return await self._insert_event(payload, current_user)
+
+    async def _insert_event(self, payload: MatterChronologyEventCreate, current_user: Any) -> Dict[str, Any]:
+        """Persist an event. Server paths only: extraction sets `ai_extraction_id` here."""
         chronology = await self.get_chronology(payload.chronology_id)
+        if payload.source_document_id:
+            await self._require_current_document_authority(payload.source_document_id)
         data = payload.model_dump()
-        data["organization_id"] = data.get("organization_id") or chronology.get("organization_id")
-        data["project_id"] = data.get("project_id") or chronology.get("project_id")
+        self._apply_chronology_authority_scope(data, chronology)
         data["contract_id"] = data.get("contract_id") or chronology.get("contract_id")
         data["matter_id"] = data.get("matter_id") or chronology.get("matter_id")
         data["claim_id"] = data.get("claim_id") or chronology.get("claim_id")
@@ -233,10 +361,24 @@ class ChronologyService:
     ) -> Dict[str, Any]:
         before = await self.get_event(chronology_id, event_id)
         update = payload.model_dump(exclude_unset=True)
-        if before.get("verification_status") in {
-            ChronologyVerificationStatus.VERIFIED.value,
-            ChronologyVerificationStatus.EDITED_VERIFIED.value,
-        } and "verification_status" not in update:
+        # The generic update is not a review path: an unchanged echo of the
+        # stored state passes, any change of it is refused - for every caller.
+        requested_status = _enum_value(update.pop("verification_status", None))
+        if requested_status is not None and requested_status != before.get("verification_status"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Chronology review state changes only through verify, reject or mark-duplicate",
+            )
+        changed = sorted(field for field, value in update.items() if _jsonable(value) != _jsonable(before.get(field)))
+        material = [field for field in changed if field not in _PRESENTATION_ONLY_EVENT_FIELDS]
+        was_verified = before.get("verification_status") in _VERIFIED_STATES
+        note = None
+        if was_verified and material:
+            # Changed content was never verified, whoever changed it: editing and
+            # verifying are separate acts, so a verifier re-verifies explicitly.
+            update["verification_status"] = ChronologyVerificationStatus.NEEDS_REVIEW.value
+            note = f"Material edit to a verified event; returned to review. Changed: {', '.join(material)}"
+        elif was_verified:
             update["verification_status"] = ChronologyVerificationStatus.EDITED_VERIFIED.value
         update["updated_at"] = datetime.utcnow()
         update["updated_by"] = _actor_id(current_user)
@@ -245,7 +387,9 @@ class ChronologyService:
             {"$set": _jsonable(update)},
             return_document=True,
         )
-        await self._append_revision(updated, ChronologyRevisionAction.EDITED, current_user, before=before, after=updated)
+        if was_verified and material:
+            await self._withdraw_publication(dict(updated), current_user, ProjectEventStatus.UNDER_REVIEW, note)
+        await self._append_revision(updated, ChronologyRevisionAction.EDITED, current_user, before=before, after=updated, note=note)
         await self._refresh_counts(chronology_id)
         return dict(updated)
 
@@ -255,8 +399,13 @@ class ChronologyService:
         event_id: str,
         current_user: Any,
         decision: Optional[ChronologyDecisionRequest] = None,
+        *,
+        policy: Any,
     ) -> Dict[str, Any]:
+        await self._require_verify_authority(current_user, await self.get_chronology(chronology_id), policy)
         before = await self.get_event(chronology_id, event_id)
+        if before.get("source_document_id"):
+            await self._require_current_document_authority(before["source_document_id"])
         update = {
             "verification_status": ChronologyVerificationStatus.VERIFIED.value,
             "updated_at": datetime.utcnow(),
@@ -285,7 +434,10 @@ class ChronologyService:
         event_id: str,
         current_user: Any,
         decision: Optional[ChronologyDecisionRequest] = None,
+        *,
+        policy: Any,
     ) -> Dict[str, Any]:
+        await self._require_verify_authority(current_user, await self.get_chronology(chronology_id), policy)
         before = await self.get_event(chronology_id, event_id)
         updated = await self.db.matter_chronology_events.find_one_and_update(
             {"_id": event_id, "chronology_id": chronology_id},
@@ -298,6 +450,10 @@ class ChronologyService:
             },
             return_document=True,
         )
+        if before.get("verification_status") in _VERIFIED_STATES:
+            await self._withdraw_publication(
+                dict(updated), current_user, ProjectEventStatus.CLOSED, "Chronology event rejected after verification"
+            )
         await self._append_revision(
             updated,
             ChronologyRevisionAction.REJECTED,
@@ -315,8 +471,15 @@ class ChronologyService:
         event_id: str,
         payload: ChronologyDuplicateRequest,
         current_user: Any,
+        *,
+        policy: Any,
     ) -> Dict[str, Any]:
         before = await self.get_event(chronology_id, event_id)
+        was_verified = before.get("verification_status") in _VERIFIED_STATES
+        if was_verified:
+            # Marking a verified event duplicate takes it out of drafting: a
+            # de-publication, so it needs verify authority, not just edit.
+            await self._require_verify_authority(current_user, await self.get_chronology(chronology_id), policy)
         await self.get_event(chronology_id, payload.duplicate_of_event_id)
         updated = await self.db.matter_chronology_events.find_one_and_update(
             {"_id": event_id, "chronology_id": chronology_id},
@@ -330,6 +493,10 @@ class ChronologyService:
             },
             return_document=True,
         )
+        if was_verified:
+            await self._withdraw_publication(
+                dict(updated), current_user, ProjectEventStatus.CLOSED, "Chronology event marked duplicate after verification"
+            )
         await self._append_revision(
             updated,
             ChronologyRevisionAction.MARKED_DUPLICATE,
@@ -351,25 +518,53 @@ class ChronologyService:
         before = await self.get_event(chronology_id, event_id)
         related_event_ids = sorted(set((before.get("related_event_ids") or []) + payload.related_event_ids))
         related_document_ids = sorted(set((before.get("related_document_ids") or []) + payload.related_document_ids))
+        update: Dict[str, Any] = {
+            "related_event_ids": related_event_ids,
+            "related_document_ids": related_document_ids,
+            "updated_at": datetime.utcnow(),
+            "updated_by": _actor_id(current_user),
+        }
+        changed = [
+            field
+            for field, value in (("related_event_ids", related_event_ids), ("related_document_ids", related_document_ids))
+            if value != sorted(before.get(field) or [])
+        ]
+        demote = before.get("verification_status") in _VERIFIED_STATES and bool(changed)
+        note = payload.note
+        if demote:
+            # A new linkage is a material edit, the same rule as `update_event`.
+            update["verification_status"] = ChronologyVerificationStatus.NEEDS_REVIEW.value
+            note = f"Material edit to a verified event; returned to review. Changed: {', '.join(changed)}"
         updated = await self.db.matter_chronology_events.find_one_and_update(
             {"_id": event_id, "chronology_id": chronology_id},
-            {
-                "$set": {
-                    "related_event_ids": related_event_ids,
-                    "related_document_ids": related_document_ids,
-                    "updated_at": datetime.utcnow(),
-                    "updated_by": _actor_id(current_user),
-                }
-            },
+            {"$set": update},
             return_document=True,
         )
-        await self._append_revision(updated, ChronologyRevisionAction.LINKED, current_user, before=before, after=updated, note=payload.note)
+        if demote:
+            await self._withdraw_publication(dict(updated), current_user, ProjectEventStatus.UNDER_REVIEW, note)
+        await self._append_revision(updated, ChronologyRevisionAction.LINKED, current_user, before=before, after=updated, note=note)
+        await self._refresh_counts(chronology_id)
         return dict(updated)
 
     async def event_revisions(self, chronology_id: str, event_id: str) -> List[Dict[str, Any]]:
         await self.get_event(chronology_id, event_id)
         cursor = self.db.matter_chronology_event_revisions.find({"chronology_id": chronology_id, "event_id": event_id}).sort("revision", 1)
-        return await _collect(cursor)
+        revisions = await _collect(cursor)
+        # `before`/`after` are event snapshots embedding document-derived span
+        # text. Gate the nested snapshots through the same projection so the
+        # audit surface cannot serve a blocked document's text either.
+        from .publication_policy import safe_event_records
+
+        for rev in revisions:
+            for key in ("before", "after"):
+                snap = rev.get(key)
+                if isinstance(snap, dict):
+                    rev[key] = (
+                        await safe_event_records(
+                            self.db, [snap], ("description", "title"), span_fields=("source_spans",)
+                        )
+                    )[0]
+        return revisions
 
     async def extract_events(self, chronology_id: str, payload: ChronologyExtractRequest, current_user: Any) -> Dict[str, Any]:
         chronology = await self.get_chronology(chronology_id)
@@ -383,7 +578,12 @@ class ChronologyService:
             "project_id": chronology.get("project_id"),
         }
         if source_ids:
-            query["_id"] = {"$in": source_ids[: payload.max_documents]}
+            from .publication_policy import document_id_candidates
+
+            _ids = []
+            for _sid in source_ids[: payload.max_documents]:
+                _ids.extend(document_id_candidates(_sid))
+            query["_id"] = {"$in": _ids}
         cursor = self.db.documents.find(query).limit(payload.max_documents)
         docs = await _collect(cursor)
         created: List[Dict[str, Any]] = []
@@ -416,6 +616,16 @@ class ChronologyService:
             .limit(limit)
         )
         events = await _collect(cursor)
+        # Same projection as `list_events`: a document-derived event's
+        # description/title/source_spans are span text lifted from the source
+        # document, so they must be withheld once that document is no longer
+        # consumable. `_ledger_row` reads exactly those fields, so gate before
+        # building the ledger. Manual events (no source_document_id) untouched.
+        from .publication_policy import safe_event_records
+
+        events = await safe_event_records(
+            self.db, events, ("description", "title"), span_fields=("source_spans",)
+        )
         ledger = [self._ledger_row(event, idx) for idx, event in enumerate(events, start=1)]
         missing = []
         for event in events:
@@ -482,8 +692,25 @@ class ChronologyService:
 
     async def _extract_document_event(self, chronology: Dict[str, Any], source_doc: Dict[str, Any], current_user: Any) -> Optional[Dict[str, Any]]:
         source_id = str(source_doc.get("_id"))
-        raw_text = self._document_text(source_doc)
-        content_hash = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
+        if not await self._has_current_document_authority(source_id):
+            return None
+        # `raw_text` keeps its historical shape only for the idempotency hash,
+        # so re-running extraction does not duplicate existing events. Every
+        # fact below - date, clauses, letter number, classification, span -
+        # is read from the document's own text; the LLM summary is used only
+        # when the document has no body at all.
+        hash_text = self._document_text(source_doc)
+        content_hash = hashlib.sha256(hash_text.encode("utf-8")).hexdigest()
+        fact_text = self._document_fact_text(source_doc)
+        raw_text = (
+            " ".join(
+                str(part)
+                for part in (source_doc.get("subject"), fact_text, source_doc.get("description"))
+                if part
+            )
+            if fact_text
+            else hash_text
+        )
         existing = await self.db.matter_chronology_events.find_one(
             {"chronology_id": chronology["_id"], "source_document_id": source_id, "metadata.content_hash": content_hash}
         )
@@ -509,7 +736,10 @@ class ChronologyService:
             ),
             current_user=current_user,
         )
-        span_text = _shorten(raw_text, 900)
+        # The span and description are presented as the document's own words,
+        # so they come from its body; the summary-led `raw_text` above only
+        # drives the (hash-stable) classification. No body -> previous text.
+        span_text = _shorten(fact_text or raw_text, 900)
         event = MatterChronologyEventCreate(
             chronology_id=chronology["_id"],
             organization_id=chronology.get("organization_id"),
@@ -541,18 +771,50 @@ class ChronologyService:
             ai_extraction_id=str(extraction.get("_id")),
             metadata={"content_hash": content_hash, "source_type": "document"},
         )
-        return await self.create_event(event, current_user)
+        return await self._insert_event(event, current_user)
+
+    async def _has_current_document_authority(self, document_id: str) -> bool:
+        """Resolve authority from the canonical document at the write boundary."""
+        from .publication_policy import resolve_document_authority
+
+        return (await resolve_document_authority(self.db, document_id)).consumable
+
+    async def _require_current_document_authority(self, document_id: str) -> None:
+        if not await self._has_current_document_authority(document_id):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Source document is not currently authoritative",
+            )
+
+    def _document_fact_text(self, source_doc: Dict[str, Any]) -> str:
+        from .publication_policy import is_consumable
+        from .source_text import select_body_text
+
+        if not is_consumable(source_doc):
+            return ""
+        return select_body_text(source_doc, include_summary=False)
 
     def _document_text(self, source_doc: Dict[str, Any]) -> str:
+        # Suggested chronology entries feed EOT and claim reasoning, so this is
+        # an authoritative-content consumer. Metadata stays available so a
+        # blocked document is still identifiable; only extracted body text and
+        # its derived summary are withheld.
+        from .publication_policy import is_consumable
+        from .source_text import select_body_text
+
+        consumable = is_consumable(source_doc)
         parts = [
             source_doc.get("subject"),
-            source_doc.get("summary"),
+            source_doc.get("summary") if consumable else None,
             source_doc.get("description"),
-            source_doc.get("ocrText"),
-            source_doc.get("ocr_text"),
-            source_doc.get("full_content"),
-            source_doc.get("content"),
-            source_doc.get("text"),
+            # The letter body by source authority. Raw `ocrText` is the whole
+            # extraction report - reply advice included - when the document
+            # had no source text, and that must not seed EOT/claim spans.
+            select_body_text(source_doc, include_summary=False) if consumable else None,
+            source_doc.get("ocr_text") if consumable else None,
+            source_doc.get("full_content") if consumable else None,
+            source_doc.get("content") if consumable else None,
+            source_doc.get("text") if consumable else None,
             source_doc.get("filename"),
         ]
         return " ".join(str(part) for part in parts if part)
@@ -652,13 +914,32 @@ class ChronologyService:
                 return None
         return None
 
+    async def _event_publication_scope(self, event: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+        """The scope a verified event may publish under: its parent chronology's.
+
+        Never the stored row's own fields. `create_project_event` re-authorizes
+        nothing, so a row written before `_apply_chronology_authority_scope`
+        existed would otherwise still publish a project event, its links and its
+        audit trail into whatever tenant it happens to carry.
+        """
+        chronology = await self.get_chronology(event["chronology_id"])
+        return chronology.get("organization_id"), chronology.get("project_id")
+
     async def _sync_verified_event(self, event: Dict[str, Any], current_user: Any) -> Dict[str, Any]:
-        if event.get("project_event_id"):
-            return event
-        project_event = await self.graph.create_project_event(
-            ProjectEventCreate(
-                organization_id=event.get("organization_id"),
-                project_id=event.get("project_id"),
+        """Publish a verified event to the evidence graph from server state.
+
+        Runs on every verification. `project_event_id` / `event_link_ids` are
+        server-owned, but a row may still carry a value a client wrote before
+        that rule: only a project event that names this chronology event is
+        reused, and the event's previous links are retired before fresh ones
+        are written from the content just verified.
+        """
+        if event.get("source_document_id"):
+            await self._require_current_document_authority(event["source_document_id"])
+        organization_id, project_id = await self._event_publication_scope(event)
+        project_payload = ProjectEventCreate(
+                organization_id=organization_id,
+                project_id=project_id,
                 event_type=self._project_event_type(event),
                 event_date=event.get("event_date") or datetime.utcnow(),
                 event_end_date=event.get("event_end_date"),
@@ -682,15 +963,33 @@ class ChronologyService:
                     "pleading_use": event.get("pleading_use"),
                     "clauses": event.get("contract_clauses") or [],
                 },
-            ),
-            current_user,
-        )
+            )
+        owned = await self._owned_project_event(event)
+        if owned:
+            fields = _jsonable(project_payload.model_dump())
+            fields.update({"updated_at": datetime.utcnow(), "updated_by": _actor_id(current_user)})
+            await self.db.project_events.update_one({"_id": owned["_id"]}, {"$set": fields})
+            project_event = {**owned, **fields}
+            await self.graph.audit.emit(
+                action="project_event.updated",
+                actor_id=_actor_id(current_user),
+                resource_type="project_event",
+                resource_id=str(owned["_id"]),
+                organization_id=project_event.get("organization_id"),
+                project_id=project_event.get("project_id"),
+                before=owned,
+                after=project_event,
+            )
+        else:
+            project_event = await self.graph.create_project_event(project_payload, current_user)
+        await self._retire_event_links(event, current_user, "Superseded by re-verification of the chronology event")
         link_ids: List[str] = []
         if event.get("source_document_id"):
+            await self._require_current_document_authority(event["source_document_id"])
             link = await self.graph.suggest_link(
                 EventLinkCreate(
-                    organization_id=event.get("organization_id"),
-                    project_id=event.get("project_id"),
+                    organization_id=organization_id,
+                    project_id=project_id,
                     source_type=EvidenceEntityType.PROJECT_EVENT,
                     source_id=str(project_event["_id"]),
                     target_type=EvidenceEntityType.DOCUMENT,
@@ -707,10 +1006,12 @@ class ChronologyService:
             )
             link_ids.append(str(link.get("link_group_id")))
         for clause in event.get("contract_clauses") or []:
+            if event.get("source_document_id"):
+                await self._require_current_document_authority(event["source_document_id"])
             link = await self.graph.suggest_link(
                 EventLinkCreate(
-                    organization_id=event.get("organization_id"),
-                    project_id=event.get("project_id"),
+                    organization_id=organization_id,
+                    project_id=project_id,
                     source_type=EvidenceEntityType.PROJECT_EVENT,
                     source_id=str(project_event["_id"]),
                     target_type=EvidenceEntityType.CLAUSE,
@@ -725,12 +1026,65 @@ class ChronologyService:
                 current_user=current_user,
             )
             link_ids.append(str(link.get("link_group_id")))
+        if event.get("source_document_id"):
+            await self._require_current_document_authority(event["source_document_id"])
         updated = await self.db.matter_chronology_events.find_one_and_update(
             {"_id": event["_id"], "chronology_id": event["chronology_id"]},
-            {"$set": {"project_event_id": str(project_event["_id"]), "event_link_ids": link_ids, "updated_at": datetime.utcnow()}},
+            {
+                "$set": {
+                    "project_event_id": str(project_event["_id"]),
+                    "event_link_ids": link_ids,
+                    "organization_id": organization_id,
+                    "project_id": project_id,
+                    "updated_at": datetime.utcnow(),
+                }
+            },
             return_document=True,
         )
         return dict(updated)
+
+    async def _require_verify_authority(self, current_user: Any, chronology: Dict[str, Any], policy: Any) -> None:
+        """Verify authority on the chronology, checked here so no caller can skip it."""
+        if policy is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Chronology review decisions require an authorization policy",
+            )
+        await policy.authorize_document(
+            current_user, Permissions.CHRONOLOGY_VERIFY, chronology, resource_type="matter_chronology"
+        )
+
+    async def _owned_project_event(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """The event's project event, only if it really was published for this event."""
+        project_event_id = event.get("project_event_id")
+        if not project_event_id:
+            return None
+        row = await self.db.project_events.find_one({"_id": project_event_id})
+        if not row or str((row.get("metadata") or {}).get("chronology_event_id") or "") != str(event.get("_id")):
+            return None
+        return dict(row)
+
+    async def _retire_event_links(self, event: Dict[str, Any], current_user: Any, note: str) -> None:
+        """Reject the event's still-live links. Links of other events are never touched."""
+        live = {EventLinkStatus.USER_VERIFIED.value, EventLinkStatus.APPROVED.value, EventLinkStatus.AI_SUGGESTED.value}
+        for group_id in event.get("event_link_ids") or []:
+            latest = await self.graph.get_latest_link(str(group_id))
+            if not latest or str((latest.get("metadata") or {}).get("chronology_event_id") or "") != str(event.get("_id")):
+                continue
+            if _enum_value(latest.get("status")) in live:
+                await self.graph.reject_link(str(group_id), current_user, note=note)
+
+    async def _withdraw_publication(
+        self, event: Dict[str, Any], current_user: Any, project_status: ProjectEventStatus, note: str
+    ) -> None:
+        """An event leaving the verified state stops being verified evidence anywhere."""
+        owned = await self._owned_project_event(event)
+        if owned:
+            await self.db.project_events.update_one(
+                {"_id": owned["_id"]},
+                {"$set": {"status": project_status.value, "updated_at": datetime.utcnow(), "updated_by": _actor_id(current_user)}},
+            )
+        await self._retire_event_links(event, current_user, note)
 
     def _project_event_type(self, event: Dict[str, Any]) -> ProjectEventType:
         mapping = {

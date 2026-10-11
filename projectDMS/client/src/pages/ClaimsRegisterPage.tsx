@@ -83,6 +83,8 @@ import ClaimApprovalDialog from "@/components/claims/ClaimApprovalDialog";
 import ClaimAssessmentDialog from "@/components/claims/ClaimAssessmentDialog";
 import ClaimTaskDialog from "@/components/claims/ClaimTaskDialog";
 import { getUpcoming } from "@/services/sla-api";
+import { useRegisterProjectScope } from "@/hooks/useRegisterProjectScope";
+import { scopeRefusalMessage } from "@/services/active-scope";
 import { buildSlaStateMap, type ClaimSla } from "@/lib/claims-helpers";
 
 const CLAIM_TYPES: { value: ClaimType; label: string }[] = [
@@ -158,6 +160,8 @@ const ClaimsRegisterPage: React.FC = () => {
   const [slaMap, setSlaMap] = useState<Record<string, ClaimSla>>({});
   const [exportingId, setExportingId] = useState<string | null>(null);
   const navigate = useNavigate();
+  // CL-4A: the server pins the list to the navbar project; new claims are filed in it.
+  const { selectedProjectId, tenantLoading } = useRegisterProjectScope();
 
   const load = useCallback(async () => {
     try {
@@ -165,8 +169,8 @@ const ClaimsRegisterPage: React.FC = () => {
       if (typeFilter !== "all") params.type = typeFilter;
       if (statusFilter !== "all") params.status = statusFilter;
       setClaims(await getClaims(params));
-    } catch {
-      toast.error("Failed to load claims");
+    } catch (error) {
+      toast.error(scopeRefusalMessage(error, "claim") || "Failed to load claims");
     }
     try {
       setSlaMap(buildSlaStateMap(await getUpcoming({ days: 30 })));
@@ -176,8 +180,8 @@ const ClaimsRegisterPage: React.FC = () => {
   }, [typeFilter, statusFilter]);
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    if (!tenantLoading) void load();
+  }, [load, tenantLoading]);
 
   useEffect(() => {
     let active = true;
@@ -200,7 +204,7 @@ const ClaimsRegisterPage: React.FC = () => {
 
   const openCreate = () => {
     setEditingId(null);
-    setForm({ ...EMPTY_FORM });
+    setForm({ ...EMPTY_FORM, project_id: selectedProjectId });
     setDialogOpen(true);
   };
 
@@ -243,8 +247,8 @@ const ClaimsRegisterPage: React.FC = () => {
       await load();
       toast.success(editingId ? "Claim updated" : "Claim created");
       setDialogOpen(false);
-    } catch {
-      toast.error("Failed to save claim");
+    } catch (error) {
+      toast.error(scopeRefusalMessage(error, "claim") || "Failed to save claim");
     } finally {
       setSaving(false);
     }

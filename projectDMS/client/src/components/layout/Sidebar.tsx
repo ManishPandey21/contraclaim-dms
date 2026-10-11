@@ -32,6 +32,7 @@ import {
   Activity,
   CreditCard,
   CalendarClock,
+  OctagonAlert,
   GitCompareArrows,
   Landmark,
   FileSignature,
@@ -168,6 +169,7 @@ const Sidebar = () => {
     // ── Contract registers ──
     { path: "/contracts/master", icon: <FileSignature size={20} />, label: "Contract Master" },
     { path: "/key-dates", icon: <CalendarClock size={20} />, label: "Key Dates" },
+    { path: "/hindrances", icon: <OctagonAlert size={20} />, label: "Hindrance & Constraint Register" },
     { path: "/bank-guarantees", icon: <Landmark size={20} />, label: "Bank Guarantee Register" },
     { path: "/insurance", icon: <ShieldCheck size={20} />, label: "Insurance Management" },
     { path: "/ipc-bills", icon: <FileSignature size={20} />, label: "IPC / Bill Register" },

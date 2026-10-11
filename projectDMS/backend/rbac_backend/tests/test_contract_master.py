@@ -11,6 +11,7 @@ from fastapi import HTTPException
 
 from rbac_backend.models.contract_master import ContractMasterCreate
 from rbac_backend.routers.contract_master import create_contract_master
+from rbac_backend.tests.selection_fixtures import selection
 from rbac_backend.services.contract_master_service import (
     ContractMasterService,
     bg_required_up_to,
@@ -250,5 +251,9 @@ def _policy():
 async def test_create_denies_cross_tenant():
     payload = ContractMasterCreate(project_id="proj-B", organization_id="org-B")
     with pytest.raises(HTTPException) as exc:
-        await create_contract_master(payload, db=_DB(), current_user=_user(org="org-A"), policy=_policy())
+        # The selection is the target's own project, so the policy is what answers.
+        await create_contract_master(
+            payload, db=_DB(), current_user=_user(org="org-A"), policy=_policy(),
+            selection=selection(None, "org-B", "proj-B"),
+        )
     assert exc.value.status_code == 403

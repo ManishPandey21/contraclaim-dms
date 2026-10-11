@@ -6,6 +6,7 @@ but link decisions and audit history live here as append-only revisions.
 
 from __future__ import annotations
 
+import logging
 import hashlib
 import re
 import uuid
@@ -13,6 +14,7 @@ from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from ..core.database import get_database
+from ..models.document_metadata import METADATA_EXTRACTION_PROMPT_VERSION
 from ..models.evidence_graph import (
     AIExtraction,
     AIExtractionCreate,
@@ -32,6 +34,10 @@ from ..models.evidence_graph import (
     TimelineSummary,
 )
 from .audit_event_service import AuditEventService
+from .source_text import select_body_text
+
+
+logger = logging.getLogger(__name__)
 
 
 class EvidenceGraphError(Exception):
@@ -48,6 +54,19 @@ def _actor_id(user: Any) -> Optional[str]:
 
 def _enum_value(value: Any) -> Any:
     return getattr(value, "value", value)
+
+
+def _document_body(document_data: Dict[str, Any], metadata: Any) -> str:
+    """The letter text evidence is derived from: source text first.
+
+    ``metadata.full_content`` is the LLM's retyped Item 25; source spans, the
+    content hash and the claim/delay signals must come from the letter's own
+    text whenever the document carries it, and use Item 25 only as the
+    fallback when it does not.
+    """
+    return select_body_text(document_data, include_summary=False) or str(
+        getattr(metadata, "full_content", None) or ""
+    )
 
 
 def _cursor_to_list(cursor: Any) -> Any:
@@ -95,7 +114,12 @@ class EvidenceGraphService:
 
     async def get_project_event(self, event_id: str) -> Optional[Dict[str, Any]]:
         db = await self._get_db()
-        return await db.project_events.find_one({"_id": event_id})
+        record = await db.project_events.find_one({"_id": event_id})
+        if not record:
+            return None
+        from .publication_policy import safe_event_records
+
+        return (await safe_event_records(db, [record], ("description", "title"), dict_fields=("metadata",)))[0]
 
     async def list_project_events(
         self,
@@ -140,7 +164,9 @@ class EvidenceGraphService:
                 range_query["$lte"] = date_to
             query["event_date"] = range_query
         cursor = db.project_events.find(query).sort("event_date", -1).skip(skip).limit(limit)
-        return await _collect_cursor(cursor)
+        from .publication_policy import safe_event_records
+
+        return await safe_event_records(db, await _collect_cursor(cursor), ("description", "title"), dict_fields=("metadata",))
 
     async def create_ai_extraction(self, payload: AIExtractionCreate, current_user: Any = None) -> Dict[str, Any]:
         db = await self._get_db()
@@ -294,7 +320,14 @@ class EvidenceGraphService:
         query = dict(scope_filter or {})
         query["link_group_id"] = link_group_id
         cursor = db.event_links.find(query).sort("revision", 1)
-        return await _collect_cursor(cursor)
+        # Same gate as `list_links`: a link whose document target is blocked must
+        # not serve that document's evidence_text/source_spans, even on the
+        # history/audit surface.
+        from .publication_policy import safe_event_records
+
+        return await safe_event_records(
+            db, await _collect_cursor(cursor), ("evidence_text",), span_fields=("source_spans",)
+        )
 
     async def list_links(
         self,
@@ -323,6 +356,9 @@ class EvidenceGraphService:
             query["target_id"] = target_id
         cursor = db.event_links.find(query).sort("created_at", -1).skip(skip).limit(limit)
         links = await _collect_cursor(cursor)
+        from .publication_policy import safe_event_records
+
+        links = await safe_event_records(db, links, ("evidence_text",), span_fields=("source_spans",))
         if not latest_only:
             return links
         return self._latest_by_group(links)
@@ -535,13 +571,28 @@ class EvidenceGraphService:
         document_id: str,
         document_data: Dict[str, Any],
         metadata: Any,
-        metadata_source: str,
-        upload_type: str,
+        metadata_source: Optional[str],
+        upload_type: Optional[str],
         current_user: Any = None,
     ) -> Optional[Dict[str, Any]]:
         org_id = str(document_data.get("organization_id") or "")
         project_id = str(document_data.get("project_id") or "")
-        full_text = str(getattr(metadata, "full_content", None) or document_data.get("full_text") or "")
+        # Defence in depth. The production call site is already inside the
+        # publishable-gated block, but this function would otherwise happily
+        # build persistent AI-extraction and project-event records from any
+        # dict handed to it. Derived artifacts retain source_document_id, so a
+        # consumer can re-establish authority - but they should not be created
+        # from blocked content in the first place.
+        from .publication_policy import is_consumable
+
+        if not is_consumable(document_data):
+            logger.info(
+                "[evidence_graph] Skipping ingestion for %s: source is not consumable",
+                document_id,
+            )
+            return None
+
+        full_text = _document_body(document_data, metadata)
         content_seed = "|".join(
             [
                 document_id,
@@ -560,7 +611,7 @@ class EvidenceGraphService:
                 content_hash=content_hash,
                 schema_version="evidence_graph.v2",
                 model=metadata_source,
-                prompt_version="existing_document_metadata.v2",
+                prompt_version=METADATA_EXTRACTION_PROMPT_VERSION,
                 raw_output=parsed,
                 parsed_output=parsed,
                 confidence=0.75 if metadata_source else None,
@@ -586,10 +637,12 @@ class EvidenceGraphService:
             )
         return extraction
 
-    def _parsed_metadata(self, document_data: Dict[str, Any], metadata: Any, upload_type: str) -> Dict[str, Any]:
+    def _parsed_metadata(
+        self, document_data: Dict[str, Any], metadata: Any, upload_type: Optional[str]
+    ) -> Dict[str, Any]:
         subject = str(getattr(metadata, "subject", None) or document_data.get("subject") or "")
         summary = str(getattr(metadata, "summary", None) or document_data.get("summary") or "")
-        full_text = str(getattr(metadata, "full_content", None) or document_data.get("full_text") or "")
+        full_text = _document_body(document_data, metadata)
         refs = [dict(item) for item in (document_data.get("reference") or []) if isinstance(item, dict)]
         clause_values = list(getattr(metadata, "contractual_clauses", None) or document_data.get("contractual_clauses") or [])
         keywords = list(getattr(metadata, "keywords", None) or document_data.get("keywords") or [])
@@ -597,6 +650,9 @@ class EvidenceGraphService:
             getattr(metadata, "additional_keywords", None) or document_data.get("additional_keywords") or []
         )
         text = " ".join([subject, summary, full_text[:12000]])
+        # Reference and span extraction cite the letter; the summary in `text`
+        # is classification context only, used for refs when there is no body.
+        ref_text = " ".join([subject, full_text[:12000]]) if full_text else text
         return {
             "document_class": self._classify_document(text, upload_type),
             "letter_no": getattr(metadata, "letter_no", None) or document_data.get("letterNo"),
@@ -614,21 +670,21 @@ class EvidenceGraphService:
             "chainage_to": self._first_value(document_data, metadata, "chainage_to"),
             "work_type": self._first_value(document_data, metadata, "work_type"),
             "issue_nature": self._first_value(document_data, metadata, "issue_nature"),
-            "claim_type": self._first_value(document_data, metadata, "claim_category") or self._extract_claim_type(text),
-            "delay_responsibility": self._first_value(document_data, metadata, "alleged_responsibility") or self._extract_delay_responsibility(text),
+            "claim_type": self._first_value(document_data, metadata, "claim_category") or self._extract_claim_type(ref_text),
+            "delay_responsibility": self._first_value(document_data, metadata, "alleged_responsibility") or self._extract_delay_responsibility(ref_text),
             "priority": self._first_value(document_data, metadata, "priority"),
             "linked_event_suggested": self._first_value(document_data, metadata, "linked_event_suggested"),
             "reference_chain": self._first_value(document_data, metadata, "reference_chain"),
-            "payment_status": self._extract_payment_status(text),
+            "payment_status": self._extract_payment_status(ref_text),
             "references": refs,
-            "clauses": self._extract_clauses(text, clause_values),
+            "clauses": self._extract_clauses(ref_text, clause_values),
             "keywords": keywords,
             "additional_keywords": additional_keywords,
-            "drawing_refs": self._extract_pattern(text, r"\b(?:DWG|DRG|GFC|IFC)[-/ ]?[A-Z0-9][A-Z0-9./_-]{2,}\b"),
-            "payment_refs": self._extract_pattern(text, r"\b(?:IPC|IP|RA|BILL)[-/ ]?\d+[A-Z0-9./_-]*\b"),
-            "milestone_refs": self._extract_pattern(text, r"\b(?:KD|MS|M)[-/ ]?\d+[A-Z0-9./_-]*\b"),
-            "delay_refs": self._extract_pattern(text, r"\b(?:DEL|DLY|D)[-/ ]?\d+[A-Z0-9./_-]*\b"),
-            "source_spans": self._extract_source_spans(text),
+            "drawing_refs": self._extract_pattern(ref_text, r"\b(?:DWG|DRG|GFC|IFC)[-/ ]?[A-Z0-9][A-Z0-9./_-]{2,}\b"),
+            "payment_refs": self._extract_pattern(ref_text, r"\b(?:IPC|IP|RA|BILL)[-/ ]?\d+[A-Z0-9./_-]*\b"),
+            "milestone_refs": self._extract_pattern(ref_text, r"\b(?:KD|MS|M)[-/ ]?\d+[A-Z0-9./_-]*\b"),
+            "delay_refs": self._extract_pattern(ref_text, r"\b(?:DEL|DLY|D)[-/ ]?\d+[A-Z0-9./_-]*\b"),
+            "source_spans": self._extract_source_spans(full_text or text),
             "tags": document_data.get("tags") or [],
             "extracted_tags": getattr(metadata, "tags", None) or document_data.get("extracted_tags") or [],
             "extracted_subTags": getattr(metadata, "sub_tags", None) or document_data.get("extracted_subTags") or [],
@@ -637,7 +693,7 @@ class EvidenceGraphService:
     def _first_value(self, document_data: Dict[str, Any], metadata: Any, field: str) -> Optional[str]:
         return getattr(metadata, field, None) or document_data.get(field)
 
-    def _classify_document(self, text: str, upload_type: str) -> str:
+    def _classify_document(self, text: str, upload_type: Optional[str]) -> str:
         lowered = text.lower()
         candidates: List[Tuple[str, Tuple[str, ...]]] = [
             ("eot_claim", ("extension of time", " eot", "delay claim")),

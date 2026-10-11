@@ -2,12 +2,54 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
 
 ReferenceValue = Union[str, Dict[str, Any]]
+
+#: Version of the numbered correspondence-metadata extraction prompt
+#: (services/openai_service.py). Bump it whenever that prompt text changes.
+#: v3: item 21 relabelled "Additional Key Words" - it duplicated item 18's
+#: "Key Words" label, so label-based parsing could not tell them apart (DI-L7).
+#: v4: items 22 (Summary) and 24 (Key Reply Points) redefined from the two
+#: instructions below; labels and item numbers are unchanged.
+METADATA_EXTRACTION_PROMPT_VERSION = "existing_document_metadata.v4"
+
+#: What "summary" means, for every extraction path. The numbered report prompt,
+#: the PydanticAI prompt and the PydanticAI output-schema descriptions all use
+#: this text, so the prompt and the schema cannot drift apart.
+#:
+#: Detailed but bounded. The report has one 4096-token output budget, and
+#: Summary (22) comes before Key Reply Points (24), Full Content (25) and the
+#: tags (26-27); Full Content is the letter itself. An open-ended "in detail"
+#: summary of a four-to-six page letter leaves no room for the letter's tail
+#: or the tags, and a cut-off reply is not detected.
+SUMMARY_EXTRACTION_INSTRUCTION = (
+    "Summarise in sufficient detail the background and sequence of material events stated "
+    "in the letter. Preserve their chronology and include material dates and developments "
+    "where stated, while avoiding repetition. Base the summary strictly on the letter and do "
+    "not add external information, assumptions, legal analysis or unsupported facts; do not "
+    "supply dates or events the letter does not state. Give one material event or development "
+    "per point, in chronological order, in one sentence each."
+)
+
+#: What "key_reply_points" means. These are AI-derived reply considerations:
+#: advice about a reply, never source text or source facts. They stay out of
+#: correspondence evidence and vector payloads (retrieval.correspondence_payload
+#: ADVISORY_FIELDS); this text only defines what the model is asked for.
+KEY_REPLY_POINTS_EXTRACTION_INSTRUCTION = (
+    "Identify every point in the letter that must be considered when preparing the reply. "
+    "Capture each distinct issue, allegation, request, instruction, demand, question, "
+    "rejection, criticism, responsibility attribution, contractual position, claim, "
+    "reservation, deadline, commitment or other matter that may require acknowledgement, "
+    "clarification, substantiation or response. Every point must be grounded in something "
+    "the letter actually states. These are considerations for a reply, not quotations or "
+    "facts: do not draft the reply, do not decide contractual entitlement, do not propose "
+    "counterarguments, and do not add facts or clauses the letter does not state."
+)
 
 NULLISH_VALUES = {"", "null", "'null'", '"null"', "not found", "none", "n/a", "na", "not applicable", "-", "--"}
 
@@ -145,6 +187,19 @@ class ParsedDocumentMetadata(BaseModel):
     full_content: Optional[str] = None
     tags: List[str] = Field(default_factory=list)
     sub_tags: List[str] = Field(default_factory=list, alias="subTags")
+    #: Fields the parser could not validate, keyed by field name. A failed
+    #: field is dropped and recorded here; every other field is kept. Excluded
+    #: from dumps so it never lands in the stored ``metadata`` snapshot as if
+    #: it were extracted content.
+    field_failures: Dict[str, str] = Field(default_factory=dict, exclude=True)
+    #: The letter body the processor chose to persist as ``documents.full_text``,
+    #: and where it came from (``services/source_text.py``). Set only when it is
+    #: not ``full_content``: complete native/OCR source text is the body, and
+    #: the report is then not asked for Item 25 at all. Excluded from dumps -
+    #: source text is not extracted metadata and must not be copied into the
+    #: ``metadata`` snapshot.
+    body_text: Optional[str] = Field(default=None, exclude=True)
+    body_text_source: Optional[str] = Field(default=None, exclude=True)
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -213,6 +268,36 @@ class ParsedDocumentMetadata(BaseModel):
         return self
 
 
+@lru_cache(maxsize=None)
+def _field_adapter(name: str) -> TypeAdapter:
+    """One cached validator per metadata field."""
+    return TypeAdapter(ParsedDocumentMetadata.model_fields[name].annotation)
+
+
+def build_parsed_metadata(
+    values: Dict[str, Any],
+    *,
+    field_failures: Optional[Dict[str, str]] = None,
+) -> ParsedDocumentMetadata:
+    """Validate each extracted field on its own and keep every valid one.
+
+    A value that does not fit its field is dropped and recorded in
+    ``field_failures``; it never takes the other fields down with it.
+    """
+    failures: Dict[str, str] = dict(field_failures or {})
+    valid: Dict[str, Any] = {}
+    for name, value in values.items():
+        field = ParsedDocumentMetadata.model_fields.get(name)
+        if field is None or name == "field_failures":
+            failures[name] = "unknown metadata field"
+            continue
+        try:
+            valid[name] = _field_adapter(name).validate_python(value)
+        except ValidationError as exc:
+            failures[name] = f"invalid value: {exc.errors()[0].get('msg', 'validation error')}"
+    return ParsedDocumentMetadata(**valid, field_failures=failures)
+
+
 class ProcessingResult(BaseModel):
     """Result of document processing"""
     success: bool
@@ -225,11 +310,43 @@ class ProcessingResult(BaseModel):
     metadata_source: str = "legacy_regex"
     metadata_debug: Optional[Dict[str, Any]] = None
     partial_failures: Dict[str, Any] = Field(default_factory=dict)
+    #: Typed page-extraction result. Carried so the durable job layer can
+    #: derive the document state and requeue deferred pages without
+    #: re-deriving them from text. Not a Pydantic model - allow arbitrary types.
+    extraction_result: Optional[Any] = None
+    extraction_completeness: Optional[str] = None
+    #: Which extractor handled this upload (pdf/image/text/archive).
+    source_kind: Optional[str] = None
+    #: Set when the processor reached an explicit terminal state of its own,
+    #: such as an archive stored without extraction.
+    processing_state: Optional[str] = None
+    #: Pages the quality gate and fallback ladder could not resolve. A
+    #: non-empty list means this document cannot be reported as completed.
+    pages_human_review: List[int] = Field(default_factory=list)
+    #: The single publishability decision, derived once from the quality
+    #: outcome and honoured by every downstream boundary.
+    #:
+    #: `success` means "extraction ran"; it must never be read as "safe to
+    #: publish". Keeping them separate is what stops a blocked document being
+    #: embedded, graph-published or answered from retrieval while its review
+    #: flag is still being written.
+    publishable: bool = True
+    #: The extraction pipeline that actually ran (`legacy_v0`/`unified_v1`),
+    #: stamped by the processor on every outcome, failures included. It names
+    #: what executed, not what was requested: an unrecognised request ran
+    #: legacy and is reported as legacy.
+    pipeline_version: Optional[str] = None
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 __all__ = [
     "ParsedDocumentMetadata",
     "ProcessingResult",
+    "build_parsed_metadata",
+    "METADATA_EXTRACTION_PROMPT_VERSION",
+    "SUMMARY_EXTRACTION_INSTRUCTION",
+    "KEY_REPLY_POINTS_EXTRACTION_INSTRUCTION",
     "ReferenceValue",
     "EXTRACTED_TAG_OPTIONS",
     "EXTRACTED_SUBTAG_OPTIONS",
