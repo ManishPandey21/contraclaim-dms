@@ -41,7 +41,8 @@ export interface ProjectEventDTO {
   organization_id?: string | null;
   project_id?: string | null;
   event_type: string;
-  event_date: string;
+  /** null when no source supports a date (never a record or upload time). */
+  event_date: string | null;
   event_end_date?: string | null;
   title: string;
   description?: string | null;

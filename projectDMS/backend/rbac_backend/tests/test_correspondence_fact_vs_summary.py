@@ -330,7 +330,10 @@ async def test_chronology_fact_fields_come_from_the_body() -> None:
     row = _row(summary="LLM SUMMARY: refers to NTP dated 01-02-2023 under Clause 99.9")
     await service._extract_document_event({"_id": "c-1"}, row, None)
     event = captured["event"]
-    assert event.date_text == "12-08-2024"
+    # The summary's date never leaks in. Since A0b (D1) the body's first date
+    # is not taken either: "hand over ... by 12-08-2024" is a deadline, not
+    # when anything happened. With no document date the entry stays undated.
+    assert event.date_text is None and event.event_date is None
     assert "99.9" not in " ".join(event.contract_clauses)
 
 

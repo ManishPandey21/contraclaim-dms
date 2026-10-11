@@ -34,6 +34,7 @@ from ..models.evidence_graph import (
     TimelineSummary,
 )
 from .audit_event_service import AuditEventService
+from .event_dates import DATE_ROLE_DOCUMENT, date_metadata, parse_day_first
 from .source_text import select_body_text
 
 
@@ -162,8 +163,20 @@ class EvidenceGraphService:
                 range_query["$gte"] = date_from
             if date_to:
                 range_query["$lte"] = date_to
+            # A range matches stored event dates only: an undated event has none
+            # and is not treated as happening when it was recorded.
             query["event_date"] = range_query
-        cursor = db.project_events.find(query).sort("event_date", -1).skip(skip).limit(limit)
+        # Newest event first; Mongo orders a missing/null date below every date,
+        # so undated events follow all dated ones as a group. Ties - and the
+        # undated group - order by when the row was recorded, then by id, so a
+        # page boundary is deterministic. `created_at` orders; it is never shown
+        # as the event's date.
+        cursor = (
+            db.project_events.find(query)
+            .sort([("event_date", -1), ("created_at", -1), ("_id", -1)])
+            .skip(skip)
+            .limit(limit)
+        )
         from .publication_policy import safe_event_records
 
         return await safe_event_records(db, await _collect_cursor(cursor), ("description", "title"), dict_fields=("metadata",))
@@ -779,10 +792,7 @@ class EvidenceGraphService:
         )
         if existing:
             return existing
-        event_date = document_data.get("date")
-        if not isinstance(event_date, datetime):
-            event_date = datetime.utcnow()
-        title = parsed.get("linked_event_suggested") or parsed.get("subject") or parsed.get("letter_no") or document_data.get("filename") or "Document event"
+        title =parsed.get("linked_event_suggested") or parsed.get("subject") or parsed.get("letter_no") or document_data.get("filename") or "Document event"
         event_type = ProjectEventType.LETTER
         if parsed.get("document_class") in {"instruction", "meeting_record", "payment", "variation", "bg", "eot_claim", "programme", "drawing_transmittal"}:
             event_type = {
@@ -795,6 +805,14 @@ class EvidenceGraphService:
                 "programme": ProjectEventType.MILESTONE,
                 "drawing_transmittal": ProjectEventType.DRAWING,
             }[parsed["document_class"]]
+        # Only the "letter issued" event is dated by its document (D1): a
+        # meeting record's or payment advice's letter date is not when the
+        # meeting or payment happened. No date stays no date - never now().
+        event_date: Optional[datetime] = None
+        date_flags: List[str] = []
+        if event_type == ProjectEventType.LETTER:
+            event_date, date_flags = parse_day_first(document_data.get("date"))
+        date_meta = date_metadata(event_date, DATE_ROLE_DOCUMENT, date_flags)
         return await self.create_project_event(
             ProjectEventCreate(
                 organization_id=document_data.get("organization_id"),
@@ -836,6 +854,7 @@ class EvidenceGraphService:
                     "milestone_refs": parsed.get("milestone_refs") or [],
                     "key_date_refs": parsed.get("milestone_refs") or [],
                     "delay_refs": parsed.get("delay_refs") or [],
+                    **date_meta,
                 },
             ),
             current_user,

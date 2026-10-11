@@ -43,6 +43,7 @@ from ..models.evidence_registers import (
     TimelineSyncStatus,
 )
 from ..utils.error_handler import BaseDomainError
+from .event_dates import DATE_ROLE_PERIOD_START, date_metadata
 from .evidence_graph_service import EvidenceGraphService
 from .evidence_register_service import EvidenceRegisterNotFound, EvidenceRegisterService, _actor_id, _jsonable
 from .scope_service import ScopeService
@@ -155,9 +156,12 @@ def timeline_fields(doc: Dict[str, Any]) -> Dict[str, Any]:
     """Deterministic projection of one register row onto its ProjectEvent."""
     event_type = event_type_of(doc)
     responsibility = _value(doc.get("responsibility"))
+    # The register's own start date, or none: never when the row was recorded
+    # or projected (D1).
+    event_date = doc.get("start_date") or None
     return {
         "event_type": project_event_type_for(event_type),
-        "event_date": doc.get("start_date") or doc.get("created_at") or datetime.utcnow(),
+        "event_date": event_date,
         "event_end_date": doc.get("end_date"),
         "title": f"{reference_of(doc)} - {doc.get('title') or ''}"[:300],
         "description": doc.get("description"),
@@ -176,6 +180,7 @@ def timeline_fields(doc: Dict[str, Any]) -> Dict[str, Any]:
             "delay_responsibility": responsibility,
             "critical_path_impact": bool(doc.get("critical_path_impact")),
             "archived": bool(doc.get("archived_at")),
+            **date_metadata(event_date, DATE_ROLE_PERIOD_START),
         },
     }
 
