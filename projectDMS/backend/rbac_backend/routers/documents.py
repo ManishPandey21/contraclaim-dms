@@ -20,6 +20,7 @@ import pandas as pd
 from concurrent.futures import ThreadPoolExecutor
 import asyncio
 from bson import ObjectId
+from fastapi.encoders import jsonable_encoder
 import tempfile
 
 from ..core.database import get_db, get_database
@@ -2840,6 +2841,54 @@ async def get_document(
     await PolicyService().authorize_document(current_user, Permissions.DOCUMENT_VIEW, document)
     await _set_document_revision_headers(response, controller, id)
     return document
+
+
+#: The fields the viewer's ``DocumentProcessingJobStatus`` declares
+#: (client/src/services/enhanced-api.ts). Job internals - stored file path,
+#: checksums, requester, tenant ids, pipeline version - are not part of it.
+_PROCESSING_STATUS_FIELDS = (
+    "_id",
+    "document_id",
+    "status",
+    "stage",
+    "attempts",
+    "max_attempts",
+    "error",
+    "metadata",
+    "created_at",
+    "queued_at",
+    "started_at",
+    "completed_at",
+    "updated_at",
+)
+
+
+@router.get("/documents/{id}/processing-status", response_model=Dict[str, Any])
+@handle_exceptions
+async def get_document_processing_status(
+    id: str,
+    controller: DocumentController = Depends(get_document_controller),
+    current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
+) -> Dict[str, Any]:
+    """The document's processing state, as the document viewer polls it.
+
+    Exactly ``GET /documents/{id}``'s access, then
+    ``DocumentService.get_processing_status``: the document's processing job, or
+    the document's own status when it has no job. Statuses are reported as
+    stored; the client decides terminality (``utils/processingStatus.ts``).
+    """
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_VIEW, selection)
+    document = await controller_get_document(controller, id, current_user)
+    await PolicyService().authorize_document(current_user, Permissions.DOCUMENT_VIEW, document)
+    state = await controller.document_service.get_processing_status(id)
+    if not state:
+        raise DocumentError("Document not found", status.HTTP_404_NOT_FOUND)
+    projected = {key: state[key] for key in _PROCESSING_STATUS_FIELDS if key in state}
+    for key in ("_id", "document_id"):
+        if projected.get(key) is not None:
+            projected[key] = str(projected[key])
+    return jsonable_encoder(projected, custom_encoder={ObjectId: str})
 
 
 @router.post("/documents/{id}/process", response_model=DocumentProcessingResult)
