@@ -241,7 +241,7 @@ async def test_chronology_source_span_is_the_body() -> None:
 
     service._has_current_document_authority = authority
     service.graph = SimpleNamespace(create_ai_extraction=create_extraction)
-    service.create_event = create_event
+    service._insert_event = create_event
     service.db = SimpleNamespace(matter_chronology_events=_Find([]))
     await service._extract_document_event({"_id": "c-1", "organization_id": "org-A", "project_id": "proj-A"}, _row(), None)
     event = captured["event"]
@@ -325,7 +325,7 @@ async def test_chronology_fact_fields_come_from_the_body() -> None:
 
     service._has_current_document_authority = authority
     service.graph = SimpleNamespace(create_ai_extraction=create_extraction)
-    service.create_event = create_event
+    service._insert_event = create_event
     service.db = SimpleNamespace(matter_chronology_events=_Find([]))
     row = _row(summary="LLM SUMMARY: refers to NTP dated 01-02-2023 under Clause 99.9")
     await service._extract_document_event({"_id": "c-1"}, row, None)

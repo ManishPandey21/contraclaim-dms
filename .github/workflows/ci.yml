@@ -161,6 +161,7 @@ jobs:
             backend/rbac_backend/tests/integration/test_variation_relationships_cl2_mongo.py
             backend/rbac_backend/tests/integration/test_cl3a_variation_hindrance_mongo.py
             backend/rbac_backend/tests/integration/test_cl3b_programme_chronology_mongo.py
+            backend/rbac_backend/tests/integration/test_chronology_verification_authority_mongo.py
             backend/rbac_backend/tests/integration/test_cl4a_core_active_scope_mongo.py
             backend/rbac_backend/tests/integration/test_contract_master_policy_mongo.py
             backend/rbac_backend/tests/integration/test_contract_master_routes_mongo.py
