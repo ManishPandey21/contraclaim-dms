@@ -95,7 +95,10 @@ class ProjectEventBase(BaseModel):
     organization_id: Optional[str] = None
     project_id: Optional[str] = None
     event_type: ProjectEventType = ProjectEventType.OTHER
-    event_date: datetime
+    #: None when no source supports a date. Never filled from created_at, an
+    #: upload time or the current time; `metadata.date_role` / `date_flags`
+    #: say what a present date means (services/event_dates.py).
+    event_date: Optional[datetime] = None
     event_end_date: Optional[datetime] = None
     title: str
     description: Optional[str] = None

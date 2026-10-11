@@ -51,6 +51,7 @@ from ..models.evidence_graph import (
 )
 from .arbitration_drafting.repository import ArbitrationDraftingRepository
 from .audit_event_service import AuditEventService
+from .event_dates import DATE_ROLE_DOCUMENT, DATE_ROLE_EVENT, FLAG_AMBIGUOUS_DM, date_metadata, parse_day_first
 from .evidence_graph_service import EvidenceGraphService
 
 
@@ -370,6 +371,27 @@ class ChronologyService:
                 detail="Chronology review state changes only through verify, reject or mark-duplicate",
             )
         changed = sorted(field for field, value in update.items() if _jsonable(value) != _jsonable(before.get(field)))
+        if "event_date" in changed:
+            # A date a person entered is the event's own date, resolved: it no
+            # longer is the document date the extractor proposed, nor ambiguous.
+            meta = dict(update.get("metadata") or before.get("metadata") or {})
+            meta.update(date_metadata(update.get("event_date"), DATE_ROLE_EVENT if update.get("event_date") else None))
+            update["metadata"] = meta
+            # The ledger, exports and the timeline projection prefer
+            # `date_text`, so the old text must not outlive the date it spelled.
+            # Text supplied with the new date is the reviewer's and is kept.
+            if "date_text" not in update:
+                update["date_text"] = None
+            if "date_type" not in update:
+                if update.get("event_date") is None:
+                    update["date_type"] = ChronologyDateType.UNDATED.value
+                elif _enum_value(before.get("date_type")) in {
+                    ChronologyDateType.UNDATED.value,
+                    ChronologyDateType.INFERRED.value,
+                }:
+                    # A date a person entered is neither missing nor a
+                    # day-first guess any more; other precisions are theirs.
+                    update["date_type"] = ChronologyDateType.EXACT.value
         material = [field for field in changed if field not in _PRESENTATION_ONLY_EVENT_FIELDS]
         was_verified = before.get("verification_status") in _VERIFIED_STATES
         note = None
@@ -716,7 +738,7 @@ class ChronologyService:
         )
         if existing:
             return dict(existing)
-        event_date, date_text, date_type = self._event_date(source_doc, raw_text)
+        event_date, date_text, date_type, date_meta = self._event_date(source_doc)
         clauses = self._clauses(raw_text)
         letter_no = source_doc.get("letterNo") or source_doc.get("letter_no") or self._letter_no(raw_text)
         classification = self._classification(raw_text)
@@ -765,11 +787,16 @@ class ChronologyService:
             event_classification=classification,
             impact_type=self._impact_type(classification),
             confidence_score=0.72 if raw_text and event_date else 0.45,
-            verification_status=ChronologyVerificationStatus.AI_SUGGESTED if span_text else ChronologyVerificationStatus.NEEDS_REVIEW,
+            # An ambiguous day/month needs a human to resolve it, like a missing span.
+            verification_status=(
+                ChronologyVerificationStatus.AI_SUGGESTED
+                if span_text and FLAG_AMBIGUOUS_DM not in date_meta["date_flags"]
+                else ChronologyVerificationStatus.NEEDS_REVIEW
+            ),
             pleading_use=self._pleading_use(classification, chronology.get("party_perspective")),
             related_document_ids=[source_id],
             ai_extraction_id=str(extraction.get("_id")),
-            metadata={"content_hash": content_hash, "source_type": "document"},
+            metadata={"content_hash": content_hash, "source_type": "document", **date_meta},
         )
         return await self._insert_event(event, current_user)
 
@@ -819,34 +846,26 @@ class ChronologyService:
         ]
         return " ".join(str(part) for part in parts if part)
 
-    def _event_date(self, source_doc: Dict[str, Any], raw_text: str) -> tuple[Optional[datetime], Optional[str], ChronologyDateType]:
-        for key in ["date", "document_date", "letter_date", "created_at"]:
-            value = source_doc.get(key)
-            parsed = self._parse_date(value)
-            if parsed:
-                return parsed, parsed.date().isoformat(), ChronologyDateType.EXACT
-        match = re.search(r"\b(\d{4}-\d{2}-\d{2}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4})\b", raw_text or "")
-        if match:
-            parsed = self._parse_date(match.group(1))
-            if parsed:
-                return parsed, match.group(1), ChronologyDateType.EXACT
-        return None, None, ChronologyDateType.UNDATED
+    def _event_date(
+        self, source_doc: Dict[str, Any]
+    ) -> tuple[Optional[datetime], Optional[str], ChronologyDateType, Dict[str, Any]]:
+        """The date of a Builder entry: its source document's own date (D1).
 
-    def _parse_date(self, value: Any) -> Optional[datetime]:
-        if isinstance(value, datetime):
-            return value
-        if not value:
-            return None
-        raw = str(value).strip()
-        for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%y", "%d/%m/%y", "%d-%m-%y"):
-            try:
-                return datetime.strptime(raw[:10], fmt)
-            except ValueError:
-                continue
-        try:
-            return datetime.fromisoformat(raw.replace("Z", "+00:00")).replace(tzinfo=None)
-        except ValueError:
-            return None
+        A Builder entry is one per source document - the letter itself - so it is
+        the deterministic "letter / document issued" event and may carry the
+        document date, recorded as ``date_role=document_date``. Nothing else
+        fills it: not ``created_at`` or an upload time, and not a date read from
+        the body, whose first date is as likely a referenced letter's. Missing
+        stays missing. An ambiguous day/month is flagged, not called exact.
+        """
+        for key in ["date", "document_date", "letter_date"]:
+            value = source_doc.get(key)
+            parsed, flags = parse_day_first(value)
+            if parsed:
+                date_text = str(value).strip() if isinstance(value, str) else parsed.date().isoformat()
+                date_type = ChronologyDateType.INFERRED if FLAG_AMBIGUOUS_DM in flags else ChronologyDateType.EXACT
+                return parsed, date_text, date_type, date_metadata(parsed, DATE_ROLE_DOCUMENT, flags)
+        return None, None, ChronologyDateType.UNDATED, date_metadata(None, None)
 
     def _clauses(self, text: str) -> List[str]:
         found = re.findall(r"\b(?:GCC|SCC|Clause|Cl\.?)\s*([0-9]+(?:\.[0-9]+)*)\b", text or "", flags=re.I)
@@ -941,7 +960,9 @@ class ChronologyService:
                 organization_id=organization_id,
                 project_id=project_id,
                 event_type=self._project_event_type(event),
-                event_date=event.get("event_date") or datetime.utcnow(),
+                # Verified means reviewed, not dated: an undated event publishes
+                # undated rather than at the moment someone verified it (D1).
+                event_date=event.get("event_date"),
                 event_end_date=event.get("event_end_date"),
                 title=event.get("title") or "Chronology event",
                 description=event.get("description"),
@@ -962,6 +983,11 @@ class ChronologyService:
                     "supports_party": event.get("supports_party"),
                     "pleading_use": event.get("pleading_use"),
                     "clauses": event.get("contract_clauses") or [],
+                    **date_metadata(
+                        event.get("event_date"),
+                        (event.get("metadata") or {}).get("date_role"),
+                        (event.get("metadata") or {}).get("date_flags"),
+                    ),
                 },
             )
         owned = await self._owned_project_event(event)

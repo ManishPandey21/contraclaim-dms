@@ -27,6 +27,7 @@ from ..models.evidence_registers import (
     ProgrammeMilestoneUpdate,
 )
 from .audit_event_service import AuditEventService
+from .event_dates import date_metadata
 from .evidence_graph_service import EvidenceGraphService
 from .publication_policy import is_consumable, resolve_canonical_document
 
@@ -76,7 +77,7 @@ class EvidenceRegisterService:
             current_user,
             entity_type=EvidenceEntityType.DRAWING,
             event_type=ProjectEventType.DRAWING,
-            event_date=doc.get("issue_date") or doc.get("received_date") or doc.get("created_at"),
+            event_date=doc.get("issue_date") or doc.get("received_date"),
             title=f"{doc.get('drawing_number')} Rev {doc.get('revision') or '-'} - {doc.get('title')}",
             description=doc.get("metadata", {}).get("description"),
             relation_type=EventRelationType.REFERS_TO,
@@ -372,7 +373,8 @@ class EvidenceRegisterService:
                     organization_id=doc.get("organization_id"),
                     project_id=doc.get("project_id"),
                     event_type=event_type,
-                    event_date=event_date or datetime.utcnow(),
+                    # The register's own date or none - never the clock (D1).
+                    event_date=event_date,
                     event_end_date=event_end_date,
                     title=title[:300],
                     description=description,
@@ -389,6 +391,7 @@ class EvidenceRegisterService:
                         "status": _enum_value(doc.get("status")),
                         "responsibility": _enum_value(doc.get("responsibility")),
                         "milestone_type": _enum_value(doc.get("milestone_type")),
+                        **date_metadata(event_date, None),
                     },
                 ),
                 current_user,

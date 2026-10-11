@@ -84,7 +84,7 @@ function titleCase(value?: string | null): string {
 }
 
 function fmtDate(value?: string | null): { day: string; month: string; year: string; full: string } {
-  if (!value) return { day: "--", month: "---", year: "----", full: "No date" };
+  if (!value) return { day: "--", month: "---", year: "----", full: "Date not established" };
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return { day: "--", month: "---", year: "----", full: value };
   return {
@@ -235,10 +235,22 @@ const TimelineCard: React.FC<{
     <div className="grid grid-cols-[64px_minmax(0,1fr)] gap-4">
       <div className="relative text-center">
         <div className="absolute left-1/2 top-0 h-full w-px -translate-x-1/2 bg-slate-200" />
-        <div className="relative mx-auto rounded-full border bg-white px-1 py-2 text-xs text-slate-500">
-          <div>{d.month}</div>
-          <div className="text-xl font-semibold text-slate-900">{d.day}</div>
-          <div>{d.year}</div>
+        {/* An event with no supported date says so; its record time is never shown in its place. */}
+        <div
+          data-testid="timeline-event-date"
+          data-event-id={event.id}
+          title={event.event_date ? d.full : "Date not established"}
+          className="relative mx-auto rounded-full border bg-white px-1 py-2 text-xs text-slate-500"
+        >
+          {event.event_date ? (
+            <>
+              <div>{d.month}</div>
+              <div className="text-xl font-semibold text-slate-900">{d.day}</div>
+              <div>{d.year}</div>
+            </>
+          ) : (
+            <div className="py-3 font-medium">Undated</div>
+          )}
         </div>
       </div>
       <Card className="overflow-hidden rounded-md">
