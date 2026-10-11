@@ -359,3 +359,87 @@ def test_hindrance_projection_without_start_date_is_undated() -> None:
     fields = timeline_fields({"_id": "h-1", "created_at": UPLOADED_AT})
     assert fields["event_date"] is None
     assert "source_missing" in fields["metadata"]["date_flags"]
+
+
+# --- stale date_text after a date edit ---------------------------------------------
+#
+# The ledger, exports and the timeline projection prefer `date_text` over the
+# structured date, so a `date_text` left behind by an `event_date` edit would
+# keep presenting the old date as the event's date.
+
+DATE_A_TEXT = "25/03/2026"
+DATE_A = datetime(2026, 3, 25)
+DATE_B = datetime(2026, 3, 10)
+
+
+async def _verified_at_a() -> tuple[Any, dict[str, Any], dict[str, Any]]:
+    svc, chronology, event = await _extract({"date": DATE_A_TEXT, "subject": "Access letter"})
+    assert event["event_date"] == DATE_A and event["date_text"] == DATE_A_TEXT
+    await svc.verify_event(chronology["_id"], event["_id"], _user(), ChronologyDecisionRequest(), policy=_VerifierPolicy())
+    return svc, chronology, event
+
+
+def test_changing_only_event_date_retires_the_old_date_text() -> None:
+    async def scenario() -> None:
+        svc, chronology, event = await _verified_at_a()
+        updated = await svc.update_event(
+            chronology["_id"], event["_id"], MatterChronologyEventUpdate(event_date=DATE_B), _user()
+        )
+        assert updated["event_date"] == DATE_B
+        assert updated.get("date_text") != DATE_A_TEXT
+
+        # Re-verified, the arbitration ledger cites B, never the stale A text.
+        await svc.verify_event(chronology["_id"], event["_id"], _user(), ChronologyDecisionRequest(), policy=_VerifierPolicy())
+        context = await svc.pleading_context(chronology["_id"])
+        citation = context.source_ledger[0]["citation"]
+        assert citation.startswith("2026-03-10")
+        assert DATE_A_TEXT not in citation
+
+        project_event = next(iter(svc.db.project_events.docs.values()))
+        assert project_event["event_date"] == DATE_B
+        assert _metadata(project_event).get("date_text") != DATE_A_TEXT
+
+        current = await svc.get_event(chronology["_id"], event["_id"])
+        rows = adapter_harness._adapter_rows(adapter_harness._event(**{**current, "verification_status": "approved"}), [])
+        assert rows[0]["date"] == DATE_B
+
+    _run(scenario())
+
+
+def test_changing_event_date_and_date_text_together_keeps_both() -> None:
+    async def scenario() -> None:
+        svc, chronology, event = await _verified_at_a()
+        updated = await svc.update_event(
+            chronology["_id"], event["_id"], MatterChronologyEventUpdate(event_date=DATE_B, date_text="10.03.2026"), _user()
+        )
+        assert updated["event_date"] == DATE_B
+        assert updated["date_text"] == "10.03.2026"
+
+    _run(scenario())
+
+
+def test_clearing_event_date_leaves_no_stale_date_text() -> None:
+    async def scenario() -> None:
+        svc, chronology, event = await _verified_at_a()
+        updated = await svc.update_event(
+            chronology["_id"], event["_id"], MatterChronologyEventUpdate(event_date=None), _user()
+        )
+        assert updated.get("event_date") is None
+        assert updated.get("date_text") is None
+        assert updated.get("date_type") == ChronologyDateType.UNDATED.value
+        assert "source_missing" in _metadata(updated)["date_flags"]
+
+    _run(scenario())
+
+
+def test_an_unrelated_edit_keeps_date_text() -> None:
+    async def scenario() -> None:
+        svc, chronology, event = await _verified_at_a()
+        updated = await svc.update_event(
+            chronology["_id"], event["_id"], MatterChronologyEventUpdate(title="Access letter (renamed)"), _user()
+        )
+        assert updated["event_date"] == DATE_A
+        assert updated["date_text"] == DATE_A_TEXT
+        assert _metadata(updated)["date_role"] == "document_date"
+
+    _run(scenario())
