@@ -185,6 +185,13 @@ services:
       # The contract-worker is the single scheduler owner; the leader lock is the
       # safety net if this is ever flipped on by mistake.
       RUN_SCHEDULER: "false"
+      # Unified extraction routing. The API assigns each job's pipeline_version
+      # at upload (DocumentService.queue_document_processing), so these must
+      # reach this service, not only the workers - otherwise the canary
+      # allowlist routes nothing. Same defaults as the workers: off, empty.
+      # See docs/operations/unified_extraction_canary_and_rollback.md
+      UNIFIED_EXTRACTION_ENABLED: "${UNIFIED_EXTRACTION_ENABLED:-false}"
+      UNIFIED_EXTRACTION_CANARY_ORG_IDS: "${UNIFIED_EXTRACTION_CANARY_ORG_IDS:-}"
     depends_on:
       qdrant:
         condition: service_healthy
