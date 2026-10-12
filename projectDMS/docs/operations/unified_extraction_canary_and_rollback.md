@@ -191,6 +191,13 @@ Verify before going further:
 
 ## 4. Enable one canary organisation (Step 3)
 
+> **Release 1.1 (#63): an allowlist change must recreate `backend` too.** The API
+> assigns `pipeline_version` when it queues the job
+> (`DocumentService.queue_document_processing`), and it reads
+> `UNIFIED_EXTRACTION_*` only at process start. Recreating only the workers leaves
+> the API on the old allowlist: new uploads keep the old routing. Every enable,
+> rollback and re-enable recreates `backend` together with the workers.
+
 Two workers with **disjoint claims**: the existing worker keeps every tenant on
 legacy, and a separate canary worker takes only unified jobs.
 
@@ -206,7 +213,7 @@ DOCUMENT_WORKER_CANARY_REPLICAS=1             # canary worker: unified_v1 only
 docker tag "<approved document-worker image id from current.json>" \
   "<project>-document-worker-canary:latest"
 docker compose -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml \
-  up -d --no-deps --no-build document-worker document-worker-canary
+  up -d --no-deps --no-build backend document-worker document-worker-canary
 ```
 
 While the canary runs, every deploy runs `scripts/release_preflight.sh` (deployment
@@ -236,21 +243,39 @@ Enqueue one clean PDF and one mixed fixture in that organisation only. Assert:
 
 Rollback is **server-side**: no image redeploy, no evidence deletion.
 
-```bash
-# .env
-UNIFIED_EXTRACTION_CANARY_ORG_IDS=          # new jobs are legacy_v0 again
-DOCUMENT_WORKER_CANARY_REPLICAS=0           # stop claiming unified jobs
-DOCUMENT_WORKER_PIPELINE_VERSIONS=          # existing worker: unrestricted
+> **Release 1.1 (#63): an allowlist change must recreate `backend` too.** The API
+> assigns `pipeline_version` when it queues the job
+> (`DocumentService.queue_document_processing`), and it reads
+> `UNIFIED_EXTRACTION_*` only at process start. Recreating only the workers leaves
+> the API on the old allowlist: new uploads keep the old routing. Every enable,
+> rollback and re-enable recreates `backend` together with the workers.
 
+```bash
+# 1. .env: new jobs are legacy_v0 again. The API decides, so recreate backend.
+UNIFIED_EXTRACTION_CANARY_ORG_IDS=
 docker compose -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml \
-  up -d --no-deps --no-build document-worker document-worker-canary
+  up -d --no-deps --no-build --pull never backend document-worker
+
+# 2. Inventory unified_v1 jobs still queued/processing/retrying, and let them
+#    drain on the canary (or record an explicit decision per job).
+
+# 3. .env: stop the canary worker.
+DOCUMENT_WORKER_CANARY_REPLICAS=0
+docker compose -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml \
+  up -d --no-deps --no-build --pull never document-worker-canary
 ```
 
-Order matters. Clear the allowlist **first** so no further unified jobs are
-created, then scale the canary worker down. Any unified job still queued is
-picked up by the now-unrestricted default worker and processed on the unified
-path — its persisted version is honoured, so it is never silently reprocessed as
-legacy.
+Order matters. Clear the allowlist **and recreate `backend`** first so no further
+unified jobs are created, then drain, then scale the canary worker down.
+
+**The default worker does not become unrestricted.** `docker-compose.prod.yml`
+passes `DOCUMENT_WORKER_PIPELINE_VERSIONS` as `${DOCUMENT_WORKER_PIPELINE_VERSIONS:-legacy_v0}`,
+so an empty value in `.env` still means `legacy_v0`. A `unified_v1` job left queued
+after the canary is scaled to 0 is **not** processed by anything. It waits, with its
+persisted version, run id and page evidence intact, until a canary worker runs again.
+That is why step 2 drains first. Never rewrite a queued job's `pipeline_version`.
+(Corrected 2026-10-12 by the Release 1.1 certification. An earlier revision said
+clearing the variable made the default worker unrestricted.)
 
 Then confirm:
 

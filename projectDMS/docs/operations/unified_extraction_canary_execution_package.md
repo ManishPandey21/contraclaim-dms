@@ -577,7 +577,9 @@ MANIFESTS=/opt/contraclaim-dms/release-manifests
 PROJECT="$($DC config --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["name"])')"
 WORKER_IMAGE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["services"]["document-worker"]["image_id"])' "$MANIFESTS/current.json")"
 docker tag "$WORKER_IMAGE" "$PROJECT-document-worker-canary:latest"
-$DC up -d --no-deps --no-build document-worker document-worker-canary
+# Release 1.1 (#63): the API assigns pipeline_version at upload and reads the
+# allowlist only at start, so backend is recreated with the workers.
+$DC up -d --no-deps --no-build --pull never backend document-worker document-worker-canary
 
 # S3.4 confirm topology from the running containers. No image changes: the canary
 #      runs the approved document-worker image, so the scope is UNCHANGED. While
@@ -1214,11 +1216,13 @@ Execution order: **§6 Stage A → §2 → §3 → §4 → §5 (before) → §6 
    `DOCUMENT_WORKER_CANARY_REPLICAS=1`, keeping
    `DOCUMENT_WORKER_PIPELINE_VERSIONS=legacy_v0`.
 7. Retag the approved `document-worker` image onto
-   `<project>-document-worker-canary:latest` and recreate `document-worker` and
-   `document-worker-canary` with `--no-build` to pick that up (S3.3).
+   `<project>-document-worker-canary:latest` and recreate `backend`, `document-worker`
+   and `document-worker-canary` with `--no-build` to pick that up (S3.3). The backend
+   recreate is required: the API assigns `pipeline_version` at upload (Release 1.1, #63).
 8. Upload and process **demo-organisation fixtures F1–F6 only**.
-9. Execute the §9 rollback: clear the allowlist, set canary replicas to 0,
-   recreate both workers.
+9. Execute the §9 rollback: clear the allowlist and recreate `backend` and
+   `document-worker`, drain or decide each in-flight `unified_v1` job, then set canary
+   replicas to 0 and recreate `document-worker-canary`.
 10. Write evidence into this document.
 
 **Nothing else.** Any action not on this list is outside the authorisation.
