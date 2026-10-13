@@ -271,6 +271,9 @@ export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   "/documents": ["dms.document.view"],
   "/documentsearch": ["dms.document.view"],
   "/documentviewer": ["dms.document.view"],
+  // Release 1.1.1: the queue is readable with view; deciding a page needs
+  // dms.document.review_extraction, which the server enforces per request.
+  "/extraction-reviews": ["dms.document.view"],
   "/reference": ["dms.document.view"],
   "/share": ["dms.document.share"],
   // C3: canonical backend permission is `drafting.request.view` (default_roles.py,

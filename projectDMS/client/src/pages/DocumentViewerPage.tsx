@@ -29,7 +29,11 @@ import EnclosuresPanel from "@/components/document-viewer/EnclosuresPanel";
 import ReferencesPanel from "@/components/document-viewer/ReferencesPanel";
 import DocumentDetailsPanel from "@/components/document-viewer/DocumentDetailsPanel";
 import LinkedRecordsPanel from "@/components/document-viewer/LinkedRecordsPanel";
-import { isTerminalProcessingStatus } from "@/utils/processingStatus";
+import ExtractionReviewPanel from "@/components/document-viewer/ExtractionReviewPanel";
+import {
+  REVIEW_PUBLICATION_PENDING_STAGE,
+  isTerminalProcessingStatus,
+} from "@/utils/processingStatus";
 
 const DocumentViewer = React.lazy(
   () => import("@/components/document-viewer/DocumentViewer")
@@ -97,12 +101,22 @@ const DocumentViewerPage: React.FC = () => {
     "enclosure",
     "references",
     "details",
+    "review",
   ]);
   const initialTabParam = (searchParams.get("tab") || "metadata").toLowerCase();
   const initialActiveTab = allowedTabs.has(initialTabParam)
     ? initialTabParam
     : "metadata";
   const [activeTab, setActiveTab] = useState(initialActiveTab);
+  // `?page=N` opens the source PDF at that page (extraction review deep link).
+  const pageParam = Number.parseInt(searchParams.get("page") || "", 10);
+  const [pdfPage, setPdfPage] = useState<number | null>(
+    Number.isFinite(pageParam) && pageParam > 0 ? pageParam : null
+  );
+  useEffect(() => {
+    const requested = Number.parseInt(searchParams.get("page") || "", 10);
+    if (Number.isFinite(requested) && requested > 0) setPdfPage(requested);
+  }, [searchParams]);
   useEffect(() => {
     const t = (searchParams.get("tab") || "").toLowerCase();
     if (allowedTabs.has(t) && t !== activeTab) {
@@ -791,6 +805,9 @@ const DocumentViewerPage: React.FC = () => {
       ? "Metadata extracted"
       : effectiveProcessingStatus === "human_review_required"
         ? "Needs human review"
+      : effectiveProcessingStatus === "partially_processed" &&
+          processingStatus?.stage === REVIEW_PUBLICATION_PENDING_STAGE
+        ? "Human review resolved; publishing"
       : effectiveProcessingStatus === "partially_processed"
         ? isTerminalProcessingStatus(effectiveProcessingStatus, processingStatus?.stage)
           ? "Partially processed"
@@ -807,6 +824,27 @@ const DocumentViewerPage: React.FC = () => {
             : effectiveProcessingStatus === "queued"
               ? "Metadata extraction queued"
               : "Metadata extraction in progress";
+
+  const reviewPages: number[] = Array.isArray(
+    (processingError as { pages?: unknown } | null)?.pages
+  )
+    ? ((processingError as { pages: unknown[] }).pages
+        .map((page) => Number(page))
+        .filter((page) => Number.isFinite(page) && page > 0) as number[])
+    : [];
+  const showReviewTab =
+    effectiveProcessingStatus === "human_review_required" ||
+    activeTab === "review" ||
+    String(processingStatus?.stage || "").startsWith("review_");
+  const openReview = () => {
+    setShowMetadata(true);
+    setActiveTab("review");
+    if (reviewPages.length) setPdfPage(reviewPages[0]);
+  };
+  const refreshAfterReview = () => {
+    void fetchProcessingStatus();
+    void fetchDocument();
+  };
 
   return (
     <div className="h-screen flex flex-col bg-gray-100">
@@ -846,6 +884,11 @@ const DocumentViewerPage: React.FC = () => {
               )}
             </div>
             <div className="flex items-center gap-2">
+              {effectiveProcessingStatus === "human_review_required" && (
+                <Button size="sm" variant="outline" onClick={openReview}>
+                  Review pages
+                </Button>
+              )}
               {processingError && (
                 <Button
                   size="sm"
@@ -928,7 +971,7 @@ const DocumentViewerPage: React.FC = () => {
                 </div>
               }
             >
-              <DocumentViewer document={document} />
+              <DocumentViewer document={document} page={pdfPage} />
             </Suspense>
           </ResizablePanel>
 
@@ -943,12 +986,15 @@ const DocumentViewerPage: React.FC = () => {
                   className="w-full h-full min-h-0 flex flex-col"
                 >
                   <div className="bg-white border-b p-3">
-                    <TabsList className="grid w-full grid-cols-5">
+                    <TabsList
+                      className={`grid w-full ${showReviewTab ? "grid-cols-6" : "grid-cols-5"}`}
+                    >
                       <TabsTrigger value="metadata">Metadata</TabsTrigger>
                       <TabsTrigger value="enclosure">Enclosures</TabsTrigger>
                       <TabsTrigger value="references">References</TabsTrigger>
                       <TabsTrigger value="details">Details</TabsTrigger>
                       <TabsTrigger value="records">Records</TabsTrigger>
+                      {showReviewTab && <TabsTrigger value="review">Review</TabsTrigger>}
                     </TabsList>
                   </div>
 
@@ -1009,6 +1055,17 @@ const DocumentViewerPage: React.FC = () => {
                       <TabsContent value="records" className="m-0">
                         <LinkedRecordsPanel documentId={documentId!} />
                       </TabsContent>
+
+                      {showReviewTab && documentId && (
+                        <TabsContent value="review" className="m-0">
+                          <ExtractionReviewPanel
+                            documentId={documentId}
+                            currentPage={pdfPage}
+                            onShowPage={setPdfPage}
+                            onDecided={refreshAfterReview}
+                          />
+                        </TabsContent>
+                      )}
                     </div>
                   </ScrollArea>
                 </Tabs>

@@ -12,6 +12,7 @@ const Overview = lazyWithRetry(() => import("./pages/Overview"));
 const OrganizationsPage = lazyWithRetry(() => import("./pages/OrganizationsPage"));
 const ProjectsPage = lazyWithRetry(() => import("./pages/ProjectsPage"));
 const DocumentsPage = lazyWithRetry(() => import("./pages/DocumentsPage"));
+const ExtractionReviewQueuePage = lazyWithRetry(() => import("./pages/ExtractionReviewQueuePage"));
 const EnhancedDocumentsPage = lazyWithRetry(
   () => import("./pages/EnhancedDocumentsPage"),
 );
@@ -138,6 +139,7 @@ const AppRoutes = () => (
         <Route path="projects" element={<ProjectsPage />} />
         <Route path="documents" element={<DocumentsPage />} />
         <Route path="documentsearch" element={<EnhancedDocumentsPage />} />
+        <Route path="extraction-reviews" element={<ExtractionReviewQueuePage />} />
         <Route path="tags" element={<TagsPage />} />
         <Route path="profile" element={<ProfilePage />} />
         <Route path="users" element={<UsersPage />} />

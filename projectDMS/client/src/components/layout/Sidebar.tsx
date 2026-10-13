@@ -41,6 +41,7 @@ import {
   ShieldCheck,
   Eye,
   ListTree,
+  ClipboardCheck,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import useRBAC from "@/hooks/useRBAC";
@@ -106,6 +107,12 @@ const Sidebar = () => {
       path: "/documentsearch",
       icon: <Search size={20} />,
       label: "Search Letters",
+    },
+    {
+      path: "/extraction-reviews",
+      icon: <ClipboardCheck size={20} />,
+      label: "Extraction Review",
+      permission: "dms.document.review_extraction",
     },
     //{ path: "/reference/663c9a72a3b039f4cd364bcf", icon: <FileSearch size={20} />, label: "Reference Page" },
 
