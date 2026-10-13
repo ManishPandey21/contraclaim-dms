@@ -582,6 +582,7 @@ class ExtractionReviewService:
         current = latest.get(int(page_number))
         current_version = int((current or {}).get("decision_version") or 0)
 
+        resolution: Dict[str, Any]
         if current and current.get("action") == action:
             # Idempotent: the same decision again records nothing new.
             if state == REVIEW_REQUIRED and action == ACTION_APPROVE:
@@ -662,7 +663,7 @@ class ExtractionReviewService:
             },
         )
 
-        resolution: Dict[str, Any] = {"resolved": False, "state": REVIEW_REQUIRED}
+        resolution = {"resolved": False, "state": REVIEW_REQUIRED}
         if action == ACTION_APPROVE:
             resolution = await self._resolve_if_complete(document, evidence, current_user)
         return {"decision": _public_decision(row), "idempotent": False, "resolution": resolution}
@@ -912,7 +913,8 @@ class ExtractionReviewService:
         if not authorised:
             return {"graph": "withheld"}
 
-        quality = current.get("metadata_quality") if isinstance(current.get("metadata_quality"), Mapping) else {}
+        stored_quality = current.get("metadata_quality")
+        quality: Mapping[str, Any] = stored_quality if isinstance(stored_quality, Mapping) else {}
         references = current.get("reference") or []
         try:
             if quality.get("references_authoritative"):
