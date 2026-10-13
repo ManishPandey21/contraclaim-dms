@@ -151,6 +151,9 @@ jobs:
           # Batched subtag lookup: caller-supplied tag ids must never reach a
           # foreign tag's subtags (real HTTP, Mongo and RBAC).
           TAGS_SUBTAG_BATCH_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          # Release 1.1.1 extraction review: approve/reject, stale-evidence 409s,
+          # resolution and post-review publication over real HTTP, Mongo and RBAC.
+          EXTRACTION_REVIEW_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
         # Every real-Mongo module is in this list or excused by name, with a
         # reason, in test_ci_real_mongo_coverage.py: a module in neither is red.
         # That is how the reprojection review, source-mutation and
@@ -164,6 +167,7 @@ jobs:
             backend/rbac_backend/tests/integration/test_chronology_verification_authority_mongo.py
             backend/rbac_backend/tests/integration/test_event_date_timeline_mongo.py
             backend/rbac_backend/tests/integration/test_cl4a_core_active_scope_mongo.py
+            backend/rbac_backend/tests/integration/test_extraction_review_mongo.py
             backend/rbac_backend/tests/integration/test_contract_master_policy_mongo.py
             backend/rbac_backend/tests/integration/test_contract_master_routes_mongo.py
             backend/rbac_backend/tests/integration/test_contract_migration_claim_mongo.py

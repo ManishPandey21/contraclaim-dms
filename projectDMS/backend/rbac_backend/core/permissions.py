@@ -13,6 +13,7 @@ CLIENT_DMS_PERMISSIONS: List[str] = [
     "dms.document.bulk_download",
     "dms.document.share",
     "dms.document.link_reference",
+    "dms.document.review_extraction",
     "dms.status.update",
     "dms.comment.add",
     "dms.dashboard.view",
@@ -178,6 +179,10 @@ class Permissions:
     DOCUMENT_BULK_DOWNLOAD = "dms.document.bulk_download"
     DOCUMENT_SHARE = "dms.document.share"
     DOCUMENT_LINK_REFERENCE = "dms.document.link_reference"
+    #: Approve or reject a page the extraction quality gate sent to human review.
+    #: Narrower than edit_metadata on purpose: it releases evidence for retrieval
+    #: and drafting, so it is not granted to every document editor.
+    DOCUMENT_REVIEW_EXTRACTION = "dms.document.review_extraction"
     STATUS_UPDATE = "dms.status.update"
     COMMENT_ADD = "dms.comment.add"
     DASHBOARD_VIEW = "dms.dashboard.view"

@@ -124,6 +124,23 @@ def _route_source(route: Any) -> str:
                     inspect.getsource(DocumentRelationshipService._document),
                 ]
             )
+    if route.endpoint.__module__ == "rbac_backend.routers.document_extraction_review":
+        # Release 1.1.1: the router is thin; selection and PolicyService are
+        # enforced in the domain service, which is what must be inspected.
+        from rbac_backend.services.extraction_review_service import ExtractionReviewService
+
+        delegated_methods = {
+            "list_extraction_review_queue": ("list_queue",),
+            "get_extraction_review": ("get_review", "_authorised_document"),
+            "approve_extraction_page": ("decide_page", "_authorised_document"),
+            "reject_extraction_page": ("decide_page", "_authorised_document"),
+            "finalize_extraction_review": ("finalize", "_authorised_document"),
+        }
+        names = delegated_methods.get(str(route.name), ())
+        source = "\n".join(
+            [source]
+            + [inspect.getsource(getattr(ExtractionReviewService, name)) for name in names]
+        )
     return source
 
 
