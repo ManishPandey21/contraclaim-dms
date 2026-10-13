@@ -36,10 +36,10 @@ Gate 3's execution plan; it is not a licence to ship a page with no error state.
 ## Counts
 
 - Source: `client/src/routes.tsx`
-- Routes: **95**
-- Authenticated routes: **88**
-- Routes owing an empty state: **60**
-- Routes owing a loading state: **88**
+- Routes: **96**
+- Authenticated routes: **89**
+- Routes owing an empty state: **61**
+- Routes owing a loading state: **89**
 
 ## The inventory
 
@@ -94,6 +94,7 @@ Gate 3's execution plan; it is not a licence to ship a page with no error state.
 | `/documentsearch` | GET | yes | `EnhancedDocumentsPage` | yes | yes | MISSING - no fault-injection coverage yet |
 | `/documentviewer/:id` | GET | yes | `DocumentViewerPage` | no | yes | MISSING - no fault-injection coverage yet |
 | `/email-groups` | GET | yes | `EmailGroupsPage` | yes | yes | MISSING - no fault-injection coverage yet |
+| `/extraction-reviews` | GET | yes | `ExtractionReviewQueuePage` | yes | yes | `client/src/pages/__tests__/ExtractionReviewQueuePage.test.tsx` |
 | `/folders` | GET | yes | `FolderStructurePage` | yes | yes | MISSING - no fault-injection coverage yet |
 | `/health` | GET | yes | `HealthPage` | no | yes | MISSING - no fault-injection coverage yet |
 | `/hindrances` | GET | yes | `HindranceRegisterPage` | yes | yes | `client/src/pages/__tests__/HindranceRegisterPage.test.tsx` |

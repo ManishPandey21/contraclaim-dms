@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  PAGE_RESUME_STAGE,
+  PAGE_RESUME_STAGE, REVIEW_PUBLICATION_PENDING_STAGE,
   isTerminalProcessingStatus,
 } from "@/utils/processingStatus";
 
@@ -38,6 +38,12 @@ describe("isTerminalProcessingStatus", () => {
 
   it("partially_processed keeps polling while its pages wait to be retried", () => {
     expect(isTerminalProcessingStatus("partially_processed", PAGE_RESUME_STAGE)).toBe(false);
+  });
+
+  it("partially_processed keeps polling while a resolved review is being published", () => {
+    expect(
+      isTerminalProcessingStatus("partially_processed", REVIEW_PUBLICATION_PENDING_STAGE)
+    ).toBe(false);
   });
 
   it("is case-insensitive and treats a missing status as not yet settled", () => {
