@@ -13,6 +13,7 @@ from .core.errors import register_domain_error_handler
 from .core.public_body_limit import PublicBodyLimitMiddleware, public_body_caps
 from .routers import (
     ai_assistant,
+    document_extraction_review,
     arbitration_drafting,
     auth,
     chronology,
@@ -253,6 +254,7 @@ app.include_router(users.router, prefix="/api", tags=["users"])
 app.include_router(profiles.router, prefix="/api", tags=["profiles"])
 app.include_router(documents.router, prefix="/api", tags=["documents"])
 app.include_router(document_relationships.router, prefix="/api", tags=["document-relationships"])
+app.include_router(document_extraction_review.router, prefix="/api", tags=["document-extraction-review"])
 app.include_router(legacy_relationship_backfill.router, prefix="/api", tags=["legacy-relationship-backfill"])
 app.include_router(contracts.router, prefix="/api", tags=["contracts"])
 app.include_router(claims.router, prefix="/api", tags=["claims"])

@@ -13,6 +13,7 @@ CLIENT_DMS_PERMISSIONS: List[str] = [
     "dms.document.bulk_download",
     "dms.document.share",
     "dms.document.link_reference",
+    "dms.document.review_extraction",
     "dms.status.update",
     "dms.comment.add",
     "dms.dashboard.view",
@@ -178,6 +179,10 @@ class Permissions:
     DOCUMENT_BULK_DOWNLOAD = "dms.document.bulk_download"
     DOCUMENT_SHARE = "dms.document.share"
     DOCUMENT_LINK_REFERENCE = "dms.document.link_reference"
+    #: Approve or reject a page the extraction quality gate sent to human review.
+    #: Narrower than edit_metadata on purpose: it releases evidence for retrieval
+    #: and drafting, so it is not granted to every document editor.
+    DOCUMENT_REVIEW_EXTRACTION = "dms.document.review_extraction"
     STATUS_UPDATE = "dms.status.update"
     COMMENT_ADD = "dms.comment.add"
     DASHBOARD_VIEW = "dms.dashboard.view"
@@ -330,6 +335,19 @@ class Permissions:
 #: catalogue, defines the entitlement-scoped set, and drives the bulk role
 #: grant; omitting a permission to solve the third would silently break the
 #: first two, and an unscoped permission passes the subscription gate.
+#: Release 1.1.1 owner decision: CLIENT_DMS permissions granted ONLY to the
+#: roles named in default_roles.py, never through the bulk default-role merge.
+#: They stay in CLIENT_DMS_PERMISSIONS for the same reason as the org-tier set
+#: below (catalogue, entitlement scope). `dms.document.review_extraction`
+#: releases held-back extraction evidence, so it goes to orgadmin and
+#: projectadmin only - not contractmgr_org, and not the superadmin document
+#: (Super Admin is admitted by name and still held to the active selection).
+EXPLICIT_GRANT_ONLY_PERMISSIONS: frozenset = frozenset(
+    {
+        "dms.document.review_extraction",
+    }
+)
+
 ORG_TIER_ONLY_PERMISSIONS: frozenset = frozenset(
     {
         "dms.contract.applicability.manage",

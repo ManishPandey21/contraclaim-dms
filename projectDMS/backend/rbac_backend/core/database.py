@@ -301,6 +301,12 @@ async def ensure_indexes(db):
         background=True,
     )
 
+    # Extraction review decisions (Release 1.1.1): the unique key is the
+    # concurrency guard - two reviewers cannot both write decision N+1.
+    from ..services.extraction_review_service import ensure_review_indexes
+
+    await ensure_review_indexes(db)
+
     # Letters
     await db.letters.create_index("organization_id", background=True)
     await db.letters.create_index("project_id", background=True)

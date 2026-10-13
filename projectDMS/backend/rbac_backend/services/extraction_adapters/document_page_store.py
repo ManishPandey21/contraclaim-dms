@@ -492,7 +492,11 @@ class DocumentPageStore:
                 if "canonical_revision" in previous
                 else {"$exists": False}
             )
-            result = await heads.update_one(guard, {"$set": manifest})
+            # A new revision is new evidence: a human review resolution made
+            # against the previous revision does not carry over to it.
+            result = await heads.update_one(
+                guard, {"$set": manifest, "$unset": {"review_resolution": ""}}
+            )
             if getattr(result, "matched_count", 1) == 0:
                 raise CanonicalHeadConflictError(
                     f"canonical head for document {self.document_id!r} changed "
