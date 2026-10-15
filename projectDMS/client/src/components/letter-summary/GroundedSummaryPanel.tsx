@@ -210,14 +210,16 @@ const GroundedSummaryPanel: React.FC<GroundedSummaryPanelProps> = ({ documentId,
       {detailed && (
         <Card>
           <CardHeader>
-            <CardTitle className="text-lg flex items-center gap-2">
-              <FileSearch className="h-4 w-4" /> Detailed Summary
-            </CardTitle>
-            <CardDescription>
-              Each point cites the page it was read from. Statements are the author's, attributed and quoted — not
-              findings. Revision {detailed.generated_from.canonical_revision}
-              {reviewed ? " · released by human review" : ""}
-            </CardDescription>
+            <div>
+              <CardTitle className="text-lg flex items-center gap-2">
+                <FileSearch className="h-4 w-4" /> Detailed Summary
+              </CardTitle>
+              <CardDescription>
+                Each point cites the page it was read from. Statements are the author's, attributed and quoted — not
+                findings. Revision {detailed.generated_from.canonical_revision}
+                {reviewed ? " · released by human review" : ""}
+              </CardDescription>
+            </div>
           </CardHeader>
           <CardContent className="space-y-5">
             {detailed.executive_overview && (
