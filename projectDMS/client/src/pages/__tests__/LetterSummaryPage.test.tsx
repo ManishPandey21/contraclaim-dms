@@ -145,6 +145,31 @@ global.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     return jsonResponse(currentDoc);
   }
 
+  if (url.match(/\/api\/documents\/([^/]+)\/grounded-summary$/)) {
+    return jsonResponse({
+      document_id: "doc-1",
+      summary_status: "current",
+      short_summary: "Letter from AFCONS regarding the additional borewell construction cost.",
+      detailed_summary: {
+        schema_version: "1",
+        executive_overview: "Letter AFC/PM/KNPCC-06/4930 dated 17 November 2025.",
+        requests_relief: [
+          {
+            text: "AFCONS requests (as written): “submit the construction cost”",
+            role: "request",
+            fact_ids: ["request_statement-1"],
+            page_numbers: [1],
+            verification_status: "source_stated",
+          },
+        ],
+        facts: [],
+        markdown: "",
+        generated_from: { canonical_revision: 1, canonical_sha256: "abc" },
+        generator: { mode: "deterministic", prompt_version: "grounded_letter_summary.v1", generated_at: "", degraded: false },
+      },
+    });
+  }
+
   if (url.match(/\/api\/documents\/([^/]+)\/comments$/)) {
     return jsonResponse([]);
   }
@@ -295,5 +320,20 @@ describe("LetterSummaryPage extraction quality", () => {
     await screen.findByText(currentDoc.subject);
     await user.click(screen.getByRole("tab", { name: /key reply points/i }));
     expect(screen.getAllByText(/not statements made in this letter/i).length).toBeGreaterThan(0);
+  });
+
+  it("shows the grounded short summary and keeps reply points separate and advisory", async () => {
+    const user = userEvent.setup();
+    renderAt();
+
+    expect(
+      await screen.findByText("Letter from AFCONS regarding the additional borewell construction cost.")
+    ).toBeInTheDocument();
+    const detailed = screen.getByTestId("grounded-summary");
+    expect(within(detailed).getByRole("heading", { name: /Requests/ })).toBeInTheDocument();
+    // Reply advice is never part of the grounded summary.
+    expect(within(detailed).queryByText(/Confirm entitlement/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: /key reply points/i }));
+    expect(screen.getByText(/Confirm entitlement/)).toBeInTheDocument();
   });
 });
