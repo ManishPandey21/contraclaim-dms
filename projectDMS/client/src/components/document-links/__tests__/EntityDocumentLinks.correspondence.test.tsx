@@ -197,3 +197,83 @@ describe("EntityDocumentLinks correspondence selector", () => {
     expect(screen.getByText(/view-only access/i)).toBeInTheDocument();
   });
 });
+
+/**
+ * jsdom has no layout, so these pin the width contract the browser regression
+ * (e2e/correspondence-linking.spec.ts) measures: nothing in the picker may take
+ * its width from its content. A long filename once set the width of the
+ * Variation dialog's grid track and spilled past the dialog and the viewport.
+ */
+describe("EntityDocumentLinks width contract", () => {
+  const longName =
+    "Kanpur-LET-JVTI-CPM-00550-E01-Variation statement no.01 for the Utility (Sewer & GRP Water Pipe line).pdf";
+  const longLetter = { ...incomingLetter, filename: longName, letterNo: "Kanpur-LET-JVTI-CPM-00550-E01" };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    relationshipApi.listEntityDocumentLinks.mockResolvedValue([{ ...linkRow, document: longLetter }]);
+    relationshipApi.searchLinkableDocuments.mockResolvedValue([longLetter]);
+  });
+
+  it("lets its grid or flex parent shrink it below its content width", async () => {
+    const { container } = renderVariationLinks();
+    await screen.findByTestId("linked-document");
+    expect(container.firstElementChild).toHaveClass("min-w-0");
+  });
+
+  it("clamps a long linked filename and keeps the full name reachable", async () => {
+    renderVariationLinks();
+    const row = await screen.findByTestId("linked-document");
+    const link = within(row).getByRole("link");
+    expect(link).toHaveAttribute("title", longName);
+    expect(link).toHaveClass("min-w-0", "flex-1");
+    const name = within(row).getByText(longName);
+    expect(name).toHaveClass("line-clamp-2");
+    expect(name.className).toContain("[overflow-wrap:anywhere]");
+    expect(within(row).getByRole("button", { name: `Unlink ${longName}` })).toBeInTheDocument();
+  });
+
+  it("lays the filters out by available width, with every control able to shrink", async () => {
+    renderVariationLinks();
+    await screen.findByTestId("linked-document");
+    const controls = ["Direction", "Letter number", "Subject", "Date from", "Date to"]
+      .map((label) => screen.getByLabelText(label));
+    const grid = controls[0].closest("label")?.parentElement;
+    expect(grid?.className).toContain("grid-cols-[repeat(auto-fit,minmax(min(100%,10rem),1fr))]");
+    // Viewport breakpoints would size the grid for the page, not for the dialog.
+    expect(grid?.className).not.toMatch(/\b(sm|md|lg):grid-cols-/);
+    for (const control of controls) {
+      expect(control.parentElement).toBe(control.closest("label"));
+      expect(control.closest("label")?.parentElement).toBe(grid);
+      expect(control).toHaveClass("w-full", "min-w-0");
+      expect(control.closest("label")).toHaveClass("min-w-0");
+    }
+    expect(screen.getByLabelText("Search Documents")).toHaveClass("min-w-0", "flex-1");
+    expect(screen.getByRole("button", { name: "Search" })).toHaveClass("shrink-0");
+  });
+
+  it("keeps a long search result's actions beside a clamped name and links it", async () => {
+    relationshipApi.listEntityDocumentLinks.mockResolvedValue([]);
+    relationshipApi.batchLinkDocuments.mockResolvedValue([{ ...linkRow, document: longLetter }]);
+    const user = userEvent.setup();
+    renderVariationLinks();
+    await screen.findByText("No linked Documents yet.");
+    await user.type(screen.getByLabelText("Search Documents"), "Kanpur");
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+
+    const result = await screen.findByTestId("document-search-result");
+    expect(result).toHaveClass("min-w-0");
+    const name = within(result).getByText(longName);
+    expect(name).toHaveClass("line-clamp-2");
+    expect(name.closest("label")).toHaveAttribute("title", longName);
+    expect(name.closest("label")).toHaveClass("min-w-0", "flex-1");
+    const linkButton = within(result).getByRole("button", { name: `Link ${longName}` });
+    expect(linkButton.parentElement).toHaveClass("shrink-0");
+
+    await user.click(linkButton);
+    await waitFor(() => expect(relationshipApi.batchLinkDocuments).toHaveBeenCalledWith(
+      "variation", "var-1", [{ document_id: longLetter._id, relationship_role: "correspondence" }],
+    ));
+    expect(await screen.findByTestId("linked-document")).toHaveTextContent(longName);
+  });
+});
