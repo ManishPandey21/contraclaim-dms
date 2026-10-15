@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from rbac_backend.config.document_processing_config import DocumentProcessingConfig
 from rbac_backend.models.document_metadata import ParsedDocumentMetadata
@@ -121,6 +121,10 @@ class _Collection:
                 if all(record.get(key) == value for key, value in (query or {}).items())
             ]
         )
+
+    async def find_one(self, query: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        # Publishing canonical evidence reads the previous head for its revision.
+        return None
 
 
 class _Db:

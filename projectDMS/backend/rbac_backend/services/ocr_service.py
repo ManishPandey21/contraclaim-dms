@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from ..config.document_processing_config import DocumentProcessingConfig
 from ..utils import exceptions as processing_exceptions
 from ..utils.pipeline_logging import configure_pipeline_logger
+from .extraction.numeric_integrity import readable_page, repair_split_grouped_numbers
 from .extraction.text_quality import assess_native_text_quality
 
 logger = logging.getLogger(__name__)
@@ -87,6 +88,24 @@ _EXIT_NAMES = {
     15: "other_error",
     130: "ctrl_c",
 }
+
+
+def _joined_ocr_numbers(text: Optional[str], name: str) -> Optional[str]:
+    """OCR text with grouped numbers split at a word gap joined back.
+
+    The legacy path keeps no per-page record, so the count is logged; the
+    unified path records each repair on its page instead.
+    """
+    if not text:
+        return text
+    repaired, repairs = repair_split_grouped_numbers(text)
+    if repairs:
+        logger.info(
+            "[document_pipeline] Joined %d OCR-split grouped number(s) in %s",
+            len(repairs),
+            name,
+        )
+    return repaired
 
 
 def _installed_ocrmypdf_version() -> Optional[str]:
@@ -181,7 +200,7 @@ class OCRService:
             import pdfplumber
 
             with pdfplumber.open(pdf_path) as pdf:
-                texts = [page.extract_text() or "" for page in pdf.pages[:max_pages]]
+                texts = [readable_page(page).extract_text() or "" for page in pdf.pages[:max_pages]]
         except Exception as e:
             logger.error(f"Error checking PDF text content: {e}")
             return TextLayerAssessment.OCR_REQUIRED_EMPTY
@@ -214,7 +233,7 @@ class OCRService:
             with pdfplumber.open(pdf_path) as pdf:
                 for number, page in enumerate(pdf.pages, start=1):
                     try:
-                        text = page.extract_text() or ""
+                        text = readable_page(page).extract_text() or ""
                     except Exception:
                         continue
                     if assess_native_text_quality(text).unusable:
@@ -304,8 +323,11 @@ class OCRService:
                         input_path.name,
                         e,
                     )
-                    raw_ocr_text = await self._replace_unusable_text_layer(
-                        input_path, dest_path, sidecar_txt_path
+                    raw_ocr_text = _joined_ocr_numbers(
+                        await self._replace_unusable_text_layer(
+                            input_path, dest_path, sidecar_txt_path
+                        ),
+                        input_path.name,
                     )
                 except Exception as e:
                     logger.warning(f"Failed to extract sidecar text: {e}")
@@ -314,13 +336,19 @@ class OCRService:
                     "[document_pipeline] Replacing the unusable text layer of %s with OCR",
                     input_path.name,
                 )
-                raw_ocr_text = await self._replace_unusable_text_layer(
-                    input_path, dest_path, sidecar_txt_path
+                raw_ocr_text = _joined_ocr_numbers(
+                    await self._replace_unusable_text_layer(
+                        input_path, dest_path, sidecar_txt_path
+                    ),
+                    input_path.name,
                 )
             else:
                 # Perform OCR
                 logger.info("[document_pipeline] Running OCR preprocessing for %s (no text layer detected)", input_path.name)
-                raw_ocr_text = await self._run_ocr_with_sidecar(input_path, dest_path, sidecar_txt_path)
+                raw_ocr_text = _joined_ocr_numbers(
+                    await self._run_ocr_with_sidecar(input_path, dest_path, sidecar_txt_path),
+                    input_path.name,
+                )
 
             published = True
             return dest_path, raw_ocr_text
@@ -713,7 +741,7 @@ class OCRService:
                 with pdfplumber.open(pdf_path) as pdf:
                     total_pages = len(pdf.pages)
                     for number, page in enumerate(pdf.pages, start=1):
-                        text = page.extract_text() or ""
+                        text = readable_page(page).extract_text() or ""
                         quality = assess_native_text_quality(text)
                         if quality.unusable:
                             unusable_pages.append(number)

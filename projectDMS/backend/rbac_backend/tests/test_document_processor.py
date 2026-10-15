@@ -85,24 +85,15 @@ def make_processor(ocr_text: str, openai_service: FakeOpenAIService):
     async def close_connection():
         return None
 
+    from rbac_backend.tests.retry_harness import FakeDb
+
+    # The page store is exercised by its own suite. Here it needs a store that
+    # keeps what it is given: publishing canonical evidence reads the run's
+    # rows back and verifies them before the head moves.
+    page_db = FakeDb()
+
     async def get_database():
-        # The page store is exercised by its own suite; here it only needs a
-        # collection-shaped object that accepts writes.
-        class _Collection:
-            async def bulk_write(self, requests):
-                return None
-
-            async def insert_one(self, document):
-                return SimpleNamespace(inserted_id="batch-1")
-
-            async def update_one(self, *args, **kwargs):
-                return None
-
-        class _Db:
-            def __getitem__(self, name):
-                return _Collection()
-
-        return _Db()
+        return page_db
 
     from rbac_backend.services.extraction.source_kind import SourceKindRouter
 

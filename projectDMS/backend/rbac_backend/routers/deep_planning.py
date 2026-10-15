@@ -357,28 +357,43 @@ def _effective_project_id(current_user) -> Optional[str]:
         pass
     return None
 
-async def validate_document_ids(db, document_ids: List[str], current_user: CurrentUser) -> None:
-    """Validate document IDs and check user access permissions."""
+async def validate_document_ids(db, document_ids: List[str], current_user: Optional[CurrentUser],
+                                organization_id: Optional[str] = None,
+                                project_id: Optional[str] = None) -> None:
+    """Refuse the request unless every document lies inside the caller's tenant scope.
+
+    Scope is `build_scope_query`, narrowed by the organisation the gate
+    authorised and the requested project - the same boundary as the similar
+    letters and the reply target. An organisation match alone is not enough: it
+    let a project-tier caller pull a sibling project's document into the prompt.
+
+    The id and the scope go to Mongo in one filter, so an out-of-scope document
+    is never read and answers exactly like a nonexistent one (404). One bad id
+    refuses the whole request, so no document content is read for drafting
+    unless all of it is authorised. A deny-all scope refuses without a read.
+    """
+    if not document_ids:
+        return
     logger.info(f"Validating document IDs: {document_ids}")
 
     for doc_id in document_ids:
-        try:
-            # Validate ObjectId format
-            if not ObjectId.is_valid(doc_id):
-                raise HTTPException(status_code=400, detail=f"Invalid document ID format: {doc_id}")
+        if not ObjectId.is_valid(doc_id):
+            raise HTTPException(status_code=400, detail=f"Invalid document ID format: {doc_id}")
 
-            # Check if document exists
-            document = await db.documents.find_one({"_id": ObjectId(doc_id)})
+    deny_all: Dict[str, Any] = {"_id": {"$in": []}}
+    scope = deny_all if current_user is None else build_scope_query(
+        current_user,
+        organization_id=organization_id,
+        project_id=project_id,
+    )
+
+    for doc_id in document_ids:
+        try:
+            document = None
+            if scope != deny_all:
+                document = await db.documents.find_one({"$and": [{"_id": ObjectId(doc_id)}, scope]})
             if not document:
                 raise HTTPException(status_code=404, detail=f"Document not found: {doc_id}")
-
-            # Check user access permissions
-            doc_org_id = document.get('organization_id')
-            user_org_id = getattr(current_user, 'organization_id', None)
-
-            if doc_org_id != user_org_id:
-                raise HTTPException(status_code=403, detail=f"Access denied to document: {doc_id}")
-
         except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
@@ -878,8 +893,11 @@ async def generate_deep_planning_draft(
             project_id=proj_id,
         )
 
-        # Validate document IDs
-        await validate_document_ids(db, request.document_ids, current_user)
+        # Same scope as the similar letters and the reply target: refuse before
+        # any driving-document content is read if one id falls outside it.
+        await validate_document_ids(
+            db, request.document_ids, current_user, org_id, request.project_id
+        )
 
         # Extract content from driving documents (including OCR text and summary)
         document_context = await extract_document_content(db, request.document_ids)

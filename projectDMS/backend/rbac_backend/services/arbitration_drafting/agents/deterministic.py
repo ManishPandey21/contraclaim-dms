@@ -233,7 +233,9 @@ class DeterministicArbitrationAgent:
             row = {
                 "chronology_id": _first(event, "chronology_id"),
                 "chronology_event_id": event_id,
-                "date": _first(event, "event_date", "date", "start_date", "created_at"),
+                # An undated event stays undated here; when the row was
+                # recorded is not when the event happened (D1).
+                "date": _first(event, "event_date", "date", "start_date"),
                 "event": _condense(f"{title}. {_first(event, 'description', 'details') or ''}", 500),
                 "document_ref": _first(event, "document_ref", "source_document_id", "source_id"),
                 # Explicit provenance. `document_ref` is a display reference and

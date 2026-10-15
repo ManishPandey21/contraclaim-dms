@@ -385,6 +385,34 @@ def metadata_for_publication(
     return clone
 
 
+def metadata_from_document(stored: Optional[Mapping[str, Any]]) -> Any:
+    """The publication metadata of a document whose extraction already ran.
+
+    Graph and evidence publication take the parsed metadata alongside the
+    document. A document released later - a human-review resolution - no
+    longer has that object, but its stored fields ARE the publication values
+    (`metadata_for_publication` already put every kept and human-edited value
+    back before they were written). So it is rebuilt from them, field by field,
+    with the same tolerant validator extraction uses: a stored value that no
+    longer fits its field is dropped, never fatal. None when nothing is stored.
+    """
+    if not stored:
+        return None
+    from ..models.document_metadata import build_parsed_metadata
+
+    values: Dict[str, Any] = {}
+    for key, attr in TOP_KEY_TO_METADATA_ATTR.items():
+        value = stored.get(key)
+        if not _is_empty(value):
+            values[attr] = _snapshot_form(value)
+    references = stored.get("reference")
+    if not _is_empty(references):
+        values["references"] = references
+    if not values:
+        return None
+    return build_parsed_metadata(values)
+
+
 __all__ = [
     "CORE_FIELDS",
     "DEGRADED_METADATA_SOURCES",
@@ -398,6 +426,7 @@ __all__ = [
     "effective_human_edited_fields",
     "keep_stored_values_on_degraded_source",
     "metadata_for_publication",
+    "metadata_from_document",
     "merge_degraded_snapshot",
     "merge_human_edited_fields",
     "protect_human_edited_fields",

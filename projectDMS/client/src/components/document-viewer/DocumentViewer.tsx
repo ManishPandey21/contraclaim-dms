@@ -10,9 +10,11 @@ import type { LocalDocument as Document } from "../../pages/DocumentViewerPage";
 
 interface DocumentViewerProps {
   document: Document;
+  /** Open the PDF at this page (the native viewer honours `#page=`). */
+  page?: number | null;
 }
 
-const DocumentViewer: React.FC<DocumentViewerProps> = ({ document }) => {
+const DocumentViewer: React.FC<DocumentViewerProps> = ({ document, page }) => {
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
@@ -126,8 +128,9 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ document }) => {
 
   const iframeUrl = useMemo(() => {
     if (!pdfUrl) return null;
-    return `${pdfUrl}#toolbar=1&navpanes=0&view=FitH`;
-  }, [pdfUrl]);
+    const pageFragment = page && page > 0 ? `page=${Math.floor(page)}&` : "";
+    return `${pdfUrl}#${pageFragment}toolbar=1&navpanes=0&view=FitH`;
+  }, [pdfUrl, page]);
 
   const openPdf = useCallback(() => {
     if (!pdfUrl) return;
@@ -194,6 +197,9 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ document }) => {
               </div>
             ) : iframeUrl ? (
               <iframe
+                // A fragment-only change does not re-navigate every native
+                // viewer, so a new page remounts the frame.
+                key={iframeUrl}
                 title={document.filename || "PDF document"}
                 src={iframeUrl}
                 className="h-full w-full border-0 bg-white"

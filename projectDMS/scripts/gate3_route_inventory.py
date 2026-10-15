@@ -146,6 +146,9 @@ PAGE_STATES: Dict[str, PageStates] = {
         error="client/src/pages/__tests__/DocumentsPage.under-process-guard.test.tsx"
     ),
     "EnhancedDocumentsPage": _fetching(),
+    "ExtractionReviewQueuePage": _fetching(
+        error="client/src/pages/__tests__/ExtractionReviewQueuePage.test.tsx"
+    ),
     "TagsPage": _fetching(),
     "ProfilePage": _fetching(empty=False),
     "UsersPage": _fetching(),

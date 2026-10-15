@@ -238,7 +238,7 @@ async def _extract_and_verify(
         chronology_id, ChronologyExtractRequest(), _user()
     )
     if result["events"]:
-        await service.verify_event(chronology_id, result["events"][0]["_id"], _user())
+        await service.verify_event(chronology_id, result["events"][0]["_id"], _user(), policy=_ScopedPolicy())
     return result
 
 
@@ -399,7 +399,7 @@ async def test_manual_chronology_event_remains_independent_and_verifiable() -> N
         _user(),
     )
 
-    verified = await service.verify_event(chronology["_id"], event["_id"], _user())
+    verified = await service.verify_event(chronology["_id"], event["_id"], _user(), policy=_ScopedPolicy())
 
     assert verified["verification_status"] == ChronologyVerificationStatus.VERIFIED
     assert MANUAL_MARKER in repr(db.matter_chronology_events.documents)
@@ -449,7 +449,7 @@ async def test_verification_rechecks_authority_before_project_event_and_links(
     before_revisions = len(db.matter_chronology_event_revisions.documents)
 
     try:
-        await service.verify_event(chronology["_id"], event_id, _user())
+        await service.verify_event(chronology["_id"], event_id, _user(), policy=_ScopedPolicy())
     except HTTPException:
         pass
 

@@ -86,6 +86,19 @@ async def _load_and_authorize_chronology(
     return chronology
 
 
+async def _load_chronology_in_selection(chronology_id: str, db, selection: ActiveScope) -> dict:
+    """Load a chronology held to the navbar selection, leaving authorization to the service.
+
+    Review decisions (verify, reject) check ``dms.chronology.verify`` inside
+    ``ChronologyService`` so a direct service caller cannot skip it; checking it
+    here as well would audit every decision twice.
+    """
+    selection.require_selection()
+    chronology = await ChronologyService(db).get_chronology(chronology_id)
+    await selection.require_record(chronology)
+    return chronology
+
+
 def _refuse_related_document_write(requested, stored=None) -> None:
     """Refuse a raw ``related_document_ids`` write that ADDS a reference (409).
 
@@ -360,8 +373,10 @@ async def verify_chronology_event(
     policy: PolicyService = Depends(get_policy),
     selection: ActiveScope = Depends(active_scope),
 ):
-    await _load_and_authorize_chronology(chronology_id, Permissions.CHRONOLOGY_VERIFY, db, current_user, policy, selection)
-    return MatterChronologyEvent(**await ChronologyService(db).verify_event(chronology_id, event_id, current_user, payload))
+    await _load_chronology_in_selection(chronology_id, db, selection)
+    return MatterChronologyEvent(
+        **await ChronologyService(db).verify_event(chronology_id, event_id, current_user, payload, policy=policy)
+    )
 
 
 @router.post("/chronologies/{chronology_id}/events/{event_id}/reject", response_model=MatterChronologyEvent)
@@ -374,8 +389,10 @@ async def reject_chronology_event(
     policy: PolicyService = Depends(get_policy),
     selection: ActiveScope = Depends(active_scope),
 ):
-    await _load_and_authorize_chronology(chronology_id, Permissions.CHRONOLOGY_VERIFY, db, current_user, policy, selection)
-    return MatterChronologyEvent(**await ChronologyService(db).reject_event(chronology_id, event_id, current_user, payload))
+    await _load_chronology_in_selection(chronology_id, db, selection)
+    return MatterChronologyEvent(
+        **await ChronologyService(db).reject_event(chronology_id, event_id, current_user, payload, policy=policy)
+    )
 
 
 @router.post("/chronologies/{chronology_id}/events/{event_id}/mark-duplicate", response_model=MatterChronologyEvent)
@@ -389,7 +406,10 @@ async def mark_chronology_event_duplicate(
     selection: ActiveScope = Depends(active_scope),
 ):
     await _load_and_authorize_chronology(chronology_id, Permissions.CHRONOLOGY_EDIT, db, current_user, policy, selection)
-    return MatterChronologyEvent(**await ChronologyService(db).mark_duplicate(chronology_id, event_id, payload, current_user))
+    # Edit is the floor; a verified target also needs verify, checked in the service.
+    return MatterChronologyEvent(
+        **await ChronologyService(db).mark_duplicate(chronology_id, event_id, payload, current_user, policy=policy)
+    )
 
 
 @router.post("/chronologies/{chronology_id}/events/{event_id}/link", response_model=MatterChronologyEvent)

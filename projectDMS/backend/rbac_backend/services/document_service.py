@@ -58,6 +58,54 @@ from .source_text import full_text_updates
 logger = logging.getLogger(__name__)
 configure_pipeline_logger(logger)
 
+#: ``vector_sync_status.sync_status`` values that mean a run's indexing did not
+#: finish. ``disabled`` (switched off by configuration) and ``empty`` (nothing
+#: to index) are outcomes, not failures. ``deferred`` counts unless the
+#: document is a confirmed duplicate; ``unknown`` is an unreadable row.
+_UNFINISHED_VECTOR_SYNC = frozenset({"error", "mismatch", "pending", "deferred", "unknown"})
+
+
+def _human_review_message(unresolved: List[int], quality: List[int]) -> str:
+    """Name every page a person must look at, and why."""
+
+    def _listed(pages: List[int]) -> str:
+        return ", ".join(str(page) for page in pages)
+
+    if not unresolved and not quality:
+        # A checkpoint from before review pages were recorded. Say so rather
+        # than report a count of zero for a review that did happen.
+        return "Extraction needs human review; the affected pages were not recorded"
+    total = len(set(unresolved) | set(quality))
+    reasons = []
+    if unresolved:
+        reasons.append(f"could not be extracted automatically: page(s) {_listed(unresolved)}")
+    if quality:
+        reasons.append(f"failed the extraction quality check: page(s) {_listed(quality)}")
+    return f"{total} page(s) need review ({'; '.join(reasons)})"
+
+
+def _page_extraction_record(result: Any) -> Optional[Dict[str, Dict[str, Any]]]:
+    """How each page of `result` was read, keyed by page number.
+
+    `None` when the extractor kept no per-page record - the legacy path decides
+    once per document, and inventing page methods for it would claim evidence
+    that does not exist.
+    """
+    extraction = getattr(result, "extraction_result", None)
+    pages = getattr(extraction, "pages", None)
+    if not pages:
+        return None
+    record: Dict[str, Dict[str, Any]] = {}
+    for page in pages:
+        source = getattr(page, "source", None)
+        status = getattr(page, "status", None)
+        record[str(getattr(page, "number", len(record) + 1))] = {
+            "source": getattr(source, "value", source),
+            "status": getattr(status, "value", status),
+        }
+    return record
+
+
 class DocumentServiceError(Exception):
     """Custom exception for document service errors"""
     pass
@@ -948,6 +996,7 @@ class DocumentService:
             "expected_page_numbers": [],
             "resolved_page_numbers": [],
             "remaining_page_numbers": [],
+            "review_page_numbers": [],
             "page_attempts": {},
             "resume_count": 0,
         }
@@ -1276,6 +1325,14 @@ class DocumentService:
                 return False
             if checkpoint_state == ProcessingState.STORED_ONLY.value:
                 await self._mark_stored_only(job_id, document_id)
+                return False
+            # Extraction finished, but `completed` also claims the indexing
+            # this run attempted finished. Embedding failures are recorded as
+            # partial failures and swallowed so the extracted text survives;
+            # reading only the checkpoint reported such a run `completed`.
+            unfinished = await self._unfinished_indexing(db, checkpoint, document_id)
+            if unfinished:
+                await self._mark_indexing_incomplete(job_id, document_id, unfinished)
                 return False
 
             completed_at = datetime.utcnow()
@@ -1619,7 +1676,14 @@ class DocumentService:
             # Its status and evidence belong to the contract writers: not
             # marked for review, not purged.
             return
-        remaining = list(checkpoint.get("remaining_page_numbers") or [])
+        # Two reasons a page reaches a person, recorded separately: extraction
+        # still owes it (remaining), or the quality gate failed what extraction
+        # produced (review). A gate-failed page is never in `remaining`, so a
+        # message built from that list alone reported "0 page(s)" for a review
+        # the gate raised.
+        unresolved = sorted({int(n) for n in checkpoint.get("remaining_page_numbers") or []})
+        quality = sorted({int(n) for n in checkpoint.get("review_page_numbers") or []})
+        pages = sorted(set(unresolved) | set(quality))
         await db.document_processing_jobs.update_one(
             {"_id": job_id},
             {
@@ -1639,11 +1703,10 @@ class DocumentService:
                     "processing_job_id": job_id,
                     "updatedAt": now,
                     "processing_error": {
-                        "message": (
-                            f"{len(remaining)} page(s) could not be extracted "
-                            "automatically and need review"
-                        ),
-                        "pages": remaining,
+                        "message": _human_review_message(unresolved, quality),
+                        "pages": pages,
+                        "unresolved_pages": unresolved,
+                        "quality_review_pages": quality,
                         "timestamp": now,
                         "terminal": True,
                     },
@@ -1651,9 +1714,12 @@ class DocumentService:
             },
         )
         logger.warning(
-            "[document_pipeline] Document %s needs human review; pages %s unresolved",
+            "[document_pipeline] Document %s needs human review; pages %s "
+            "(unresolved %s, quality review %s)",
             document_id,
-            remaining,
+            pages,
+            unresolved,
+            quality,
         )
 
         # Only after the blocking state is durably persisted. If this ran first
@@ -1692,6 +1758,98 @@ class DocumentService:
         )
         logger.info(
             "[document_pipeline] Document %s stored without extraction", document_id
+        )
+
+    async def _unfinished_indexing(
+        self, db: Any, job: Dict[str, Any], document_id: str
+    ) -> Dict[str, str]:
+        """The downstream stages this run recorded as not finished.
+
+        Read from what the run itself wrote: the embedding failure kept in the
+        job's ``metadata.partial_failures``, and the document's
+        ``vector_sync_status`` row. Empty means indexing finished, or was not
+        required (switched off, nothing to index, a confirmed duplicate).
+        """
+        stages: Dict[str, str] = {}
+        partial = (job.get("metadata") or {}).get("partial_failures") or {}
+        if isinstance(partial, dict) and partial.get("embeddings"):
+            stages["embeddings"] = "failed"
+
+        collection = getattr(db, "vector_sync_status", None)
+        if collection is None:
+            return stages
+        try:
+            row = await collection.find_one({"document_id": str(document_id)})
+            sync_status = str((row or {}).get("sync_status") or "")
+            if sync_status == "deferred":
+                stored = await db.documents.find_one(
+                    {"_id": self._validate_document_id(document_id)},
+                    {"duplicate_status": 1},
+                )
+                # A confirmed duplicate is never indexed: deferred is final.
+                if (stored or {}).get("duplicate_status") == CLASSIFICATION_DUPLICATE:
+                    sync_status = ""
+        except Exception:
+            logger.warning(
+                "[document_pipeline] Could not read the vector sync outcome for %s",
+                document_id,
+                exc_info=True,
+            )
+            sync_status = "unknown"
+        if sync_status in _UNFINISHED_VECTOR_SYNC:
+            stages["vector_sync"] = sync_status
+        return stages
+
+    async def _mark_indexing_incomplete(
+        self, job_id: str, document_id: str, stages: Dict[str, str]
+    ) -> None:
+        """Terminal, non-success: text extracted, indexing did not finish.
+
+        ``partially_processed`` is the existing state for "usable extraction,
+        required processing incomplete". It is deliberately not human review:
+        nothing was judged wrong with the content, so the document stays
+        consumable and no earlier publication is retracted. The job is not
+        retried, because a retry would re-run the whole extraction.
+        """
+        db = await self._get_db()
+        now = datetime.utcnow()
+        detail = "; ".join(f"{stage}: {outcome}" for stage, outcome in sorted(stages.items()))
+        error = {
+            "message": (
+                f"Text was extracted, but indexing did not finish ({detail}). "
+                "Reprocess the document once the cause is fixed."
+            ),
+            "stages": dict(stages),
+            "timestamp": now,
+            "terminal": True,
+        }
+        await db.document_processing_jobs.update_one(
+            {"_id": job_id},
+            {
+                "$set": {
+                    "status": ProcessingState.PARTIALLY_PROCESSED.value,
+                    "stage": "indexing_incomplete",
+                    "completed_at": now,
+                    "updated_at": now,
+                    "error": error,
+                }
+            },
+        )
+        await db.documents.update_one(
+            {"_id": self._validate_document_id(document_id)},
+            {
+                "$set": {
+                    "processing_status": ProcessingState.PARTIALLY_PROCESSED.value,
+                    "processing_job_id": job_id,
+                    "processing_error": error,
+                    "updatedAt": now,
+                }
+            },
+        )
+        logger.warning(
+            "[document_pipeline] Document %s extracted but indexing incomplete: %s",
+            document_id,
+            detail,
         )
 
     async def _checkpoint_extraction_attempt(
@@ -2119,6 +2277,11 @@ class DocumentService:
                     "processing_time": getattr(result, "processing_time", None),
                     "chunks_created": getattr(result, "chunks_created", None),
                     "metadata_source": metadata_source,
+                    # Which pipeline produced this text, and how each page was
+                    # read. A canary is audited from these; without them an OCR
+                    # failure and a native page look the same on the record.
+                    "pipeline_version": getattr(result, "pipeline_version", None),
+                    "page_extraction": _page_extraction_record(result),
                 }
                 partial_failures = getattr(result, "partial_failures", None) or {}
                 if partial_failures:
@@ -2239,6 +2402,7 @@ class DocumentService:
                 update_fields["processing_error"] = {
                     "message": getattr(result, "error", "Document processing failed"),
                     "timestamp": datetime.utcnow(),
+                    "pipeline_version": getattr(result, "pipeline_version", None),
                 }
 
             if metadata is not None and publishable and not derived_publication_authorized:

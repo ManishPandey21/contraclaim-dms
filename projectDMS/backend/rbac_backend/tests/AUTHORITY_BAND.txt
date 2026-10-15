@@ -62,6 +62,9 @@ backend/rbac_backend/tests/test_document_graph_evidence_authority_red.py
 backend/rbac_backend/tests/test_evidence_graph_backfill_authority_red.py
 # --- Vertical slice 11: chronology document-derived evidence
 backend/rbac_backend/tests/test_chronology_evidence_authority_red.py
+# --- Vertical slice 11a: chronology verification authority (A0a: edit never confers verify,
+# material edits to verified content return to review, server-owned sync state)
+backend/rbac_backend/tests/test_chronology_verification_authority_red.py
 # --- Vertical slice 12: direct LangGraph letter-draft Falkor writer
 backend/rbac_backend/tests/test_letterdraft_graph_writer_authority_red.py
 # --- Vertical slice 13: evidence register linked_document_ids

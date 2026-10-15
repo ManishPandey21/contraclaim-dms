@@ -15,6 +15,7 @@ from ..models.evidence_graph import (
     ProjectEventStatus,
     ProjectEventType,
 )
+from .event_dates import date_metadata
 from .evidence_graph_service import EvidenceGraphService
 from .publication_policy import resolve_document_authority
 
@@ -39,63 +40,65 @@ class EvidenceGraphBackfillService:
             "collection": "documents",
             "entity_type": EvidenceEntityType.DOCUMENT,
             "event_type": ProjectEventType.LETTER,
-            "date_fields": ["date", "created_at", "upload_date"],
+            "date_fields": ["date"],
+            # The "letter issued" event: its date is the document date.
+            "date_role": "document_date",
             "title_fields": ["subject", "letterNo", "filename", "name"],
         },
         {
             "collection": "claims",
             "entity_type": EvidenceEntityType.CLAIM,
             "event_type": ProjectEventType.CLAIM,
-            "date_fields": ["event_date", "claim_date", "created_at"],
+            "date_fields": ["event_date", "claim_date"],
             "title_fields": ["claim_ref", "title", "subject"],
         },
         {
             "collection": "key_date_milestones",
             "entity_type": EvidenceEntityType.KEY_DATE,
             "event_type": ProjectEventType.KEY_DATE,
-            "date_fields": ["current_approved_key_date", "original_planned_key_date", "created_at"],
+            "date_fields": ["current_approved_key_date", "original_planned_key_date"],
             "title_fields": ["milestone_ref", "title"],
         },
         {
             "collection": "variations",
             "entity_type": EvidenceEntityType.VARIATION,
             "event_type": ProjectEventType.VARIATION,
-            "date_fields": ["variation_date", "event_date", "created_at"],
+            "date_fields": ["variation_date", "event_date"],
             "title_fields": ["variation_ref", "title", "subject"],
         },
         {
             "collection": "bank_guarantees",
             "entity_type": EvidenceEntityType.BANK_GUARANTEE,
             "event_type": ProjectEventType.BANK_GUARANTEE,
-            "date_fields": ["issue_date", "valid_from", "created_at"],
+            "date_fields": ["issue_date", "valid_from"],
             "title_fields": ["bg_number", "reference", "title"],
         },
         {
             "collection": "ipc_bills",
             "entity_type": EvidenceEntityType.PAYMENT_EVENT,
             "event_type": ProjectEventType.PAYMENT,
-            "date_fields": ["ipc_date", "created_at"],
+            "date_fields": ["ipc_date"],
             "title_fields": ["ipc_number", "ipc_period", "title"],
         },
         {
             "collection": "drawing_references",
             "entity_type": EvidenceEntityType.DRAWING,
             "event_type": ProjectEventType.DRAWING,
-            "date_fields": ["issue_date", "received_date", "created_at"],
+            "date_fields": ["issue_date", "received_date"],
             "title_fields": ["drawing_number", "title"],
         },
         {
             "collection": "delay_events",
             "entity_type": EvidenceEntityType.DELAY_EVENT,
             "event_type": ProjectEventType.DELAY,
-            "date_fields": ["start_date", "created_at"],
+            "date_fields": ["start_date"],
             "title_fields": ["delay_ref", "title"],
         },
         {
             "collection": "programme_milestones",
             "entity_type": EvidenceEntityType.PROGRAMME_MILESTONE,
             "event_type": ProjectEventType.MILESTONE,
-            "date_fields": ["planned_date", "forecast_date", "created_at"],
+            "date_fields": ["planned_date", "forecast_date"],
             "title_fields": ["milestone_ref", "title"],
         },
     ]
@@ -155,12 +158,13 @@ class EvidenceGraphBackfillService:
                     from .hindrance_register_service import event_type_of, project_event_type_for
 
                     event_type = project_event_type_for(event_type_of(row))
+                event_date = self._event_date(row, spec["date_fields"])
                 event = await graph.create_project_event(
                     ProjectEventCreate(
                         organization_id=row.get("organization_id"),
                         project_id=row.get("project_id"),
                         event_type=event_type,
-                        event_date=self._event_date(row, spec["date_fields"]),
+                        event_date=event_date,
                         title=self._title(row, spec["title_fields"], fallback=collection_name),
                         description=row.get("description") or row.get("summary"),
                         party=row.get("party") or row.get("from") or row.get("contractor_name"),
@@ -170,7 +174,11 @@ class EvidenceGraphBackfillService:
                         source_entity_id=entity_id,
                         status=ProjectEventStatus.OPEN,
                         confidence=1.0,
-                        metadata={"backfilled": True, "source_collection": collection_name},
+                        metadata={
+                            "backfilled": True,
+                            "source_collection": collection_name,
+                            **date_metadata(event_date, spec.get("date_role")),
+                        },
                     ),
                     current_user,
                 )
@@ -209,11 +217,16 @@ class EvidenceGraphBackfillService:
             }
         return report
 
-    def _event_date(self, row: Dict[str, Any], fields: List[str]) -> datetime:
+    def _event_date(self, row: Dict[str, Any], fields: List[str]) -> Optional[datetime]:
+        """The register's own business date, or None (D1).
+
+        ``date_fields`` name only the source's business dates; ``created_at``
+        and upload times are not among them and the clock is never a fallback.
+        """
         value = _first(row, fields)
         if isinstance(value, datetime):
             return value
-        return datetime.utcnow()
+        return None
 
     def _title(self, row: Dict[str, Any], fields: List[str], *, fallback: str) -> str:
         first = _first(row, fields)

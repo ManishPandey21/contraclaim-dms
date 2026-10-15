@@ -59,6 +59,7 @@ DEFAULT_PERMISSIONS = [
     {"_id": "dms.document.bulk_download", "name": "Bulk Download DMS Documents"},
     {"_id": "dms.document.share", "name": "Share DMS Documents"},
     {"_id": "dms.document.link_reference", "name": "Link DMS Document References"},
+    {"_id": "dms.document.review_extraction", "name": "Review DMS Document Extraction"},
     {"_id": "dms.status.update", "name": "Update DMS Status"},
     {"_id": "dms.comment.add", "name": "Add DMS Comments"},
     {"_id": "dms.dashboard.view", "name": "View DMS Dashboard"},

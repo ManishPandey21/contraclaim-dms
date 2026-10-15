@@ -156,6 +156,13 @@ def _user():
     return SimpleNamespace(id="user-1", organization_id="org-A")
 
 
+class _VerifierPolicy:
+    """Holds `dms.chronology.verify`: review decisions check it in the service."""
+
+    async def authorize_document(self, current_user, permission, document, *, resource_type="document"):
+        return None
+
+
 @pytest.mark.asyncio
 async def test_extract_verify_syncs_chronology_event_to_graph():
     svc = _svc()
@@ -184,7 +191,7 @@ async def test_extract_verify_syncs_chronology_event_to_graph():
 
     extracted = await svc.extract_events(chronology["_id"], ChronologyExtractRequest(), _user())
     event = extracted["events"][0]
-    verified = await svc.verify_event(chronology["_id"], event["_id"], _user(), ChronologyDecisionRequest(note="checked"))
+    verified = await svc.verify_event(chronology["_id"], event["_id"], _user(), ChronologyDecisionRequest(note="checked"), policy=_VerifierPolicy())
     revisions = await svc.event_revisions(chronology["_id"], event["_id"])
 
     assert extracted["events_created"] == 1
@@ -235,7 +242,7 @@ async def test_pleading_context_and_attach_use_only_verified_events_by_default()
     )
 
     empty_context = await svc.pleading_context(chronology["_id"])
-    await svc.verify_event(chronology["_id"], event["_id"], _user())
+    await svc.verify_event(chronology["_id"], event["_id"], _user(), policy=_VerifierPolicy())
     context = await svc.pleading_context(chronology["_id"])
     attached = await svc.attach_to_arbitration_draft("draft-1", AttachChronologyRequest(chronology_id=chronology["_id"]), _user())
 

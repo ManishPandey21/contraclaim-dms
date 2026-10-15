@@ -1,6 +1,7 @@
 # services/document_processor.py
 
 import asyncio
+import hashlib
 import logging
 import time
 import os
@@ -11,18 +12,24 @@ from typing import Optional, Any, Dict, List, Sequence
 from uuid import uuid4
 
 from .text_processing_service import TextProcessingService
-from .database_service import DatabaseService
+from .database_service import (
+    DEFERRAL_DUPLICATE_PENDING,
+    DEFERRAL_HUMAN_REVIEW,
+    DatabaseService,
+)
 from .file_service import FileService
 from .ocr_service import OCRService
 from .openai_service import OpenAIService
 from .pydantic_ai_service import PydanticAIService, PydanticAIMetadataError
 from .metadata_integrity import assess_metadata_quality
 
+from .extraction.canonical import assemble_canonical_document
 from .extraction.fallback.models import FallbackOutcome
 from .extraction.image_extractor import extract_image, extract_text_file
 from .extraction.image_ocr_runner import TesseractImageOcrRunner
 from .extraction.models import Completeness, PageStatus, SourceKind
 from .extraction.page_store import InconsistentExtractionRunError
+from .extraction_adapters.document_page_store import CanonicalEvidenceInconsistentError
 from .extraction.quality.gate import ExtractionQualityGate
 from .extraction.source_kind import SourceKindRouter
 from .extraction.text_quality import withhold_unusable
@@ -86,6 +93,30 @@ class LegacyDispatchResult:
     processed_path: Path
     extraction: None = None
     pages_human_review: List[int] = field(default_factory=list)
+
+
+async def _file_sha256(path: Path) -> str:
+    """Checksum of the exact bytes this evidence was extracted from."""
+
+    # Not caught: the bytes were read moments ago to extract them, and
+    # evidence published with unknown provenance would look like success.
+    def _digest() -> str:
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for block in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(block)
+        return digest.hexdigest()
+
+    return await asyncio.to_thread(_digest)
+
+
+def _ran(pipeline_version: str, result: Any) -> Any:
+    """Stamp the pipeline that produced `result` onto it, and hand it back."""
+    try:
+        result.pipeline_version = pipeline_version
+    except (AttributeError, TypeError, ValueError):
+        pass
+    return result
 
 
 class DocumentProcessor:
@@ -281,15 +312,18 @@ class DocumentProcessor:
                 }
             )
 
+        # Extraction may already have repaired this page (phantom glyphs, OCR
+        # number joins); its records are appended to, never replaced.
+        prior = list(getattr(page, "applied_repairs", None) or [])
         if repaired_text == original_text and repaired_tables == original_tables:
-            page.applied_repairs = applied
+            page.applied_repairs = prior + applied
             return verdict
 
         if page.raw_text is None:
             page.raw_text = original_text
         page.text = repaired_text
         page.tables = repaired_tables
-        page.applied_repairs = applied
+        page.applied_repairs = prior + applied
 
         # Re-verify. The repaired text is only canonical if the gate agrees.
         return self.quality_gate.assess(page, tables=page.tables or None)
@@ -472,7 +506,37 @@ class DocumentProcessor:
         # only in a log line and a page row. Unconditional: a reconstruction
         # adopted from the ladder leaves no applied_repairs to key on.
         if pages:
-            extraction.combined_text = "\n\n".join(page.text or "" for page in pages)
+            canonical = assemble_canonical_document(pages)
+            extraction.combined_text = canonical.text
+            # Canonical evidence precedes indexing. Published here - after the
+            # page rows hold their final text, before metadata extraction,
+            # chunking, embeddings or vector sync can run - so no failure in
+            # those steps can prevent or erase it. A failure to publish is not
+            # swallowed: evidence that cannot be vouched for fails the attempt.
+            publish = getattr(page_store, "publish_canonical", None)
+            if publish is not None:
+                manifest = await publish(
+                    expected=canonical,
+                    pipeline_version=UNIFIED_PIPELINE,
+                    source_sha256=await _file_sha256(source),
+                    engine_version=getattr(extraction, "engine_version", None),
+                )
+                # Counts and checksums only - never document text.
+                logger.info(
+                    "[document_pipeline] Canonical evidence published for %s: "
+                    "status=%s pages=%s review=%s unresolved=%s withheld=%s "
+                    "chars=%s sha256=%s revision=%s pipeline=%s",
+                    document_id,
+                    manifest["build_status"],
+                    manifest["page_count"],
+                    manifest["review_pages"],
+                    manifest["unresolved_pages"],
+                    manifest["withheld_pages"],
+                    manifest["canonical_char_count"],
+                    manifest["canonical_sha256"],
+                    manifest["canonical_revision"],
+                    manifest["pipeline_version"],
+                )
 
         return needs_review
 
@@ -584,6 +648,17 @@ class DocumentProcessor:
         logger.info("[document_pipeline] Starting document processing for %s", pdf_path)
 
         processed_path: Optional[Path] = None
+        # What will actually run, normalised once: anything not explicitly
+        # unified takes the legacy path below, so it is recorded as legacy.
+        executed_pipeline = (
+            UNIFIED_PIPELINE if pipeline_version == UNIFIED_PIPELINE else LEGACY_PIPELINE
+        )
+        logger.info(
+            "[document_pipeline] %s routed to pipeline_version=%s (requested=%r)",
+            Path(pdf_path).name,
+            executed_pipeline,
+            pipeline_version,
+        )
 
         try:
             # Validate input file
@@ -616,7 +691,7 @@ class DocumentProcessor:
             extraction = None
             pages_human_review: List[int] = []
 
-            if pipeline_version != UNIFIED_PIPELINE:
+            if executed_pipeline != UNIFIED_PIPELINE:
                 legacy = await self._extract_legacy(input_path)
                 processed_path = legacy.processed_path
                 raw_ocr_text = legacy.raw_text
@@ -626,7 +701,7 @@ class DocumentProcessor:
                     input_path.name,
                     len(raw_ocr_text or ""),
                 )
-                return await self._extract_and_persist(
+                return _ran(executed_pipeline, await self._extract_and_persist(
                     input_path=input_path,
                     original_path=pdf_path,
                     processed_path=processed_path,
@@ -638,7 +713,7 @@ class DocumentProcessor:
                     document_id=document_id,
                     skip_embeddings=skip_embeddings,
                     start_time=start_time,
-                )
+                ))
 
             run_id = extraction_run_id or str(uuid4())
             db = await self.database_service.get_database()
@@ -665,6 +740,7 @@ class DocumentProcessor:
                     processing_time=time.time() - start_time,
                     source_kind=dispatch.kind.value,
                     processing_state=ProcessingState.STORED_ONLY.value,
+                    pipeline_version=executed_pipeline,
                 )
             extraction = dispatch.extraction
             if extraction is None:
@@ -708,7 +784,7 @@ class DocumentProcessor:
             )
 
 
-            return await self._extract_and_persist(
+            return _ran(executed_pipeline, await self._extract_and_persist(
                 input_path=input_path,
                 original_path=pdf_path,
                 processed_path=processed_path,
@@ -720,12 +796,13 @@ class DocumentProcessor:
                 document_id=document_id,
                 skip_embeddings=skip_embeddings,
                 start_time=start_time,
-            )
-        except InconsistentExtractionRunError as e:
+            ))
+        except (InconsistentExtractionRunError, CanonicalEvidenceInconsistentError) as e:
             # Retrying cannot heal this: the run's page evidence and the
-            # checkpoint disagree, and every further attempt would re-derive
-            # the same disagreement while burning the retry budget. Report it
-            # as terminal so a person sees it, with page numbers only.
+            # checkpoint (or the text about to be published) disagree, and
+            # every further attempt would re-derive the same disagreement while
+            # burning the retry budget. Report it as terminal so a person sees
+            # it, with page numbers only.
             processing_time = time.time() - start_time
             logger.error(
                 "[document_pipeline] Extraction run inconsistent for %s: %s",
@@ -737,8 +814,13 @@ class DocumentProcessor:
                 error=str(e),
                 processing_time=processing_time,
                 processing_state=ProcessingState.HUMAN_REVIEW_REQUIRED.value,
-                pages_human_review=list(e.missing_page_numbers),
+                pages_human_review=list(
+                    e.missing_page_numbers
+                    if isinstance(e, InconsistentExtractionRunError)
+                    else e.page_numbers
+                ),
                 publishable=False,
+                pipeline_version=executed_pipeline,
             )
         except Exception as e:
             processing_time = time.time() - start_time
@@ -750,6 +832,7 @@ class DocumentProcessor:
                 processing_time=processing_time,
                 # A failed extraction is never publishable.
                 publishable=False,
+                pipeline_version=executed_pipeline,
             )
 
         finally:
@@ -979,6 +1062,8 @@ class DocumentProcessor:
         *,
         metadata_quality: Optional[Dict[str, Any]] = None,
         source_text_status: Optional[str] = None,
+        deferral_reasons: Optional[List[str]] = None,
+        review_pages: Optional[List[int]] = None,
     ) -> int:
         """Save processing results to file system and database"""
         try:
@@ -1015,6 +1100,8 @@ class DocumentProcessor:
                 skip_embeddings=skip_embeddings,
                 metadata_quality=metadata_quality,
                 source_provenance=source_provenance,
+                deferral_reasons=deferral_reasons,
+                review_pages=review_pages,
             )
 
             return chunks_created
@@ -1267,6 +1354,15 @@ class DocumentProcessor:
                     if raw_ocr_text and raw_ocr_text.strip()
                     else SOURCE_TEXT_ABSENT
                 ),
+                # Which hold withheld the vectors, so the sync row names it.
+                # None, not [], when nothing is held: persistence then sees
+                # exactly what it saw before reasons existed.
+                deferral_reasons=(
+                    ([DEFERRAL_HUMAN_REVIEW] if blocked_for_review else [])
+                    + ([DEFERRAL_DUPLICATE_PENDING] if skip_embeddings else [])
+                )
+                or None,
+                review_pages=list(pages_human_review) or None,
             )
             partial_failures.update(dict(getattr(self.database_service, "partial_failures", {}) or {}))
 

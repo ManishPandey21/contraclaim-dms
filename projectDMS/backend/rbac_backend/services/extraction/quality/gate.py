@@ -8,6 +8,10 @@ Only FAIL and INDETERMINATE escalate. NOT_CHECKABLE - "we could not identify
 this structure well enough to verify it" - accepts and marks unverified,
 because the alternative is the 12 paid model calls per correct document that
 companion 3.3 measured.
+
+NOT_CHECKABLE is also not PASS. A page carrying a numeric table whose
+arithmetic was never verified stays NOT_CHECKABLE whatever else passed on it:
+a consistent date column (real claim page 4) says nothing about the amounts.
 """
 
 from __future__ import annotations
@@ -38,6 +42,17 @@ _SUBSTANTIVE = {"row_identity", "subtotal_identity", "date_convention"}
 
 _MIN_DATE_VALUES = 2
 
+#: How far down a table its header may sit. Real tables lead with blank, title
+#: and spacer rows; the measured claim's headers sit at rows 0 to 4.
+HEADER_SEARCH_ROWS = 6
+
+#: The checks that verify a table's numbers. A date check does not.
+_ARITHMETIC = ("row_identity", "subtotal_identity")
+
+#: One per numeric table: how its header was chosen and whether any arithmetic
+#: verified it. NOT_CHECKABLE here keeps the page from passing.
+_TABLE_VERIFICATION = "table_verification"
+
 
 class ExtractionQualityGate:
     def assess(
@@ -49,8 +64,10 @@ class ExtractionQualityGate:
         ]
         repairs: List[NumericRepair] = []
 
-        for table in tables or []:
-            table_checks, table_repairs = self._assess_table(table, page_number=page.number)
+        for position, table in enumerate(tables or []):
+            table_checks, table_repairs = self._assess_table(
+                table, page_number=page.number, position=position
+            )
             checks.extend(table_checks)
             repairs.extend(table_repairs)
 
@@ -65,31 +82,133 @@ class ExtractionQualityGate:
         )
 
     def _assess_table(
-        self, table: Table, *, page_number: int
+        self, table: Table, *, page_number: int, position: int
     ) -> tuple[List[CheckResult], List[NumericRepair]]:
         checks: List[CheckResult] = []
         repairs: List[NumericRepair] = []
 
         rows = [list(row) for row in table]
-        if len(rows) < 2:
-            return checks, repairs
-
-        headers = rows[0]
+        header_index = self._find_header(rows)
+        # With no header found, row 0 stays the nominal header for the date
+        # checks, as before, and every row counts as unverified content.
+        start = 0 if header_index is None else header_index
+        headers = rows[start] if rows else []
         roles = map_column_roles(headers)
-        body = rows[1:]
+        body = rows[start + 1 :]
+        content = body if header_index is not None else rows
 
-        checks.extend(self._date_checks(headers, body))
-
-        if not is_checkable(roles):
-            checks.append(
-                CheckResult(
-                    name="row_identity",
-                    verdict=Verdict.NOT_CHECKABLE,
-                    detail="column roles not established for this table",
+        if len(rows) >= 2:
+            checks.extend(self._date_checks(headers, body))
+            if header_index is None:
+                checks.append(
+                    CheckResult(
+                        name="row_identity",
+                        verdict=Verdict.NOT_CHECKABLE,
+                        detail="column roles not established for this table",
+                    )
                 )
-            )
-            return checks, repairs
+            else:
+                repairs = self._check_arithmetic(
+                    body, roles, checks, page_number=page_number
+                )
 
+        summary = self._table_verification(
+            position, header_index, roles, content, checks
+        )
+        if summary is not None:
+            checks.append(summary)
+        return checks, repairs
+
+    @staticmethod
+    def _find_header(rows: Sequence[Sequence[str]]) -> Optional[int]:
+        """Index of the first row whose roles make the table checkable.
+
+        Searches only the leading ``HEADER_SEARCH_ROWS`` rows, and only past
+        rows that carry no number: a blank, a title or a spacer can precede a
+        header, data cannot. A header-shaped row below data would leave those
+        data rows silently unchecked. None means no header - never a guess.
+        """
+        for index, row in enumerate(rows[:HEADER_SEARCH_ROWS]):
+            if is_checkable(map_column_roles(row)):
+                return index
+            if any(parse_amount(cell) is not None for cell in row):
+                return None
+        return None
+
+    @staticmethod
+    def _table_verification(
+        position: int,
+        header_index: Optional[int],
+        roles: Sequence[ColumnRole],
+        content: Sequence[Sequence[str]],
+        table_checks: Sequence[CheckResult],
+    ) -> Optional[CheckResult]:
+        """Say whether this table's numbers were verified, and how.
+
+        A table without numbers has no arithmetic to verify and gets no record.
+        A numeric table is verified only when some arithmetic check passed on
+        it; established roles alone verify nothing.
+        """
+        numeric = sum(
+            1 for row in content for cell in row if parse_amount(cell) is not None
+        )
+        if numeric == 0:
+            return None
+
+        label = f"table {position + 1}"
+        if header_index is None:
+            return CheckResult(
+                name=_TABLE_VERIFICATION,
+                verdict=Verdict.NOT_CHECKABLE,
+                detail=(
+                    f"{label}: no header row with rate, amount and quantity or "
+                    f"nos columns in the first {HEADER_SEARCH_ROWS} rows; "
+                    f"{numeric} numeric cell(s) unverified"
+                ),
+            )
+
+        named = ", ".join(
+            role.value for role in roles if role is not ColumnRole.UNKNOWN
+        )
+        header = f"header row {header_index} ({named})"
+        refs = [f"table[{position}].header.row[{header_index}]"]
+        passed = {
+            name: sum(
+                1
+                for check in table_checks
+                if check.name == name and check.verdict is Verdict.PASS
+            )
+            for name in _ARITHMETIC
+        }
+        if sum(passed.values()):
+            return CheckResult(
+                name=_TABLE_VERIFICATION,
+                verdict=Verdict.PASS,
+                detail=(
+                    f"{label}: {header}; {passed['row_identity']} row and "
+                    f"{passed['subtotal_identity']} subtotal check(s) passed"
+                ),
+                evidence_refs=refs,
+            )
+        return CheckResult(
+            name=_TABLE_VERIFICATION,
+            verdict=Verdict.NOT_CHECKABLE,
+            detail=(
+                f"{label}: {header}, but no arithmetic check passed; "
+                f"{numeric} numeric cell(s) unverified"
+            ),
+            evidence_refs=refs,
+        )
+
+    def _check_arithmetic(
+        self,
+        body: Sequence[Sequence[str]],
+        roles: Sequence[ColumnRole],
+        checks: List[CheckResult],
+        *,
+        page_number: int,
+    ) -> List[NumericRepair]:
+        repairs: List[NumericRepair] = []
         data_rows, stated_total = self._split_total_row(body, roles)
         for index, row in enumerate(data_rows):
             row_check = check_row(row, roles)
@@ -111,7 +230,7 @@ class ExtractionQualityGate:
                 check_subtotal(data_rows, stated_total, roles, candidate_row_index=0)
             )
 
-        return checks, repairs
+        return repairs
 
     def _maybe_repair(
         self,
@@ -208,6 +327,13 @@ class ExtractionQualityGate:
             return Verdict.FAIL
         if Verdict.INDETERMINATE in verdicts:
             return Verdict.INDETERMINATE
+
+        # After FAIL/INDETERMINATE, so a real failure still escalates.
+        if any(
+            check.name == _TABLE_VERIFICATION and check.verdict is Verdict.NOT_CHECKABLE
+            for check in checks
+        ):
+            return Verdict.NOT_CHECKABLE
 
         substantive_pass = any(
             check.verdict is Verdict.PASS and check.name in _SUBSTANTIVE

@@ -16,8 +16,9 @@ instead of creating a contradictory second row.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pytest
 
@@ -41,6 +42,7 @@ class FakeCollection:
     def __init__(self) -> None:
         self.rows: Dict[tuple, Dict[str, Any]] = {}
         self.writes = 0
+        self.head: Optional[Dict[str, Any]] = None
 
     async def bulk_write(self, operations: List[Any]) -> None:
         self.writes += 1
@@ -52,6 +54,23 @@ class FakeCollection:
                 criteria["page_number"],
             )
             self.rows[key] = op._doc
+
+    # Publishing canonical evidence reads the run back and moves the head.
+    def find(self, query: Dict[str, Any]) -> Any:
+        rows = [row for row in self.rows.values() if all(row.get(k) == v for k, v in query.items())]
+
+        class _Cursor:
+            async def to_list(self, length: Any = None) -> List[Dict[str, Any]]:
+                return [dict(row) for row in rows]
+
+        return _Cursor()
+
+    async def find_one(self, query: Dict[str, Any]) -> Any:
+        return self.head
+
+    async def update_one(self, query: Dict[str, Any], update: Dict[str, Any], **kwargs: Any) -> Any:
+        self.head = {**(self.head or {}), **update.get("$set", {})}
+        return SimpleNamespace(matched_count=1)
 
 
 class FakeDB:
@@ -86,6 +105,10 @@ def _page(number: int, text: str, tables: Any = None) -> ExtractedPage:
     return page
 
 
+#: The gate stage checksums the source it extracted; any readable file will do.
+_SOURCE = Path(__file__)
+
+
 def _run(pages: List[ExtractedPage]):
     """Drive the gate stage with the real DocumentPageStore."""
     db = FakeDB()
@@ -108,7 +131,7 @@ def _run(pages: List[ExtractedPage]):
     )
     asyncio.run(
         processor._apply_quality_gate(
-            None, extraction, document_id="doc-1", page_store=store
+            _SOURCE, extraction, document_id="doc-1", page_store=store
         )
     )
     return db[DOCUMENT_OCR_PAGES].rows, db[DOCUMENT_OCR_PAGES]

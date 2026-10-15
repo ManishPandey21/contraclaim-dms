@@ -22,6 +22,7 @@ import logging
 from typing import Any, List, Tuple
 
 from .models import PageClass, PageClassification
+from .numeric_integrity import readable_page
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,7 @@ class PageClassifier:
         rotation = int(getattr(page, "rotation", 0) or 0)
 
         try:
-            text = page.extract_text() or ""
+            text = readable_page(page).extract_text() or ""
         except Exception as exc:
             logger.warning("Page text could not be extracted for classification: %s", exc)
             return PageClassification(
@@ -129,7 +130,7 @@ class PageClassifier:
     @staticmethod
     def _table_count(page: Any) -> int:
         try:
-            return len(page.find_tables() or [])
+            return len(readable_page(page).find_tables() or [])
         except Exception as exc:
             logger.debug("Table detection failed during classification: %s", exc)
             return 0

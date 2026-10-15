@@ -95,6 +95,9 @@ def test_frontend_referenced_route_families_are_mounted():
         "/api/security-terms/acceptances",
         "/api/security-terms/versions",
         "/api/security-terms/versions/{version_id}/activate",
+        # Polled by the document viewer (enhanced-api.ts); absent until 2026-10-11,
+        # so every poll answered 404 and the viewer showed `not_queued`.
+        "/api/documents/{id}/processing-status",
     }
 
     missing = sorted(expected_paths - paths)

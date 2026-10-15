@@ -109,11 +109,11 @@ def _add_high(
 def test_the_current_braces_advisory_alone_passes_with_the_exception_banner(tmp_path):
     message = _gate(tmp_path, _Npm(_report()))
     assert "TEMPORARY OWNER-APPROVED SECURITY EXCEPTION" in message
-    assert "GHSA-vfj7-8cjw-p6xm" in message and "expires 2026-10-10" in message
+    assert "GHSA-vfj7-8cjw-p6xm" in message and "expires 2026-11-05" in message
 
 
 def test_the_last_day_still_passes(tmp_path):
-    assert "EXCEPTION" in _gate(tmp_path, _Npm(_report()), today=dt.date(2026, 10, 10))
+    assert "EXCEPTION" in _gate(tmp_path, _Npm(_report()), today=dt.date(2026, 11, 5))
 
 
 def test_a_clean_report_passes_without_the_exception(tmp_path):
@@ -237,8 +237,8 @@ def test_no_installed_braces_fails(tmp_path):
 
 
 def test_after_expiry_fails(tmp_path):
-    with pytest.raises(gate.GateFailure, match="expired on 2026-10-10"):
-        _gate(tmp_path, _Npm(_report()), today=dt.date(2026, 10, 11))
+    with pytest.raises(gate.GateFailure, match="expired on 2026-11-05"):
+        _gate(tmp_path, _Npm(_report()), today=dt.date(2026, 11, 6))
 
 
 @pytest.mark.parametrize(

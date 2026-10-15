@@ -29,6 +29,11 @@ import EnclosuresPanel from "@/components/document-viewer/EnclosuresPanel";
 import ReferencesPanel from "@/components/document-viewer/ReferencesPanel";
 import DocumentDetailsPanel from "@/components/document-viewer/DocumentDetailsPanel";
 import LinkedRecordsPanel from "@/components/document-viewer/LinkedRecordsPanel";
+import ExtractionReviewPanel from "@/components/document-viewer/ExtractionReviewPanel";
+import {
+  REVIEW_PUBLICATION_PENDING_STAGE,
+  isTerminalProcessingStatus,
+} from "@/utils/processingStatus";
 
 const DocumentViewer = React.lazy(
   () => import("@/components/document-viewer/DocumentViewer")
@@ -96,12 +101,22 @@ const DocumentViewerPage: React.FC = () => {
     "enclosure",
     "references",
     "details",
+    "review",
   ]);
   const initialTabParam = (searchParams.get("tab") || "metadata").toLowerCase();
   const initialActiveTab = allowedTabs.has(initialTabParam)
     ? initialTabParam
     : "metadata";
   const [activeTab, setActiveTab] = useState(initialActiveTab);
+  // `?page=N` opens the source PDF at that page (extraction review deep link).
+  const pageParam = Number.parseInt(searchParams.get("page") || "", 10);
+  const [pdfPage, setPdfPage] = useState<number | null>(
+    Number.isFinite(pageParam) && pageParam > 0 ? pageParam : null
+  );
+  useEffect(() => {
+    const requested = Number.parseInt(searchParams.get("page") || "", 10);
+    if (Number.isFinite(requested) && requested > 0) setPdfPage(requested);
+  }, [searchParams]);
   useEffect(() => {
     const t = (searchParams.get("tab") || "").toLowerCase();
     if (allowedTabs.has(t) && t !== activeTab) {
@@ -204,7 +219,7 @@ const DocumentViewerPage: React.FC = () => {
       return status;
     } catch (error) {
       console.warn("Unable to fetch processing status", error);
-      const fallbackStatus = {
+      const fallbackStatus: DocumentProcessingJobStatus = {
         _id: "",
         document_id: documentId,
         status: "not_queued",
@@ -253,19 +268,22 @@ const DocumentViewerPage: React.FC = () => {
   useEffect(() => {
     if (!documentId) return;
     let cancelled = false;
-    let completedRefreshDone = false;
-    const terminal = new Set(["completed", "failed", "dead_lettered", "not_queued"]);
+    let settledRefreshDone = false;
 
-    const currentStatus = processingStatus?.status;
-    if (currentStatus && terminal.has(currentStatus)) {
+    if (isTerminalProcessingStatus(processingStatus?.status, processingStatus?.stage)) {
       return;
     }
 
     const poll = async () => {
       const status = await fetchProcessingStatus();
       if (cancelled || !status) return;
-      if (status.status === "completed" && !completedRefreshDone) {
-        completedRefreshDone = true;
+      // Any final verdict, not only `completed`, may have rewritten the
+      // document (review message, extracted fields), so reload it once.
+      if (
+        isTerminalProcessingStatus(status.status, status.stage) &&
+        !settledRefreshDone
+      ) {
+        settledRefreshDone = true;
         await fetchDocument();
       }
     };
@@ -273,8 +291,7 @@ const DocumentViewerPage: React.FC = () => {
     void poll();
     const interval = window.setInterval(() => {
       if (cancelled) return;
-      const current = processingStatus?.status;
-      if (current && terminal.has(current)) {
+      if (isTerminalProcessingStatus(processingStatus?.status, processingStatus?.stage)) {
         window.clearInterval(interval);
         return;
       }
@@ -285,7 +302,13 @@ const DocumentViewerPage: React.FC = () => {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [documentId, fetchDocument, fetchProcessingStatus, processingStatus?.status]);
+  }, [
+    documentId,
+    fetchDocument,
+    fetchProcessingStatus,
+    processingStatus?.status,
+    processingStatus?.stage,
+  ]);
 
   const fetchAvailableAndLinkedDocuments = useCallback(async () => {
     if (!documentId) return;
@@ -773,10 +796,24 @@ const DocumentViewerPage: React.FC = () => {
     "dead_lettered",
     "metadata_extracted",
     "completed",
+    "human_review_required",
+    "partially_processed",
+    "stored_only",
   ].includes(effectiveProcessingStatus);
   const processingLabel =
     effectiveProcessingStatus === "completed"
       ? "Metadata extracted"
+      : effectiveProcessingStatus === "human_review_required"
+        ? "Needs human review"
+      : effectiveProcessingStatus === "partially_processed" &&
+          processingStatus?.stage === REVIEW_PUBLICATION_PENDING_STAGE
+        ? "Human review resolved; publishing"
+      : effectiveProcessingStatus === "partially_processed"
+        ? isTerminalProcessingStatus(effectiveProcessingStatus, processingStatus?.stage)
+          ? "Partially processed"
+          : "Partially processed; remaining pages will be retried"
+      : effectiveProcessingStatus === "stored_only"
+        ? "Stored without extraction"
       : effectiveProcessingStatus === "metadata_extracted"
         ? "Metadata extracted; indexing is finishing"
         : effectiveProcessingStatus === "failed" ||
@@ -787,6 +824,27 @@ const DocumentViewerPage: React.FC = () => {
             : effectiveProcessingStatus === "queued"
               ? "Metadata extraction queued"
               : "Metadata extraction in progress";
+
+  const reviewPages: number[] = Array.isArray(
+    (processingError as { pages?: unknown } | null)?.pages
+  )
+    ? ((processingError as { pages: unknown[] }).pages
+        .map((page) => Number(page))
+        .filter((page) => Number.isFinite(page) && page > 0) as number[])
+    : [];
+  const showReviewTab =
+    effectiveProcessingStatus === "human_review_required" ||
+    activeTab === "review" ||
+    String(processingStatus?.stage || "").startsWith("review_");
+  const openReview = () => {
+    setShowMetadata(true);
+    setActiveTab("review");
+    if (reviewPages.length) setPdfPage(reviewPages[0]);
+  };
+  const refreshAfterReview = () => {
+    void fetchProcessingStatus();
+    void fetchDocument();
+  };
 
   return (
     <div className="h-screen flex flex-col bg-gray-100">
@@ -826,6 +884,11 @@ const DocumentViewerPage: React.FC = () => {
               )}
             </div>
             <div className="flex items-center gap-2">
+              {effectiveProcessingStatus === "human_review_required" && (
+                <Button size="sm" variant="outline" onClick={openReview}>
+                  Review pages
+                </Button>
+              )}
               {processingError && (
                 <Button
                   size="sm"
@@ -908,7 +971,7 @@ const DocumentViewerPage: React.FC = () => {
                 </div>
               }
             >
-              <DocumentViewer document={document} />
+              <DocumentViewer document={document} page={pdfPage} />
             </Suspense>
           </ResizablePanel>
 
@@ -923,12 +986,15 @@ const DocumentViewerPage: React.FC = () => {
                   className="w-full h-full min-h-0 flex flex-col"
                 >
                   <div className="bg-white border-b p-3">
-                    <TabsList className="grid w-full grid-cols-5">
+                    <TabsList
+                      className={`grid w-full ${showReviewTab ? "grid-cols-6" : "grid-cols-5"}`}
+                    >
                       <TabsTrigger value="metadata">Metadata</TabsTrigger>
                       <TabsTrigger value="enclosure">Enclosures</TabsTrigger>
                       <TabsTrigger value="references">References</TabsTrigger>
                       <TabsTrigger value="details">Details</TabsTrigger>
                       <TabsTrigger value="records">Records</TabsTrigger>
+                      {showReviewTab && <TabsTrigger value="review">Review</TabsTrigger>}
                     </TabsList>
                   </div>
 
@@ -989,6 +1055,17 @@ const DocumentViewerPage: React.FC = () => {
                       <TabsContent value="records" className="m-0">
                         <LinkedRecordsPanel documentId={documentId!} />
                       </TabsContent>
+
+                      {showReviewTab && documentId && (
+                        <TabsContent value="review" className="m-0">
+                          <ExtractionReviewPanel
+                            documentId={documentId}
+                            currentPage={pdfPage}
+                            onShowPage={setPdfPage}
+                            onDecided={refreshAfterReview}
+                          />
+                        </TabsContent>
+                      )}
                     </div>
                   </ScrollArea>
                 </Tabs>
