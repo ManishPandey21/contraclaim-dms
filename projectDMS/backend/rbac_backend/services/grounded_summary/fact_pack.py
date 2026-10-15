@@ -353,9 +353,16 @@ def _as_date(value: Any) -> Optional[date]:
 
 # --- amounts, quantities, clauses --------------------------------------------------
 
+#: A currency marker, then the figure. The figure must not run on into a date
+#: ("2,000,000 INR 10/30/2022" is a rental followed by a date, not INR 10).
 _CURRENCY_AMOUNT = re.compile(
-    r"(?:\bINR\b|\bRs\b\.?|₹|\bRupees\b)\s*:?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?:/-)?"
-    r"(?:\s*(lakhs?|lacs?|crores?|cr\b|million|mn\b))?",
+    r"(?:\bINR\b|\bRs\b\.?|₹|\bRupees\b)\s*:?\s*([0-9][0-9,]*(?:\.[0-9]+)?)(?![0-9,]*[/\-][0-9])"
+    r"\s*(?:/-)?(?:\s*(lakhs?|lacs?|crores?|cr\b|million|mn\b))?",
+    re.IGNORECASE,
+)
+#: The figure, then the marker: "Monthly Rental 2,000,000 INR".
+_AMOUNT_CURRENCY = re.compile(
+    r"(?<![\w.,/])([0-9]{1,3}(?:,[0-9]{2,3})+(?:\.[0-9]+)?|[0-9]{4,}(?:\.[0-9]+)?)\s*(?:/-\s*)?(?:INR|Rs\b\.?|₹)",
     re.IGNORECASE,
 )
 _MULTIPLIERS = {
@@ -412,7 +419,12 @@ def _page_states(evidence: CanonicalEvidence, approved_pages: Sequence[int]) -> 
     states: Dict[int, PageState] = {}
     for page in evidence.pages:
         machine_failed = bool(page.needs_review) or str(page.quality_verdict or "") in _MACHINE_FAILED_VERDICTS
-        unresolved = str(page.status or "") in _UNRESOLVED_PAGE_STATUSES
+        status_value = str(page.status or "")
+        # A page OCR never produced text for (disabled, or empty) was not
+        # read at all; calling it "failed quality checks" would misstate why.
+        unresolved = status_value in _UNRESOLVED_PAGE_STATUSES or (
+            status_value in {"ocr_disabled", "ocr_empty"} and page.end <= page.start
+        )
         withheld = bool(page.text_withheld)
         if withheld or unresolved:
             cap: Optional[str] = "uncertain"
@@ -655,6 +667,10 @@ class _Builder:
                 continue
             seen.add(key)
             sentence = self._sentence_at(sentences, mention.start)
+            # Material dates are dates the letter states in prose. A table of
+            # daily idle dates is the claim's working, not its chronology.
+            if sentence is None or not _is_prose(sentence.text):
+                continue
             checks: List[Dict[str, Any]] = []
             if mention.ambiguous:
                 status = "uncertain"
@@ -682,7 +698,9 @@ class _Builder:
             if len(self.by_type("amount")) >= MAX_AMOUNTS:
                 break
             base = _decimal(match.group(1))
-            if base is None or base == 0:
+            # "Amount in INR 1 Mobilisation ..." is a table header and a row
+            # number. A real stated sum below 100 rupees is not material.
+            if base is None or base < 100:
                 continue
             unit_word = (match.group(2) or "").lower()
             value = base * _MULTIPLIERS.get(unit_word, Decimal(1))
@@ -691,6 +709,14 @@ class _Builder:
                 continue
             seen.add(key)
             self._amount_fact(match.start(), match.end(), match.group(0).strip(), value, "INR", sentences)
+        for match in _AMOUNT_CURRENCY.finditer(self.text):
+            if len(self.by_type("amount")) >= MAX_AMOUNTS:
+                break
+            figure = _decimal(match.group(1))
+            if figure is None or figure < 100 or (self._page(match.start()), figure) in seen:
+                continue
+            seen.add((self._page(match.start()), figure))
+            self._amount_fact(match.start(), match.end(), match.group(0).strip(), figure, "INR", sentences)
         # Values the quality gate checked and passed, stated in a table without
         # a currency marker: only those, never every number on the page.
         for evidence_page in self.evidence.pages:
@@ -740,9 +766,9 @@ class _Builder:
                         "detail": f"read as '{repair.get('before')}', repaired to '{after}'",
                     })
         sentence = self._sentence_at(sentences, start)
-        if currency is None:
-            # A checked table value: its row is the context, not the run of
-            # cells the sentence splitter joined around it.
+        if currency is None or sentence is None or not _is_prose(sentence.text):
+            # A table value: its row is the context, not the run of cells the
+            # sentence splitter joined around it.
             line_start, line_end = self._line(start)
             quote: Optional[str] = _quote(self.text[line_start:line_end])
         else:
@@ -769,6 +795,8 @@ class _Builder:
             seen.add(key)
             number = _decimal(match.group(1))
             sentence = self._sentence_at(sentences, match.start())
+            if sentence is None or not _is_prose(sentence.text):
+                continue
             self._add(
                 kind="quantity", label="Quantity", value=stated, unit=match.group(2).lower(),
                 normalized_value=_json_number(number) if number is not None else None,

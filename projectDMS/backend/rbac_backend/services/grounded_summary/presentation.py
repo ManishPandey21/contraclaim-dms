@@ -78,10 +78,35 @@ class PresentationRejected(ValueError):
     pass
 
 
+#: The facts the model may cite: what it is allowed to word (header, the
+#: letter's statements, the clauses and headline amounts a short summary may
+#: name). Dates, tables, references and qualifications are rendered without
+#: it, so it is never shown them - which also keeps its input well below the
+#: size of the document itself.
+MODEL_FACT_TYPES = frozenset(
+    {
+        "letter_number", "letter_date", "subject", "from_party", "to_party",
+        "background_statement", "position_statement", "request_statement",
+        "instruction_statement", "reservation_statement", "claim_statement",
+        "clause", "amount",
+    }
+)
+#: Quotes only travel with statements; a clause or amount is cited by value.
+_QUOTED_TYPES = frozenset(t for t in MODEL_FACT_TYPES if t.endswith("_statement"))
+
+
+def model_facts(pack: FactPack) -> List[Any]:
+    return [
+        fact
+        for fact in pack.facts
+        if fact.type in MODEL_FACT_TYPES and not (fact.type == "amount" and not fact.unit)
+    ]
+
+
 def fact_pack_payload(pack: FactPack) -> List[Dict[str, Any]]:
-    """What the model sees: facts only, quotes trimmed. Never page text."""
+    """What the model sees: the citable facts only. Never page text."""
     payload = []
-    for fact in pack.facts:
+    for fact in model_facts(pack):
         row: Dict[str, Any] = {
             "id": fact.id,
             "type": fact.type,
@@ -97,7 +122,7 @@ def fact_pack_payload(pack: FactPack) -> List[Dict[str, Any]]:
             row["party"] = fact.party
         if fact.role:
             row["role"] = fact.role
-        if fact.quote and fact.quote != fact.value:
+        if fact.type in _QUOTED_TYPES and fact.quote and fact.quote != fact.value:
             row["quote"] = fact.quote
         if fact.page_numbers:
             row["pages"] = fact.page_numbers
@@ -106,7 +131,9 @@ def fact_pack_payload(pack: FactPack) -> List[Dict[str, Any]]:
 
 
 def build_user_message(pack: FactPack) -> str:
-    return "FACTS:\n" + json.dumps(fact_pack_payload(pack), ensure_ascii=False, default=str)
+    return "FACTS:\n" + json.dumps(
+        fact_pack_payload(pack), ensure_ascii=False, default=str, separators=(",", ":")
+    )
 
 
 _NUMBER = re.compile(r"\d+(?:[.,/\-]\d+)*")
@@ -149,8 +176,9 @@ def _check_item(raw: Any, pack: FactPack, where: str) -> Tuple[str, List[Any]]:
     if not isinstance(ids, list) or not ids:
         raise PresentationRejected(f"{where}: cites no fact")
     facts = []
+    citable = {fact.id for fact in model_facts(pack)}
     for fact_id in ids:
-        fact = pack.get(str(fact_id))
+        fact = pack.get(str(fact_id)) if str(fact_id) in citable else None
         if fact is None:
             raise PresentationRejected(f"{where}: cites unknown fact {fact_id!r}")
         facts.append(fact)

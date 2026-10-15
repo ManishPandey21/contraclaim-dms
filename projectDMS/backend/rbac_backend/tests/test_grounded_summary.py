@@ -682,3 +682,54 @@ async def test_table_rows_and_headings_are_not_read_as_party_statements() -> Non
     assert not [f for f in statements if 2 in f.page_numbers], [f.quote for f in statements]
     # The header block is split into its lines, not one run-on "sentence".
     assert not [f for f in pack.by_type("date") if f.value in {"24-12-2022", "03.02.2023"}]
+
+
+# --- regressions from the 4299 local acceptance run (2026-10-16) ------------------------
+
+TABLE_PAGE = (
+    "Date Count Status\n8/10/2022 1 Idle\n9/10/2022 1 Idle\n10/13/2022 1 Idle\n"
+    "B Monthly Rental 2,000,000 INR 10/30/2022 1 Idle\n"
+    "S/N Description Unit Qty Rate in INR Amount in INR 1 Mobilisation Charges Nos 1 950,000.00 950,000\n"
+)
+
+
+async def test_table_rows_do_not_become_material_dates_or_false_amounts() -> None:
+    db = FakeDb()
+    pages = [_page(1, PAGE_ONE), _page(2, TABLE_PAGE)]
+    pack, _ = await _pack(db, await _seed(db, pages=pages))
+
+    assert not [f for f in pack.by_type("date") if 2 in f.page_numbers]
+    amounts = {f.normalized_value for f in pack.by_type("amount")}
+    assert 10 not in amounts and 1 not in amounts  # "INR 10/30/2022", "INR 1 Mobilisation"
+    assert 2000000 in amounts  # "2,000,000 INR": figure before the marker
+
+
+async def test_the_model_input_is_smaller_than_the_document_and_cites_only_citable_facts() -> None:
+    db = FakeDb()
+    pages = [_page(1, PAGE_ONE), _page(2, TABLE_PAGE * 40)]
+    pack, evidence = await _pack(db, await _seed(db, pages=pages))
+    model = FakeModel(json.dumps({}))
+
+    await compose(pack, evidence, model=model)
+
+    _, user = model.calls[0]
+    assert len(user) < len(evidence.text)
+    date_fact = pack.by_type("letter_date")[0]
+    reference = pack.by_type("reference")[0]
+    with pytest.raises(PresentationRejected, match="unknown fact"):
+        validate_presentation(
+            json.dumps({"executive_overview": {"text": "x", "fact_ids": [reference.id]}}), pack
+        )
+    assert date_fact.id in user and reference.id not in user
+
+
+async def test_a_page_ocr_never_read_is_reported_as_unread_not_as_failed_checks() -> None:
+    db = FakeDb()
+    unread = ExtractedPage(
+        number=2, text="", source=PageSource.EMPTY, status=PageStatus.OCR_DISABLED,
+        classification=_classification(""), quality_verdict="fail", needs_review=True,
+    )
+    pack, _ = await _pack(db, await _seed(db, pages=[_page(1, PAGE_ONE), unread]))
+
+    notes = [f.value for f in pack.by_type("page_qualification")]
+    assert notes == ["Page 2 could not be read by extraction; its content is missing."]

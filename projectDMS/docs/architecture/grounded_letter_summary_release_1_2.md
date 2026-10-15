@@ -141,6 +141,39 @@ for non-consumable documents. `POST /api/documents/{id}/grounded-summary/generat
 (lazy) generation for an existing document, `dms.document.edit_metadata`. A dedicated route because
 staleness needs the head read and the payload is large; the existing document payload is not widened.
 
+## 8. Measurements (local, 2026-10-16)
+
+Real native extraction (`OCRService.process_pdf_pagewise`), the real `ExtractionQualityGate` and a real
+`publish_canonical` into the in-memory Mongo double, then `GroundedSummaryService.generate`. This
+workstation has no Tesseract/OCRmyPDF, so scanned pages stay unread here; OCR-dependent acceptance
+(4299 cover pages, GLM mixed PDF) needs staging.
+
+| Letter | Pages read | Canonical text | Fact Pack build | Whole generation | Model input (o200k) |
+|---|---|---|---|---|---|
+| 4299 (claim, tables) | 2–6 native; 1 unread (scan) | 5,234 chars / 2,152 tokens | 11–12 ms | 12–13 ms | 274 tokens (0.13x document) |
+| 2327 (scanned) | 3–4 only (scan) | 70 chars | 1 ms | 1 ms | 4 tokens |
+
+Deterministic mode (the default) costs nothing per document. With the model pass enabled the input
+is the citable facts only; at the measured 274 input tokens and a ≤ 2,500-token output cap the cost is
+bounded by the output, which must be priced against the configured `OPENAI_RESPONSES_MODEL` before the
+flag is turned on. The first run of this measurement found the input at 4x the document (8,822 tokens)
+because every fact carried its quote; fixed before review (see the acceptance-fix commit).
+
+Defects found by the real document and fixed: table rows read as material dates and quantities; a
+figure running into a date read as an amount ("INR 10" from `2,000,000 INR 10/30/2022`); table headers
+read as amounts ("INR 1"); an unread page described as failing quality checks.
+
+## 9. Owner decisions
+
+1. **Legacy documents** (`legacy_v0`, no canonical evidence — most of production while the unified
+   canary is off) get no grounded summary. Option: a page-less degraded variant from source `ocrText`.
+2. **Model pass** stays off (`GROUNDED_SUMMARY_LLM_ENABLED=false`) until priced and reviewed on
+   staging output.
+3. **Backfill**: none in this release. `POST .../grounded-summary/generate` is per document; a
+   corpus backfill is a separate approved operation.
+4. **Consumer migration** of `summary` → `short_summary` (registers, search, cards, drafting selectors)
+   is a later PR.
+
 ## 10. `summary` consumers and the compatibility decision
 
 Full inventory, 2026-10-16 (backend root `backend/rbac_backend/`):
