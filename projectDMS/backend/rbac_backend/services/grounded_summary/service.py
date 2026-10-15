@@ -89,6 +89,12 @@ def _now() -> datetime:
 
 
 def _held_status(document: Mapping[str, Any]) -> str:
+    # Quarantine outranks review: a confirmed duplicate is withheld whatever a
+    # reviewer later decides about its pages.
+    if str(document.get("duplicate_status") or "") == "duplicate" or str(
+        document.get("lifecycle_state") or ""
+    ) in {"duplicate", "deleted"}:
+        return SUMMARY_WITHHELD
     if str(document.get("processing_status") or "") == ProcessingState.HUMAN_REVIEW_REQUIRED.value:
         return SUMMARY_BLOCKED_FOR_REVIEW
     return SUMMARY_WITHHELD

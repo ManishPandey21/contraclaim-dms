@@ -217,6 +217,22 @@ class DocumentService:
                 payload.pop(field, None)
         return payload
 
+    async def _generate_grounded_summary(self, db: Any, document_id: str) -> None:
+        """Release 1.2: summarise the evidence this run published.
+
+        Derivative and last: the service holds it for a document that may not
+        be consumed, and records - never raises - its own failure, so a summary
+        can never fail or delay the extraction it describes.
+        """
+        try:
+            from .grounded_summary.service import GroundedSummaryService
+
+            await GroundedSummaryService(db).generate(str(document_id), trigger="pipeline")
+        except Exception:
+            logger.warning(
+                "[document_pipeline] Grounded summary skipped for %s", document_id, exc_info=True
+            )
+
     async def _publish_graph_and_evidence_from_current(
         self,
         *,
@@ -2546,6 +2562,8 @@ class DocumentService:
                     upload_type=upload,
                     raise_on_error=True,
                 )
+            if metadata is not None:
+                await self._generate_grounded_summary(db, document_id)
             return bool(result and getattr(result, "success", False) and metadata)
         except Exception as exc:
             logger.exception("Unexpected error while processing document %s", document_id)
