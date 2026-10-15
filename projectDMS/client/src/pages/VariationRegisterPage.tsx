@@ -446,8 +446,11 @@ const VariationRegisterPage: React.FC = () => {
       </Card>
 
       <Dialog open={linksFor !== null} onOpenChange={closeLinks}>
-        <DialogContent className="sm:max-w-2xl">
-          <DialogHeader>
+        {/* Bounded by the viewport on both axes: the header stays put and the
+            links/search body scrolls, so a long result list cannot push the
+            dialog (or its close control) off screen. */}
+        <DialogContent className="max-h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] grid-rows-[auto_minmax(0,1fr)] sm:max-w-2xl">
+          <DialogHeader className="pr-6">
             <DialogTitle>Correspondence — {linksFor?.variation_number || "Variation"}</DialogTitle>
             <DialogDescription>
               Link existing incoming or outgoing letters to this variation. Unlinking removes the
@@ -455,15 +458,17 @@ const VariationRegisterPage: React.FC = () => {
             </DialogDescription>
           </DialogHeader>
           {linksFor && (
-            <EntityDocumentLinks
-              targetType="variation"
-              targetId={linksFor.id}
-              organizationId={linksFor.organization_id}
-              projectId={linksFor.project_id}
-              roles={VARIATION_DOCUMENT_RELATIONSHIP_ROLES}
-              defaultRole="correspondence"
-              canManage={can("dms.variation.edit")}
-            />
+            <div className="-mx-1 min-h-0 min-w-0 overflow-y-auto px-1">
+              <EntityDocumentLinks
+                targetType="variation"
+                targetId={linksFor.id}
+                organizationId={linksFor.organization_id}
+                projectId={linksFor.project_id}
+                roles={VARIATION_DOCUMENT_RELATIONSHIP_ROLES}
+                defaultRole="correspondence"
+                canManage={can("dms.variation.edit")}
+              />
+            </div>
           )}
         </DialogContent>
       </Dialog>

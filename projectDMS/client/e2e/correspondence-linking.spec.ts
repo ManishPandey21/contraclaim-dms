@@ -33,6 +33,22 @@ const CONTRACT = {
   ...INCOMING, _id: "65f0c0ffee0000000000cc01", filename: "Particular-Conditions.pdf",
   subject: "Particular conditions", letterNo: "PC-1", uploadType: "contract",
 };
+// The production filename that pushed the Variation correspondence dialog past
+// the viewport, plus one unbroken token: a name with no spaces has no soft wrap
+// opportunity, which is the worst case for intrinsic width.
+const LONG_OUTGOING = {
+  ...INCOMING, _id: "65f0c0ffee0000000000aa02", uploadType: "outgoing",
+  filename: "Kanpur-LET-JVTI-CPM-00550-E01-Variation statement no.01 for the Utility (Sewer & GRP Water Pipe line).pdf",
+  letterNo: "Kanpur-LET-JVTI-CPM-00550-E01",
+  subject: "Variation statement no.01 for the Utility (Sewer & GRP Water Pipe line) at Naveen Market and Bada Chauraha Metro Station.",
+  from: "CONSULTING ENGINEERS JOINT VENTURE OF KANPUR METRO RAIL PROJECT", to: "GULERMAK-SAM INDIA KNPCC05",
+};
+const LONG_UNBROKEN = {
+  ...INCOMING, _id: "65f0c0ffee0000000000aa03",
+  filename: "Kanpur_LET_JVTI_CPM_00551_E01_Variation_statement_no02_for_the_Utility_Sewer_and_GRP_Water_Pipe_line_revised_final.pdf",
+  letterNo: "Kanpur-LET-JVTI-CPM-00551-E01-REV-A-ANNEXURE-SCHEDULE-OF-RATES-AND-QUANTITIES",
+  subject: "Variation statement no.02 for the Utility (Sewer & GRP Water Pipe line) at Naveen Market and Bada Chauraha Metro Station - revised.",
+};
 const VARIATION = {
   _id: "var-1", variation_number: "VO-001", variation_type: "positive", description: "Added drainage works",
   status: "submitted", organization_id: ORG, project_id: PROJECT, contract_id: "primary",
@@ -54,10 +70,17 @@ function json(route: Route, body: unknown, status = 200) {
   return route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 }
 
-async function mockBackend(page: Page) {
-  const documents = [INCOMING, CONTRACT];
-  const links: Link[] = [];
+async function mockBackend(
+  page: Page,
+  { extraDocuments = [], linkedDocumentIds = [] }: { extraDocuments?: typeof INCOMING[]; linkedDocumentIds?: string[] } = {},
+) {
+  const documents = [INCOMING, CONTRACT, ...extraDocuments];
   let sequence = 0;
+  const links: Link[] = linkedDocumentIds.map((documentId) => ({
+    _id: `link-${++sequence}`, organization_id: ORG, project_id: PROJECT, target_type: "variation",
+    target_id: VARIATION._id, document_id: documentId, relationship_role: "correspondence",
+    source: "user", _revision: 1, removed_at: null, frozen_at: null, created_at: "2026-09-03T00:00:00",
+  }));
   const active = () => links.filter((link) => link.removed_at === null);
   const view = (link: Link) => ({
     ...link,
@@ -229,3 +252,101 @@ test("links an existing incoming letter to a Variation and unlinks it without de
   await page.getByRole("tab", { name: "Records" }).click();
   await expect(page.getByText("No linked records.")).toBeVisible();
 });
+
+/**
+ * Layout regression: at production desktop widths the dialog's content grew to
+ * the min-content width of a long, unwrapped filename and of a five-column
+ * filter grid that could not shrink, and spilled past the dialog's right edge
+ * and the viewport. Assert geometry, not classes: the dialog sits inside the
+ * viewport, every descendant sits inside the dialog, the page gains no
+ * horizontal scroll, and the controls a user needs are on screen.
+ */
+const VIEWPORTS = [
+  { width: 1920, height: 1080 },
+  { width: 1600, height: 900 },
+  { width: 1366, height: 768 },
+  { width: 1280, height: 720 },
+  { width: 1024, height: 768 },
+  { width: 390, height: 844 },
+];
+
+for (const viewport of VIEWPORTS) {
+  test(`correspondence dialog stays inside a ${viewport.width}x${viewport.height} viewport with long filenames`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await mockBackend(page, {
+      extraDocuments: [LONG_OUTGOING, LONG_UNBROKEN],
+      linkedDocumentIds: [LONG_OUTGOING._id],
+    });
+
+    if (viewport.width >= 768) {
+      await page.goto("/variations");
+      await page.getByRole("button", { name: "Correspondence for VO-001" }).click();
+    } else {
+      // On a phone the register table's row actions are not reachable (a page
+      // layout matter outside this dialog); the deep link opens the same dialog.
+      await page.goto(`/variations?variation_id=${VARIATION._id}`);
+    }
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByTestId("linked-document")).toHaveCount(1);
+    await expect(dialog.getByTestId("linked-document")).toContainText("Kanpur-LET-JVTI-CPM-00550-E01");
+
+    await dialog.getByLabel("Search Documents").fill("Kanpur");
+    await dialog.getByRole("button", { name: "Search" }).click();
+    await expect(dialog.getByTestId("document-search-result")).toHaveCount(2);
+
+    const overflow = await dialog.evaluate((root) => {
+      const box = root.getBoundingClientRect();
+      const outside = Array.from(root.querySelectorAll<HTMLElement>("*"))
+        .filter((element) => {
+          const rect = element.getBoundingClientRect();
+          if (rect.width === 0 && rect.height === 0) return false;
+          if (element.closest(".sr-only")) return false;
+          return rect.left < box.left - 1 || rect.right > box.right + 1;
+        })
+        .map((element) => `${element.tagName.toLowerCase()}.${element.className}`.slice(0, 120));
+      return {
+        dialog: { left: box.left, right: box.right, top: box.top, bottom: box.bottom },
+        viewport: { width: window.innerWidth, height: window.innerHeight },
+        pageScrollWidth: document.documentElement.scrollWidth,
+        dialogScrollWidth: root.scrollWidth,
+        dialogClientWidth: root.clientWidth,
+        outside,
+      };
+    });
+
+    expect(overflow.outside, "descendants outside the dialog").toEqual([]);
+    expect(overflow.dialog.left).toBeGreaterThanOrEqual(0);
+    expect(overflow.dialog.right).toBeLessThanOrEqual(overflow.viewport.width);
+    expect(overflow.dialog.top).toBeGreaterThanOrEqual(0);
+    expect(overflow.dialog.bottom).toBeLessThanOrEqual(overflow.viewport.height);
+    expect(overflow.dialogScrollWidth).toBeLessThanOrEqual(overflow.dialogClientWidth);
+    expect(overflow.pageScrollWidth).toBeLessThanOrEqual(overflow.viewport.width);
+
+    // The full name stays reachable when the row clamps it.
+    await expect(dialog.getByTestId("linked-document").getByRole("link")).toHaveAttribute("title", LONG_OUTGOING.filename);
+    for (const control of [
+      dialog.getByLabel("Relationship role"),
+      dialog.getByLabel("Search Documents"),
+      dialog.getByRole("button", { name: "Search" }),
+      dialog.getByLabel("Direction"),
+      dialog.getByLabel("Letter number"),
+      dialog.getByLabel("Subject"),
+      dialog.getByRole("button", { name: "Close" }),
+    ]) {
+      await expect(control).toBeInViewport({ ratio: 1 });
+    }
+    // Result actions stay reachable (the body scrolls, the dialog does not grow).
+    const lastLink = dialog.getByRole("button", { name: `Link ${LONG_UNBROKEN.filename}` });
+    await lastLink.scrollIntoViewIfNeeded();
+    await expect(lastLink).toBeInViewport({ ratio: 1 });
+    await expect(dialog.getByTestId("document-search-result").first()).toContainText("Already linked");
+
+    await page.screenshot({ path: test.info().outputPath(`dialog-${viewport.width}x${viewport.height}.png`) });
+
+    // Function is unchanged: link the second long letter, then close.
+    await lastLink.click();
+    await expect(dialog.getByTestId("linked-document")).toHaveCount(2);
+    await dialog.getByRole("button", { name: "Close" }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+  });
+}
