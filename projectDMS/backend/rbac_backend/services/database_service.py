@@ -27,7 +27,9 @@ from .falkor_graph_service import normalize_letter_code
 from .metadata_integrity import (
     keep_stored_values_on_degraded_source,
     merge_degraded_snapshot,
+    merge_reference_lists,
     protect_human_edited_fields,
+    references_may_add,
 )
 from ..utils.pipeline_logging import configure_pipeline_logger
 from ..ingestion.chunk_ids import deterministic_chunk_id
@@ -305,16 +307,22 @@ class DatabaseService:
             references_authoritative = (
                 metadata_quality is None or bool(metadata_quality.get("references_authoritative"))
             )
+            may_add = metadata_quality is not None and references_may_add(metadata_quality)
             if (
-                references_authoritative
+                (references_authoritative or may_add)
                 and hasattr(parsed_metadata, "references")
                 and parsed_metadata.references
             ):
                 # A non-authoritative list is partial; storing it would let a
                 # later "sync references" bucket-replace the links it missed.
+                # A readable partial one (truncated input) is merged in instead.
                 normalized_refs = self._normalize_metadata_references(parsed_metadata.references)
                 if normalized_refs:
-                    updates["reference"] = normalized_refs
+                    updates["reference"] = (
+                        normalized_refs
+                        if references_authoritative
+                        else merge_reference_lists((doc or {}).get("reference"), normalized_refs)
+                    )
             if hasattr(parsed_metadata, "full_content") and parsed_metadata.full_content:
                 updates["full_text"] = parsed_metadata.full_content
             if hasattr(parsed_metadata, "keywords") and parsed_metadata.keywords:

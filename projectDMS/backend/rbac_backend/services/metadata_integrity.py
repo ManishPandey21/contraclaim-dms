@@ -39,16 +39,44 @@ def _is_empty(value: Any) -> bool:
     return value in (None, "", [], {})
 
 
+def source_text_complete_signal(
+    extraction_completeness: Optional[str],
+    pages_human_review: Optional[Iterable[int]] = None,
+) -> Optional[bool]:
+    """Whether the text the extraction read was the whole document.
+
+    ``None`` means the pipeline gives no signal (legacy_v0); that keeps the
+    previous behaviour rather than inventing one. The unified pipeline reports
+    completeness, and a page waiting for review is a page nobody has read.
+    """
+    if pages_human_review and list(pages_human_review):
+        return False
+    if extraction_completeness is None:
+        return None
+    return str(extraction_completeness).lower() == "complete"
+
+
 def assess_metadata_quality(
     metadata: Any,
     *,
     metadata_source: Optional[str],
     partial_failures: Optional[Mapping[str, Any]] = None,
+    source_text_complete: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Classify one extraction result.
 
-    ``references_authoritative`` is True only when an empty reference list
-    really means "this letter cites nothing".
+    ``references_authoritative`` is True only when the reference list is a
+    complete answer: then an empty list really means "this letter cites
+    nothing", and a non-empty one may remove links it no longer contains. It is
+    decided per field - a failure in another field does not touch it - and is
+    False when the References field failed, the result is the deterministic
+    fallback, an AI stage failed, nothing at all was read, or the source text
+    the extraction read was incomplete (pages missing or awaiting review, or
+    the text cut short before the model saw it).
+
+    Incomplete source text also degrades the header fields: a value read from
+    part of the letter (often another letter's number quoted in the body) may
+    fill an empty field but never replaces a stored one.
     """
     field_failures = dict(getattr(metadata, "field_failures", None) or {})
     missing_core = [name for name in CORE_FIELDS if _is_empty(getattr(metadata, name, None))]
@@ -63,6 +91,10 @@ def assess_metadata_quality(
         and ai_failure_record.get("stage") == "ocr_text_extraction"
     )
     fallback = (metadata_source or "") in DEGRADED_METADATA_SOURCES
+    source_incomplete = source_text_complete is False
+    # The model saw only the head of the text. The header lives there, so the
+    # header fields stand; a reference later in the letter may have been cut.
+    source_truncated = bool((partial_failures or {}).get("source_text_truncated"))
 
     warnings: List[str] = []
     if field_failures:
@@ -75,18 +107,34 @@ def assess_metadata_quality(
         warnings.append("no_core_metadata_extracted")
     elif missing_core:
         warnings.append("missing_core_fields")
+    if source_incomplete:
+        warnings.append("source_text_incomplete")
+    if source_truncated:
+        warnings.append("source_text_truncated")
 
-    degraded = bool(field_failures) or fallback or ai_failure or no_core
+    degraded = bool(field_failures) or fallback or ai_failure or no_core or source_incomplete
     if degraded:
         status = QUALITY_PARTIAL_EXTRACTION
-    elif missing_core:
+    elif missing_core or source_truncated:
         status = QUALITY_COMPLETE_WITH_WARNINGS
     else:
         status = QUALITY_COMPLETE
 
-    references_authoritative = not (
-        "references" in field_failures or fallback or ai_failure or no_core
-    )
+    # Why the reference list is not a complete answer. Codes only - never
+    # document content - so the record is safe to persist and log.
+    not_authoritative_because = [
+        cause
+        for cause, applies in (
+            ("references_field_failed", "references" in field_failures),
+            ("deterministic_fallback", fallback),
+            ("ai_extraction_failed", ai_failure),
+            ("no_core_metadata", no_core),
+            ("source_text_incomplete", source_incomplete),
+            ("source_text_truncated", source_truncated),
+        )
+        if applies
+    ]
+    references_authoritative = not not_authoritative_because
     return {
         "status": status,
         "degraded": degraded,
@@ -94,13 +142,68 @@ def assess_metadata_quality(
         # it may fill gaps but must not replace values already stored. A clean
         # AI read of a letter with no header (no_core) is not a guess; empty
         # values are never written anyway.
-        "source_degraded": fallback or ai_failure,
+        "source_degraded": fallback or ai_failure or source_incomplete,
         "references_authoritative": references_authoritative,
+        "references_not_authoritative_because": not_authoritative_because,
         "field_failures": field_failures,
         "missing_core_fields": missing_core,
         "warnings": warnings,
         "metadata_source": metadata_source,
     }
+
+
+def reference_sync_skip_record(quality: Mapping[str, Any]) -> Dict[str, Any]:
+    """The audit record for a run whose references were not synchronised.
+
+    Reason codes only; no reference text, letter number or other content.
+    """
+    return {
+        "stage": "reference_sync",
+        # Links are never removed by such a run; with `added_only` the
+        # references it did read were linked additively.
+        "action": "added_only" if references_may_add(quality) else "preserved_existing",
+        "reason": "reference_extraction_not_authoritative",
+        "causes": list(quality.get("references_not_authoritative_because") or []),
+    }
+
+
+def references_may_add(quality: Mapping[str, Any]) -> bool:
+    """A non-authoritative list whose entries may still be linked additively.
+
+    Only when the sole reason is that the model saw just the head of the text:
+    what it read there is a real reading, it simply may have missed later
+    references. Any other cause (a failed or unreadable References field,
+    the fallback, an AI failure, pages missing from the middle) makes the
+    entries themselves doubtful, so nothing is added.
+    """
+    return list(quality.get("references_not_authoritative_because") or []) == [
+        "source_text_truncated"
+    ]
+
+
+def merge_reference_lists(stored: Any, new: Iterable[Any]) -> List[Any]:
+    """The stored reference list plus any new entries it does not hold.
+
+    Used for an additive (non-authoritative) run: nothing already stored is
+    dropped, and an entry is added once, keyed by its normalised number.
+    """
+    from .falkor_graph_service import normalize_letter_code
+
+    def _key(entry: Any) -> str:
+        if isinstance(entry, Mapping):
+            value = entry.get("letterNo") or entry.get("letter_no") or entry.get("raw") or ""
+        else:
+            value = entry
+        return normalize_letter_code(str(value or ""))
+
+    merged: List[Any] = list(stored) if isinstance(stored, list) else []
+    seen = {_key(entry) for entry in merged}
+    for entry in new or []:
+        key = _key(entry)
+        if key and key not in seen:
+            merged.append(entry)
+            seen.add(key)
+    return merged
 
 
 def stored_references_authoritative(stored: Mapping[str, Any]) -> bool:
@@ -383,5 +486,9 @@ __all__ = [
     "merge_degraded_snapshot",
     "merge_human_edited_fields",
     "protect_human_edited_fields",
+    "merge_reference_lists",
+    "reference_sync_skip_record",
+    "references_may_add",
+    "source_text_complete_signal",
     "stored_references_authoritative",
 ]

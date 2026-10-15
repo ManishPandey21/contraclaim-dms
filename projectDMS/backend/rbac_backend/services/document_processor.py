@@ -16,7 +16,7 @@ from .file_service import FileService
 from .ocr_service import OCRService
 from .openai_service import OpenAIService
 from .pydantic_ai_service import PydanticAIService, PydanticAIMetadataError
-from .metadata_integrity import assess_metadata_quality
+from .metadata_integrity import assess_metadata_quality, source_text_complete_signal
 
 from .extraction.fallback.models import FallbackOutcome
 from .extraction.image_extractor import extract_image, extract_text_file
@@ -1060,6 +1060,13 @@ class DocumentProcessor:
                         metadata_source = "pydantic_ai"
                         parsed_metadata = agent_result.metadata
                         metadata_debug = {**agent_result.debug, "raw_result": agent_result.raw_result}
+                        truncated = (agent_result.debug or {}).get("input_truncated")
+                        if truncated:
+                            # The agent read only the head of the text.
+                            partial_failures["source_text_truncated"] = {
+                                "stage": "pydantic_ai_input",
+                                **truncated,
+                            }
                         logger.info("[document_pipeline] [%s] Metadata extracted successfully via PydanticAI", input_path.name)
                     else:
                         logger.info("[document_pipeline] [%s] PydanticAI returned no metadata; using legacy regex parser", input_path.name)
@@ -1081,10 +1088,16 @@ class DocumentProcessor:
 
             # Degraded extraction must be visible on every path that persists
             # it, including bulk upload, which never reaches DocumentService.
+            # References read from part of the letter are not a complete
+            # answer; the legacy path has no completeness signal (None).
+            completeness = getattr(extraction, "completeness", None) if extraction is not None else None
             metadata_quality = assess_metadata_quality(
                 parsed_metadata,
                 metadata_source=metadata_source,
                 partial_failures=partial_failures,
+                source_text_complete=source_text_complete_signal(
+                    getattr(completeness, "value", completeness), pages_human_review
+                ),
             )
 
             # The publication barrier. Decided once, here, BEFORE any

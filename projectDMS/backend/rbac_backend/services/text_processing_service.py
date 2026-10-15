@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from ..models.document_metadata import ParsedDocumentMetadata, build_parsed_metadata
 from ..utils.date_parser import format_date_ddmmyyyy
-from .reference_parser import parse_legacy_reference_text
+from .reference_parser import parse_legacy_reference_text, readable_references
 
 logger = logging.getLogger(__name__)
 
@@ -249,7 +249,7 @@ class TextProcessingService:
         cleaned = value.strip().strip("[]").strip()
         return bool(
             re.fullmatch(
-                r"(null|'null'|\"null\"|not\s+found|none|n/?a|not\s+applicable|nil|-|--)",
+                r"(null|'null'|\"null\"|not\s+found|none|n/?a|not\s+applicable|nil|-|--|–|—)",
                 cleaned,
                 flags=re.I,
             )
@@ -395,6 +395,16 @@ class TextProcessingService:
             references = []
             field_failures["references"] = f"reference parsing failed: {exc.__class__.__name__}"
             logger.warning("Reference parsing failed; other metadata fields kept: %s", exc)
+        # An entry that only says the reference could not be read
+        # ("illegible", "LTR-3??", "see attached") is not a citation. Kept as
+        # one, a list of such entries looked like a complete answer naming
+        # letters that do not exist, and replaced every real link.
+        if references and "references" not in field_failures:
+            references, unreadable = readable_references(references)
+            if unreadable:
+                field_failures["references"] = (
+                    f"{unreadable} reference entry(ies) could not be read"
+                )
         # An empty list is "cites nothing" only when the References item says
         # so explicitly ("null", "none", "not found" - the prompt asks for
         # that). A missing item, an empty one, or content that yielded no

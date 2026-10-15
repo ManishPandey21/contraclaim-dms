@@ -12,6 +12,7 @@ from ..models.document_metadata import (
 from ..utils.date_parser import format_date_ddmmyyyy
 from ..utils.exceptions import DocumentProcessingError
 from .ai_guardrails import UNTRUSTED_DOCUMENT_GUARD, scan_document_text_for_injection
+from .reference_parser import readable_references
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +89,10 @@ class PydanticAIService:
             letter_no: Optional[str] = Field(default=None, alias="letterNo")
             from_company: Optional[str] = Field(default=None, alias="fromCompany")
             to_company: Optional[str] = Field(default=None, alias="toCompany")
-            references: List[LetterRef] = Field(default_factory=list)
+            # None, not []: an omitted field must stay distinguishable from
+            # an explicit empty list, or "not read" becomes "cites nothing"
+            # and clears every existing reference link.
+            references: Optional[List[LetterRef]] = None
             asset_type: Optional[str] = Field(default=None, alias="assetType")
             location: Optional[str] = None
             specific_area: Optional[str] = Field(default=None, alias="specificArea")
@@ -192,7 +196,9 @@ class PydanticAIService:
         trimmed_text = document_text.strip()
         logger.info("PydanticAIService extracting metadata (text length=%d)", len(trimmed_text))
 
-        if len(trimmed_text) > self._MAX_DOCUMENT_CHARS:
+        source_chars = len(trimmed_text)
+        if source_chars > self._MAX_DOCUMENT_CHARS:
+            # Recorded, not silent: what the model never saw it cannot cite.
             trimmed_text = trimmed_text[: self._MAX_DOCUMENT_CHARS]
 
         injection_findings = scan_document_text_for_injection(trimmed_text, origin="pydantic_ai_extraction")
@@ -225,6 +231,11 @@ class PydanticAIService:
         }
         if injection_findings:
             debug["injection_findings"] = injection_findings
+        if source_chars > self._MAX_DOCUMENT_CHARS:
+            debug["input_truncated"] = {
+                "chars_sent": self._MAX_DOCUMENT_CHARS,
+                "chars_total": source_chars,
+            }
 
         try:
             debug["messages"] = run_result.new_messages_json().decode("utf-8")
@@ -300,9 +311,23 @@ class PydanticAIService:
         keywords = getattr(data, "keywords", None) or []
         additional_keywords = getattr(data, "additional_keywords", None) or []
 
+        field_failures: Dict[str, str] = {}
+        # Omitted is "not answered"; an explicit null or [] is "cites
+        # nothing" (the prompt asks for null/empty on absent fields). A model
+        # instance knows which fields the reply actually set.
+        fields_set = getattr(data, "model_fields_set", None)
+        if fields_set is not None:
+            references_answered = "references" in fields_set
+        else:
+            references_answered = getattr(data, "references", None) is not None
+        if not references_answered:
+            # The reply did not answer the question, so existing links stay.
+            field_failures["references"] = "references item absent from extraction output"
+
         # FIXED: Convert LetterRef objects to dictionaries for MongoDB compatibility
         references = getattr(data, "references", None) or []
         serialized_references = []
+        unserializable = 0
 
         if references:
             for ref in references:
@@ -323,8 +348,16 @@ class PydanticAIService:
                             "date": getattr(ref, 'date', '')
                         })
                     except Exception as e:
-                        logger.warning(f"Failed to serialize reference {ref}: {e}")
+                        logger.warning("Failed to serialize a reference: %s", e.__class__.__name__)
+                        unserializable += 1
                         continue
+
+        # Same rule as the report parser: an entry with no readable letter
+        # number makes the list incomplete, so it cannot remove links.
+        serialized_references, unreadable = readable_references(serialized_references)
+        unreadable += unserializable
+        if unreadable and "references" not in field_failures:
+            field_failures["references"] = f"{unreadable} reference entry(ies) could not be read"
 
         clauses = getattr(data, "contractual_clauses", None) or []
         key_reply_points = getattr(data, "key_reply_points", None) or []
@@ -359,4 +392,5 @@ class PydanticAIService:
             full_content=full_content,
             tags=getattr(data, "tags", None) or [],
             sub_tags=getattr(data, "sub_tags", None) or [],
+            field_failures=field_failures,
         )

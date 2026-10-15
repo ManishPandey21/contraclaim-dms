@@ -12,10 +12,18 @@ from pymongo.database import Database
 
 from ..core.database import get_database
 from ..models.document import DocumentReference
+from ..utils.date_parser import format_date_ddmmyyyy
 from .falkor_graph_service import normalize_letter_code
 from .reference_parser import parse_legacy_reference_text
 
 logger = logging.getLogger(__name__)
+
+_OCR_FOLD = str.maketrans({"o": "0", "i": "1", "l": "1", "s": "5", "b": "8", "z": "2"})
+
+
+def _ocr_folded(letter_no: str) -> str:
+    """A letter number with the common OCR character confusions folded."""
+    return normalize_letter_code(letter_no).translate(_OCR_FOLD)
 
 
 class ReferenceSyncError(Exception):
@@ -50,8 +58,13 @@ class ReferenceSyncService:
             source: Origin hint for generated links (e.g. "parser", "manual").
             default_link_type: Fallback link type when not provided.
             enqueue_missing: Whether to queue unresolved references for later processing.
-            clear_existing: When true, an empty reference set clears existing
-                links for this source bucket instead of behaving as a no-op.
+            clear_existing: Whether ``references`` is the complete, authoritative
+                set for this source bucket. Only then may the call remove a
+                link: links in the bucket that the set no longer contains are
+                removed (with their backlinks), and an empty set clears the
+                bucket. When false the call is additive - links are added or
+                updated, never removed - so a partial or uncertain list cannot
+                delete a link it merely failed to mention.
 
         Returns:
             Summary statistics about the synchronisation operation.
@@ -193,6 +206,30 @@ class ReferenceSyncService:
                 source=source,
             )
 
+        withheld_targets: List[str] = []
+        if not clear_existing:
+            # Additive: keep this bucket's links the call did not mention.
+            for target_id, existing in existing_source_refs.items():
+                if target_id and target_id not in new_source_refs:
+                    new_source_refs[target_id] = existing
+        elif missing:
+            # An authoritative list that names a letter which does not resolve
+            # may be a misread of a letter already linked ("LTR-3OO" for
+            # LTR-300, "our letter dated 15.07.2024"). A misread is not a
+            # change, so such a link stays until a later list resolves or
+            # drops the candidate.
+            for target_id, existing in existing_source_refs.items():
+                if not target_id or target_id in new_source_refs:
+                    continue
+                target_oid = self._to_object_id(target_id)
+                documents: Any = db.documents  # Motor at runtime
+                target_doc = (
+                    await documents.find_one({"_id": target_oid}) if target_oid else None
+                )
+                if self._could_be_misread(target_doc, existing, missing):
+                    new_source_refs[target_id] = existing
+                    withheld_targets.append(target_id)
+
         removed_targets = await self._upsert_source_references(
             db=db,
             source_doc=source_doc,
@@ -242,7 +279,43 @@ class ReferenceSyncService:
             "cross_source_skipped": len(
                 [tid for tid in resolved if tid in cross_source_targets]
             ),
+            "removal_withheld": len(withheld_targets),
         }
+
+    @staticmethod
+    def _could_be_misread(
+        target_doc: Optional[Dict[str, Any]],
+        existing: DocumentReference,
+        missing: Sequence[Dict[str, Any]],
+    ) -> bool:
+        """Whether an unresolved entry may name the linked letter, misread.
+
+        The same letter number once the usual OCR confusions (O/0, I/l/1,
+        S/5, B/8, Z/2) are folded, or the same date on an entry that carries
+        no number of its own ("our letter dated ..."). Not "similar" numbers:
+        numbers in one series differ by a digit. Not a same-date entry that
+        has a number: that names another letter (often an external one that
+        is never uploaded), and withholding on its date would keep a wrong
+        link for ever.
+        """
+        target_code = _ocr_folded(
+            str((target_doc or {}).get("letterNo") or existing.letterNo or "")
+        )
+        target_date = format_date_ddmmyyyy((target_doc or {}).get("date"))
+        for entry in missing:
+            entry_number = str(entry.get("letterNo") or entry.get("letter_no") or "")
+            entry_code = _ocr_folded(entry_number)
+            if entry_code and entry_code == target_code:
+                return True
+            entry_date = format_date_ddmmyyyy(entry.get("date"))
+            if (
+                entry_date
+                and target_date
+                and entry_date == target_date
+                and not re.search(r"\d", entry_number)
+            ):
+                return True
+        return False
 
     async def enqueue_missing(
         self,

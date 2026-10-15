@@ -40,6 +40,10 @@ from ..utils.pipeline_logging import configure_pipeline_logger
 from .reference_sync_service import ReferenceSyncService, ReferenceSyncError
 from .metadata_integrity import (
     assess_metadata_quality,
+    merge_reference_lists,
+    reference_sync_skip_record,
+    references_may_add,
+    source_text_complete_signal,
     keep_stored_values_on_degraded_source,
     merge_degraded_snapshot,
     merge_human_edited_fields,
@@ -1672,6 +1676,8 @@ class DocumentService:
         metadata_source: Optional[str] = None
         metadata_references: List[Dict[str, Any]] = []
         references_authoritative = False
+        # Non-authoritative but readable (truncated input): add, never remove.
+        references_additive = False
         # The extraction result as published to graph/evidence stores: the
         # parsed metadata with human-edited and kept stored values put back.
         publication_metadata: Any = None
@@ -1905,16 +1911,31 @@ class DocumentService:
                 }
                 partial_failures = getattr(result, "partial_failures", None) or {}
                 if partial_failures:
-                    update_fields["processing_metadata"]["partial_failures"] = partial_failures
+                    # A copy: the audit records added below must not leak back
+                    # into the processor's result.
+                    update_fields["processing_metadata"]["partial_failures"] = dict(
+                        partial_failures
+                    )
 
             if metadata:
                 metadata_quality = assess_metadata_quality(
                     metadata,
                     metadata_source=metadata_source,
                     partial_failures=getattr(result, "partial_failures", None),
+                    source_text_complete=source_text_complete_signal(
+                        getattr(result, "extraction_completeness", None),
+                        getattr(result, "pages_human_review", None),
+                    ),
                 )
                 references_authoritative = metadata_quality["references_authoritative"]
                 update_fields["metadata_quality"] = metadata_quality
+                if not references_authoritative:
+                    # Say why the links were left alone (reason codes only).
+                    processing_metadata = update_fields.get("processing_metadata")
+                    if isinstance(processing_metadata, dict):
+                        processing_metadata.setdefault("partial_failures", {})[
+                            "reference_sync"
+                        ] = reference_sync_skip_record(metadata_quality)
                 if metadata_quality["degraded"]:
                     logger.warning(
                         "[document_pipeline] Metadata for %s is degraded (%s); "
@@ -1945,6 +1966,12 @@ class DocumentService:
                     if references_authoritative:
                         update_fields["reference"] = normalized_refs
                         metadata_references = normalized_refs
+                    elif normalized_refs and references_may_add(metadata_quality):
+                        update_fields["reference"] = merge_reference_lists(
+                            stored.get("reference"), normalized_refs
+                        )
+                        metadata_references = normalized_refs
+                        references_additive = True
                 if getattr(metadata, "full_content", None):
                     update_fields["full_text"] = metadata.full_content
                 if getattr(metadata, "subject", None):
@@ -2127,6 +2154,16 @@ class DocumentService:
                             source="parser",
                             default_link_type="indirect",
                             clear_existing=True,
+                        )
+                    elif references_additive:
+                        # Additive: the references read are linked; nothing
+                        # the run may have missed is removed.
+                        await self.reference_sync_service.sync_bidirectional(
+                            document_id=document_id,
+                            references=metadata_references,
+                            source="parser",
+                            default_link_type="indirect",
+                            clear_existing=False,
                         )
                     else:
                         logger.warning(
