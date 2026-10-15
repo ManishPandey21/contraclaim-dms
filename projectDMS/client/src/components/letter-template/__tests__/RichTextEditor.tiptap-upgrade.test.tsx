@@ -35,7 +35,7 @@
  * the reachability question has to be asked again.
  */
 
-import { render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -59,7 +59,15 @@ beforeAll(() => {
 /** Event-handler attributes are the payload the advisory turns executable. */
 const HANDLER_ATTRIBUTES = ["onerror", "onload", "onclick", "onmouseover", "onfocus"];
 
-afterEach(() => {
+// Unmounting does not destroy the editor: `useEditor` schedules the destroy on
+// a 1 ms timer, so a StrictMode remount can reclaim the instance. After the
+// last test vitest tears jsdom down, and a destroy that fires then reaches
+// `window.removeEventListener` with no `window` - an unhandled ReferenceError
+// that fails the run with every test green. Unmount here and let that timer
+// run while the environment still exists.
+afterEach(async () => {
+  cleanup();
+  await new Promise((resolve) => setTimeout(resolve, 10));
   for (const attribute of HANDLER_ATTRIBUTES) {
     delete (Object.prototype as Record<string, unknown>)[attribute];
   }
