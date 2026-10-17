@@ -11,7 +11,11 @@ Wording rules (pinned with ``GROUNDED_SUMMARY_PROMPT_VERSION``):
   never restated as an established fact;
 * a value is shown as the letter writes it; a normalised form is added only
   when the text settles it (an ambiguous numeric date stays as written);
-* uncertainty is a section of its own and is never dropped.
+* uncertainty is a section of its own and is never dropped;
+* a fact that is not assertable (``uncertain``, or ``not_checkable``) is never
+  written as plain fact: not in the short summary, not in the executive
+  overview, not in a factual section. It is named, qualified, under
+  Uncertainty, and it stays in the Fact Pack for audit.
 """
 
 from __future__ import annotations
@@ -24,7 +28,7 @@ from ...models.grounded_summary import (
     GroundedFact,
     GroundedSummaryItem,
 )
-from .fact_pack import FactPack, weakest
+from .fact_pack import FactPack, is_assertable, weakest
 
 SHORT_SUMMARY_LIMIT = 240
 SECTION_ITEM_LIMIT = 12
@@ -115,6 +119,8 @@ def deterministic_sections(pack: FactPack) -> Dict[str, List[GroundedSummaryItem
         sections["contractual_basis"].append(item_from_facts(text, [fact], role="source_fact"))
 
     for fact in pack.by_type("letter_date"):
+        if not is_assertable(fact):
+            continue  # qualified under Uncertainty by the Fact Pack
         sections["dates_periods"].append(
             item_from_facts(f"Letter date: {fact.value}", [fact], role="source_fact")
         )
@@ -136,6 +142,14 @@ def deterministic_sections(pack: FactPack) -> Dict[str, List[GroundedSummaryItem
         sections["amounts_quantities"].append(item_from_facts(text, [fact], role="source_fact"))
 
     for fact in pack.by_type("reference"):
+        if not is_assertable(fact):
+            sections["uncertainties"].append(
+                item_from_facts(
+                    f"Extracted metadata lists reference ‘{fact.value}’, which this revision's text does not state.",
+                    [fact], role="uncertainty",
+                )
+            )
+            continue
         if fact.resolved_document_id:
             text = f"Reference stated in the letter: {fact.value} — linked DMS record"
         else:
@@ -164,9 +178,33 @@ def _join(values: Iterable[str]) -> str:
     return ", ".join(items[:-1]) + " and " + items[-1]
 
 
+#: Header key -> the fact type that decides whether it may be stated.
+HEADER_FACT_TYPES: Dict[str, str] = {
+    "letterNo": "letter_number",
+    "date": "letter_date",
+    "subject": "subject",
+    "from": "from_party",
+    "to": "to_party",
+}
+
+
+def assertable_header(pack: FactPack) -> Dict[str, Optional[str]]:
+    """The header values the summaries may state: their fact is assertable."""
+    out: Dict[str, Optional[str]] = {}
+    for key, kind in HEADER_FACT_TYPES.items():
+        facts = pack.by_type(kind)
+        value = pack.header.get(key)
+        out[key] = value if value and facts and all(is_assertable(fact) for fact in facts) else None
+    return out
+
+
+def _assertable(pack: FactPack, *types: str) -> List[GroundedFact]:
+    return [fact for fact in pack.by_type(*types) if is_assertable(fact)]
+
+
 def executive_overview(pack: FactPack) -> Optional[str]:
     """One paragraph of header facts and counts - nothing interpreted."""
-    header = pack.header
+    header = assertable_header(pack)
     if not any(header.values()):
         return None
     parts = ["Letter"]
@@ -183,23 +221,27 @@ def executive_overview(pack: FactPack) -> Optional[str]:
         sentence += f", subject “{header['subject']}”"
     sentence += "."
     counts = []
-    requests = len(pack.by_type("request_statement", "instruction_statement"))
+    requests = len(_assertable(pack, "request_statement", "instruction_statement"))
     if requests:
         counts.append(f"{requests} request/instruction statement{'s' if requests != 1 else ''}")
-    claims = len(pack.by_type("claim_statement", "reservation_statement"))
+    claims = len(_assertable(pack, "claim_statement", "reservation_statement"))
     if claims:
         counts.append(f"{claims} claim/reservation statement{'s' if claims != 1 else ''}")
-    clauses = [str(f.value) for f in pack.by_type("clause")][:4]
+    clauses = [str(f.value) for f in _assertable(pack, "clause")][:4]
     if clauses:
         counts.append("cites " + _join(clauses))
-    references = len(pack.by_type("reference"))
+    references = len(_assertable(pack, "reference"))
     if references:
         counts.append(f"refers to {references} earlier document{'s' if references != 1 else ''}")
     if counts:
         sentence += " The letter contains " + _join(counts) + "."
-    uncertain = len([f for f in pack.facts if f.type in QUALIFICATION_TYPES])
+    uncertain = len([f for f in pack.facts if f.type in QUALIFICATION_TYPES]) + len(
+        [f for f in pack.by_type("reference") if not is_assertable(f)]
+    )
     if uncertain:
-        sentence += f" {uncertain} qualification{'s' if uncertain != 1 else ''} apply (see Uncertainty)."
+        sentence += (
+            f" {uncertain} qualification{'s apply' if uncertain != 1 else ' applies'} (see Uncertainty)."
+        )
     return sentence
 
 
@@ -208,12 +250,13 @@ def overview_fact_ids(pack: FactPack) -> List[str]:
         fact.id
         for fact in pack.facts
         if fact.type in {"letter_number", "letter_date", "from_party", "to_party", "subject"}
+        and is_assertable(fact)
     ]
 
 
 def short_summary(pack: FactPack) -> Optional[str]:
     """``What is this letter about?`` from header facts, <= 240 characters."""
-    header = pack.header
+    header = assertable_header(pack)
     subject = header.get("subject")
     sender, recipient = header.get("from"), header.get("to")
     if not (subject or sender):
@@ -229,7 +272,7 @@ def short_summary(pack: FactPack) -> Optional[str]:
         text = f"{lead} regarding “{topic}”."
     else:
         text = lead + "."
-    clauses = [str(f.value) for f in pack.by_type("clause")][:2]
+    clauses = [str(f.value) for f in _assertable(pack, "clause")][:2]
     if clauses:
         tail = f" Cites {_join(clauses)}."
         if len(text) + len(tail) <= SHORT_SUMMARY_LIMIT:
@@ -265,7 +308,9 @@ def render_markdown(overview: Optional[str], sections: Dict[str, List[GroundedSu
 
 __all__ = [
     "ATTRIBUTION",
+    "HEADER_FACT_TYPES",
     "QUALIFICATION_TYPES",
+    "assertable_header",
     "SHORT_SUMMARY_LIMIT",
     "STATEMENT_SECTIONS",
     "deterministic_sections",

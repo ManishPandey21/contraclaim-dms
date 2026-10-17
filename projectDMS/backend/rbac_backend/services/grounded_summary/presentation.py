@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Protocol, Tuple
 
 from ...models.grounded_summary import GROUNDED_SUMMARY_PROMPT_VERSION, GroundedSummaryItem
-from .fact_pack import FactPack
+from .fact_pack import FactPack, is_assertable
 from .render import item_from_facts
 
 #: Sections the model may word. Everything else is deterministic only.
@@ -91,6 +91,9 @@ MODEL_FACT_TYPES = frozenset(
         "clause", "amount",
     }
 )
+#: Header facts the model may see only when the text states them: a value
+#: that is uncertain or not checkable is never handed to it to word.
+_HEADER_TYPES = frozenset({"letter_number", "letter_date", "subject", "from_party", "to_party"})
 #: Quotes only travel with statements; a clause or amount is cited by value.
 _QUOTED_TYPES = frozenset(t for t in MODEL_FACT_TYPES if t.endswith("_statement"))
 
@@ -99,7 +102,9 @@ def model_facts(pack: FactPack) -> List[Any]:
     return [
         fact
         for fact in pack.facts
-        if fact.type in MODEL_FACT_TYPES and not (fact.type == "amount" and not fact.unit)
+        if fact.type in MODEL_FACT_TYPES
+        and not (fact.type == "amount" and not fact.unit)
+        and not (fact.type in _HEADER_TYPES and not is_assertable(fact))
     ]
 
 
@@ -195,6 +200,15 @@ def _check_item(raw: Any, pack: FactPack, where: str) -> Tuple[str, List[Any]]:
     return text, facts
 
 
+def _require_assertable(facts: List[Any], where: str) -> None:
+    """The short summary and the overview state facts plainly: no qualified ones."""
+    for fact in facts:
+        if not is_assertable(fact):
+            raise PresentationRejected(
+                f"{where}: cites {fact.id!r}, whose status ({fact.verification_status}) may not be stated as fact"
+            )
+
+
 @dataclass
 class Presentation:
     short_summary: Optional[str]
@@ -213,7 +227,8 @@ def validate_presentation(raw_text: str, pack: FactPack) -> Presentation:
 
     short: Optional[str] = None
     if data.get("short_summary") is not None:
-        short, _ = _check_item(data["short_summary"], pack, "short_summary")
+        short, facts = _check_item(data["short_summary"], pack, "short_summary")
+        _require_assertable(facts, "short_summary")
         if len(short) > SHORT_SUMMARY_MAX:
             raise PresentationRejected("short_summary longer than allowed")
 
@@ -221,6 +236,7 @@ def validate_presentation(raw_text: str, pack: FactPack) -> Presentation:
     overview_ids: List[str] = []
     if data.get("executive_overview") is not None:
         overview, facts = _check_item(data["executive_overview"], pack, "executive_overview")
+        _require_assertable(facts, "executive_overview")
         overview_ids = [fact.id for fact in facts]
 
     sections: Dict[str, List[GroundedSummaryItem]] = {}
