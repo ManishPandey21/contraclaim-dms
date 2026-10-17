@@ -697,6 +697,28 @@ def test_concurrent_reviewers_only_one_decision_wins(monkeypatch: pytest.MonkeyP
     _run(scenario())
 
 
+def test_a_stale_matching_decision_is_a_conflict_not_an_idempotent_repeat(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The order CI hit in the concurrent test: the reject wins, then a second
+    reviewer who loaded the page at version 0 also rejects. The same action is
+    not "the same decision again" - that reviewer never saw the first one, and
+    answering 200 dropped their decision and comment while reporting success."""
+    async def scenario() -> None:
+        async with _env(monkeypatch) as (env, _):
+            first = await env.decide("org_admin", DOC_R2, 3, "reject", comment="not legible", expected=0)
+            assert first.status_code == 200, first.text
+            stale = await env.decide("project_admin", DOC_R2, 3, "reject", comment="other reason", expected=0)
+            assert stale.status_code == 409, stale.text
+            stale_approve = await env.decide("project_admin", DOC_R2, 3, expected=0)
+            assert stale_approve.status_code == 409, stale_approve.text
+            (decision,) = await env.decisions(DOC_R2)
+            assert decision["comment"] == "not legible"
+            # A reviewer who saw the current decision may still repeat it idempotently.
+            current = await env.decide("org_admin", DOC_R2, 3, "reject", comment="not legible", expected=1)
+            assert current.status_code == 200 and current.json()["idempotent"] is True
+
+    _run(scenario())
+
+
 # --------------------------------------------------------------------------- #
 # 15-17. Reprocess invalidation, deleted, quarantined, nothing to approve
 # --------------------------------------------------------------------------- #

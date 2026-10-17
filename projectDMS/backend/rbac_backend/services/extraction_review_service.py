@@ -582,6 +582,16 @@ class ExtractionReviewService:
         current = latest.get(int(page_number))
         current_version = int((current or {}).get("decision_version") or 0)
 
+        # Checked before the idempotent shortcut: a reviewer who loaded the
+        # page before someone else decided it has not seen that decision, so a
+        # matching action is not "the same decision again". Answering it 200
+        # dropped their decision and comment while reporting success.
+        if expected_decision_version is not None and int(expected_decision_version) != current_version:
+            raise _conflict(
+                "Another reviewer decided this page since it was loaded; reload it",
+                current_decision_version=current_version,
+            )
+
         resolution: Dict[str, Any]
         if current and current.get("action") == action:
             # Idempotent: the same decision again records nothing new.
@@ -593,11 +603,6 @@ class ExtractionReviewService:
 
         if state != REVIEW_REQUIRED:
             raise _conflict("This document's review is already resolved", review_state=state)
-        if expected_decision_version is not None and int(expected_decision_version) != current_version:
-            raise _conflict(
-                "Another reviewer decided this page since it was loaded; reload it",
-                current_decision_version=current_version,
-            )
 
         try:
             page = evidence.page(int(page_number))
