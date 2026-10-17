@@ -1,7 +1,14 @@
-aiosmtplib==5.1.1
+aiosmtplib==5.1.2
 annotated-types==0.7.0
 razorpay==1.4.2
-anyio==4.8.0
+# Raised in R-A8T to close four CVEs pip-audit reported against the transitive
+# httpx2 / httpcore2 (CVE-2026-84379, -84380, -84382, -84381). The fix is
+# httpx2 2.12.0, which needs anyio>=4.10, which needs a newer
+# typing_extensions, which needs a newer idna. All four floors were floated
+# together and the resolver converged on the versions pinned here; each is a
+# minor bump inside its own major. Recorded as exact pins because this file
+# pins everything - a floor here would let the audited set drift.
+anyio==4.15.1
 bcrypt==4.2.1
 APScheduler==3.10.4
 beanie==1.29.0
@@ -15,7 +22,7 @@ chardet==5.2.0
 charset-normalizer==3.4.3
 click==8.3.3
 colorama==0.4.6
-cryptography==49.0.0
+cryptography==50.0.0
 Deprecated==1.2.18
 deprecation==2.1.0
 distro==1.9.0
@@ -24,12 +31,22 @@ redis==7.0.1
 email_validator==2.3.0
 exceptiongroup==1.2.2
 fastapi==0.139.2
-fastapi-mail==1.6.5
+fastapi-mail==1.6.6
 greenlet==3.1.1
 h11==0.16.0
 httpcore==1.0.9
+# Transitive, and pinned here because pip-audit reported four CVEs against
+# the versions the resolver chose (httpx2 2.3.0 / httpcore2 2.3.0):
+# CVE-2026-84379, -84380 (fixed 2.11.0), -84382 (fixed 2.12.0) and
+# CVE-2026-84381 in httpcore2 (fixed 2.10.0). It arrives through
+# langsmith (httpx2<3,>=2), genai-prices and starlette[full]; nothing
+# declares an upper bound below 2.12.0, and httpx2 2.12.0 pins
+# httpcore2==2.12.0, so one pin closes all four. Distinct package from
+# httpx/httpcore above, which stay where they are.
+httpcore2==2.12.0
 httpx==0.28.1
-idna==3.15
+httpx2==2.12.0
+idna==3.19
 img2pdf==0.6.1
 inflection==0.5.1
 iniconfig==2.0.0
@@ -65,13 +82,13 @@ pycparser==2.22
 pydantic==2.12.5
 pydantic-settings==2.9.0
 pydantic_core==2.41.5
-pymongo==4.16.0
+pymongo==4.18.2
 pytest==9.0.3
 pytest-asyncio==1.3.0
 pytesseract==0.3.13
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.2
-PyJWT[crypto]==2.10.1
+PyJWT[crypto]==2.15.1
 python-multipart==0.0.31
 reportlab==4.4.3
 rich==14.1.0
@@ -85,14 +102,14 @@ tomli==2.2.1
 tqdm==4.67.1
 typing-inspect==0.9.0
 typing-inspection==0.4.2
-typing_extensions==4.15.0
-urllib3==2.7.0
+typing_extensions==4.16.0
+urllib3==2.8.0
 uvicorn==0.34.0
 wrapt==1.17.3
 # The backend imports only pydantic_ai's OpenAI model adapter.  The meta
 # package installs every optional provider and makes a clean Docker resolver
 # backtrack across unrelated cloud/HuggingFace dependencies.
-pydantic-ai-slim[openai]==1.102.0
+pydantic-ai-slim[openai]==1.107.7
 # pydantic-ai 1.1 imports the private ``opentelemetry._events`` module, which
 # was removed by later API releases. Keep the provider runtime importable.
 opentelemetry-api==1.37.0
@@ -103,7 +120,7 @@ langchain-text-splitters==1.1.2
 # Official production workflow runtime. Keep this aligned with the root and
 # sidecar manifests; backend/Dockerfile installs this file.
 langgraph==1.2.9
-langgraph-checkpoint-mongodb==0.4.0
+langgraph-checkpoint-mongodb==0.5.1
 langchain-openai==1.1.14
 # 1.0 keeps the LangChain Core 1.x contract while supporting the production
 # Qdrant 1.12 server; the 1.1 package forces a newer incompatible client.

@@ -51,7 +51,7 @@ Insert after the `TextChunker` class:
 ```python
 class ClauseExtractor:
     """Enhanced clause extraction that preserves complete clauses"""
-    
+
     # Comprehensive patterns for legal document structures
     CLAUSE_PATTERNS = [
         # "CLAUSE 1.2.3 - Title" or "CLAUSE 1.2.3: Title"
@@ -63,10 +63,10 @@ class ClauseExtractor:
         # Standalone numbered clause
         r'^\s*(\d+(?:\.\d+){0,3})\s*$',
     ]
-    
+
     def __init__(self):
         self.patterns = [re.compile(p, re.MULTILINE | re.IGNORECASE) for p in self.CLAUSE_PATTERNS]
-    
+
     def extract_clauses(self, text: str) -> List[ClauseInfo]:
         """
         Extract complete clauses from contract text.
@@ -74,19 +74,19 @@ class ClauseExtractor:
         """
         if not text or not text.strip():
             return []
-        
+
         # Normalize line endings
         normalized_text = text.replace('\r\n', '\n').replace('\r', '\n')
         lines = normalized_text.split('\n')
-        
+
         clause_markers = []  # List of (line_idx, clause_number, clause_title, clause_type)
-        
+
         # First pass: identify all clause headers
         for idx, line in enumerate(lines):
             stripped = line.strip()
             if not stripped:
                 continue
-            
+
             for pattern in self.patterns:
                 match = pattern.match(line)
                 if match:
@@ -99,10 +99,10 @@ class ClauseExtractor:
                         clause_type = 'clause'
                         clause_number = groups[0]
                         clause_title = ""
-                    
+
                     clause_markers.append((idx, clause_number, clause_title, clause_type))
                     break
-        
+
         if not clause_markers:
             # No clauses found, treat entire text as single section
             return [ClauseInfo(
@@ -114,33 +114,33 @@ class ClauseExtractor:
                 end_position=len(text),
                 level=1
             )]
-        
+
         # Second pass: extract complete clause content
         clauses = []
-        
+
         for i, (line_idx, clause_number, clause_title, clause_type) in enumerate(clause_markers):
             # Find start position
             start_line = line_idx
             start_pos = sum(len(lines[j]) + 1 for j in range(start_line))  # +1 for newline
-            
+
             # Find end position (start of next clause or end of document)
             if i < len(clause_markers) - 1:
                 end_line = clause_markers[i + 1][0]
             else:
                 end_line = len(lines)
-            
+
             # Extract complete clause text
             clause_lines = lines[start_line:end_line]
             clause_text = '\n'.join(clause_lines).strip()
-            
+
             # Calculate hierarchy level based on clause numbering
             level = clause_number.count('.') + 1 if '.' in clause_number else 1
-            
+
             # Determine parent clause number
             parent_number = None
             if '.' in clause_number:
                 parent_number = '.'.join(clause_number.split('.')[:-1])
-            
+
             clause_info = ClauseInfo(
                 clause_number=clause_number,
                 clause_title=clause_title or f"{clause_type.title()} {clause_number}",
@@ -151,11 +151,11 @@ class ClauseExtractor:
                 level=level,
                 parent_number=parent_number
             )
-            
+
             clauses.append(clause_info)
-        
+
         return clauses
-    
+
     def split_long_clause(self, clause: ClauseInfo, max_length: int = 6000) -> List[Dict[str, Any]]:
         """
         Split a long clause intelligently at paragraph or sentence boundaries.
@@ -169,22 +169,22 @@ class ClauseExtractor:
                 'chunk_index': 0,
                 'is_complete': True
             }]
-        
+
         # Split at paragraph boundaries first
         paragraphs = clause.clause_text.split('\n\n')
         chunks = []
         current_chunk = []
         current_length = 0
         chunk_index = 0
-        
+
         header = f"{clause.clause_type.upper()} {clause.clause_number}"
         if clause.clause_title:
             header += f": {clause.clause_title}"
         header += "\n\n"
-        
+
         for para in paragraphs:
             para_len = len(para)
-            
+
             # If single paragraph exceeds max_length, split at sentences
             if para_len > max_length:
                 sentences = re.split(r'([.!?]\s+)', para)
@@ -201,10 +201,10 @@ class ClauseExtractor:
                         current_chunk = []
                         current_length = len(header)
                         chunk_index += 1
-                    
+
                     current_chunk.append(sent)
                     current_length += len(sent)
-            
+
             elif current_length + para_len > max_length and current_chunk:
                 chunk_text = header + '\n\n'.join(current_chunk)
                 chunks.append({
@@ -220,7 +220,7 @@ class ClauseExtractor:
             else:
                 current_chunk.append(para)
                 current_length += para_len
-        
+
         # Save remaining chunk
         if current_chunk:
             chunk_text = header + '\n\n'.join(current_chunk)
@@ -231,7 +231,7 @@ class ClauseExtractor:
                 'chunk_index': chunk_index,
                 'is_complete': len(chunks) == 0
             })
-        
+
         return chunks
 ```
 
@@ -264,14 +264,14 @@ for idx, chunk in enumerate(chunks):
 # NEW loop over clauses
 for clause in clauses:
     clause_chunks = self.clause_extractor.split_long_clause(
-        clause, 
+        clause,
         max_length=self.config.CHUNK_SIZE
     )
-    
+
     for chunk_data in clause_chunks:
         chunk_text = chunk_data['text']
         chunk_checksum = hashlib.sha256(chunk_text.encode("utf-8")).hexdigest()
-        
+
         metadata = {
             "upload_id": upload_id,
             "document_id": None,
@@ -281,7 +281,7 @@ for clause in clauses:
             "letterNo": None,
             "source_file": str(file_path_obj),
             "source_filename": filename,
-            
+
             # NEW CLAUSE METADATA FIELDS
             "clause_number": chunk_data['clause_number'],
             "clause_title": chunk_data['clause_title'],
@@ -292,15 +292,15 @@ for clause in clauses:
             "is_complete_clause": chunk_data['is_complete'],
             "clause_start_position": clause.start_position,
             "clause_end_position": clause.end_position,
-            
+
             "tags": final_tags,
             "checksum_sha256": chunk_checksum,
             "source": "contracts_ingest",
         }
-        
+
         payloads.append({
-            "text": chunk_text, 
-            "metadata": metadata, 
+            "text": chunk_text,
+            "metadata": metadata,
             "checksum": chunk_checksum
         })
 ```
@@ -334,14 +334,14 @@ interface ClauseResult {
 ```typescript
 const groupChunksByClause = (results: any[]): Map<string, ClauseResult[]> => {
   const clauseMap = new Map<string, ClauseResult[]>();
-  
+
   results.forEach(result => {
     const key = `${result.source_filename}_${result.clause_number}`;
-    
+
     if (!clauseMap.has(key)) {
       clauseMap.set(key, []);
     }
-    
+
     clauseMap.get(key)!.push({
       clause_number: result.clause_number || 'N/A',
       clause_title: result.clause_title || 'Untitled Clause',
@@ -356,7 +356,7 @@ const groupChunksByClause = (results: any[]): Map<string, ClauseResult[]> => {
       chunk_index: result.chunk_index || 0
     });
   });
-  
+
   return clauseMap;
 };
 ```
@@ -364,24 +364,24 @@ const groupChunksByClause = (results: any[]): Map<string, ClauseResult[]> => {
 **3. Add ClauseResultCard component:**
 
 ```typescript
-const ClauseResultCard: React.FC<{ clauseKey: string; chunks: ClauseResult[] }> = ({ 
-  clauseKey, 
-  chunks 
+const ClauseResultCard: React.FC<{ clauseKey: string; chunks: ClauseResult[] }> = ({
+  clauseKey,
+  chunks
 }) => {
   const [expanded, setExpanded] = useState(false);
   const firstChunk = chunks[0];
   const isMultiChunk = chunks.length > 1;
-  
+
   const completeClauseText = chunks
     .sort((a, b) => (a.chunk_index || 0) - (b.chunk_index || 0))
     .map(c => c.text)
     .join('\n\n');
-  
-  const displayText = expanded ? completeClauseText : 
-    (completeClauseText.length > 500 
-      ? completeClauseText.slice(0, 500) + '...' 
+
+  const displayText = expanded ? completeClauseText :
+    (completeClauseText.length > 500
+      ? completeClauseText.slice(0, 500) + '...'
       : completeClauseText);
-  
+
   return (
     <Card className="mb-4 hover:shadow-lg transition-shadow">
       <CardHeader className="pb-3">
@@ -464,7 +464,7 @@ const ClauseResultCard: React.FC<{ clauseKey: string; chunks: ClauseResult[] }> 
 ```typescript
 {searchResult && searchResult.results && (() => {
   const clauseMap = groupChunksByClause(searchResult.results);
-  
+
   return (
     <div className="mt-6">
       <h3 className="text-lg font-semibold mb-4">
@@ -482,13 +482,13 @@ const ClauseResultCard: React.FC<{ clauseKey: string; chunks: ClauseResult[] }> 
 
 ## Key Benefits
 
-✅ **Complete Clauses** - Users see entire clause content, not fragments  
-✅ **Proper Headers** - Clear clause identification (e.g., "CLAUSE 4.2: Payment Terms")  
-✅ **Intelligent Splitting** - Long clauses split at natural boundaries (paragraphs/sentences)  
-✅ **Chunk Reassembly** - Frontend automatically combines multi-part clauses  
-✅ **Rich Metadata** - Clause number, title, type, hierarchy level, parent relationship  
-✅ **Professional UX** - Clean, readable presentation with expand/collapse  
-✅ **Backward Compatible** - Documents without clauses treated as single unit  
+✅ **Complete Clauses** - Users see entire clause content, not fragments
+✅ **Proper Headers** - Clear clause identification (e.g., "CLAUSE 4.2: Payment Terms")
+✅ **Intelligent Splitting** - Long clauses split at natural boundaries (paragraphs/sentences)
+✅ **Chunk Reassembly** - Frontend automatically combines multi-part clauses
+✅ **Rich Metadata** - Clause number, title, type, hierarchy level, parent relationship
+✅ **Professional UX** - Clean, readable presentation with expand/collapse
+✅ **Backward Compatible** - Documents without clauses treated as single unit
 
 ---
 
@@ -539,11 +539,11 @@ Search Results:
 ```
 Search Results:
 - CLAUSE 4.2: Payment Terms
-  The Contractor shall pay the Employer within 30 days of receiving 
-  a valid invoice. The payment terms are subject to approval by the 
-  Engineer. Late payment penalties apply at 2% per month. All 
+  The Contractor shall pay the Employer within 30 days of receiving
+  a valid invoice. The payment terms are subject to approval by the
+  Engineer. Late payment penalties apply at 2% per month. All
   payments shall be made in USD to the account specified...
-  
+
   [Show Complete Clause]
 ```
 

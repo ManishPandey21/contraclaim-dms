@@ -18,6 +18,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from ...models.contract_clause import ClauseProcessingRun, ContractClause
+from ..publication_policy import is_publication_blocked, resolve_canonical_document
 from .modification_detector import ModificationDetector
 from .storage_service import ClauseStorageService
 
@@ -362,14 +363,51 @@ class ClauseChunkingAgent:
 
         # Phase 3: sync the clause graph to FalkorDB (best-effort).
         if self.graph_service is not None:
-            try:
-                await self.graph_service.sync(records, modification_links)
-            except Exception as exc:  # pragma: no cover - external service
-                logger.warning("clause graph sync failed: %s", exc)
-                summary.errors.append(f"graph_sync_failed: {exc}")
+            # G31: the entry gate in `process_document` is a verdict about the
+            # moment the run STARTED. Everything above - scope authorisation,
+            # clause persistence, modification detection and a network round
+            # trip to the vector store - happens inside a fire-and-forget
+            # background task, so a reviewer's `human_review_required`, a
+            # duplicate quarantine or a deletion can land in that window. A
+            # graph assertion written on the strength of a withdrawn verdict is
+            # exactly the support G31 forbids, so authority is resolved again
+            # from the canonical Mongo record immediately before the write -
+            # the same recheck `ContractIngestor` performs before each of its
+            # stores, and the LangGraph letter pipeline before each low-level
+            # Falkor write.
+            if await self._publication_withheld(scope.document_id):
+                logger.info(
+                    "clause graph sync withheld by canonical publication authority for %s",
+                    scope.document_id,
+                )
+                summary.errors.append("graph_sync_withheld: publication authority")
+            else:
+                try:
+                    await self.graph_service.sync(records, modification_links)
+                except Exception as exc:  # pragma: no cover - external service
+                    logger.warning("clause graph sync failed: %s", exc)
+                    summary.errors.append(f"graph_sync_failed: {exc}")
 
         await self._write_run(current_user, scope, summary)
         return summary
+
+    async def _publication_withheld(self, document_id: Optional[str]) -> bool:
+        """Is the CURRENT canonical record still publishable?
+
+        Resolved through `resolve_canonical_document` rather than from the
+        document dict this run started with: a stale dict answers the question
+        that was asked when the run began, which is the one G31 says a writer
+        may not act on. Fails CLOSED on a lookup error - a graph assertion that
+        cannot be justified must not be written.
+        """
+        try:
+            canonical = await resolve_canonical_document(self.db, document_id)
+        except Exception as exc:  # pragma: no cover - transport failure
+            logger.warning(
+                "clause graph authority recheck failed for %s: %s", document_id, exc
+            )
+            return True
+        return is_publication_blocked(canonical)
 
     def _detect_modifications(self, records: List[ContractClause]) -> List[Dict[str, Any]]:
         """Modification links from SCC/addendum clauses to base GCC clauses (req 19).
@@ -440,6 +478,13 @@ class ClauseChunkingAgent:
                 break
         if not document:
             raise ValueError(f"Contract document {document_id} not found")
+
+        if is_publication_blocked(document):
+            logger.info(
+                "clause indexing withheld by canonical publication authority for %s",
+                document_id,
+            )
+            return ClauseProcessingSummary(document_id=str(document.get("_id") or document_id))
 
         scope = DocumentScope(
             org_id=str(document.get("organization_id") or ""),

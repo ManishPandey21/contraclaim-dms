@@ -15,9 +15,14 @@ from ..models.tag import (
     TagCreate,
     TagResponse,
     TagUpdate,
+    SubtagLookupItem,
     SubtagResponse,
 )
 from ..utils.error_handler import TagError
+
+#: Upper bound on subtags one batch lookup returns; the response says when it
+#: was reached instead of reading an unbounded result set.
+SUBTAG_BATCH_MAX_RESULTS = 5000
 
 
 class TagService:
@@ -424,6 +429,52 @@ class TagService:
                 )
             )
         return responses, total
+
+    async def get_subtag_lookup_for_tags(
+        self, authorized_tag_query: Dict[str, Any], tag_ids: List[str]
+    ) -> Tuple[List[SubtagLookupItem], bool]:
+        """Active subtags of those requested tags the caller is authorized to see.
+
+        Two queries, whatever the number of tags: the requested ids are first
+        intersected with ``authorized_tag_query`` (from
+        ``AuthorizationService.build_tag_query``) inside the tag query itself,
+        and only the surviving parents reach the subtag query. A requested tag
+        outside that universe is indistinguishable from one that does not exist.
+        No usage counts or name enrichment: this feeds display lookups only.
+
+        Returns the items and whether ``SUBTAG_BATCH_MAX_RESULTS`` cut them off.
+        """
+        if not tag_ids:
+            return [], False
+        tags, subtags, _ = await self._get_handles()
+        requested = self._document_lookup_values(*tag_ids)
+        parent_docs = await tags.find(
+            {"$and": [authorized_tag_query, {"is_active": True}, {"_id": {"$in": requested}}]},
+            {"_id": 1},
+        ).to_list(length=len(requested))
+        authorized_ids = [str(doc["_id"]) for doc in parent_docs if doc.get("_id") is not None]
+        if not authorized_ids:
+            return [], False
+
+        docs = (
+            await subtags.find(
+                {"is_active": True, "tag_id": {"$in": self._document_lookup_values(*authorized_ids)}},
+                {"_id": 1, "name": 1, "tag_id": 1},
+            )
+            .sort("name", 1)
+            # Bounds the server-side sort too (top-k), not only what is read back.
+            .limit(SUBTAG_BATCH_MAX_RESULTS + 1)
+            .to_list(length=SUBTAG_BATCH_MAX_RESULTS + 1)
+        )
+        truncated = len(docs) > SUBTAG_BATCH_MAX_RESULTS
+        items: List[SubtagLookupItem] = []
+        for doc in docs[:SUBTAG_BATCH_MAX_RESULTS]:
+            name = str(doc.get("name") or "").strip()
+            if doc.get("_id") is None or not name or doc.get("tag_id") is None:
+                # A malformed row must not fail the lookup for every other row.
+                continue
+            items.append(SubtagLookupItem(_id=str(doc["_id"]), name=name, tag_id=str(doc["tag_id"])))
+        return items, truncated
 
     async def get_subtag_by_id(self, subtag_id: str) -> Optional[Subtag]:
         _, subtags, _ = await self._get_handles()

@@ -10,7 +10,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
 
 from ..core.database import get_database
-from ..core.security import CurrentUser
+from ..core.security import CurrentUser, build_scope_query
 from ..models.report import (
     ReportCategory,
     ReportDefinition,
@@ -19,6 +19,19 @@ from ..models.report import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: Graph candidates fetched per linked-chain page. A floor, not the answer: the
+#: page is `max(request.limit, this)`, so a large report never pages one row at
+#: a time and a small one still reads a useful batch. Correctness does not
+#: depend on the value — only how many round trips a contaminated
+#: neighbourhood costs.
+_LINKED_CHAIN_GRAPH_PAGE_SIZE = 100
+
+#: Hard stop on how many RAW graph candidates one linked-chain report will
+#: examine. Purely a termination guarantee against a pathological
+#: neighbourhood; reaching it is reported in `metrics` rather than silently
+#: returned as "no linked evidence" (see `_generate_linked_chain_report`).
+_LINKED_CHAIN_MAX_GRAPH_CANDIDATES = 5000
 
 
 class ReportServiceError(Exception):
@@ -255,7 +268,13 @@ class ReportService:
             )
             if proj_clause:
                 match_clauses.append(proj_clause)
-        scope_clause = self._scope_clause(current_user, "organization_id", "project_id")
+        scope_clause = self._scope_clause(
+            current_user,
+            "organization_id",
+            "project_id",
+            requested_organization_id=request.organization_id,
+            requested_project_id=request.project_id,
+        )
         match = self._combine_clauses([self._combine_clauses(match_clauses), scope_clause])
         status_values = [s for s in (request.statuses or []) if s]
         if status_values:
@@ -362,7 +381,13 @@ class ReportService:
             if proj_clause:
                 match_clauses.append(proj_clause)
 
-        scope_clause = self._scope_clause(current_user, "organization_id", "project_id")
+        scope_clause = self._scope_clause(
+            current_user,
+            "organization_id",
+            "project_id",
+            requested_organization_id=request.organization_id,
+            requested_project_id=request.project_id,
+        )
         match = self._combine_clauses([self._combine_clauses(match_clauses), scope_clause])
         if request.direction and request.direction.lower() in ("incoming", "outgoing"):
             direction_value = request.direction.lower()
@@ -463,7 +488,13 @@ class ReportService:
             )
             if proj_clause:
                 match_clauses.append(proj_clause)
-        scope_clause = self._scope_clause(current_user, "organization_id", "project_id")
+        scope_clause = self._scope_clause(
+            current_user,
+            "organization_id",
+            "project_id",
+            requested_organization_id=request.organization_id,
+            requested_project_id=request.project_id,
+        )
         base_match = self._combine_clauses([self._combine_clauses(match_clauses), scope_clause])
 
         tag_values = [t for t in (request.tags or []) if t]
@@ -566,134 +597,149 @@ class ReportService:
         if not svc.enabled:
             raise ReportServiceError("FalkorDB is disabled")
 
-        # Build direction-specific traversal
-        # Allow nodes missing org/project metadata to pass so we can enrich them from Mongo later.
-        where_clauses = []
-        params = {"norm": norm, "limit": request.limit}
-        if request.organization_id:
-            where_clauses.append(
-                "(node IS NULL OR node.organization_id IS NULL OR node.organization_id = $orgId)"
-            )
-            params["orgId"] = request.organization_id
-        if request.project_id:
-            where_clauses.append(
-                "(node IS NULL OR node.project_id IS NULL OR node.project_id = $projId OR node.project = $projId)"
-            )
-            params["projId"] = request.project_id
-        where_filter = ""
-        if where_clauses:
-            where_filter = "WHERE " + " AND ".join(where_clauses)
-
+        # NO tenant filter on node properties. This traversal used to carry
+        # `node.organization_id IS NULL OR node.organization_id = $orgId`, which
+        # was this report's ONLY tenant boundary - it is the one report of the
+        # six that never calls `_scope_clause`. G32 then stripped the shared
+        # `(:Letter {normCode})` node down to identity, so `organization_id` is
+        # NULL on every node the current writer produces and the clause became a
+        # tautology that admits every tenant's letters. A filter that reads a
+        # property nothing writes is not a weak guard, it is no guard.
+        #
+        # The boundary now lives where authority lives: each traversed normCode
+        # is resolved to Mongo documents inside the caller's scope, and codes
+        # with no in-scope consumable supporter are dropped (see below). The
+        # node supplies identity only.
+        #
+        # CANDIDATE CAPACITY IS BOUNDED, AND THE BOUND APPLIES TO AUTHORISED
+        # EVIDENCE, NOT TO RAW GRAPH CANDIDATES.
+        #
+        # This traversal used to end `RETURN DISTINCT node.normCode LIMIT $limit`
+        # and resolve authority afterwards. So an inadmissible node - blocked,
+        # another tenant's, or resolving to no Mongo document at all - spent a
+        # report slot before `build_scope_query`, `is_consumable` or
+        # `graph_codes_denied` were ever consulted, and a legitimate linked
+        # letter was pushed out of the answer entirely. Reproduced against a
+        # real FalkorDB: eleven candidates, ten inadmissible, `limit=3` returned
+        # NO rows and `metrics["total_linked"] == 0` while one genuine linked
+        # letter existed. Withholding a contaminated node's CONTENT is not zero
+        # material influence if its mere presence deletes a valid row.
+        #
+        # The reasoning was already written 40 lines below for the Python cut
+        # ("Slicing before containment lets a denied or out-of-scope code consume
+        # a report slot and silently push a legitimate linked letter out of the
+        # CSV"). It simply was never applied to the Cypher `LIMIT` one statement
+        # upstream of it.
+        #
+        # Fix: page the graph in stable batches and filter each batch through the
+        # canonical predicates, stopping when `request.limit` AUTHORISED rows
+        # exist or the candidate space is exhausted. Rejected alternatives:
+        #   * a fixed overfetch multiplier (`limit * k`) is not a boundary - the
+        #     shared `(:Letter {normCode})` node is GLOBAL, so the inadmissible
+        #     pool is instance-wide and unbounded; any k is exceeded by k+1
+        #     contaminants;
+        #   * removing the bound outright makes traversal cost unbounded on that
+        #     same global graph, which is why the bound exists;
+        #   * fencing the query on a canonical eligible normCode set would make a
+        #     globally-shared identity the security boundary and would redesign
+        #     what the traversal means (G32 ownership), which this seam may not do.
+        #
+        # A STABLE ORDER is what makes paging safe. `normCode` is the only
+        # identity property the shared node is allowed to carry, it is immutable
+        # and it is not content, so ordering on it adds no reader-side dependency
+        # on a property the writer no longer maintains (G32 reader half). Paging
+        # SKIP/LIMIT over an unspecified traversal order would drop and repeat
+        # candidates between pages. Engine order must not be load-bearing here
+        # for the same reason `graph_codes_denied` stopped trusting Mongo natural
+        # order: correctness that depends on it is correctness by luck.
         if direction == "down":
-            traversal = f"""
-            MATCH (root:Letter {{normCode:$norm}})
-            OPTIONAL MATCH path = (root)-[:CITES|REPLIES_TO*1..5]->(node:Letter)
-            {where_filter}
-            RETURN DISTINCT node.normCode AS normCode, node.code AS code, node.subject AS subject,
-                            toString(node.date) AS date, node.organization_id AS organization_id,
-                            node.project_id AS project_id, node.direction AS direction
-            LIMIT $limit
-            """
+            pattern = "(root)-[:CITES|REPLIES_TO*1..5]->(node:Letter)"
         else:
-            traversal = f"""
-            MATCH (root:Letter {{normCode:$norm}})
-            OPTIONAL MATCH path = (node:Letter)-[:CITES|REPLIES_TO*1..5]->(root)
-            {where_filter}
-            RETURN DISTINCT node.normCode AS normCode, node.code AS code, node.subject AS subject,
-                            toString(node.date) AS date, node.organization_id AS organization_id,
-                            node.project_id AS project_id, node.direction AS direction
-            LIMIT $limit
-            """
+            pattern = "(node:Letter)-[:CITES|REPLIES_TO*1..5]->(root)"
 
-        rows: List[Dict[str, Any]] = []
-        try:
-            result = await asyncio.to_thread(svc._execute, traversal, params)
-            parsed = svc._parse_rows(result)
-            if request.include_self:
-                # add root node too (basic data)
-                rows.append(
+        traversal = f"""
+        MATCH (root:Letter {{normCode:$norm}})
+        OPTIONAL MATCH {pattern}
+        WITH DISTINCT node.normCode AS normCode
+        WHERE normCode IS NOT NULL
+        RETURN normCode
+        ORDER BY normCode ASC
+        SKIP $skip
+        LIMIT $page
+        """
+
+        prepared_rows: List[Dict[str, Any]] = []
+        seen_codes: set = set()
+
+        if request.include_self:
+            # The root is a candidate like any other: it goes through the same
+            # authority resolution rather than being trusted because the caller
+            # named it.
+            seen_codes.add(norm)
+            for row in await self._admissible_linked_rows(
+                db,
+                [
                     {
                         "normCode": norm,
                         "code": request.letter_no,
-                        "subject": "",
-                        "date": "",
-                        "organization_id": request.organization_id,
-                        "project_id": request.project_id,
-                        "direction": "self",
                     }
-                )
-            rows.extend(parsed)
-        except Exception as exc:
-            raise ReportServiceError(f"Graph traversal failed: {exc}")
+                ],
+                request,
+                current_user,
+                direction,
+            ):
+                prepared_rows.append(row)
 
-        # Deduplicate and trim to limit
-        deduped: Dict[str, Dict[str, Any]] = {}
-        for row in rows:
-            code = str(row.get("code") or row.get("normCode") or "")
-            if not code:
-                continue
-            deduped[code] = row
-        limited_rows = list(deduped.values())[: request.limit]
+        page_size = max(int(request.limit), _LINKED_CHAIN_GRAPH_PAGE_SIZE)
+        skip = 0
+        examined = 0
+        exhausted = False
+        truncated = False
 
-        # Enrich with letter metadata from Mongo
-        codes = [
-            str(code)
-            for code in (r.get("code") or r.get("normCode") for r in limited_rows)
-            if code
-        ]
-        summaries: Dict[str, Dict[str, Any]] = {}
-        if codes:
-            normalized_codes = [
-                normalize_letter_code(code) for code in codes if code
-            ]
-            match_filters: List[Dict[str, Any]] = [
-                {"letter_no": {"$in": codes}},
-                {"letterNo": {"$in": codes}},
-                {"code": {"$in": codes}},
-            ]
-            if normalized_codes:
-                match_filters.append({"letterNoNormalized": {"$in": normalized_codes}})
-                match_filters.append({"normCode": {"$in": normalized_codes}})
-            docs = await db.documents.find({"$or": match_filters}).to_list(length=None)
-            letters = await db.letters.find({"$or": match_filters}).to_list(length=None)
-            for doc in docs + letters:
-                key = str(
-                    doc.get("letter_no")
-                    or doc.get("letterNo")
-                    or doc.get("code")
-                    or doc.get("normCode")
-                    or ""
+        while len(prepared_rows) < request.limit and not exhausted:
+            try:
+                result = await asyncio.to_thread(
+                    svc._execute,
+                    traversal,
+                    {"norm": norm, "skip": skip, "page": page_size},
                 )
-                if not key:
+                batch = svc._parse_rows(result)
+            except Exception as exc:
+                raise ReportServiceError(f"Graph traversal failed: {exc}")
+
+            if len(batch) < page_size:
+                # A short page means the candidate space ran out. This is the
+                # normal termination: no admissible row is required to exist.
+                exhausted = True
+            skip += page_size
+            examined += len(batch)
+
+            candidates: List[Dict[str, Any]] = []
+            for row in batch:
+                code = str(row.get("code") or row.get("normCode") or "")
+                # Duplicate suppression must survive paging: the same code seen
+                # on two pages (concurrent graph writes shift the ordering) must
+                # neither be emitted twice nor spend the window twice.
+                if not code or code in seen_codes:
                     continue
-                row_summary = {
-                    "summary": doc.get("summary") or doc.get("content_summary") or "",
-                    "subject": doc.get("subject") or "",
-                    "date": doc.get("date") or doc.get("created_at") or doc.get("createdAt") or "",
-                    "organization_id": doc.get("organization_id") or doc.get("organizationId"),
-                    "project_id": doc.get("project_id") or doc.get("projectId"),
-                }
-                if key not in summaries:
-                    summaries[key] = row_summary
-                normalized_key = normalize_letter_code(key)
-                if normalized_key and normalized_key not in summaries:
-                    summaries[normalized_key] = row_summary
+                seen_codes.add(code)
+                candidates.append(row)
 
-        prepared_rows: List[Dict[str, Any]] = []
-        for row in limited_rows:
-            code = str(row.get("code") or row.get("normCode") or "")
-            meta = summaries.get(code, {})
-            prepared_rows.append(
-                {
-                    "letter_no": code,
-                    "subject": meta.get("subject") or row.get("subject") or "",
-                    "summary": meta.get("summary", ""),
-                    "direction": row.get("direction") or direction,
-                    "date": meta.get("date") or row.get("date") or "",
-                    "organization_id": meta.get("organization_id") or row.get("organization_id") or "",
-                    "project_id": meta.get("project_id") or row.get("project_id") or "",
-                }
-            )
+            for row in await self._admissible_linked_rows(
+                db, candidates, request, current_user, direction
+            ):
+                if len(prepared_rows) >= request.limit:
+                    break
+                prepared_rows.append(row)
+
+            if not exhausted and examined >= _LINKED_CHAIN_MAX_GRAPH_CANDIDATES:
+                # A safety cap, so a pathological neighbourhood cannot make one
+                # report scan forever. Reaching it is NOT allowed to look like
+                # "no linked evidence": the caller is told the scan was cut
+                # short, in the metrics, rather than being handed a confident
+                # under-count. Fail visible, never silently short.
+                truncated = True
+                break
 
         # Attach org/project names
         await self._attach_metadata(
@@ -716,15 +762,181 @@ class ReportService:
             "organization_name",
             "project_name",
         ]
+        metrics: Dict[str, Any] = {"total_linked": len(prepared_rows)}
+        if truncated:
+            # Only present when the cap actually fired, so an ordinary report
+            # keeps its existing metric shape and a degraded one is impossible
+            # to mistake for a complete answer.
+            metrics["linked_chain_truncated"] = True
+            metrics["linked_chain_candidates_examined"] = examined
         return ReportPreview(
             report_id=definition.id,
             report_name=definition.name,
             generated_at=datetime.utcnow(),
             columns=columns,
             rows=prepared_rows,
-            metrics={"total_linked": len(prepared_rows)},
+            metrics=metrics,
             total_rows=len(prepared_rows),
         )
+
+    async def _admissible_linked_rows(
+        self,
+        db: Any,
+        candidate_rows: List[Dict[str, Any]],
+        request: ReportRequest,
+        current_user: CurrentUser,
+        direction: str,
+    ) -> List[Dict[str, Any]]:
+        """Canonical authority for ONE batch of linked-chain graph candidates.
+
+        Extracted so the report's bound can be applied to what comes OUT of this
+        (authorised rows) instead of to what goes in (raw graph candidates). The
+        predicates are unchanged and there is no second policy here:
+        `build_scope_query` for row visibility, `is_consumable` for publication
+        authority, `graph_codes_denied` for graph provenance. A batch is
+        evaluated whole, so the answer for a given candidate never depends on
+        which page it arrived on.
+        """
+        from ..services.publication_policy import (
+            authoritative_summary,
+            graph_codes_denied,
+            is_consumable,
+        )
+        from ..services.falkor_graph_service import normalize_letter_code
+
+        if not candidate_rows:
+            return []
+
+        # Enrich with letter metadata from Mongo
+        codes = [
+            str(code)
+            for code in (r.get("code") or r.get("normCode") for r in candidate_rows)
+            if code
+        ]
+        summaries: Dict[str, Dict[str, Any]] = {}
+        if codes:
+            normalized_codes = [
+                normalize_letter_code(code) for code in codes if code
+            ]
+            match_filters: List[Dict[str, Any]] = [
+                {"letter_no": {"$in": codes}},
+                {"letterNo": {"$in": codes}},
+                {"code": {"$in": codes}},
+            ]
+            if normalized_codes:
+                match_filters.append({"letterNoNormalized": {"$in": normalized_codes}})
+                match_filters.append({"normCode": {"$in": normalized_codes}})
+            # Tenant scope. This enrichment matched on LETTER CODE ALONE, and a
+            # letter code is global - the same code exists in other tenants. So a
+            # legitimate org-A user received org-B's subject/summary in the
+            # preview and the CSV download. The graph traversal was org-filtered;
+            # the Mongo lookup that supplies the actual text was not.
+            #
+            # The boundary is derived from the CALLER'S IDENTITY, never from the
+            # request alone. `request.organization_id`/`project_id` are optional
+            # fields: an omitted `organizationId` still passes the router gate
+            # (it authorizes against `request.organization_id or
+            # current_user.organization_id`) while leaving the service with no
+            # filter at all, so the enrichment ran across every tenant and the
+            # `if not meta: continue` guard below stopped dropping anything. The
+            # shipped Reports page sends exactly that request whenever no
+            # organisation or project is selected. A request-derived filter also
+            # cannot see `current_user.projects`, so a project-tier user read
+            # every project in their organisation.
+            #
+            # `build_scope_query` is the canonical row-visibility helper: it
+            # treats the request fields as a NARROWING selection inside the
+            # caller's entitlement (a foreign id denies all), ANDs organisation
+            # with project assignments, and falls back to deny-all rather than to
+            # "unfiltered" for an unrecognised caller.
+            scope_query = build_scope_query(
+                current_user,
+                organization_id=request.organization_id,
+                project_id=request.project_id,
+            )
+            enrichment_query: Dict[str, Any] = (
+                {"$and": [{"$or": match_filters}, scope_query]}
+                if scope_query
+                else {"$or": match_filters}
+            )
+            docs = await db.documents.find(enrichment_query).to_list(length=None)
+            letters = await db.letters.find(enrichment_query).to_list(length=None)
+            for doc in docs + letters:
+                key = str(
+                    doc.get("letter_no")
+                    or doc.get("letterNo")
+                    or doc.get("code")
+                    or doc.get("normCode")
+                    or ""
+                )
+                if not key:
+                    continue
+                # Authority-controlled: `summary` is extraction-derived and
+                # `subject` is filing metadata, but neither may come from a
+                # document that is not currently publishable. This report reached
+                # an exported CSV with a blocked, quarantined, cross-tenant
+                # document's text attached.
+                consumable = is_consumable(doc)
+                row_summary = {
+                    "summary": (authoritative_summary(doc) if consumable else ""),
+                    "subject": (doc.get("subject") or "") if consumable else "",
+                    # Inside the consumable gate too: a blocked document's date
+                    # and tenancy are still its data.
+                    "date": (doc.get("date") or doc.get("created_at") or doc.get("createdAt") or "") if consumable else "",
+                    "organization_id": (doc.get("organization_id") or doc.get("organizationId")) if consumable else None,
+                    "project_id": (doc.get("project_id") or doc.get("projectId")) if consumable else None,
+                }
+                if key not in summaries:
+                    summaries[key] = row_summary
+                normalized_key = normalize_letter_code(key)
+                if normalized_key and normalized_key not in summaries:
+                    summaries[normalized_key] = row_summary
+
+        admissible: List[Dict[str, Any]] = []
+        # A denied code must not COUNT either. Suppressing its text while still
+        # incrementing `total_linked` is material influence: the metric asserts
+        # how many linked letters support this chain, and a blocked or orphan
+        # code is not support. Same denial set the serving paths use - one
+        # authority semantic, not separate "display" and "metric" ones.
+        row_codes = [str(r.get("normCode") or r.get("code") or "") for r in candidate_rows]
+        try:
+            denied_codes = await graph_codes_denied(db, [c for c in row_codes if c])
+        except Exception:
+            denied_codes = {c for c in row_codes if c}  # fail closed
+
+        for row in candidate_rows:
+            code = str(row.get("code") or row.get("normCode") or "")
+            row_norm = str(row.get("normCode") or "") or normalize_letter_code(code)
+            if row_norm and row_norm in denied_codes:
+                continue
+            meta = summaries.get(code, {})
+            # `summaries` is built from Mongo scoped to the CALLER, so an empty
+            # meta means this code has no in-scope supporting document. That is
+            # the tenant boundary for this report: the graph node is shared
+            # across tenants on normCode alone, so emitting an unenriched row
+            # would publish a FOREIGN tenant's letter number (and count it in
+            # metrics["total_linked"]).
+            if not meta:
+                continue
+            admissible.append(
+                {
+                    "letter_no": code,
+                    # No fallback to `row` (the shared graph node): it is
+                    # identity-only and any subject still on it is legacy
+                    # contamination owned by some other document/tenant.
+                    "subject": meta.get("subject") or "",
+                    "summary": meta.get("summary", ""),
+                    # Same rule as `subject` above: no fallback to `row`. The
+                    # shared node is identity-only, so `direction`/
+                    # `organization_id`/`project_id` still sitting on it are
+                    # legacy values owned by whichever document wrote last.
+                    "direction": meta.get("direction") or direction,
+                    "date": meta.get("date") or "",
+                    "organization_id": meta.get("organization_id") or "",
+                    "project_id": meta.get("project_id") or "",
+                }
+            )
+        return admissible
 
     async def _generate_document_activity_report(
         self,
@@ -882,7 +1094,13 @@ class ReportService:
             if proj_clause:
                 clauses.append(proj_clause)
 
-        scope_clause = self._scope_clause(current_user, organization_field, project_field)
+        scope_clause = self._scope_clause(
+            current_user,
+            organization_field,
+            project_field,
+            requested_organization_id=request.organization_id,
+            requested_project_id=request.project_id,
+        )
         combined = self._combine_clauses([self._combine_clauses(clauses), scope_clause])
         return combined
 
@@ -924,40 +1142,51 @@ class ReportService:
 
     @staticmethod
     def _scope_clause(
-        current_user: CurrentUser, organization_field: str, project_field: str
+        current_user: CurrentUser,
+        organization_field: str,
+        project_field: str,
+        *,
+        requested_organization_id: Optional[str] = None,
+        requested_project_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        roles = [role.lower() for role in (current_user.roles or [])]
-        if "superadmin" in roles:
-            return None
-        org_ids = set()
-        if getattr(current_user, "organization_id", None):
-            org_ids.add(str(current_user.organization_id))
-        for org in getattr(current_user, "organizations", []) or []:
-            if org:
-                org_ids.add(str(org))
-        project_ids = {str(pid) for pid in (getattr(current_user, "projects", []) or []) if pid}
-        scope_clauses: List[Dict[str, Any]] = []
-        if org_ids:
-            org_list = sorted(org_ids)
-            clause: Dict[str, Any] = (
-                {organization_field: org_list[0]}
-                if len(org_list) == 1
-                else {organization_field: {"$in": org_list}}
-            )
-            scope_clauses.append(clause)
-        if project_ids:
-            project_list = sorted(project_ids)
-            clause = (
-                {project_field: project_list[0]}
-                if len(project_list) == 1
-                else {project_field: {"$in": project_list}}
-            )
-            scope_clauses.append(clause)
-        if not scope_clauses:
-            return None
-        if len(scope_clauses) == 1:
-            return scope_clauses[0]
-        return {"$or": scope_clauses}
+        """Canonical row visibility for every report that filters by tenancy.
+
+        This used to build its own filter, and it UNIONED the two scope
+        dimensions:
+
+            {"$or": [{"organization_id": "org-A"}, {"project_id": "proj-A"}]}
+
+        Either branch alone admits a row, so a project-tier caller assigned to
+        Project A matched every record whose organisation is A - including the
+        sibling Project B they are not assigned to. Organisation entitlement and
+        project assignment must INTERSECT.
+
+        Three further widenings came from the same hand-rolled clause: it ORed
+        every entry of `current_user.organizations` (entitlement history, not
+        the active navbar selection); it treated an unrecognised role as
+        organisation-wide instead of denying it; and it could not see that a
+        caller-supplied `projectId` lay outside the caller's assignments.
+
+        `build_scope_query` is the single canonical row-visibility helper
+        (`core/security.py`) and it already expresses all four semantics,
+        including superadmin's unrestricted read and superuser's
+        multi-organisation entitlement. The report layer CONSUMES that
+        authority; it does not invent a second implementation, and it never
+        authorises by role name.
+
+        `requested_organization_id` / `requested_project_id` are the caller's
+        request fields. They are passed as a NARROWING selection inside the
+        caller's entitlement - a foreign id denies all - never as an authority
+        substitute.
+        """
+        scope = build_scope_query(
+            current_user,
+            organization_id=requested_organization_id,
+            project_id=requested_project_id,
+            org_field=organization_field,
+            project_field=project_field,
+        )
+        return scope or None
 
     @staticmethod
     def _letter_field_map() -> Dict[str, Tuple[str, ...]]:

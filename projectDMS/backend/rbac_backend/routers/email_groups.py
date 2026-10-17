@@ -16,7 +16,7 @@ from ..models.email_group import (
     EmailGroup, EmailGroupCreate, EmailGroupUpdate, EmailGroupListResponse
 )
 from ..utils.validation import validate_email, validate_input, sanitize_text, validate_object_id
-from ..utils.error_handler import handle_exceptions, EmailGroupError
+from ..utils.error_handler import BaseDomainError, handle_exceptions, EmailGroupError
 from ..utils.rate_limiter import RateLimiter
 from ..utils.audit_logger import AuditLogger
 
@@ -54,7 +54,7 @@ async def _authorize_email_group_policy(
 
 class EmailGroupController:
     """Secure email group controller with comprehensive validation and authorization."""
-    
+
     def __init__(
         self,
         email_group_service: EmailGroupService,
@@ -87,25 +87,25 @@ class EmailGroupController:
 
             # Legacy authorization check kept during migration for compatibility.
             await self.auth_service.require_permission(current_user, "email_groups:read")
-            
+
             # Build authorized query based on user scope
             authorized_query = await self.auth_service.build_email_group_query(
                 current_user, filters
             )
-            
+
             # Get email groups with pagination
             groups, total_count = await self.email_group_service.get_groups_paginated(
                 authorized_query, pagination
             )
-            
+
             return EmailGroupListResponse(
                 groups=groups,
                 total=total_count,
                 page=pagination["skip"] // pagination["limit"] + 1,
                 limit=pagination["limit"]
             )
-            
-        except HTTPException:
+
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to get email groups: {str(e)}")
@@ -131,21 +131,21 @@ class EmailGroupController:
 
             # Legacy authorization check kept during migration for compatibility.
             await self.auth_service.require_permission(current_user, "email_groups:create")
-            
+
             # Validate and sanitize input
             validated_data = await self._validate_group_input(group_data)
-            
+
             # Check authorization for organization/project context
             if validated_data.organization_id:
                 await self.auth_service.check_organization_access(
                     current_user, validated_data.organization_id, "create_email_group"
                 )
-            
+
             if validated_data.project_id:
                 await self.auth_service.check_project_access(
                     current_user, validated_data.project_id, "create_email_group"
                 )
-            
+
             # Check for duplicate group name within scope
             if await self.email_group_service.group_exists_in_scope(
                 validated_data.name, validated_data.organization_id, validated_data.project_id
@@ -154,20 +154,20 @@ class EmailGroupController:
                     f"Email group '{validated_data.name}' already exists in this scope",
                     status.HTTP_409_CONFLICT
                 )
-            
+
             # Create email group
             group = await self.email_group_service.create_group(
                 validated_data, current_user
             )
-            
+
             # Audit log
             await self.audit_logger.log_email_group_created(
                 current_user.id, group.id, group.name, len(group.emails)
             )
-            
+
             return group
-            
-        except (EmailGroupError, HTTPException):
+
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Email group creation failed: {str(e)}")
@@ -186,10 +186,10 @@ class EmailGroupController:
 
             # Legacy authorization check kept during migration for compatibility.
             await self.auth_service.require_permission(current_user, "email_groups:read")
-            
+
             # Validate group ID
             validated_group_id = validate_object_id(group_id)
-            
+
             # Get group
             group = await self.email_group_service.get_group_by_id(validated_group_id)
             if not group:
@@ -202,15 +202,15 @@ class EmailGroupController:
                 organization_id=group_org_id,
                 project_id=group_project_id,
             )
-            
+
             # Check authorization for this specific group
             await self.auth_service.check_email_group_access(
                 current_user, group, "read"
             )
-            
+
             return group
-            
-        except (EmailGroupError, HTTPException):
+
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to get email group: {str(e)}")
@@ -229,10 +229,10 @@ class EmailGroupController:
 
             # Legacy authorization check kept during migration for compatibility.
             await self.auth_service.require_permission(current_user, "email_groups:update")
-            
+
             # Validate group ID
             validated_group_id = validate_object_id(group_id)
-            
+
             # Get existing group
             existing_group = await self.email_group_service.get_group_by_id(validated_group_id)
             if not existing_group:
@@ -245,17 +245,17 @@ class EmailGroupController:
                 organization_id=group_org_id,
                 project_id=group_project_id,
             )
-            
+
             # Check authorization for this specific group
             await self.auth_service.check_email_group_access(
                 current_user, existing_group, "update"
             )
-            
+
             # Validate update data
             validated_update = await self._validate_group_update(update_data)
-            
+
             # Check for name conflicts if name is being updated
-            if (validated_update.name and 
+            if (validated_update.name and
                 validated_update.name != existing_group.name):
                 if await self.email_group_service.group_exists_in_scope(
                     validated_update.name,
@@ -266,21 +266,21 @@ class EmailGroupController:
                         f"Email group '{validated_update.name}' already exists in this scope",
                         status.HTTP_409_CONFLICT
                     )
-            
+
             # Update group
             updated_group = await self.email_group_service.update_group(
                 validated_group_id, validated_update, current_user
             )
-            
+
             # Audit log
             changed_fields = list(validated_update.dict(exclude_unset=True).keys())
             await self.audit_logger.log_email_group_updated(
                 current_user.id, validated_group_id, changed_fields
             )
-            
+
             return updated_group
-            
-        except (EmailGroupError, HTTPException):
+
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to update email group: {str(e)}")
@@ -299,10 +299,10 @@ class EmailGroupController:
 
             # Legacy authorization check kept during migration for compatibility.
             await self.auth_service.require_permission(current_user, "email_groups:delete")
-            
+
             # Validate group ID
             validated_group_id = validate_object_id(group_id)
-            
+
             # Get group for validation
             group = await self.email_group_service.get_group_by_id(validated_group_id)
             if not group:
@@ -315,23 +315,23 @@ class EmailGroupController:
                 organization_id=group_org_id,
                 project_id=group_project_id,
             )
-            
+
             # Check authorization for this specific group
             await self.auth_service.check_email_group_access(
                 current_user, group, "delete"
             )
-            
+
             # Delete group
             await self.email_group_service.delete_group(validated_group_id, current_user)
-            
+
             # Audit log
             await self.audit_logger.log_email_group_deleted(
                 current_user.id, validated_group_id, group.name
             )
-            
+
             return {"message": "Email group deleted successfully"}
-            
-        except (EmailGroupError, HTTPException):
+
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to delete email group: {str(e)}")
@@ -350,10 +350,10 @@ class EmailGroupController:
 
             # Legacy authorization check kept during migration for compatibility.
             await self.auth_service.require_permission(current_user, "email_groups:read")
-            
+
             # Validate group ID
             validated_group_id = validate_object_id(group_id)
-            
+
             # Get group
             group = await self.email_group_service.get_group_by_id(validated_group_id)
             if not group:
@@ -366,16 +366,16 @@ class EmailGroupController:
                 organization_id=group_org_id,
                 project_id=group_project_id,
             )
-            
+
             # Check authorization for this specific group
             await self.auth_service.check_email_group_access(
                 current_user, group, "read"
             )
-            
+
             # Return deduplicated emails
             return await self.email_group_service.get_unique_emails(group.emails)
-            
-        except (EmailGroupError, HTTPException):
+
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to resolve group emails: {str(e)}")
@@ -390,11 +390,11 @@ class EmailGroupController:
         validated_name = sanitize_text(
             validate_input(group_data.name, max_length=200, required=True)
         )
-        
+
         # Validate and deduplicate emails
         validated_emails = []
         seen_emails = set()
-        
+
         for email in (group_data.emails or []):
             try:
                 validated_email = validate_email(email.strip())
@@ -405,14 +405,14 @@ class EmailGroupController:
                 # Skip invalid emails but log them
                 logger.warning(f"Invalid email skipped: {email}")
                 continue
-        
+
         # Validate description
         validated_description = None
         if group_data.description:
             validated_description = sanitize_text(
                 validate_input(group_data.description, max_length=1000)
             )
-        
+
         return EmailGroupCreate(
             name=validated_name,
             description=validated_description,
@@ -424,21 +424,21 @@ class EmailGroupController:
     async def _validate_group_update(self, update_data: EmailGroupUpdate) -> EmailGroupUpdate:
         """Validate email group update data."""
         validated_fields = {}
-        
+
         if update_data.name is not None:
             validated_fields['name'] = sanitize_text(
                 validate_input(update_data.name, max_length=200, required=True)
             )
-        
+
         if update_data.description is not None:
             validated_fields['description'] = sanitize_text(
                 validate_input(update_data.description, max_length=1000)
             )
-        
+
         if update_data.emails is not None:
             validated_emails = []
             seen_emails = set()
-            
+
             for email in update_data.emails:
                 try:
                     validated_email = validate_email(email.strip())
@@ -448,9 +448,9 @@ class EmailGroupController:
                 except ValueError:
                     logger.warning(f"Invalid email skipped in update: {email}")
                     continue
-            
+
             validated_fields['emails'] = validated_emails
-        
+
         return EmailGroupUpdate(**validated_fields)
 
 
@@ -461,7 +461,7 @@ async def get_email_group_controller() -> EmailGroupController:
     auth_service = AuthorizationService()
     rate_limiter = RateLimiter(scope="email_groups")
     audit_logger = AuditLogger()
-    
+
     return EmailGroupController(
         email_group_service, auth_service, rate_limiter, audit_logger
     )
@@ -486,7 +486,7 @@ async def get_email_groups(
         "search": search
     }
     pagination = {"skip": skip, "limit": limit}
-    
+
     return await controller.get_email_groups(pagination, filters, current_user)
 
 

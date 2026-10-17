@@ -7,7 +7,6 @@ import re
 import shlex
 import shutil
 import subprocess
-import sys
 import uuid
 from collections import Counter
 from contextlib import asynccontextmanager
@@ -19,11 +18,20 @@ import tempfile
 
 from ..core.config import settings
 from ..config.document_processing_config import DocumentProcessingConfig
+from ..models.processing_state import ProcessingState, build_attempt_outcome
+from .extraction.models import PageClass, PageStatus
 from .contract_categorizer import create_contract_categorizer
 from .contract_graph_service import (
+    ContractGraphIdentityError,
     ClauseGraphPayload,
     ContractGraphService,
     DocumentGraphPayload,
+)
+from .publication_policy import (
+    CONTRACT_EXTRACTION_HOLD,
+    held_by_contract_extraction,
+    is_publication_blocked,
+    resolve_canonical_document,
 )
 from ..retrieval.embeddings import EmbeddingClient
 from ..retrieval.generator import LLMGenerator
@@ -107,12 +115,66 @@ class ParsedPage:
 
 
 @dataclass
+class ContractExtractionVerdict:
+    """What page extraction concluded about the whole contract, before anything publishes.
+
+    The engine already judges every page (PR #25 withholds unusable ``(cid:N)``
+    text; PR #28 makes a retry cumulative). This carries that judgement past
+    ``result.pages`` so ingest can refuse to complete a contract a page short.
+    The state is the shared ``derive_processing_state`` verdict - the same one
+    the document path persists - with ``attempts_exhausted=True``, because a
+    contract has no automatic retry loop: an unresolved page waits for an
+    operator's OCR retry, so it needs a person now.
+
+    One contract-specific settlement: a page the classifier found BLANK (no
+    usable text layer, no image, no table) that OCR then read as empty is an
+    empty page, not missing content. Holding it would keep a contract with a
+    blank separator sheet out of evidence for good - a retry reaches the same
+    verdict and contracts have no review action.
+    """
+
+    state: ProcessingState
+    unresolved_pages: List[int]
+    withheld_pages: List[int]
+    #: page_number/status/batch_id for every page of the run, carried pages
+    #: included, so the job summary describes the contract, not one attempt.
+    run_page_records: List[Dict[str, Any]]
+
+    @property
+    def complete(self) -> bool:
+        return self.state is ProcessingState.COMPLETED
+
+
+def _settled_blank_pages(pages: Sequence[Any]) -> Set[int]:
+    """BLANK pages OCR confirmed empty - see ContractExtractionVerdict.
+
+    Only an OCR read that returned no text at all settles a page. OCR text
+    judged unusable carries the same OCR_EMPTY status, and on a BLANK page
+    (text drawn as vector outlines has no text layer and no image) it means
+    content exists that nobody could read - that page stays unresolved.
+    """
+    from .extraction.engine import OCR_RETURNED_NO_TEXT
+
+    return {
+        page.number
+        for page in pages
+        if page.status is PageStatus.OCR_EMPTY
+        and page.classification.page_class is PageClass.BLANK
+        and page.error == OCR_RETURNED_NO_TEXT
+        and not page.text_withheld
+    }
+
+
+@dataclass
 class ParsedDocument:
     """Full document text plus page-aware spans for PDF grounding."""
 
     text: str
     pages: List[ParsedPage]
     file_path: str
+    #: Set for page-extracted PDFs; absent for text/DOCX, which have no pages
+    #: an extraction engine could leave unresolved.
+    extraction: Optional[ContractExtractionVerdict] = None
 
 
 @dataclass
@@ -523,7 +585,16 @@ class MarkerService:
             return None
 
         if result.returncode != 0:
-            logger.warning("Marker failed (code=%s): %s", result.returncode, result.stderr)
+            # Marker's stderr is derived from the document it was asked to
+            # convert - a parse warning can quote the clause it choked on - so
+            # it is treated as extracted content and never logged verbatim.
+            # The exit code and the last line's shape are what a failure is
+            # actually diagnosed from; the full stderr stays with the process.
+            logger.warning(
+                "Marker failed (code=%s, stderr_length=%s)",
+                result.returncode,
+                len(result.stderr or ""),
+            )
             return None
 
         markdown_path = self._pick_markdown(output_dir)
@@ -551,7 +622,7 @@ class MarkerService:
 
 class ClauseExtractor:
     """Enhanced clause extraction that preserves complete clauses"""
-    
+
     # Comprehensive patterns for legal document structures
     CLAUSE_PATTERNS = [
         # "CLAUSE 1.2.3 - Title" or "CLAUSE 1.2.3: Title"
@@ -573,7 +644,7 @@ class ClauseExtractor:
     # Structural divisions carry their keyword in the clause number ("Schedule 1")
     # so they never collide with a numeric clause "1".
     _STRUCTURAL_TYPES = {"SCHEDULE", "APPENDIX", "ANNEXURE", "ANNEX", "PART"}
-    
+
     def __init__(self):
         self.patterns = [re.compile(p, re.MULTILINE | re.IGNORECASE) for p in self.CLAUSE_PATTERNS]
 
@@ -600,7 +671,7 @@ class ClauseExtractor:
 
         clause_number = clause_number.rstrip(".")
         return clause_type, clause_number, clause_title
-    
+
     def extract_clauses(self, text: str) -> List[ClauseInfo]:
         """
         Extract complete clauses from contract text.
@@ -608,19 +679,19 @@ class ClauseExtractor:
         """
         if not text or not text.strip():
             return []
-        
+
         # Normalize line endings
         normalized_text = text.replace('\r\n', '\n').replace('\r', '\n')
         lines = normalized_text.split('\n')
-        
+
         clause_markers = []  # List of (line_idx, clause_number, clause_title, clause_type)
-        
+
         # First pass: identify all clause headers
         for idx, line in enumerate(lines):
             stripped = line.strip()
             if not stripped:
                 continue
-            
+
             for pattern in self.patterns:
                 match = pattern.match(line)
                 if match:
@@ -631,7 +702,7 @@ class ClauseExtractor:
                         continue
                     clause_markers.append((idx, clause_number, clause_title, clause_type))
                     break
-        
+
         if not clause_markers:
             # No clauses found, treat entire text as single section
             return [ClauseInfo(
@@ -643,33 +714,33 @@ class ClauseExtractor:
                 end_position=len(text),
                 level=1
             )]
-        
+
         # Second pass: extract complete clause content
         clauses = []
-        
+
         for i, (line_idx, clause_number, clause_title, clause_type) in enumerate(clause_markers):
             # Find start position
             start_line = line_idx
             start_pos = sum(len(lines[j]) + 1 for j in range(start_line))  # +1 for newline
-            
+
             # Find end position (start of next clause or end of document)
             if i < len(clause_markers) - 1:
                 end_line = clause_markers[i + 1][0]
             else:
                 end_line = len(lines)
-            
+
             # Extract complete clause text
             clause_lines = lines[start_line:end_line]
             clause_text = '\n'.join(clause_lines).strip()
-            
+
             # Calculate hierarchy level based on clause numbering
             level = clause_number.count('.') + 1 if '.' in clause_number else 1
-            
+
             # Determine parent clause number
             parent_number = None
             if '.' in clause_number:
                 parent_number = '.'.join(clause_number.split('.')[:-1])
-            
+
             clause_info = ClauseInfo(
                 clause_number=clause_number,
                 clause_title=clause_title or f"{clause_type.title()} {clause_number}",
@@ -680,9 +751,9 @@ class ClauseExtractor:
                 level=level,
                 parent_number=parent_number
             )
-            
+
             clauses.append(clause_info)
-        
+
         return clauses
 
     @staticmethod
@@ -703,7 +774,7 @@ class ClauseExtractor:
         if "." not in clause_number and clause_number.isdigit() and int(clause_number) > 80:
             return True
         return False
-    
+
     def split_long_clause(self, clause: ClauseInfo, max_length: int = 6000) -> List[Dict[str, Any]]:
         """
         Split a long clause intelligently at paragraph or sentence boundaries.
@@ -717,22 +788,22 @@ class ClauseExtractor:
                 'chunk_index': 0,
                 'is_complete': True
             }]
-        
+
         # Split at paragraph boundaries first
         paragraphs = clause.clause_text.split('\n\n')
         chunks = []
         current_chunk = []
         current_length = 0
         chunk_index = 0
-        
+
         header = f"{clause.clause_type.upper()} {clause.clause_number}"
         if clause.clause_title:
             header += f": {clause.clause_title}"
         header += "\n\n"
-        
+
         for para in paragraphs:
             para_len = len(para)
-            
+
             # If single paragraph exceeds max_length, split at sentences
             if para_len > max_length:
                 sentences = re.split(r'([.!?]\s+)', para)
@@ -749,10 +820,10 @@ class ClauseExtractor:
                         current_chunk = []
                         current_length = len(header)
                         chunk_index += 1
-                    
+
                     current_chunk.append(sent)
                     current_length += len(sent)
-            
+
             elif current_length + para_len > max_length and current_chunk:
                 chunk_text = header + '\n\n'.join(current_chunk)
                 chunks.append({
@@ -768,7 +839,7 @@ class ClauseExtractor:
             else:
                 current_chunk.append(para)
                 current_length += para_len
-        
+
         # Save remaining chunk
         if current_chunk:
             chunk_text = header + '\n\n'.join(current_chunk)
@@ -779,7 +850,7 @@ class ClauseExtractor:
                 'chunk_index': chunk_index,
                 'is_complete': len(chunks) == 0
             })
-        
+
         return chunks
 
 
@@ -928,7 +999,7 @@ class DatabaseService:
                 ("uploadType", 1),
                 ("createdAt", -1)
             ], name="docvec_org_proj_type_created_idx", background=True)
-            
+
             await self.db.document_vectors.create_index(
                 [("text", "text"), ("clause_title", "text")],
                 name="docvec_text_idx",
@@ -1028,6 +1099,10 @@ class DatabaseService:
             upsert=True,
         )
         return batch_id
+
+    async def has_ocr_pages(self, document_id: str) -> bool:
+        found = await self.db.contract_ocr_pages.find_one({"document_id": str(document_id)})
+        return found is not None
 
     async def upsert_ocr_pages(self, page_records: List[Dict[str, Any]]) -> None:
         if not page_records:
@@ -1297,10 +1372,34 @@ class ContractIngestor:
             record["cleaned_text_length"] = len(record["cleaned_text"])
             record["cleaning"] = audit_by_page.get(page_number, {})
             record["source_pdf_page_link"] = self._source_pdf_page_link(document_id, page_number)
-        await self.db_service.upsert_ocr_pages(page_records)
+        verdict = raw_doc.extraction
+        fresh_numbers = {int(record.get("page_number") or 0) for record in page_records}
+        carried_cleaning = [
+            {
+                "document_id": document_id,
+                "page_number": int(run_record["page_number"]),
+                "cleaned_text": cleaned_by_page.get(int(run_record["page_number"]), ""),
+                "cleaned_text_length": len(
+                    cleaned_by_page.get(int(run_record["page_number"]), "")
+                ),
+                "cleaning": audit_by_page.get(int(run_record["page_number"]), {}),
+            }
+            for run_record in (verdict.run_page_records if verdict is not None else [])
+            if int(run_record["page_number"]) not in fresh_numbers
+        ]
+        # A carried page keeps its extraction row (status, raw_text, batch)
+        # exactly; only the text derived from the whole run - which the clause
+        # index reads - is refreshed, so it agrees with what publishes.
+        await self.db_service.upsert_ocr_pages(page_records + carried_cleaning)
 
-        summary = self._summarize_ocr_records(page_records)
+        summary = self._summarize_ocr_records(
+            verdict.run_page_records if verdict is not None else page_records
+        )
         summary["page_cleaning"] = page_audit
+        if verdict is not None:
+            summary["unresolved_pages"] = list(verdict.unresolved_pages)
+            summary["withheld_pages"] = list(verdict.withheld_pages)
+        cleaned_doc.extraction = verdict
         await self.db_service.upsert_job_status(
             upload_id,
             str(file_path),
@@ -1329,261 +1428,112 @@ class ContractIngestor:
         project_id: Optional[str],
         retry_ocr_pages: Optional[List[int]] = None,
     ) -> Tuple[ParsedDocument, List[Dict[str, Any]]]:
-        raw_doc = await self.parser._extract_pdf_text(file_path)
-        page_count = max(len(raw_doc.pages), await self._get_pdf_page_count(file_path))
-        pages_by_number = {page.number: page for page in raw_doc.pages}
-        raw_pages: List[ParsedPage] = [
-            pages_by_number.get(page_number)
-            or ParsedPage(number=page_number, text="", start=0, end=0)
-            for page_number in range(1, page_count + 1)
-        ]
+        """Delegate page-level extraction to the shared engine.
 
-        min_chars = max(0, int(self.processing_config.contract_ocr_min_text_chars_per_page))
-        retry_set = {int(page) for page in (retry_ocr_pages or []) if int(page) > 0}
-        pages_needing_ocr = [
-            page.number
-            for page in raw_pages
-            if (retry_set and page.number in retry_set)
-            or (not retry_set and len((page.text or "").strip()) < min_chars)
-        ]
+        Behaviour is unchanged: the same per-page threshold, the same
+        contiguous batching, the same OCRmyPDF invocation, the same
+        contract_ocr_pages/contract_ocr_batches records. What moved is where
+        that logic lives - the engine is now shared with the general document
+        path, and everything contract-specific (upload_id, the collections,
+        usage metering) stays here behind the PageStore seam.
+        """
+        from .extraction.engine import PageExtractionEngine
+        from .extraction.models import PageExtractionPolicy
+        from .extraction.ocrmypdf_runner import OcrMyPdfRunner
+        from .extraction_adapters.contract_page_store import (
+            ContractPageStore,
+            ResumableContractPageStore,
+        )
 
-        page_text_overrides: Dict[int, str] = {}
-        page_status: Dict[int, Dict[str, Any]] = {}
-        for page in raw_pages:
-            page_status[page.number] = {
-                "status": "text_layer" if len((page.text or "").strip()) >= min_chars else "ocr_pending",
-                "batch_id": None,
-                "error": None,
-            }
-
-        if self.processing_config.ocr_enabled and pages_needing_ocr:
+        async def _meter(
+            *, page_count: int, page_numbers: Sequence[int], retry: bool
+        ) -> None:
             await self.usage_metering_service.check_and_record(
                 event_type=UsageEventType.OCR_PAGE,
                 organization_id=organization_id,
                 project_id=project_id,
-                quantity=len(pages_needing_ocr),
+                quantity=page_count,
                 metadata={
                     "operation": "contract_ocr",
                     "document_id": document_id,
                     "upload_id": upload_id,
-                    "page_numbers": pages_needing_ocr,
-                    "retry": bool(retry_set),
+                    "page_numbers": list(page_numbers),
+                    "retry": retry,
                 },
             )
-            batches = self._group_page_numbers(
-                pages_needing_ocr,
-                max(1, int(self.processing_config.contract_ocr_batch_size)),
+
+        # An OCR retry continues the contract's recorded run: the engine then
+        # reworks only the pages that still owe work and carries every resolved
+        # page forward (PR #28). A first ingest or a reindex has no run to
+        # continue and re-extracts every page, as before.
+        resume = bool(retry_ocr_pages) and await self.db_service.has_ocr_pages(document_id)
+        if retry_ocr_pages and not resume:
+            # No recorded run to continue: re-reading only the listed pages
+            # would rebuild every other page from a fresh native read, which
+            # returns nothing for a scan. Extract the whole contract instead.
+            logger.warning(
+                "OCR retry of %s names pages %s but no page rows exist; "
+                "re-extracting every page",
+                document_id,
+                retry_ocr_pages,
             )
-            for batch_index, batch_pages in enumerate(batches, start=1):
-                page_start, page_end = batch_pages[0], batch_pages[-1]
-                batch_id = await self.db_service.upsert_ocr_batch(
-                    document_id=document_id,
-                    upload_id=upload_id,
-                    organization_id=organization_id,
-                    project_id=project_id,
-                    page_start=page_start,
-                    page_end=page_end,
-                    status="running",
-                    retry_count=1 if retry_set else 0,
-                )
-                try:
-                    extracted = await self._run_ocr_page_batch(file_path, upload_id, batch_pages)
-                    page_text_overrides.update(extracted)
-                    for page_number in batch_pages:
-                        page_status[page_number] = {
-                            "status": "ocr_completed" if extracted.get(page_number, "").strip() else "ocr_empty",
-                            "batch_id": batch_id,
-                            "error": None if extracted.get(page_number, "").strip() else "OCR completed but no text was extracted",
-                        }
-                    await self.db_service.upsert_ocr_batch(
-                        document_id=document_id,
-                        upload_id=upload_id,
-                        organization_id=organization_id,
-                        project_id=project_id,
-                        page_start=page_start,
-                        page_end=page_end,
-                        status="completed",
-                        retry_count=1 if retry_set else 0,
-                    )
-                except Exception as exc:
-                    error = str(exc)
-                    logger.warning(
-                        "OCR batch failed for %s pages %s-%s: %s",
-                        file_path.name,
-                        page_start,
-                        page_end,
-                        error,
-                    )
-                    for page_number in batch_pages:
-                        page_status[page_number] = {
-                            "status": "ocr_failed",
-                            "batch_id": batch_id,
-                            "error": error[:500],
-                        }
-                    await self.db_service.upsert_ocr_batch(
-                        document_id=document_id,
-                        upload_id=upload_id,
-                        organization_id=organization_id,
-                        project_id=project_id,
-                        page_start=page_start,
-                        page_end=page_end,
-                        status="failed",
-                        error=error[:500],
-                        retry_count=1 if retry_set else 0,
-                    )
-        elif pages_needing_ocr:
-            for page_number in pages_needing_ocr:
-                page_status[page_number] = {
-                    "status": "ocr_disabled",
-                    "batch_id": None,
-                    "error": "OCR is disabled",
-                }
-
-        merged_pages: List[ParsedPage] = []
-        page_records: List[Dict[str, Any]] = []
-        for page in raw_pages:
-            page_text = page_text_overrides.get(page.number, page.text or "")
-            merged_pages.append(ParsedPage(number=page.number, text=page_text, start=0, end=0))
-            state = page_status.get(page.number) or {}
-            page_records.append(
-                {
-                    "document_id": document_id,
-                    "upload_id": upload_id,
-                    "organization_id": str(organization_id),
-                    "project_id": str(project_id) if project_id else None,
-                    "page_number": page.number,
-                    "batch_id": state.get("batch_id"),
-                    "status": state.get("status") or "text_layer",
-                    "error": state.get("error"),
-                    "raw_text": page_text,
-                    "raw_text_length": len(page_text),
-                    "cleaned_text": "",
-                    "cleaned_text_length": 0,
-                    "source_pdf_page_link": self._source_pdf_page_link(document_id, page.number),
-                }
-            )
-
-        return self._combine_pages(merged_pages, file_path), page_records
-
-    async def _get_pdf_page_count(self, file_path: Path) -> int:
-        def count_pages() -> int:
-            try:
-                import PyPDF2
-
-                with open(file_path, "rb") as handle:
-                    return len(PyPDF2.PdfReader(handle).pages)
-            except Exception:
-                return 0
-
-        return await asyncio.to_thread(count_pages)
-
-    @staticmethod
-    def _group_page_numbers(page_numbers: Sequence[int], batch_size: int) -> List[List[int]]:
-        groups: List[List[int]] = []
-        current: List[int] = []
-        previous: Optional[int] = None
-        for page_number in sorted({int(page) for page in page_numbers if int(page) > 0}):
-            if current and (previous is None or page_number != previous + 1 or len(current) >= batch_size):
-                groups.append(current)
-                current = []
-            current.append(page_number)
-            previous = page_number
-        if current:
-            groups.append(current)
-        return groups
-
-    async def _run_ocr_page_batch(self, file_path: Path, upload_id: str, page_numbers: Sequence[int]) -> Dict[int, str]:
-        if not page_numbers:
-            return {}
-        page_range = self._format_page_range(page_numbers)
-        batch_dir = BASE_UPLOAD_PATH / "ocr_batches" / upload_id
-        batch_dir.mkdir(parents=True, exist_ok=True)
-        output_path = batch_dir / f"{file_path.stem}_pages_{page_range.replace('-', '_')}.pdf"
-        sidecar_path = output_path.with_suffix(".txt")
-
-        executable = shutil.which("ocrmypdf")
-        if executable:
-            cmd = [
-                executable,
-                "--pages",
-                page_range,
-                "--language",
-                self.processing_config.ocr_language,
-                "--rotate-pages",
-                "--deskew",
-                "--optimize",
-                "1",
-                "--jobs",
-                str(min(2, os.cpu_count() or 2)),
-                "--sidecar",
-                str(sidecar_path),
-                str(file_path),
-                str(output_path),
-            ]
-        else:
-            cmd = [
-                sys.executable,
-                "-m",
-                "ocrmypdf",
-                "--pages",
-                page_range,
-                "--language",
-                self.processing_config.ocr_language,
-                "--rotate-pages",
-                "--deskew",
-                "--optimize",
-                "1",
-                "--jobs",
-                str(min(2, os.cpu_count() or 2)),
-                "--sidecar",
-                str(sidecar_path),
-                str(file_path),
-                str(output_path),
-            ]
-
-        result = await asyncio.to_thread(
-            subprocess.run,
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=900,
+            retry_ocr_pages = None
+        store_type = ResumableContractPageStore if resume else ContractPageStore
+        store = store_type(
+            db_service=self.db_service,
+            document_id=document_id,
+            upload_id=upload_id,
+            organization_id=organization_id,
+            project_id=project_id,
         )
-        if result.returncode != 0:
-            raise IngestionError((result.stderr or result.stdout or "OCRmyPDF batch failed").strip())
+        engine = PageExtractionEngine(
+            policy=PageExtractionPolicy(
+                ocr_enabled=self.processing_config.ocr_enabled,
+                min_text_chars_per_page=max(
+                    0, int(self.processing_config.contract_ocr_min_text_chars_per_page)
+                ),
+                batch_size=max(1, int(self.processing_config.contract_ocr_batch_size)),
+                # Contracts have no attempt boundary today; preserved as-is so
+                # this refactor changes no behaviour.
+                max_ocr_pages_per_attempt=0,
+                ocr_language=self.processing_config.ocr_language,
+            ),
+            ocr_runner=OcrMyPdfRunner(
+                work_dir=BASE_UPLOAD_PATH / "ocr_batches" / upload_id
+            ),
+            store=store,
+            meter=_meter,
+        )
 
-        return await self._extract_selected_pages_from_pdf(output_path, page_numbers)
-
-    @staticmethod
-    def _format_page_range(page_numbers: Sequence[int]) -> str:
-        ordered = sorted({int(page) for page in page_numbers if int(page) > 0})
-        if not ordered:
-            return ""
-        if len(ordered) == 1:
-            return str(ordered[0])
-        return f"{ordered[0]}-{ordered[-1]}"
-
-    async def _extract_selected_pages_from_pdf(self, pdf_path: Path, page_numbers: Sequence[int]) -> Dict[int, str]:
-        ordered = list(sorted(page_numbers))
-
-        def extract() -> Dict[int, str]:
-            try:
-                import pdfplumber
-
-                out: Dict[int, str] = {}
-                with pdfplumber.open(pdf_path) as pdf:
-                    output_count = len(pdf.pages)
-                    for index, page_number in enumerate(ordered):
-                        if output_count >= max(ordered):
-                            source_index = page_number - 1
-                        else:
-                            source_index = index
-                        if 0 <= source_index < output_count:
-                            out[page_number] = pdf.pages[source_index].extract_text() or ""
-                return out
-            except Exception as exc:
-                raise IngestionError(f"Failed to extract OCR batch text: {exc}") from exc
-
-        return await asyncio.to_thread(extract)
+        result = await engine.extract(file_path, retry_pages=retry_ocr_pages)
+        parsed = self._combine_pages(
+            [
+                ParsedPage(number=page.number, text=page.text, start=0, end=0)
+                for page in result.pages
+            ],
+            file_path,
+        )
+        outcome = build_attempt_outcome(
+            result, prior_page_attempts={}, attempts_exhausted=True
+        )
+        blank = _settled_blank_pages(result.pages)
+        unresolved = [n for n in outcome.remaining_page_numbers if n not in blank]
+        parsed.extraction = ContractExtractionVerdict(
+            state=outcome.state if unresolved else ProcessingState.COMPLETED,
+            unresolved_pages=unresolved,
+            withheld_pages=list(result.withheld_pages),
+            run_page_records=[
+                {
+                    "page_number": page.number,
+                    "status": page.status.value,
+                    "batch_id": page.batch_id,
+                }
+                for page in result.pages
+            ],
+        )
+        # Only the pages this attempt produced are written back; a page the
+        # run carried forward keeps its durable row exactly as it was.
+        return parsed, store.records
 
     @staticmethod
     def _combine_pages(pages: Sequence[ParsedPage], file_path: Path) -> ParsedDocument:
@@ -1666,6 +1616,13 @@ class ContractIngestor:
             except OSError:
                 pass
 
+            # A hold this contract's own extraction placed does not stop the
+            # extraction that may resolve it; nothing publishes until the new
+            # verdict is complete and the hold is lifted below.
+            await self._assert_current_publication_authority(
+                document_id, allow_own_extraction_hold=True
+            )
+
             logger.info(f"Starting ingestion for {filename} (upload_id: {upload_id})")
 
             # Update job status to processing
@@ -1699,6 +1656,30 @@ class ContractIngestor:
                 file_size=file_size,
                 retry_ocr_pages=retry_ocr_pages,
             )
+            verdict = parsed_doc.extraction
+            if verdict is not None and not verdict.complete:
+                # A page the engine could not settle - withheld (cid:N) text,
+                # failed or empty OCR, OCR switched off, unrenderable - means
+                # the contract's text is incomplete. Publishing the rest would
+                # complete the contract and make it evidence-ready with that
+                # page's content silently gone, so nothing publishes and the
+                # contract waits for review or an OCR retry.
+                return await self._hold_for_review(
+                    verdict,
+                    upload_id=upload_id,
+                    document_id=document_id,
+                    file_path=file_path_obj,
+                    filename=filename,
+                    organization_id=organization_id,
+                    project_id=project_id,
+                    tags=final_tags,
+                    file_size=file_size,
+                )
+            # A complete verdict may publish through this contract's own
+            # extraction hold; the hold is lifted only after publication has
+            # succeeded, so a failure part-way leaves the contract held.
+            own_hold_ok = verdict is not None
+
             text = parsed_doc.text
             logger.info(f"Extracted {len(text)} characters from {filename}")
             if not text or not text.strip():
@@ -1761,28 +1742,8 @@ class ContractIngestor:
                     },
                 )
 
-            clause_spans: List[ClauseSpan] = []
-            ai_confidence: Optional[float] = None
-            if (
-                self.processing_config.contract_ai_chunking_enabled
-                and self.clause_worker.enabled
-            ):
-                clause_spans = await self.clause_worker.extract_spans(markdown_text)
-                clause_spans, ai_confidence = self._validate_ai_clause_spans(clause_spans, markdown_text)
-
-            if clause_spans:
-                clauses = self._spans_to_clauses(
-                    clause_spans,
-                    markdown_text,
-                    ai_chunked=True,
-                    ai_confidence=ai_confidence,
-                )
-                clause_source = "contracts_ingest_ai_clause_chunks"
-                map_pages = True
-            else:
-                clauses = self.clause_extractor.extract_clauses(text)
-                clause_source = "contracts_ingest_regex"
-                map_pages = True
+            clauses, clause_source = await self.extract_clause_set(text, markdown_text)
+            map_pages = True
 
             logger.info("Extracted %s clauses from %s (source=%s)", len(clauses), filename, clause_source)
             await self.db_service.upsert_job_status(
@@ -1845,7 +1806,12 @@ class ContractIngestor:
                 # Fallback: create records without embeddings
                 records = self._payloads_to_records(payloads)
 
-            qdrant_chunks = await self._index_clause_vectors(payloads, vector_results)
+            qdrant_chunks = await self._index_clause_vectors(
+                payloads,
+                vector_results,
+                document_id=document_id,
+                allow_own_extraction_hold=own_hold_ok,
+            )
             await self.db_service.upsert_job_status(
                 upload_id,
                 str(file_path_obj),
@@ -1864,6 +1830,7 @@ class ContractIngestor:
             )
 
             # Graph sync (FalkorDB) - organization/project scoped
+            graph_skipped_reason: Optional[str] = None
             if self.contract_graph.enabled:
                 try:
                     section_type, priority = self._detect_section_type(filename)
@@ -1878,11 +1845,29 @@ class ContractIngestor:
                         priority=priority,
                     )
                     if clause_nodes:
+                        await self._assert_current_publication_authority(
+                            document_id, allow_own_extraction_hold=own_hold_ok
+                        )
                         self.contract_graph.upsert_contract_graph(doc_payload, clause_nodes)
+                    else:
+                        graph_skipped_reason = "no_clause_nodes"
+                except ContractGraphIdentityError as exc:
+                    # Expected domain state, NOT an outage: the contract graph is
+                    # project-scoped and this document has no project. Recorded
+                    # so "completed" never implies "present in the graph" - the
+                    # previous code logged this at the same level as a transport
+                    # failure, so an entire class of documents was silently
+                    # absent from every graph-backed feature.
+                    graph_skipped_reason = "not_representable: missing project scope"
+                    logger.info("Contract graph skipped for %s: %s", filename, exc)
                 except Exception as exc:
+                    graph_skipped_reason = f"graph_error: {type(exc).__name__}"
                     logger.warning("Contract graph ingestion skipped for %s: %s", filename, exc)
 
             # Insert into database
+            await self._assert_current_publication_authority(
+                document_id, allow_own_extraction_hold=own_hold_ok
+            )
             await self.db_service.insert_document_vectors(records)
 
             # Guard against silently completing a contract whose semantic
@@ -1900,6 +1885,9 @@ class ContractIngestor:
                     "would not be searchable. Refusing to mark it completed."
                 )
 
+            if own_hold_ok:
+                await self._release_extraction_hold(document_id)
+
             # Update job status to completed
             await self.db_service.upsert_job_status(
                 upload_id,
@@ -1913,6 +1901,8 @@ class ContractIngestor:
                 file_size=file_size,
                 extra={
                     "qdrant_chunks": qdrant_chunks,
+                    "graph_indexed": graph_skipped_reason is None,
+                    "graph_skipped_reason": graph_skipped_reason,
                     "processing_stage": "completed",
                     "stage_label": "Processing complete",
                     "progress": 100,
@@ -1992,6 +1982,35 @@ class ContractIngestor:
                 "file": filename,
                 "error": str(e)
             }
+
+    async def extract_clause_set(
+        self, text: str, markdown_text: Optional[str] = None
+    ) -> Tuple[List[ClauseInfo], str]:
+        """The clause set for one contract text, and which chunker produced it.
+
+        Shared by upload ingestion and Contract Master reprojection, so the two
+        cannot drift into different parsers: AI clause spans when enabled and
+        they pass the coverage check, the deterministic extractor otherwise.
+        """
+        markdown_text = text if markdown_text is None else markdown_text
+        clause_spans: List[ClauseSpan] = []
+        ai_confidence: Optional[float] = None
+        if (
+            self.processing_config.contract_ai_chunking_enabled
+            and self.clause_worker.enabled
+        ):
+            clause_spans = await self.clause_worker.extract_spans(markdown_text)
+            clause_spans, ai_confidence = self._validate_ai_clause_spans(clause_spans, markdown_text)
+
+        if clause_spans:
+            clauses = self._spans_to_clauses(
+                clause_spans,
+                markdown_text,
+                ai_chunked=True,
+                ai_confidence=ai_confidence,
+            )
+            return clauses, "contracts_ingest_ai_clause_chunks"
+        return self.clause_extractor.extract_clauses(text), "contracts_ingest_regex"
 
     @staticmethod
     def _detect_section_type(filename: Optional[str]) -> tuple[Optional[str], int]:
@@ -2228,7 +2247,7 @@ class ContractIngestor:
             chunk_type = clause.chunk_type or clause.clause_type or "clause"
             # Split long clauses intelligently
             clause_chunks = self.clause_extractor.split_long_clause(
-                clause, 
+                clause,
                 max_length=self.config.CHUNK_SIZE
             )
 
@@ -2270,7 +2289,7 @@ class ContractIngestor:
                     "section": section_heading,
                     "section_heading": section_heading,
                     "section_title": section_heading,
-                    
+
                     # NEW CLAUSE METADATA FIELDS (per markdown guide)
                     "clause_number": chunk_data['clause_number'],
                     "clause_no": chunk_data['clause_number'],
@@ -2296,7 +2315,7 @@ class ContractIngestor:
                     "page_start": page_start,
                     "page_end": page_end,
                     "source_pdf_page_link": source_pdf_page_link,
-                    
+
                     "tags": final_tags,
                     "checksum_sha256": chunk_checksum,
                     "source": clause_source,
@@ -2366,6 +2385,9 @@ class ContractIngestor:
             "organization_id": metadata.get("organization_id"),
             "project_id": metadata.get("project_id"),
             "checksum_sha256": checksum,
+            # Contract Master generation tag (reprojection only). A negative
+            # hint: it may drop a candidate, it never admits one.
+            "source_classification_revision": metadata.get("source_classification_revision"),
         }
 
         return {
@@ -2390,6 +2412,9 @@ class ContractIngestor:
         self,
         payloads: List[Dict[str, Any]],
         vector_results: Optional[List[Dict[str, Any]]] = None,
+        *,
+        document_id: Optional[str] = None,
+        allow_own_extraction_hold: bool = False,
     ) -> int:
         if not payloads or not self.processing_config.qdrant_enabled or not self.vector_client.enabled:
             return 0
@@ -2420,9 +2445,156 @@ class ContractIngestor:
                 self._build_qdrant_chunk(item.get("metadata") or {}, item.get("text") or "", len(vector))
                 for item, vector in zip(batch, batch_vectors)
             ]
+            await self._assert_current_publication_authority(
+                document_id, allow_own_extraction_hold=allow_own_extraction_hold
+            )
             total += await self.vector_client.upsert(batch_vectors, chunks)
 
         return total
+
+    async def _assert_current_publication_authority(
+        self,
+        document_id: Optional[str],
+        *,
+        allow_own_extraction_hold: bool = False,
+    ) -> None:
+        document = await resolve_canonical_document(self.db_service.db, document_id)
+        if not is_publication_blocked(document):
+            return
+        if (
+            allow_own_extraction_hold
+            and document is not None
+            and held_by_contract_extraction(document)
+            and not is_publication_blocked({**document, "processing_status": None})
+        ):
+            return
+        raise IngestionError(
+            f"Document {document_id or '<missing>'} is not authoritative for contract publication"
+        )
+
+    async def _hold_for_review(
+        self,
+        verdict: ContractExtractionVerdict,
+        *,
+        upload_id: str,
+        document_id: str,
+        file_path: Path,
+        filename: str,
+        organization_id: str,
+        project_id: Optional[str],
+        tags: List[str],
+        file_size: Optional[int],
+    ) -> Dict[str, Any]:
+        """Record that the contract's text is incomplete, and publish nothing.
+
+        The canonical Document takes the shared ``human_review_required``
+        state, so the one publication predicate (``is_consumable``) denies it
+        to every consumer - Contract Master evidence readiness, the clause
+        agent, retrieval - rather than each one having to learn about contract
+        pages.
+        """
+        pages = list(verdict.unresolved_pages)
+        withheld = list(verdict.withheld_pages)
+        listed = ", ".join(str(page) for page in pages)
+        message = (
+            f"{len(pages)} page(s) could not be read ({listed}); the contract is "
+            "incomplete until they are OCR-retried or reviewed"
+        )
+        document = await resolve_canonical_document(self.db_service.db, document_id)
+        if document is None:
+            raise IngestionError(
+                f"Document {document_id or '<missing>'} is not authoritative for contract publication"
+            )
+        now = datetime.utcnow()
+        # Never relabel another writer's review verdict as this contract's own:
+        # a later extraction would then lift a hold it did not place. If one
+        # is already in place the document is held anyway, so it stays as is.
+        await self.db_service.db.documents.update_one(
+            {
+                "_id": document["_id"],
+                "$or": [
+                    {
+                        "processing_status": {
+                            "$ne": ProcessingState.HUMAN_REVIEW_REQUIRED.value
+                        }
+                    },
+                    {"processing_error.source": CONTRACT_EXTRACTION_HOLD},
+                ],
+            },
+            {
+                "$set": {
+                    "processing_status": ProcessingState.HUMAN_REVIEW_REQUIRED.value,
+                    "processing_error": {
+                        "message": message,
+                        "pages": pages,
+                        "withheld_pages": withheld,
+                        "source": CONTRACT_EXTRACTION_HOLD,
+                        "terminal": True,
+                        "timestamp": now,
+                    },
+                    "updatedAt": now,
+                }
+            },
+        )
+        await self.db_service.upsert_job_status(
+            upload_id,
+            str(file_path),
+            filename,
+            ProcessingState.HUMAN_REVIEW_REQUIRED.value,
+            error=message,
+            organization_id=organization_id,
+            project_id=project_id,
+            tags=tags,
+            file_size=file_size,
+            extra={
+                "unresolved_pages": pages,
+                "withheld_pages": withheld,
+                "processing_stage": ProcessingState.HUMAN_REVIEW_REQUIRED.value,
+                "stage_label": f"{len(pages)} page(s) need OCR retry or review",
+                "progress": 100,
+            },
+        )
+        logger.warning(
+            "Contract %s held for review: unresolved pages %s (withheld %s)",
+            document_id,
+            pages,
+            withheld,
+        )
+        return {
+            "ok": False,
+            "human_review_required": True,
+            "upload_id": upload_id,
+            "document_id": document_id,
+            "file": filename,
+            "unresolved_pages": pages,
+            "withheld_pages": withheld,
+            "error": message,
+        }
+
+    async def _release_extraction_hold(self, document_id: str) -> None:
+        """Lift this contract's own extraction hold after a complete publication.
+
+        Only a hold contract extraction placed, and only while it is still in
+        place: the update matches both the status and the hold's owner, so an
+        adverse verdict another writer placed in between is never overwritten.
+        """
+        document = await resolve_canonical_document(self.db_service.db, document_id)
+        if document is None or not held_by_contract_extraction(document):
+            return
+        await self.db_service.db.documents.update_one(
+            {
+                "_id": document["_id"],
+                "processing_status": ProcessingState.HUMAN_REVIEW_REQUIRED.value,
+                "processing_error.source": CONTRACT_EXTRACTION_HOLD,
+            },
+            {
+                "$set": {
+                    "processing_status": ProcessingState.PROCESSING.value,
+                    "processing_error": None,
+                    "updatedAt": datetime.utcnow(),
+                }
+            },
+        )
 
     def _payloads_to_records(
         self,

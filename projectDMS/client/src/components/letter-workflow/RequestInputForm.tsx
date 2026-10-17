@@ -27,36 +27,36 @@ interface RequestInputFormProps {
   onInputRequest: (letterId: string, requestDetails: string, requestedUserId: string, dueDate?: Date) => void;
 }
 
-const RequestInputForm: React.FC<RequestInputFormProps> = ({ 
-  users, 
-  letterId, 
-  onRequestSent, 
+const RequestInputForm: React.FC<RequestInputFormProps> = ({
+  users,
+  letterId,
+  onRequestSent,
   onCancel,
   onInputRequest
 }) => {
   const [selectedUserId, setSelectedUserId] = useState<string>('');
   const [requestDetails, setRequestDetails] = useState<string>('');
   const [dueDate, setDueDate] = useState<Date | undefined>(undefined);
-  
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    
+
     if (!selectedUserId) {
       toast.error("Please select a user to request input from");
       return;
     }
-    
+
     if (!requestDetails.trim()) {
       toast.error("Please provide details about what input you need");
       return;
     }
-    
+
     // Call the input request handler
     onInputRequest(letterId, requestDetails, selectedUserId, dueDate);
-    
+
     onRequestSent();
   };
-  
+
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
       <div>
@@ -80,7 +80,7 @@ const RequestInputForm: React.FC<RequestInputFormProps> = ({
           </SelectContent>
         </Select>
       </div>
-      
+
       <div>
         <Label htmlFor="request-details">What information do you need?</Label>
         <Textarea
@@ -92,7 +92,7 @@ const RequestInputForm: React.FC<RequestInputFormProps> = ({
           className="resize-none"
         />
       </div>
-      
+
       <div>
         <Label htmlFor="due-date">Due Date (Optional)</Label>
         <Popover>
@@ -119,7 +119,7 @@ const RequestInputForm: React.FC<RequestInputFormProps> = ({
           If you need the input by a specific date, please select it here
         </p>
       </div>
-      
+
       <div className="flex justify-end gap-2 pt-2">
         <Button type="button" variant="outline" onClick={onCancel}>
           Cancel

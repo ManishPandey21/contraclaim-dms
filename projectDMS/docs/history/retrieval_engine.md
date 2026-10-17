@@ -41,4 +41,3 @@ Pydantic models live in `rbac_backend/retrieval/models.py`, `ingestion/models.py
 ## Filters and RBAC
 
 `org_id` and `project_id` are mandatory and enforced in the router. Optional filters include `tags`, `letter_no`, `chain_id`, `doc_type`, and `date_range`. Future lexical/hybrid layers can plug into the same request model without breaking the API.
-

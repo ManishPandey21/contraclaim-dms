@@ -78,4 +78,3 @@ _Sources referenced:_ `IMPLEMENTATION-SUMMARY.md`, `integrated-workflow-v2.md`, 
 - New frontend components/services enabling role selection & context previews.
 - End-to-end strategy experience aligning with role-based requirements.
 - Documentation (this file) describing the implementation path.
-

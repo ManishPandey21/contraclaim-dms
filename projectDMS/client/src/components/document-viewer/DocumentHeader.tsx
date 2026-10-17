@@ -40,7 +40,7 @@ import { toast } from "sonner";
 import type { LocalDocument } from "@/pages/DocumentViewerPage";
 import { emailService, EmailSuggestion } from "@/services/email-service";
 import { joinApiUrl } from "@/config/api";
-import { authenticatedFetch } from "@/services/http";
+import { fetchApiFileBlob } from "@/services/http";
 
 interface DocumentHeaderProps {
   document: LocalDocument | null;
@@ -230,17 +230,8 @@ const DocumentHeader: React.FC<DocumentHeaderProps> = ({
       }
 
       // Always prefer the authenticated backend endpoint; it streams local files
-      // and redirects to presigned URLs when needed.
-      const downloadApi = joinApiUrl(`/documents/${id}/download`);
-      const response = await authenticatedFetch(downloadApi);
-
-      if (!response.ok) {
-        throw new Error(
-          `Failed to download document: ${response.status} ${response.statusText}`
-        );
-      }
-
-      const blob = await response.blob();
+      // and hands back a presigned URL for stored ones (fetchApiFileBlob).
+      const blob = await fetchApiFileBlob(joinApiUrl(`/documents/${id}/download`));
       const url = window.URL.createObjectURL(blob);
 
       const link = window.document.createElement("a");

@@ -4,16 +4,35 @@ from datetime import datetime, timedelta
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from ..core.database import get_database
 from ..core.security import get_current_user
+from ..core.tenant_context import ActiveScope, active_scope
 from ..models.user import User
 from ..services.policy_service import PolicyService
 from ..services.scope_service import ScopeService
 import re
 from bson import ObjectId
 import logging
+from ..utils.error_handler import BaseDomainError
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["search"])
+
+
+async def _selection_pins(
+    selection: ActiveScope, organizations: List[str], projects: List[str]
+) -> tuple[Optional[str], Optional[str]]:
+    """CL-4A: validate the org/project filters against the navbar selection.
+
+    Every filter value may narrow the selection, never leave it (403
+    ``context_forbidden``). Returns the ``(organization_id, project_id)`` the search
+    is pinned to; ``(None, None)`` when nothing is selected.
+    """
+    for organization_id in organizations:
+        await selection.list_filters(organization_id, None)
+    for project_id in projects:
+        await selection.list_filters(None, project_id)
+    return await selection.list_filters(None, None)
+
 
 @router.get("/search/documents")
 async def search_documents(
@@ -33,15 +52,25 @@ async def search_documents(
     include_facets: bool = Query(False, description="Include search facets"),
     include_content: bool = Query(False, description="Include document content"),
     db: AsyncIOMotorDatabase = Depends(get_database),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """
     Advanced document search with filtering, sorting, and faceting
     """
     try:
         start_time = datetime.now()
-        requested_org = str(organizations[0]) if organizations else getattr(current_user, "organization_id", None)
-        requested_project = str(projects[0]) if projects else None
+        pinned_org, pinned_project = await _selection_pins(selection, organizations, projects)
+        if pinned_org:
+            # The filters were validated against the selection; the pin replaces them.
+            organizations = []
+            if pinned_project:
+                projects = []
+        requested_org = (
+            pinned_org
+            or (str(organizations[0]) if organizations else getattr(current_user, "organization_id", None))
+        )
+        requested_project = pinned_project or (str(projects[0]) if projects else None)
         await PolicyService().authorize(
             current_user,
             "dms.document.view",
@@ -50,10 +79,10 @@ async def search_documents(
             project_id=requested_project,
             audit=False,
         )
-        
+
         # Build search pipeline
         pipeline = []
-        match_conditions = {}
+        match_conditions: Dict[str, Any] = {}
 
         # RBAC scoping
         roles = set(current_user.roles or [])
@@ -74,13 +103,13 @@ async def search_documents(
                     return {"results": [], "total": 0, "page": page, "limit": limit, "time_ms": 0}
             else:
                 return {"results": [], "total": 0, "page": page, "limit": limit, "time_ms": 0}
-        
+
         # Text search. Uses the wildcard text index created once at startup in
         # core/database.py (ensure_indexes); per-request index creation was removed
         # (M5) — it added latency and silently failed against the existing index.
         if q and q.strip():
             match_conditions["$text"] = {"$search": q.strip()}
-        
+
         # Date range filter
         if date_from or date_to:
             date_filter = {}
@@ -96,13 +125,13 @@ async def search_documents(
                 except ValueError:
                     raise HTTPException(status_code=400, detail="Invalid date_to format")
             match_conditions["createdAt"] = date_filter
-        
+
         # File type filter
         if file_types:
             # Extract file extensions from filename
             file_type_regex = "|".join([rf"\.{re.escape(ft)}$" for ft in file_types])
             match_conditions["filename"] = {"$regex": file_type_regex, "$options": "i"}
-        
+
         # Organization filter
         if organizations:
             try:
@@ -116,7 +145,7 @@ async def search_documents(
                     return {"results": [], "total": 0, "page": page, "limit": limit, "time_ms": 0}
                 org_ids = sorted(permitted)
             match_conditions["organization_id"] = {"$in": org_ids}
-        
+
         # Project filter
         if projects:
             try:
@@ -130,25 +159,32 @@ async def search_documents(
                     return {"results": [], "total": 0, "page": page, "limit": limit, "time_ms": 0}
                 project_ids = sorted(permitted)
             match_conditions["project_id"] = {"$in": project_ids}
-        
+
+        # Navbar selection (CL-4A): validated against the principal's scope by
+        # resolve_active_scope, so the pin only narrows the role scoping above.
+        if pinned_org:
+            match_conditions["organization_id"] = pinned_org
+        if pinned_project:
+            match_conditions["project_id"] = pinned_project
+
         # Category filter
         if categories:
             match_conditions["categories"] = {"$in": categories}
-        
+
         # Tags filter
         if tags:
             match_conditions["tags"] = {"$in": tags}
-        
+
         # Upload type / Direction filter
         if upload_type:
             if upload_type not in ["incoming", "outgoing"]:
                 raise HTTPException(status_code=400, detail="Invalid upload_type")
             match_conditions["uploadType"] = upload_type
-        
+
         # Add match stage
         if match_conditions:
             pipeline.append({"$match": match_conditions})
-        
+
         # Add score for text search
         if q and q.strip():
             pipeline.append({
@@ -156,7 +192,7 @@ async def search_documents(
                     "score": {"$meta": "textScore"}
                 }
             })
-        
+
         # Sorting
         sort_stage = {}
         if sort_by == "relevance" and q and q.strip():
@@ -169,22 +205,22 @@ async def search_documents(
             sort_stage["size"] = -1 if sort_order == "desc" else 1
         else:
             sort_stage["createdAt"] = -1  # Default sort
-        
+
         pipeline.append({"$sort": sort_stage})
-        
+
         # Get total count
         count_pipeline = pipeline.copy()
         count_pipeline.append({"$count": "total"})
         count_result = await db.documents.aggregate(count_pipeline).to_list(1)
         total = count_result[0]["total"] if count_result else 0
-        
+
         # Add pagination
         skip = (page - 1) * limit
         pipeline.extend([
             {"$skip": skip},
             {"$limit": limit}
         ])
-        
+
         # Project fields
         project_fields = {
             "_id": 1,
@@ -199,24 +235,24 @@ async def search_documents(
             "createdAt": 1,
             "updatedAt": 1
         }
-        
+
         if q and q.strip():
             project_fields["score"] = {"$meta": "textScore"}
-        
+
         if include_content:
             project_fields["content"] = 1
-        
+
         # Add excerpt generation for text search
         if q and q.strip() and not include_content:
             project_fields["excerpt"] = {
                 "$substr": ["$content", 0, 200]
             }
-        
+
         pipeline.append({"$project": project_fields})
-        
+
         # Execute search
         results = await db.documents.aggregate(pipeline).to_list(limit)
-        
+
         # Convert ObjectIds to strings
         for result in results:
             if "_id" in result and isinstance(result["_id"], ObjectId):
@@ -225,10 +261,10 @@ async def search_documents(
                 result["organization_id"] = str(result["organization_id"])
             if "project_id" in result and isinstance(result["project_id"], ObjectId):
                 result["project_id"] = str(result["project_id"])
-        
+
         # Calculate search time
         search_time = int((datetime.now() - start_time).total_seconds() * 1000)
-        
+
         response = {
             "results": results,
             "total": total,
@@ -237,15 +273,15 @@ async def search_documents(
             "hasMore": skip + len(results) < total,
             "searchTime": search_time
         }
-        
+
         # Add facets if requested
         if include_facets:
             facets = await _get_search_facets(db, match_conditions)
             response["facets"] = facets
-        
+
         return response
 
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         # BUGFIX (H4): client validation errors (e.g. invalid date_from/date_to or
         # upload_type) raise HTTPException(400). Without re-raising here, the broad
         # `except Exception` below swallowed them and returned a misleading 500.
@@ -259,7 +295,8 @@ async def get_search_suggestions(
     q: str = Query(..., min_length=2, description="Partial search query"),
     limit: int = Query(5, ge=1, le=20, description="Number of suggestions"),
     db: AsyncIOMotorDatabase = Depends(get_database),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """
     Get search suggestions based on partial query
@@ -289,6 +326,11 @@ async def get_search_suggestions(
                 match_condition["project_id"] = {"$in": sorted(allowed_projects)}
             else:
                 return {"suggestions": []}
+        pinned_org, pinned_project = await selection.list_filters(None, None)
+        if pinned_org:
+            match_condition["organization_id"] = pinned_org
+        if pinned_project:
+            match_condition["project_id"] = pinned_project
 
         # Get suggestions from document names
         name_pipeline = [
@@ -301,18 +343,20 @@ async def get_search_suggestions(
             },
             {"$limit": limit}
         ]
-        
+
         name_results = await db.documents.aggregate(name_pipeline).to_list(limit)
         suggestions.extend([doc["name"] for doc in name_results])
-        
+
         # Get suggestions from search history (if implemented)
         # This would require a search_history collection
-        
+
         # Remove duplicates and limit
         unique_suggestions = list(dict.fromkeys(suggestions))[:limit]
-        
+
         return {"suggestions": unique_suggestions}
-        
+
+    except (BaseDomainError, HTTPException):
+        raise
     except Exception as e:
         logger.error(f"Suggestions error: {str(e)}")
         return {"suggestions": []}
@@ -341,9 +385,9 @@ async def get_popular_searches(
             {"term": "certificate", "count": 25},
             {"term": "warranty", "count": 20}
         ]
-        
+
         return {"searches": popular_terms[:limit]}
-        
+
     except Exception as e:
         logger.error(f"Popular searches error: {str(e)}")
         return {"searches": []}
@@ -367,10 +411,10 @@ async def track_search(
             "timestamp": datetime.utcnow(),
             "session_id": search_data.get("session_id"),
         }
-        
+
         await db.search_analytics.insert_one(analytics_doc)
         return {"status": "tracked"}
-        
+
     except Exception as e:
         logger.error(f"Search tracking error: {str(e)}")
         return {"status": "failed"}
@@ -402,11 +446,11 @@ async def get_search_analytics(
             date_filter["$gte"] = datetime.fromisoformat(date_from)
         if date_to:
             date_filter["$lte"] = datetime.fromisoformat(date_to)
-        
+
         match_condition = {}
         if date_filter:
             match_condition["timestamp"] = date_filter
-        
+
         # Get top searches
         top_searches_pipeline = [
             {"$match": match_condition},
@@ -420,9 +464,9 @@ async def get_search_analytics(
             {"$sort": {"count": -1}},
             {"$limit": 20}
         ]
-        
+
         top_searches = await db.search_analytics.aggregate(top_searches_pipeline).to_list(20)
-        
+
         # Get search volume over time
         volume_pipeline = [
             {"$match": match_condition},
@@ -445,15 +489,15 @@ async def get_search_analytics(
             },
             {"$sort": {"date": 1}}
         ]
-        
+
         volume_data = await db.search_analytics.aggregate(volume_pipeline).to_list(100)
-        
+
         return {
             "top_searches": top_searches,
             "volume_over_time": volume_data
         }
-        
-    except HTTPException:
+
+    except (BaseDomainError, HTTPException):
         # Let the 403 admin gate (and any other client error) propagate instead
         # of being masked as a 500 by the broad handler below.
         raise
@@ -465,7 +509,8 @@ async def get_search_analytics(
 async def semantic_search(
     search_data: Dict[str, Any] = Body(...),
     db: AsyncIOMotorDatabase = Depends(get_database),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """
     Perform semantic search using AI/vector similarity
@@ -474,17 +519,32 @@ async def semantic_search(
         query = search_data.get("query", "")
         limit = search_data.get("limit", 10)
         threshold = search_data.get("threshold", 0.7)
-        
+
         # This would require vector embeddings and similarity search
-        # For now, fall back to text search
+        # For now, fall back to text search. A direct call gets no FastAPI
+        # defaults: every parameter is passed, or its Query(...) sentinel leaks in.
         return await search_documents(
             q=query,
+            page=1,
             limit=limit,
+            sort_by="relevance",
+            sort_order="desc",
+            date_from=None,
+            date_to=None,
+            file_types=[],
+            organizations=[],
+            projects=[],
+            categories=[],
+            tags=[],
+            upload_type=None,
+            include_facets=False,
+            include_content=False,
             db=db,
-            current_user=current_user
+            current_user=current_user,
+            selection=selection,
         )
-        
-    except HTTPException:
+
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error(f"Semantic search error: {str(e)}")
@@ -496,7 +556,7 @@ async def _get_search_facets(db: AsyncIOMotorDatabase, base_match: Dict[str, Any
     """
     try:
         facets = {}
-        
+
         # Organizations facet
         org_pipeline = [
             {"$match": base_match},
@@ -504,9 +564,9 @@ async def _get_search_facets(db: AsyncIOMotorDatabase, base_match: Dict[str, Any
             {"$sort": {"count": -1}},
             {"$limit": 20}
         ]
-        
+
         org_results = await db.documents.aggregate(org_pipeline).to_list(20)
-        
+
         # Get organization names
         org_ids = [result["_id"] for result in org_results if result["_id"]]
         org_names = {}
@@ -516,7 +576,7 @@ async def _get_search_facets(db: AsyncIOMotorDatabase, base_match: Dict[str, Any
                 {"name": 1}
             ).to_list(len(org_ids))
             org_names = {str(org["_id"]): org["name"] for org in orgs}
-        
+
         facets["organizations"] = [
             {
                 "_id": str(result["_id"]) if result["_id"] else "unknown",
@@ -525,7 +585,7 @@ async def _get_search_facets(db: AsyncIOMotorDatabase, base_match: Dict[str, Any
             }
             for result in org_results
         ]
-        
+
         # Categories facet
         cat_pipeline = [
             {"$match": base_match},
@@ -534,13 +594,13 @@ async def _get_search_facets(db: AsyncIOMotorDatabase, base_match: Dict[str, Any
             {"$sort": {"count": -1}},
             {"$limit": 20}
         ]
-        
+
         cat_results = await db.documents.aggregate(cat_pipeline).to_list(20)
         facets["categories"] = [
             {"name": result["_id"], "count": result["count"]}
             for result in cat_results
         ]
-        
+
         # File types facet
         file_type_pipeline = [
             {"$match": base_match},
@@ -559,15 +619,15 @@ async def _get_search_facets(db: AsyncIOMotorDatabase, base_match: Dict[str, Any
             {"$sort": {"count": -1}},
             {"$limit": 10}
         ]
-        
+
         file_type_results = await db.documents.aggregate(file_type_pipeline).to_list(10)
         facets["fileTypes"] = [
             {"type": result["_id"], "count": result["count"]}
             for result in file_type_results
         ]
-        
+
         return facets
-        
+
     except Exception as e:
         logger.error(f"Facets error: {str(e)}")
         return {}

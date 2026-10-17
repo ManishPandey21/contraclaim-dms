@@ -62,8 +62,12 @@ class StatusResponse(BaseModel):
 
     upload_id: str
     document_id: Optional[str] = None
+    #: queued | processing | completed | failed | human_review_required
     status: str
     filename: Optional[str] = None
+    #: Pages extraction could not settle; set while status is human_review_required.
+    unresolved_pages: Optional[List[int]] = None
+    withheld_pages: Optional[List[int]] = None
     categories: Optional[List[str]] = None
     error: Optional[str] = None
     organization_id: Optional[str] = None

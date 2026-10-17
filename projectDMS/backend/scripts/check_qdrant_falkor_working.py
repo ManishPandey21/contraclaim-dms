@@ -83,20 +83,20 @@ def _falkor_letter_payload(
 def _count_falkor_letters(service: FalkorGraphService) -> Optional[int]:
     if not service.enabled:
         return None
-    
+
     # Since _client is None and _execute doesn't work, let's try a different approach
     try:
         # Try to use a direct Redis connection as fallback
         import redis
-        
+
         # Get connection details from environment
         redis_url = os.getenv('FALKORDB_URL', 'redis://localhost:6380')
         redis_password = os.getenv('FALKORDB_PASSWORD')
-        
+
         # Parse Redis URL
         if redis_url.startswith('redis://'):
             redis_url = redis_url[8:]
-        
+
         # Extract host and port
         if '@' in redis_url:
             # Format: password@host:port
@@ -112,7 +112,7 @@ def _count_falkor_letters(service: FalkorGraphService) -> Optional[int]:
             else:
                 host, port = redis_url, '6379'
             creds = redis_password
-        
+
         # Connect and query
         client = redis.Redis(
             host=host,
@@ -120,16 +120,16 @@ def _count_falkor_letters(service: FalkorGraphService) -> Optional[int]:
             password=creds if '@' not in redis_url else redis_password,
             decode_responses=True
         )
-        
+
         # Execute graph query
         result = client.execute_command("GRAPH.QUERY", "G", "MATCH (l:Letter) RETURN COUNT(l)")
         client.close()
-        
+
         # Parse result - format is usually [['COUNT(l)'], [[count]]]
         if result and len(result) >= 2 and result[1]:
             return int(result[1][0][0])
         return 0
-        
+
     except Exception as exc:
         print(f"[WARN] Unable to count Falkor letters: {exc}")
         return None
@@ -213,7 +213,7 @@ async def main(args: argparse.Namespace) -> int:
     # Test Falkor connection first
     print("\n--- Testing FalkorDB Connection ---")
     connection_ok = _test_falkor_connection()
-    
+
     total_qdrant = _count_qdrant_total(qdrant, config.qdrant_collection)
     if total_qdrant is not None:
         print(f"Qdrant total vectors: {total_qdrant}")

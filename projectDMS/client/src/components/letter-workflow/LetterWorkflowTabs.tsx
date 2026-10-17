@@ -11,8 +11,8 @@ interface LetterWorkflowTabsProps {
   children: React.ReactNode;
 }
 
-export const LetterWorkflowTabs: React.FC<LetterWorkflowTabsProps> = ({ 
-  activeTab, 
+export const LetterWorkflowTabs: React.FC<LetterWorkflowTabsProps> = ({
+  activeTab,
   setActiveTab,
   children
 }) => {
@@ -76,7 +76,7 @@ export const LetterWorkflowTabs: React.FC<LetterWorkflowTabsProps> = ({
           </TabsTrigger>
         ))}
       </TabsList>
-      
+
       <TabsContent value={activeTab} className="space-y-4">
         <Card>
           <CardHeader>

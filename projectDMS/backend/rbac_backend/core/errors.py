@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError as PydanticValidationError
 
 from ..schemas.common import ErrorResponse
+from ..utils.error_handler import BaseDomainError
 
 logger = logging.getLogger(__name__)
 
@@ -136,10 +137,45 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
     return await _render_error_response(status.HTTP_500_INTERNAL_SERVER_ERROR, response)
 
 
+async def domain_error_handler(request: Request, exc: BaseDomainError) -> JSONResponse:
+    """Render a domain error at its own status when no route decorator did.
+
+    `handle_exceptions` renders `BaseDomainError` for the routes it wraps. Routes
+    that re-raise the family without that decorator used to reach Starlette's
+    500, which is the F-A8W-B3 outcome one layer further out: an
+    `AuthorizationError` refusal reported as an outage. Starlette resolves
+    handlers along the exception's MRO, so this one is chosen before any
+    `Exception` fallback.
+    """
+
+    status_code = getattr(exc, "http_status", status.HTTP_400_BAD_REQUEST)
+    logger.warning("%s domain error on %s: %s", exc.__class__.__name__, request.url.path, exc)
+    server_side = status_code >= status.HTTP_500_INTERNAL_SERVER_ERROR
+    response = ErrorResponse(
+        error=getattr(exc, "error", None) or exc.__class__.__name__,
+        # A 5xx domain error's text is internal (`f"... {exc}"` is common), so
+        # only a refusal's own message reaches the client.
+        message="An unexpected error occurred" if server_side else str(exc),
+        details=None if server_side else getattr(exc, "details", None),
+        code=getattr(exc, "code", None),
+    )
+    # The same `{"detail": ...}` envelope `handle_exceptions` produces, which is
+    # what the client reads (`err.response.data.detail`); no HTTPException
+    # handler is registered on the app, so every other error has this shape.
+    return JSONResponse(status_code=status_code, content={"detail": response.model_dump_non_null()})
+
+
+def register_domain_error_handler(app: FastAPI) -> None:
+    """Attach only the domain-error backstop, leaving every other handler as is."""
+
+    app.add_exception_handler(BaseDomainError, domain_error_handler)
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     """Attach standard exception handlers to ``app`` if not already registered."""
 
     handlers: Iterable[tuple[Any, Any]] = (
+        (BaseDomainError, domain_error_handler),
         (HTTPException, http_exception_handler),
         (RequestValidationError, request_validation_exception_handler),
         (PydanticValidationError, pydantic_validation_exception_handler),
@@ -152,6 +188,8 @@ def register_exception_handlers(app: FastAPI) -> None:
 
 __all__ = [
     "ErrorResponse",
+    "domain_error_handler",
+    "register_domain_error_handler",
     "generic_exception_handler",
     "http_exception_handler",
     "pydantic_validation_exception_handler",

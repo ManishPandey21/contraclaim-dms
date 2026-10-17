@@ -7,10 +7,23 @@ from typing import Any, Dict, Iterable, List, Optional
 from fastapi import HTTPException, status
 
 from ...models.arbitration_drafting import ArbitrationSelectedReferenceCreate
-from ...models.contract_models import ContractSearchRequest
-from ..contract_service import ContractService
+from ...models.contract_document import CurrentState
+from ..contract_scope_resolver import (
+    ProjectEvidenceUniverse,
+    resolve_authorized_project_universe,
+)
+from ..document_relationship_service import DocumentRelationshipService
 from ..evidence_graph_service import EvidenceGraphService
+from .matrix_evidence_authority import matrix_clause_fence
 from .matrix_registry import MATRIX_COLLECTIONS
+
+#: A bound on the clause rows read out of an ALREADY ELIGIBLE universe, and on
+#: the rows that reach the ledger. Both apply after the canonical fence, never
+#: before it: bounding first and authorising afterwards lets ineligible rows
+#: spend the window and starve a lawful clause out of a pleading entirely - a
+#: leak that presents as an outage.
+CONTRACT_CLAUSE_CANDIDATE_LIMIT = 60
+CONTRACT_CLAUSE_SOURCE_LIMIT = 5
 
 
 VERIFIED_SOURCE_STATUSES = {
@@ -150,6 +163,125 @@ def _money(value: Any, currency: Optional[str] = None) -> Optional[str]:
     return f"{currency or ''} {value}".strip()
 
 
+from ..publication_policy import (
+    authoritative_fact_text,
+    authoritative_summary,
+    consumable_derived_text,
+    document_id_candidates,
+    is_consumable,
+    resolve_derived_authority,
+    resolve_document_authority,
+)
+
+
+#: Fields the reference hydrator computes for SAFETY rather than for display.
+#:
+#: `_ledger_row` rebuilds the ledger row from a fixed key literal, so a field
+#: that is not copied across simply ceases to exist - and a downstream guard on
+#: it becomes unreachable without any error. That is how `authority_denied`
+#: spent its whole life as dead code while looking like an implemented control.
+#:
+#: A test asserts every name here survives construction, so adding a safety
+#: field without wiring it through fails the build instead of going quiet.
+LEDGER_SAFETY_FIELDS = ("authority_denied",)
+
+#: Chronology fields that are RECORDED ABOUT a document rather than EXTRACTED
+#: FROM it, so publication authority does not reach them. Dates, parties, page
+#: numbers, letter numbers, classifications and ids keep a withheld event
+#: identifiable and reviewable; without them a blocked row is unciteable.
+#:
+#: Deliberately an allowlist. `metadata["event"]` used to be `{**row, **event}`,
+#: which re-published the very span the label and snippet had just withheld -
+#: and a denylist over that spread would fail open the moment a writer added a
+#: field. Extracted text (`event`, `title`, `description`, `source_spans`) is
+#: absent here on purpose and re-added only after an authority decision.
+SAFE_EVENT_METADATA_FIELDS = (
+    "date",
+    "document_ref",
+    "party_responsible",
+    "clause",
+    "issue_link",
+    "claim_link",
+    "pleading_use",
+    "chronology_id",
+    "chronology_event_id",
+    "evidence",
+)
+
+#: The same rule for fields copied off the chronology event itself.
+SAFE_CHRONOLOGY_EVENT_FIELDS = (
+    "event_date",
+    "date_text",
+    "date_type",
+    "source_document_id",
+    "source_document_name",
+    "source_page",
+    "letter_no",
+    "from_party",
+    "to_party",
+    "contract_clauses",
+    "issue_tags",
+    "claim_heads",
+    "event_classification",
+    "impact_type",
+    "confidence_score",
+    "verification_status",
+    "pleading_use",
+    "related_document_ids",
+)
+
+
+def _safe_event_metadata(
+    row: Dict[str, Any],
+    event: Optional[Dict[str, Any]],
+    gated_event: Any,
+    gated_description: Any,
+) -> Dict[str, Any]:
+    """Construct the published event metadata; never filter a raw spread.
+
+    The two text fields are re-admitted only in the form the authority check
+    already returned, so this cannot disagree with the label and snippet built
+    from the same decision a few lines above.
+    """
+    metadata: Dict[str, Any] = {
+        key: row.get(key) for key in SAFE_EVENT_METADATA_FIELDS if row.get(key) not in (None, "")
+    }
+    for key in SAFE_CHRONOLOGY_EVENT_FIELDS:
+        value = (event or {}).get(key)
+        if value not in (None, "", []):
+            metadata[f"event_{key}"] = value
+    if gated_event:
+        metadata["event"] = gated_event
+    if gated_description:
+        metadata["event_description"] = gated_description
+    manual_notes = (event or {}).get("manual_notes")
+    if manual_notes:
+        # Authored by counsel, not extracted - authority has no jurisdiction.
+        metadata["event_manual_notes"] = manual_notes
+    return metadata
+
+#: Every flag `_annotate_source_quality` can emit.
+#:
+#: Exported because the filing gate has to decide which of these block a filing,
+#: and it must decide over the REAL vocabulary. It previously restated its own
+#: set - `manual_or_unverified`, `source_drift`, `stale` - none of which any
+#: code produces, so the only per-source safety branch in the filing gate was
+#: dead. Deriving the gate's set from this one means a new flag cannot be
+#: invented without a filing decision being made.
+PRODUCIBLE_QUALITY_FLAGS = frozenset(
+    {
+        "missing_citation",
+        "missing_snippet",
+        "authority_denied",
+        "missing_exhibit_id",
+        "missing_source_link",
+        "not_verified_for_filing",
+        "user_supplied",
+        "unverified_ai_suggestion",
+    }
+)
+
+
 class ArbitrationContextBuilder:
     def __init__(self, db: Any) -> None:
         self.db = db
@@ -165,17 +297,27 @@ class ArbitrationContextBuilder:
         include_unverified_graph_links: bool = False,
     ) -> Dict[str, Any]:
         context_warnings: List[str] = []
-        references = await self.rehydrate_selected_references(draft, references)
+        references = await self.rehydrate_selected_references(
+            draft, references, current_user=current_user
+        )
         source_ledger = [self._ledger_row(ref, idx) for idx, ref in enumerate(references, start=1)]
         source_ledger.extend(
             await self._case_workspace_sources(
                 draft,
                 len(source_ledger),
+                current_user=current_user,
                 include_review_sources=include_unverified_graph_links,
                 context_warnings=context_warnings,
             )
         )
-        source_ledger.extend(await self._contract_search_sources(draft, current_user, len(source_ledger)))
+        source_ledger.extend(
+            await self._contract_clause_sources(
+                draft,
+                current_user,
+                len(source_ledger),
+                context_warnings,
+            )
+        )
         source_ledger.extend(
             await self._verified_graph_sources(
                 draft,
@@ -185,7 +327,7 @@ class ArbitrationContextBuilder:
             )
         )
         source_ledger = self._dedupe(source_ledger)
-        self._annotate_source_quality(source_ledger, context_warnings)
+        await self._annotate_source_quality(source_ledger, context_warnings)
         matrix_context = self._matrix_context(source_ledger)
         self._expert_consistency_warnings(matrix_context, context_warnings)
         missing = self._missing_evidence(draft, source_ledger, claim_heads, paragraph_responses)
@@ -203,6 +345,8 @@ class ArbitrationContextBuilder:
         self,
         draft: Dict[str, Any],
         references: List[Dict[str, Any]],
+        *,
+        current_user: Any,
     ) -> List[Dict[str, Any]]:
         """Resolve selected IDs against scoped server records and discard client prose.
 
@@ -210,8 +354,19 @@ class ArbitrationContextBuilder:
         marked unverified and are blocked by filing validation. Every other
         selected reference must resolve to an authoritative scoped record or an
         approved matrix revision belonging to the linked case.
+
+        `current_user` is REQUIRED and keyword-only. A selected CLAUSE is
+        resolved inside the evidence universe canonical authority gives THIS
+        ACTOR, so a hydration without a principal is not a weaker check - it is
+        an unanswerable question. Keyword-only and mandatory means a caller that
+        forgets fails loudly here rather than silently hydrating against the
+        draft's own workspace stamp, which is what this path used to do.
         """
 
+        # The canonical universe is resolved at most ONCE per call, lazily: a
+        # draft may carry many selections, and a page of them must not turn into
+        # a page of applicability enumerations.
+        fence: Dict[str, Any] = {}
         hydrated: List[Dict[str, Any]] = []
         for reference in references or []:
             source_type = str(reference.get("source_type") or "")
@@ -229,11 +384,19 @@ class ArbitrationContextBuilder:
                 continue
             matrix_row_id = (reference.get("metadata") or {}).get("matrix_row_id")
             if matrix_row_id:
-                matrix_reference = await self._rehydrate_matrix_reference(draft, str(matrix_row_id), source_type)
+                matrix_reference = await self._rehydrate_matrix_reference(
+                    draft,
+                    str(matrix_row_id),
+                    source_type,
+                    current_user=current_user,
+                    fence=fence,
+                )
                 if matrix_reference:
                     hydrated.append({**matrix_reference, "_id": reference.get("_id"), "draft_id": reference.get("draft_id")})
                     continue
-            authoritative = await self._rehydrate_direct_reference(draft, reference)
+            authoritative = await self._rehydrate_direct_reference(
+                draft, reference, current_user, fence
+            )
             if not authoritative:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -251,10 +414,28 @@ class ArbitrationContextBuilder:
         draft: Dict[str, Any],
         matrix_row_id: str,
         source_type: str,
+        *,
+        current_user: Any = None,
+        fence: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
+        """Resolve a selection that names an APPROVED case matrix row.
+
+        `current_user` and `fence` are supplied by
+        `rehydrate_selected_references`, the only production caller. They
+        default so that a caller which omits them resolves a CLAUSE row inside
+        an EMPTY universe - i.e. refuses it - rather than inside the matrix
+        row's own provenance. Absent authority denies; it never falls back.
+
+        The fence object is memoised in the same per-hydration dict the direct
+        reference path uses, so a page of matrix selections resolves the
+        canonical universe once.
+        """
         case_id = draft.get("case_id")
         if not case_id:
             return None
+        matrix_fence = (fence if fence is not None else {}).setdefault(
+            "matrix", matrix_clause_fence(self.db, draft, current_user)
+        )
         scope = {
             "_id": matrix_row_id,
             "case_id": case_id,
@@ -283,7 +464,13 @@ class ArbitrationContextBuilder:
                     "source_id": str(row.get("source_id")),
                     "label": row.get("title") or row.get("document_type") or row.get("exhibit_id") or "Case document",
                     "citation": row.get("exhibit_id") or row.get("letter_no") or row.get("title"),
-                    "snippet": row.get("relevance_note") or row.get("summary") or row.get("document_type"),
+                    # Derived from the source document's extracted text, so it
+                    # is gated by that document's CURRENT authority - not by the
+                    # matrix approval flag, which says nothing about extraction
+                    # trust. Falls back to document_type, which is metadata.
+                    "snippet": await consumable_derived_text(
+                        self.db, row, "relevance_note", "summary"
+                    ) or row.get("document_type"),
                     "page_numbers": row.get("page_numbers") or [],
                     "letter_no": row.get("letter_no"),
                     "allowed_use": row.get("allowed_use") or "fact",
@@ -296,12 +483,29 @@ class ArbitrationContextBuilder:
                     },
                 }
             if slug == "clause-matrix":
+                if not await matrix_fence.admits_clause_row(row):
+                    # HUMAN APPROVAL IS NOT LEGAL APPLICABILITY. The row says a
+                    # human judged this clause relevant; only the canonical
+                    # Contract Master universe says whether the instrument
+                    # governs this project right now. Returning None takes the
+                    # hydrator's existing door - `400 Selected arbitration
+                    # source could not be verified in the current scope` - so a
+                    # refused selection is never persisted and never appears as
+                    # a rejected-but-recorded ledger row.
+                    return None
                 return {
                     "source_type": "clause",
                     "source_id": str(row.get("clause_source_id") or row.get("source_id") or row.get("_id")),
                     "label": row.get("topic") or row.get("clause_number") or "Clause matrix row",
                     "citation": row.get("clause_number") or row.get("topic"),
-                    "snippet": row.get("clause_text_excerpt") or row.get("obligation_or_right"),
+                    # Derived from the parent document, like the ledger path.
+                    "snippet": await consumable_derived_text(
+                        self.db,
+                        row,
+                        "clause_text_excerpt",
+                        source_type="clause",
+                        source_id=row.get("clause_source_id"),
+                    ) or row.get("obligation_or_right"),
                     "page_numbers": row.get("page_numbers") or [],
                     "clause_number": row.get("clause_number"),
                     "allowed_use": "clause",
@@ -318,7 +522,11 @@ class ArbitrationContextBuilder:
                 "source_id": str(row.get("source_id") or row.get("_id")),
                 "label": row.get("title") or row.get("claim_head") or row.get("issue") or row.get("topic") or slug,
                 "citation": row.get("citation") or row.get("claim_no") or row.get("issue_no"),
-                "snippet": row.get("facts") or row.get("summary") or row.get("relevance_note"),
+                # `facts` is matrix content authored in-app; summary and
+                # relevance_note are derived from the source document.
+                "snippet": row.get("facts") or await consumable_derived_text(
+                    self.db, row, "summary", "relevance_note"
+                ),
                 "page_numbers": row.get("page_numbers") or [],
                 "allowed_use": row.get("allowed_use") or "fact",
                 "metadata": {
@@ -330,15 +538,75 @@ class ArbitrationContextBuilder:
             }
         return None
 
+    async def _selected_clause_universe(
+        self,
+        draft: Dict[str, Any],
+        current_user: Any,
+        fence: Dict[str, Any],
+    ) -> Optional[List[str]]:
+        """The eligible documents a selected CLAUSE may be resolved inside.
+
+        The SAME canonical universe the automatic contract-evidence path
+        consumes, resolved through the SAME seam - there is no second
+        implementation of applicability, lifecycle, publication or projection
+        currency here, and there must never be one.
+
+        ``None`` means the question could not be ANSWERED; an empty list means
+        nothing applicable governs this project. Both refuse every clause
+        selection, and neither may widen: a selection cannot expand authority,
+        so there is no broader lookup that would be safer than none.
+
+        Memoised in ``fence`` for the duration of one hydration call.
+        """
+        if "eligible" not in fence:
+            universe = await self._contract_evidence_universe(draft, current_user, [])
+            fence["eligible"] = (
+                None if universe is None else sorted(universe.eligible_document_ids)
+            )
+        return fence["eligible"]
+
     async def _rehydrate_direct_reference(
         self,
         draft: Dict[str, Any],
         reference: Dict[str, Any],
+        current_user: Any = None,
+        fence: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
+        """Resolve ONE selected reference against a server record.
+
+        `current_user` and `fence` are supplied by
+        `rehydrate_selected_references`, the only production caller. They
+        default so that a caller which omits them resolves a CLAUSE inside an
+        EMPTY universe - i.e. refuses it - rather than inside the draft's own
+        workspace stamp. Absent authority denies; it never falls back.
+        """
         source_type = str(reference.get("source_type") or "")
         source_id = str(reference.get("source_id") or "")
         if not source_id:
             return None
+        eligible_documents: Optional[List[str]] = None
+        if source_type == "clause":
+            # USER SELECTION IS NOT AUTHORITY. A clause selection names a
+            # contract instrument, and only the canonical Contract Master
+            # universe decides whether that instrument governs this project
+            # right now - not the row's ingest stamp, not the identifier the
+            # client sent, not the fact that the UI offered it.
+            #
+            # The universe is resolved BEFORE any clause store is read, and it
+            # is part of the QUERY below rather than a filter over its result.
+            # An unauthorised chunk that is read is an unauthorised chunk one
+            # refactor away from being kept: it has already been in memory
+            # beside the ledger, the prompt and the input hash.
+            #
+            # Deliberately CLAUSE-scoped. A letter, exhibit, claim or event is
+            # not a contract instrument and has no applicability aggregate;
+            # fencing those here would delete lawful correspondence from live
+            # pleadings, which is an outage dressed as a containment.
+            eligible_documents = await self._selected_clause_universe(
+                draft, current_user, fence if fence is not None else {}
+            )
+            if not eligible_documents:
+                return None
         collection_names = {
             "document": ("documents",),
             "letter": ("letters", "documents"),
@@ -348,19 +616,39 @@ class ArbitrationContextBuilder:
             "payment_event": ("ipc_bills",),
             "bank_guarantee": ("bank_guarantees",),
             "chronology_event": ("matter_chronology_events",),
-            "project_event": ("matter_chronology_events",),
+            "project_event": ("project_events",),
             "expert_report": ("documents",),
         }.get(source_type, ())
         for collection_name in collection_names:
-            query: Dict[str, Any] = {"_id": source_id}
-            if draft.get("organization_id"):
-                query["organization_id"] = draft.get("organization_id")
-            if draft.get("project_id"):
-                query["project_id"] = draft.get("project_id")
+            # Both fixes together, deliberately. The identifier bug (raw
+            # string against ObjectId-keyed collections) was masking the scope
+            # bug: almost nothing matched, so the conditional filter never had
+            # the chance to widen. Fixing the id alone would have turned a
+            # silent availability bug into a cross-tenant leak of
+            # claim/variation/payment/bank-guarantee/chronology records, which
+            # apply no document-authority check because they are independent
+            # application records - tenant scope is their only gate.
+            query: Dict[str, Any] = {
+                "_id": {"$in": document_id_candidates(source_id)},
+                "organization_id": draft.get("organization_id"),
+                "project_id": draft.get("project_id"),
+            }
+            if eligible_documents is not None:
+                query["document_id"] = {"$in": eligible_documents}
             record = await self.db[collection_name].find_one(query)
             if not record and source_type == "clause" and collection_name == "document_vectors":
+                # The client may hold the PARENT document id rather than a chunk
+                # id. That widens which row answers, never which documents are
+                # eligible, so the fence is INTERSECTED with the requested id
+                # instead of being replaced by it.
                 query.pop("_id", None)
-                query["document_id"] = source_id
+                query["document_id"] = {
+                    "$in": [
+                        candidate
+                        for candidate in (eligible_documents or [])
+                        if str(candidate) == source_id
+                    ]
+                }
                 record = await self.db[collection_name].find_one(query)
             if not record:
                 continue
@@ -379,17 +667,75 @@ class ArbitrationContextBuilder:
                 or record.get("variation_number")
                 or record.get("filename")
             )
-            snippet = (
-                record.get("summary")
-                or record.get("ocrText")
-                or record.get("text")
-                or record.get("text_enriched")
-                or record.get("description")
-                or label
-            )
+            # G34: these records come from document_vectors / contract_clauses,
+            # which carry no processing_status - so asking THEM whether they are
+            # consumable always said yes, and the chain fell through to raw
+            # text. A guard that reads the wrong record is no guard.
+            #
+            # But WHICH record is canonical depends on the collection that
+            # matched, and an earlier version of this guard ignored that: it
+            # always resolved `record["document_id"]`, a field only
+            # document_vectors/contract_clauses carry. For `documents` the
+            # record IS canonical, and letters/claims/variations/events have no
+            # such field at all - so 8 of the 9 source types resolved to
+            # "no_document_id", were denied, and had their snippet silently
+            # collapsed to the label while still reporting verified/strong.
+            if collection_name in {"document_vectors", "contract_clauses"}:
+                # Partial record: resolve back to the document it came from.
+                decision_ok = (
+                    await resolve_document_authority(
+                        self.db,
+                        record.get("document_id") or record.get("documentId"),
+                    )
+                ).consumable
+            elif collection_name == "documents":
+                # Already the canonical document.
+                decision_ok = is_consumable(record)
+            elif record.get("source_document_id"):
+                # A chronology event is only an application record when a human
+                # wrote it. `ChronologySuggestionService` lifts `description`
+                # straight out of a document's extracted span
+                # (`chronology.py:530`) and records `source_document_id`
+                # alongside it - so an event WITH that pointer is a document
+                # derivative, and the snippet chain below reaches
+                # `record["description"]`. Lumping it in with claims and
+                # variations meant the one path in this file that was never
+                # converted handed the span back verbatim.
+                #
+                # Keyed on the provenance field the writer actually sets, not on
+                # source_type: a manual event has no such pointer and stays
+                # application content, which is why this is not a blanket gate.
+                decision_ok = (
+                    await resolve_document_authority(
+                        self.db, record.get("source_document_id")
+                    )
+                ).consumable
+            else:
+                # Independent application records (letters, claims, variations,
+                # manually authored chronology events). They are not
+                # extraction-controlled document content and carry their own
+                # approval gate via _is_verified_source, so the
+                # document-authority model does not apply to them.
+                decision_ok = True
+
+            authority_denied = not decision_ok
+            if not decision_ok:
+                snippet = label
+            else:
+                # Source fields first - a chunk row's own `text` included; the
+                # LLM summary only when the record carries nothing else.
+                snippet = (
+                    authoritative_fact_text(record)
+                    or record.get("text")
+                    or record.get("text_enriched")
+                    or record.get("description")
+                    or authoritative_summary(record)
+                    or label
+                )
             return {
                 "source_type": source_type,
                 "source_id": source_id,
+                "authority_denied": authority_denied,
                 "label": str(label or source_id),
                 "citation": citation,
                 "snippet": condense(snippet, 650),
@@ -408,6 +754,16 @@ class ArbitrationContextBuilder:
         return None
 
     def _ledger_row(self, ref: Dict[str, Any], idx: int) -> Dict[str, Any]:
+        """Project a hydrated reference onto the ledger schema.
+
+        This is a fixed-key rebuild, which is why it needs
+        `LEDGER_SAFETY_FIELDS`: anything the hydrator computes that is not
+        named in the literal below is dropped here, silently, and every
+        downstream check on it becomes dead code. `authority_denied` was
+        exactly that - computed at `_rehydrate_direct_reference`, dropped
+        here, and then tested for in `_annotate_source_quality` where it could
+        never be true.
+        """
         citation = ref.get("citation") or ref.get("clause_number") or ref.get("letter_no") or ref.get("label")
         row = {
             "source_key": f"S{idx}",
@@ -428,6 +784,14 @@ class ArbitrationContextBuilder:
             "metadata": ref.get("metadata") or {},
             "source_hash": "",
         }
+        for field in LEDGER_SAFETY_FIELDS:
+            row[field] = ref.get(field)
+        if row.get("authority_denied"):
+            # The hydrator already collapsed the snippet to the label, so
+            # `missing_snippet` cannot fire. Without this the row still reports
+            # the metadata's "verified" and scores strong, and a blocked
+            # document reaches the drafting prompt as trusted evidence.
+            row["verification_status"] = "authority_denied"
         row["source_hash"] = source_hash(row)
         return row
 
@@ -436,6 +800,7 @@ class ArbitrationContextBuilder:
         draft: Dict[str, Any],
         offset: int,
         *,
+        current_user: Any,
         include_review_sources: bool,
         context_warnings: List[str],
     ) -> List[Dict[str, Any]]:
@@ -445,14 +810,31 @@ class ArbitrationContextBuilder:
         rows: List[Dict[str, Any]] = []
         rows.extend(await self._document_index_sources(str(case_id), offset + len(rows), include_review_sources, context_warnings))
         rows.extend(await self._chronology_matrix_sources(str(case_id), offset + len(rows), include_review_sources, context_warnings))
-        rows.extend(await self._clause_matrix_sources(str(case_id), offset + len(rows), include_review_sources, context_warnings))
+        rows.extend(
+            await self._clause_matrix_sources(
+                str(case_id),
+                offset + len(rows),
+                include_review_sources,
+                context_warnings,
+                draft=draft,
+                current_user=current_user,
+            )
+        )
         rows.extend(await self._issue_matrix_sources(str(case_id), offset + len(rows), include_review_sources, context_warnings))
         rows.extend(await self._claim_defence_matrix_sources(str(case_id), offset + len(rows), include_review_sources, context_warnings))
         rows.extend(await self._quantum_matrix_sources(str(case_id), offset + len(rows), include_review_sources, context_warnings))
         rows.extend(await self._notice_matrix_sources(str(case_id), offset + len(rows), include_review_sources, context_warnings))
         rows.extend(await self._jurisdiction_matrix_sources(str(case_id), offset + len(rows), include_review_sources, context_warnings))
         rows.extend(await self._expert_alignment_sources(str(case_id), offset + len(rows), include_review_sources, context_warnings))
-        rows.extend(await self._register_sources(draft, offset + len(rows), include_review_sources, context_warnings))
+        rows.extend(
+            await self._register_sources(
+                draft,
+                offset + len(rows),
+                include_review_sources,
+                context_warnings,
+                current_user,
+            )
+        )
         return rows
 
     async def _jurisdiction_matrix_sources(
@@ -631,10 +1013,15 @@ class ArbitrationContextBuilder:
                 collection = getattr(self.db, collection_name, None)
                 if collection is None:
                     continue
-                query: Dict[str, Any] = {"_id": str(row.get("source_id"))}
+                # documents._id is ObjectId-keyed; the raw string matched
+                # nothing and every approved source was skipped as "outside
+                # case scope".
+                query: Dict[str, Any] = {
+                    "_id": {"$in": document_id_candidates(row.get("source_id"))}
+                }
                 for scope_key in ("organization_id", "project_id"):
-                    if case.get(scope_key):
-                        query[scope_key] = case.get(scope_key)
+                    # Unconditional - see the note in _rehydrate_direct_reference.
+                    query[scope_key] = case.get(scope_key)
                 authoritative = await collection.find_one(query)
                 if authoritative:
                     authoritative_collection = collection_name
@@ -663,12 +1050,20 @@ class ArbitrationContextBuilder:
                 "permitted_uses": sorted(set([allowed, *[_allowed_use(item, allowed) for item in _as_list(row.get("permitted_uses"))]])),
                 "label": authoritative.get("subject") or authoritative.get("filename") or row.get("title") or row.get("document_type") or exhibit_id or "Case document",
                 "citation": exhibit_id or authoritative.get("letterNo") or row.get("letter_no") or authoritative.get("filename") or row.get("title"),
+                # Guarded. The sibling rehydration path was fixed for G34 and
+                # this one was missed: it read summary/ocrText straight off the
+                # canonical document. Repairing the lookup above without this
+                # would have turned a fail-closed availability bug into a real
+                # leak, by making blocked documents resolvable for the first
+                # time.
+                # relevance_note is derived from this same document's extracted
+                # text, so it cannot be a fallback for the guarded fields above -
+                # that would hand back exactly what they withheld. It is gated by
+                # the same authority; document_type is metadata and stays.
                 "snippet": condense(
-                    authoritative.get("summary")
-                    or authoritative.get("ocrText")
-                    or authoritative.get("text")
-                    or authoritative.get("text_enriched")
-                    or row.get("relevance_note")
+                    authoritative_fact_text(authoritative)
+                    or await consumable_derived_text(self.db, row, "relevance_note")
+                    or authoritative_summary(authoritative)
                     or row.get("document_type"),
                     650,
                 ),
@@ -721,10 +1116,43 @@ class ArbitrationContextBuilder:
             if not _is_verified_source(row, include_review_sources=include_review_sources):
                 continue
             event = await self._load_chronology_event(row)
-            event_data = {**row, **{f"event_{key}": value for key, value in (event or {}).items()}}
-            title = row.get("event") or (event or {}).get("title") or "Chronology event"
+            # `row["event"]` is `f"{title}. {description}"` composed by the
+            # adapter from the source document's extracted span, so the LABEL
+            # carries the same text the snippet below is gated on. A label is
+            # not free-standing metadata here: it is displayed, and it is what
+            # counsel picks evidence by.
+            gated_event = await consumable_derived_text(
+                self.db,
+                row,
+                "event",
+                source_id=row.get("source_document_id")
+                or (event or {}).get("source_document_id"),
+            )
+            if gated_event:
+                title = gated_event
+            elif row.get("event"):
+                # Withheld. The event's own `title` is no safer - it is written
+                # by `_title(source_doc, raw_text)` from the same extraction -
+                # so degrade to a static placeholder rather than vanishing: an
+                # unlabelled ledger row cannot be reviewed or cited.
+                title = "Chronology event (source withheld)"
+            else:
+                title = (event or {}).get("title") or "Chronology event"
             citation = row.get("document_ref") or row.get("date") or (event or {}).get("date_text") or (event or {}).get("letter_no") or title
-            snippet = row.get("impact") or row.get("evidence") or (event or {}).get("description") or (event or {}).get("manual_notes")
+            # `description` is lifted from the source document's extracted text
+            # (`chronology.py:530` sets it from span_text), so it is a document
+            # derivative and cannot outlive that document's authority - the same
+            # stale-derivative rule as relevance_note. `impact`, `evidence` and
+            # `manual_notes` are authored in-app and stay ungated, and an event
+            # with no source_document_id is a manual entry that document
+            # authority has no jurisdiction over.
+            description = (event or {}).get("description")
+            if description and (event or {}).get("source_document_id"):
+                description = await consumable_derived_text(
+                    self.db, event, "description"
+                )
+            gated_description = description
+            snippet = row.get("impact") or row.get("evidence") or description or (event or {}).get("manual_notes")
             allowed = _allowed_use(row.get("pleading_use") or (event or {}).get("pleading_use"), "chronology")
             ledger_row = {
                 "source_key": f"S{offset + len(out) + 1}",
@@ -752,7 +1180,7 @@ class ArbitrationContextBuilder:
                     "party_responsible": row.get("party_responsible") or (event or {}).get("responsible_party"),
                     "issue_link": row.get("issue_link"),
                     "claim_link": row.get("claim_link"),
-                    "event": event_data,
+                    "event": _safe_event_metadata(row, event, gated_event, gated_description),
                 },
                 "source_hash": "",
             }
@@ -780,7 +1208,22 @@ class ArbitrationContextBuilder:
         offset: int,
         include_review_sources: bool,
         context_warnings: List[str],
+        *,
+        draft: Optional[Dict[str, Any]] = None,
+        current_user: Any = None,
     ) -> List[Dict[str, Any]]:
+        """Approved case clause-matrix rows, INTERSECTED with canonical eligibility.
+
+        `draft` and `current_user` default so that a caller which omits them
+        resolves every document-governed row inside an EMPTY universe - i.e.
+        refuses it. The matrix row's own `project_id` / `contract_id` /
+        approval flag record where it was filed and who signed it off, never
+        that the instrument governs anything, so there is no weaker check to
+        fall back to.
+        """
+        matrix_fence = matrix_clause_fence(
+            self.db, draft, current_user, context_warnings
+        )
         try:
             rows = await _collect(
                 self.db.arbitration_clause_matrix.find({"case_id": case_id, "deleted_at": {"$exists": False}}).sort("created_at", 1)
@@ -791,8 +1234,27 @@ class ArbitrationContextBuilder:
         for row in rows:
             if not _is_verified_source(row, include_review_sources=include_review_sources):
                 continue
+            if not await matrix_fence.admits_clause_row(row):
+                # Approval is NECESSARY and not SUFFICIENT. The row is dropped
+                # entirely rather than blanked: keeping its source_id, clause
+                # number and citation would still record a foreign instrument
+                # as a contributor to a pleading, in a row sealed by
+                # immutable_version_hash and rendered by the exporter. The case
+                # matrix itself is untouched - historical approval is case
+                # history, not this generation's evidence.
+                continue
             citation = row.get("clause_number") or row.get("topic") or row.get("_id")
-            snippet = row.get("clause_text_excerpt") or row.get("obligation_or_right")
+            # `clause_text_excerpt` is up to 900 characters of the parent
+            # document's extracted text; `obligation_or_right` is authored in
+            # the matrix. The clause id lives under `clause_source_id` and the
+            # row carries no source_type, so both have to be supplied.
+            snippet = await consumable_derived_text(
+                self.db,
+                row,
+                "clause_text_excerpt",
+                source_type="clause",
+                source_id=row.get("clause_source_id"),
+            ) or row.get("obligation_or_right")
             ledger_row = {
                 "source_key": f"S{offset + len(out) + 1}",
                 "source_id": str(row.get("clause_source_id") or row.get("_id")),
@@ -1057,6 +1519,7 @@ class ArbitrationContextBuilder:
         offset: int,
         include_review_sources: bool,
         context_warnings: List[str],
+        current_user: Any,
     ) -> List[Dict[str, Any]]:
         if not draft.get("project_id"):
             return []
@@ -1069,8 +1532,24 @@ class ArbitrationContextBuilder:
         out: List[Dict[str, Any]] = []
         out.extend(await self._claim_register_sources(draft, offset + len(out), include_review_sources))
         out.extend(await self._variation_register_sources(draft, offset + len(out), include_review_sources))
-        out.extend(await self._ipc_register_sources(draft, offset + len(out), include_review_sources))
-        out.extend(await self._bank_guarantee_sources(draft, offset + len(out), include_review_sources))
+        out.extend(
+            await self._ipc_register_sources(
+                draft,
+                offset + len(out),
+                include_review_sources,
+                current_user,
+                context_warnings,
+            )
+        )
+        out.extend(
+            await self._bank_guarantee_sources(
+                draft,
+                offset + len(out),
+                include_review_sources,
+                current_user,
+                context_warnings,
+            )
+        )
         excluded = {str(item) for item in draft.get("excluded_register_ids") or [] if item}
         if excluded:
             kept = [row for row in out if str(row.get("source_id")) not in excluded]
@@ -1126,7 +1605,10 @@ class ArbitrationContextBuilder:
                 "metadata": {
                     "claim_type": row.get("type"),
                     "status": row.get("status"),
-                    "linked_document_ids": row.get("linked_document_ids") or [],
+                    # Relationship membership is not evidence authority. Claim-linked
+                    # Documents enter drafting only through separately authorized
+                    # Document sources, never through this legacy register field.
+                    "linked_document_ids": [],
                     "linked_letter_ids": row.get("linked_letter_ids") or [],
                 },
                 "source_hash": "",
@@ -1180,7 +1662,14 @@ class ArbitrationContextBuilder:
             out.append(ledger_row)
         return out
 
-    async def _ipc_register_sources(self, draft: Dict[str, Any], offset: int, include_review_sources: bool) -> List[Dict[str, Any]]:
+    async def _ipc_register_sources(
+        self,
+        draft: Dict[str, Any],
+        offset: int,
+        include_review_sources: bool,
+        current_user: Any,
+        context_warnings: List[str],
+    ) -> List[Dict[str, Any]]:
         query = self._scope_query(draft)
         if not query:
             return []
@@ -1190,6 +1679,15 @@ class ArbitrationContextBuilder:
             rows = await _collect(self.db.ipc_bills.find(query).sort("ipc_date", -1).limit(10))
         except Exception:
             return []
+        try:
+            authorized_ids = await DocumentRelationshipService(
+                self.db
+            ).authorized_document_ids_for_targets(current_user, "ipc_bill", rows)
+        except Exception:
+            authorized_ids = {}
+            context_warnings.append(
+                "IPC document relationships could not be re-authorized and were omitted."
+            )
         out: List[Dict[str, Any]] = []
         for row in rows:
             currency = row.get("base_currency") or "INR"
@@ -1224,7 +1722,7 @@ class ArbitrationContextBuilder:
                     "ipc_date": row.get("ipc_date"),
                     "status": row.get("status"),
                     "letter_references": row.get("letter_references") or [],
-                    "linked_document_ids": row.get("linked_document_ids") or [],
+                    "linked_document_ids": authorized_ids.get(str(row.get("_id") or ""), []),
                 },
                 "source_hash": "",
             }
@@ -1232,7 +1730,14 @@ class ArbitrationContextBuilder:
             out.append(ledger_row)
         return out
 
-    async def _bank_guarantee_sources(self, draft: Dict[str, Any], offset: int, include_review_sources: bool) -> List[Dict[str, Any]]:
+    async def _bank_guarantee_sources(
+        self,
+        draft: Dict[str, Any],
+        offset: int,
+        include_review_sources: bool,
+        current_user: Any,
+        context_warnings: List[str],
+    ) -> List[Dict[str, Any]]:
         query = self._scope_query(draft)
         if not query:
             return []
@@ -1242,6 +1747,17 @@ class ArbitrationContextBuilder:
             rows = await _collect(self.db.bank_guarantees.find(query).sort("updated_at", -1).limit(10))
         except Exception:
             return []
+        try:
+            from ..bank_guarantee_evidence_service import BankGuaranteeEvidenceService
+
+            authorized_evidence = await BankGuaranteeEvidenceService(
+                self.db
+            ).authorized_event_evidence(current_user, rows)
+        except Exception:
+            authorized_evidence = {}
+            context_warnings.append(
+                "Bank Guarantee document relationships could not be re-authorized and were omitted."
+            )
         out: List[Dict[str, Any]] = []
         for row in rows:
             snippet = "\n".join(
@@ -1270,14 +1786,101 @@ class ArbitrationContextBuilder:
                 "is_user_supplied": False,
                 "source_origin": "bank_guarantee_register",
                 "quality_flags": [],
-                "metadata": {"bg_type": row.get("bg_type"), "linked_document_ids": row.get("linked_document_ids") or []},
+                "metadata": {
+                    "bg_type": row.get("bg_type"),
+                    "event_evidence": authorized_evidence.get(str(row.get("_id") or ""), []),
+                },
                 "source_hash": "",
             }
             ledger_row["source_hash"] = source_hash(ledger_row)
             out.append(ledger_row)
         return out
 
-    async def _contract_search_sources(self, draft: Dict[str, Any], current_user: Any, offset: int) -> List[Dict[str, Any]]:
+    async def _contract_evidence_universe(
+        self,
+        draft: Dict[str, Any],
+        current_user: Any,
+        context_warnings: List[str],
+    ) -> Optional[ProjectEvidenceUniverse]:
+        """The canonical eligible universe for this pleading.
+
+        A pleading does not decide what governs a contract; it asks. The answer
+        is POSITIVE - applicable at the query mode, canonical Document
+        positively resolvable, publication-consumable, projection-current - and
+        it is resolved for THIS ACTOR, not for the draft's own workspace stamp.
+
+        ``None`` means the question could not be ANSWERED, which is a different
+        thing from "nothing applies". Both produce zero contract evidence, and
+        neither may widen: falling back to generic contract search is exactly
+        the door the Contract Master model closes. The distinction is surfaced
+        as a context warning rather than collapsed into an empty ledger,
+        because an arbitration draft assembled without the contract it turns on
+        must not look identical to one where no contract applies.
+
+        Query mode is ``CurrentState``, chosen rather than defaulted. A
+        pleading is written now and cites what governs now; ``Historical`` is
+        deliberately not inferred from a case or letter date, because an
+        implicit "as at" would manufacture legal evidence for a date nobody
+        asked about.
+
+        Scope note, carried from G-A7/G-A8 and not narrowed silently: the
+        arbitration draft's ``contract_id`` is free text that nothing validates
+        or joins against ``contract_document_applicability`` - only the register
+        scope query reads it - so it is not Contract Master identity and is not
+        treated as such here. This is therefore PROJECT-EVIDENCE containment:
+        the union over the contracts that have applicability in the authorised
+        project. Sibling contracts inside one project are not separable until
+        that identity is made canonical, which is an owner decision.
+        """
+        organization_id = str(draft.get("organization_id") or "")
+        project_id = str(draft.get("project_id") or "")
+        if not organization_id or not project_id:
+            return None
+        try:
+            return await resolve_authorized_project_universe(
+                self.db,
+                current_user,
+                organization_id=organization_id,
+                project_id=project_id,
+                mode=CurrentState(),
+            )
+        except Exception as exc:
+            context_warnings.append(
+                f"Contract clause evidence was omitted: contract eligibility could not be resolved ({exc})."
+            )
+            return None
+
+    async def _contract_clause_sources(
+        self,
+        draft: Dict[str, Any],
+        current_user: Any,
+        offset: int,
+        context_warnings: List[str],
+    ) -> List[Dict[str, Any]]:
+        """Contract clause evidence, fenced by the canonical universe.
+
+        The generic ``ContractService.search_contracts`` supplement that used to
+        sit here was REMOVED rather than filtered. Generic search resolves no
+        applicability, no projection currency and no positive per-document
+        publication authority - its subtractive helper fails OPEN on an id it
+        cannot resolve - and it spends its candidate limit before any of them
+        exist, so there is no point in its pipeline at which a fence would work.
+        Everything it produced reached the source ledger, the generated
+        pleading, the input hash and the immutable ``arbitration_draft_versions``
+        row the exporter renders.
+
+        A clause row's own ``org_id`` / ``project_id`` / ``contract_id`` are
+        INGEST PROVENANCE: they record where the row came from, never that the
+        instrument legally governs anything. They narrow the query; they do not
+        authorise it. ``is_authorised_for_ai`` does not help either - it is
+        written once at clause-index time from clause quality and is never
+        revisited when the parent document's authority changes.
+
+        So ``document_id: {"$in": eligible}`` is part of the QUERY, not a filter
+        over its result, and the subtractive ``blocked_document_ids`` is absent
+        from this path rather than kept beside the universe: a second predicate
+        that looks like authority is how the real one stops being read.
+        """
         query = " ".join(
             [
                 str(draft.get("title") or ""),
@@ -1286,47 +1889,112 @@ class ArbitrationContextBuilder:
                 str(draft.get("arbitration_clause") or ""),
             ]
         ).strip()
-        if not query or not draft.get("project_id"):
+        organization_id = str(draft.get("organization_id") or "")
+        project_id = str(draft.get("project_id") or "")
+        if not query or not project_id:
             return []
+
+        universe = await self._contract_evidence_universe(draft, current_user, context_warnings)
+        if universe is None:
+            # Eligibility could not be resolved. There is no partial answer to
+            # give and no broader query that would be safer, so nothing is
+            # queried at all.
+            return []
+        eligible = sorted(universe.eligible_document_ids)
+        if not eligible:
+            # Valid empty. Nothing applicable governs this project, which is an
+            # answer a pleading may act on - never a reason to search wider.
+            return []
+
+        terms = {token for token in query[:800].lower().split() if len(token) > 3}
         try:
-            response = await ContractService().search_contracts(
-                ContractSearchRequest(
-                    query=query[:800],
-                    organization_id=draft.get("organization_id"),
-                    project_id=draft.get("project_id"),
-                    limit=5,
-                    top_docs=3,
-                    chunks_per_doc=2,
-                    summarize=False,
-                ),
-                current_user,
+            records = await _collect(
+                self.db.contract_clauses.find(
+                    {
+                        "org_id": organization_id,
+                        "project_id": project_id,
+                        "is_current": True,
+                        "is_authorised_for_ai": True,
+                        "document_id": {"$in": eligible},
+                    }
+                ).limit(CONTRACT_CLAUSE_CANDIDATE_LIMIT)
             )
-        except Exception:
+        except Exception as exc:
+            context_warnings.append(
+                f"Contract clause evidence was omitted: clause retrieval failed ({exc})."
+            )
             return []
+
+        scored: List[tuple] = []
+        for record in records:
+            haystack = " ".join(
+                str(part or "")
+                for part in (
+                    record.get("cleaned_text"),
+                    record.get("clause_title"),
+                    record.get("clause_no"),
+                )
+            ).lower()
+            hits = sum(1 for term in terms if term in haystack)
+            score = hits / max(len(terms), 1)
+            if score > 0:
+                scored.append((score, record))
+        scored.sort(key=lambda item: item[0], reverse=True)
+
         rows: List[Dict[str, Any]] = []
-        for idx, result in enumerate(response.results or [], start=offset + 1):
+        for idx, (_score, record) in enumerate(
+            scored[:CONTRACT_CLAUSE_SOURCE_LIMIT], start=offset + 1
+        ):
+            clause_number = record.get("clause_no")
+            clause_title = record.get("clause_title")
+            document_id = record.get("document_id")
+            page_numbers = [
+                page for page in (record.get("page_start"), record.get("page_end")) if page
+            ]
             row = {
                 "source_key": f"S{idx}",
-                "source_id": str(result.document_id or result.upload_id or idx),
+                "source_id": str(document_id or record.get("clause_uid") or idx),
                 "source_type": "clause",
                 "allowed_use": "clause",
                 "permitted_uses": ["clause"],
-                "label": f"{result.clause_number or 'Clause'} {result.clause_title or ''}".strip(),
-                "citation": result.clause_number or result.clause_title or result.file_name,
-                "snippet": condense(result.text, 650),
-                "page_numbers": result.page_numbers or ([result.page] if result.page else []),
-                "clause_number": result.clause_number,
+                "label": f"{clause_number or 'Clause'} {clause_title or ''}".strip(),
+                "citation": clause_number or clause_title,
+                "snippet": condense(record.get("cleaned_text"), 650),
+                "page_numbers": page_numbers,
+                "clause_number": clause_number,
                 "letter_no": None,
                 "verification_status": "retrieved_clause",
                 "is_user_supplied": False,
-                "source_origin": "contract_search",
+                # Renamed from `contract_search`: this is no longer contract
+                # search, and a label that still said so would make the frozen
+                # boundary unreadable from the persisted ledger.
+                "source_origin": "contract_evidence",
                 "quality_flags": [],
-                "metadata": {"file_name": result.file_name, "document_id": result.document_id, "upload_id": result.upload_id},
+                "metadata": {
+                    "document_id": document_id,
+                    "clause_uid": record.get("clause_uid"),
+                    "document_type": record.get("document_type"),
+                },
                 "source_hash": "",
             }
             row["source_hash"] = source_hash(row)
             rows.append(row)
         return rows
+
+    async def _link_source_document_id(self, link: Dict[str, Any]) -> Optional[str]:
+        """The document an evidence link's text ultimately came from, if any.
+
+        A document-target link names it outright. A clause-target link carries
+        the same `evidence_text` but points at a clause reference, so it has to
+        go back through the chronology event that produced both.
+        """
+        if str(link.get("target_type") or "") == "document" and link.get("target_id"):
+            return str(link.get("target_id"))
+        event_id = (link.get("metadata") or {}).get("chronology_event_id")
+        if not event_id:
+            return None
+        event = await self._load_chronology_event({"chronology_event_id": event_id})
+        return (event or {}).get("source_document_id")
 
     async def _verified_graph_sources(
         self,
@@ -1351,6 +2019,27 @@ class ArbitrationContextBuilder:
             return []
         out: List[Dict[str, Any]] = []
         for idx, link in enumerate(rows[:10], start=offset + 1):
+            # `evidence_text` is the chronology event's `description` copied on
+            # to the link (`chronology.py:713`, `:733`), which is span text
+            # lifted from the source document. Gating it where it was born and
+            # not where it was copied is no gate at all.
+            source_document_id = await self._link_source_document_id(link)
+            evidence_text = (
+                await consumable_derived_text(
+                    self.db,
+                    link,
+                    "evidence_text",
+                    # An evidence link's OWN `source_type` is the graph edge's
+                    # source entity ("project_event"), not the provenance of
+                    # this text. Left to infer, the helper read that field and
+                    # waved the row through as an application record.
+                    source_type="document",
+                    source_id=source_document_id,
+                )
+                if source_document_id
+                # No document behind it - manual evidence, no jurisdiction.
+                else link.get("evidence_text")
+            )
             row = {
                 "source_key": f"S{idx}",
                 "source_id": str(link.get("link_group_id") or link.get("_id")),
@@ -1359,7 +2048,7 @@ class ArbitrationContextBuilder:
                 "permitted_uses": ["chronology", "fact"],
                 "label": f"{link.get('source_type')} {link.get('relation_type')} {link.get('target_type')}",
                 "citation": link.get("relation_type"),
-                "snippet": condense(link.get("evidence_text"), 650),
+                "snippet": condense(evidence_text, 650),
                 "page_numbers": [],
                 "clause_number": None,
                 "letter_no": None,
@@ -1498,13 +2187,35 @@ class ArbitrationContextBuilder:
                     f"Concurrency has not been addressed for delay claim {claim_no}; align the pleading with the delay expert."
                 )
 
-    def _annotate_source_quality(self, rows: List[Dict[str, Any]], context_warnings: List[str]) -> None:
+    async def _annotate_source_quality(self, rows: List[Dict[str, Any]], context_warnings: List[str]) -> None:
         for row in rows:
             flags: List[str] = list(row.get("quality_flags") or [])
             if not row.get("citation"):
                 flags.append("missing_citation")
             if not row.get("snippet"):
                 flags.append("missing_snippet")
+            # Authority is RE-RESOLVED here, centrally, from the row's own
+            # provenance - not trusted from a flag the builder may or may not
+            # have set. `authority_denied` was written by exactly one of the
+            # ledger builders; the rest gated their snippet and dropped the
+            # decision, so this check was dead for them and a blocked document
+            # scored strong/verified. Deriving the decision from source_type +
+            # source_id means a builder cannot emit a document-governed row that
+            # escapes it. An explicit builder denial is still honoured.
+            denied = bool(row.get("authority_denied"))
+            db = getattr(self, "db", None)
+            if not denied and getattr(db, "documents", None) is not None:
+                decision = await resolve_derived_authority(
+                    db,
+                    row.get("source_type"),
+                    (row.get("metadata") or {}).get("source_document_id") or row.get("source_id"),
+                )
+                denied = not decision.consumable
+            if denied:
+                row["authority_denied"] = True
+                if str(row.get("verification_status") or "") in VERIFIED_SOURCE_STATUSES:
+                    row["verification_status"] = "authority_denied"
+                flags.append("authority_denied")
             if row.get("source_origin") == "case_document_index":
                 metadata = row.get("metadata") or {}
                 if not row.get("exhibit_id"):

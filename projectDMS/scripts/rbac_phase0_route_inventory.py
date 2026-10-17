@@ -99,6 +99,62 @@ def _route_source(route: Any) -> str:
                     inspect.getsource(AIAssistantController._authorize_ai_action),
                 ]
             )
+    if route.endpoint.__module__ == "rbac_backend.routers.document_relationships":
+        from rbac_backend.services.document_relationship_service import (
+            DocumentRelationshipService,
+        )
+
+        delegated_methods = {
+            "batch_link_documents": "link_batch",
+            "list_entity_document_links": "list_for_target",
+            "freeze_entity_document_links": "freeze",
+            "remove_document_link": "remove",
+            "document_link_history": "history",
+            "list_document_entity_links": "list_for_document",
+            "list_document_link_dependencies": "list_for_document",
+        }
+        method_name = delegated_methods.get(str(route.name))
+        method = getattr(DocumentRelationshipService, method_name, None) if method_name else None
+        if method is not None:
+            source = "\n".join(
+                [
+                    source,
+                    inspect.getsource(method),
+                    inspect.getsource(DocumentRelationshipService._target),
+                    inspect.getsource(DocumentRelationshipService._document),
+                ]
+            )
+    if route.endpoint.__module__ == "rbac_backend.routers.document_extraction_review":
+        # Release 1.1.1: the router is thin; selection and PolicyService are
+        # enforced in the domain service, which is what must be inspected.
+        from rbac_backend.services.extraction_review_service import ExtractionReviewService
+
+        delegated_methods = {
+            "list_extraction_review_queue": ("list_queue",),
+            "get_extraction_review": ("get_review", "_authorised_document"),
+            "approve_extraction_page": ("decide_page", "_authorised_document"),
+            "reject_extraction_page": ("decide_page", "_authorised_document"),
+            "finalize_extraction_review": ("finalize", "_authorised_document"),
+        }
+        names = delegated_methods.get(str(route.name), ())
+        source = "\n".join(
+            [source]
+            + [inspect.getsource(getattr(ExtractionReviewService, name)) for name in names]
+        )
+    if route.endpoint.__module__ == "rbac_backend.routers.document_grounded_summary":
+        # Release 1.2: the same thin-router shape; the document gate lives in
+        # GroundedSummaryService.authorised_document.
+        from rbac_backend.services.grounded_summary.service import GroundedSummaryService
+
+        summary_methods = {
+            "get_grounded_summary": ("read_for_user", "authorised_document"),
+            "generate_grounded_summary": ("authorised_document",),
+        }
+        names = summary_methods.get(str(route.name), ())
+        source = "\n".join(
+            [source]
+            + [inspect.getsource(getattr(GroundedSummaryService, name)) for name in names]
+        )
     return source
 
 
@@ -121,6 +177,12 @@ def _classify_source(source: str, route: Any) -> tuple[str, list[str], str]:
             "PolicyService(db).authorize",
             "policy_service.authorize",
             "authorize_document",
+            # services/contract_scope_resolver.py: PolicyService.authorize, then
+            # mints the AuthorizedContractScope token.
+            "await authorize_contract_scope(",
+            # services/contract_candidate_authority.py: PolicyService.authorize at
+            # organisation scope, then ScopeService organisation-wide reach.
+            "await require_organization_wide_scope(",
         ],
     )
     if policy_markers:

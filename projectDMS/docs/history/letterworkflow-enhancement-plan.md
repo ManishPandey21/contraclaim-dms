@@ -20,7 +20,7 @@
     - Any documents referenced in the conversation history (`letter.references`, `conversation_service.get_conversation_chain` output).
     - Search results for ad-hoc inclusion (reuse the documents search endpoint with debounce).
   - Render each candidate with checkboxes, quick metadata (direction, subject, letter number), and a secondary action to open the viewer.
-  - Persist the selection in component state, defaulting to currently linked documents. 
+  - Persist the selection in component state, defaulting to currently linked documents.
   - Feed the selection into LangGraph requests by extending the hook call: `runDraft({ ..., documentIds: selectedIds })`. Store the set locally (context or Zustand) so the same selection is available when the user moves into the drafting screen.
 
 - **Backend**:

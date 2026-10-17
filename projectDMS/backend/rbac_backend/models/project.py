@@ -33,5 +33,3 @@ class Project(BaseModel):
         if isinstance(value, ObjectId):
             return str(value)
         return value
-
-    

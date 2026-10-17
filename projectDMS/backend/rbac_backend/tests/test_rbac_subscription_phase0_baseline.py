@@ -184,17 +184,24 @@ async def test_phase1_scope_service_rejects_mismatched_org_project_pair():
 def test_phase2_ai_assistant_generation_uses_policy_service():
     helper_source = inspect.getsource(ai_assistant.AIAssistantController._authorize_ai_action)
     assert "policy_service.authorize" in helper_source
+    # One-letter actions are authorised against the TARGET letter's own
+    # organisation/project, not the requested or defaulted scope.
+    letter_helper_source = inspect.getsource(
+        ai_assistant.AIAssistantController._authorize_letter_action
+    )
+    assert "policy_service.authorize" in letter_helper_source
+    assert "resolve_letter_scope" in letter_helper_source
 
-    protected_methods = [
-        ai_assistant.AIAssistantController.generate_letter_draft,
-        ai_assistant.AIAssistantController.generate_langgraph_draft,
-        ai_assistant.AIAssistantController.generate_strategy_plan,
-        ai_assistant.AIAssistantController.get_langgraph_run,
-    ]
-    for method in protected_methods:
+    protected_methods = {
+        ai_assistant.AIAssistantController.generate_letter_draft: "self._authorize_ai_action",
+        ai_assistant.AIAssistantController.generate_langgraph_draft: "self._authorize_letter_action",
+        ai_assistant.AIAssistantController.generate_strategy_plan: "self._authorize_letter_action",
+        ai_assistant.AIAssistantController.get_langgraph_run: "self._authorize_letter_action",
+    }
+    for method, helper in protected_methods.items():
         source = inspect.getsource(method)
         assert "authorize_scope(" not in source
-        assert "self._authorize_ai_action" in source
+        assert helper in source
 
 
 def test_phase2_route_inventory_tracks_ai_assistant_policy_service_delegation():

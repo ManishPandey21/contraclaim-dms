@@ -12,14 +12,14 @@ from rbac_backend.core.config import settings
 async def check_job():
     db_url = settings.DATABASE_URL
     db_name = db_url.split('/')[-1] if '/' in db_url else 'contraclaim'
-    
+
     client = AsyncIOMotorClient(db_url)
     db = client[db_name]
-    
+
     upload_id = "64bfd824-8434-4d3a-8e59-586907388137"
-    
+
     job = await db.contract_ingest_jobs.find_one({"upload_id": upload_id})
-    
+
     if job:
         print("\n" + "=" * 80)
         print("JOB DETAILS")
@@ -36,7 +36,7 @@ async def check_job():
         print(f"Categories: {job.get('categories')}")
         print(f"Tags: {job.get('tags')}")
         print("=" * 80)
-    
+
     client.close()
 
 

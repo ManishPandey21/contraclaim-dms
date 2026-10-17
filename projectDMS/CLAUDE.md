@@ -46,17 +46,32 @@ cd client && npm run test && npm run test:e2e
 ```
 
 After adding or changing any route or its authorization, regenerate the route
-contract or `test_route_authz_gate_evidence.py` / `test_route_control_manifest.py` fail:
+inventory and diff it — `test_route_inventory.py` is the gate that fails:
 
 ```bash
-backend/.venv/Scripts/python.exe scripts/rbac_phase0_route_inventory.py --format contract-json --output backend/rbac_backend/route_control_manifest.json
+backend/.venv/Scripts/python.exe scripts/rbac_phase0_route_inventory.py --format json
 ```
+
+The generator supports `--format {summary,json,markdown}` and **no `--output`** — redirect
+to a file yourself. There is no `contract-json` format, no
+`route_control_manifest.json`, and no `test_route_authz_gate_evidence.py` or
+`test_route_control_manifest.py`; that instruction described tooling this repo does
+not have. Verified 2026-08-26 against `--help` and the tests directory.
 
 Migrations (dry run first, always, before any deploy):
 
 ```bash
 cd backend && python -m rbac_backend.scripts.migrate_database --list && python -m rbac_backend.scripts.migrate_database --fail-on-warning
 ```
+
+`--fail-on-warning` fails on **warnings** — findings about the database in front
+of the migration, which name a row or a change and go away when the data is
+clean. It reports **notices** — constant sentences a migration writes about its
+own design — and passes. Emit a documentary note as `notices=` on
+`MigrationResult`, never `warnings=`; a notice must be a literal written at the
+call site, and `test_migration_warning_classification.py` fails on one that is
+derived from data. Before that split every tree failed this gate, because
+`20260721_0001` carries two such notes (F-A8M-1).
 
 Local dev: `make front` (client) / `make back` (uvicorn `rbac_backend.main:app` :8000).
 
@@ -126,10 +141,36 @@ Production is `contraclaim.com` (SSH alias `contraclaim`), checkout
   never deployed.
 - Deploy = get the commit onto the branch the server tracks (push to both remotes; the
   feature branch alone does not reach production) → on the server
-  `git pull --ff-only origin <that branch>` → rebuild only affected services
-  (`build client` for a frontend-only change) → `up -d --no-deps <service>`.
+  `git pull --ff-only origin <that branch>` → for an ad-hoc fix, rebuild only affected
+  services (`build client` for a frontend-only change); for a certified release, retag
+  instead (next bullet) → `up -d --no-deps <service>`.
   Gates: `scripts/pre_deploy_readiness.sh`, migration dry-run; after:
   `scripts/post_deploy_verify.sh`.
+- **A certified release is retagged, never rebuilt.** Tag the certified image ids from the
+  production manifest onto `contraclaim-{backend,contract-worker,document-worker,client}`
+  and start with `up -d --no-deps --no-build`; a rebuild is a different, uncertified image.
+  Application services are **four** — `document-worker` (sole extraction owner) is easy to
+  forget because the old deploy guide never listed it, and R-A9G shipped without it until
+  `post_deploy_verify.sh` failed. `document-worker-canary` runs 0 replicas.
+- **Production state after R-A9G/R-A9H (verified 2026-09-21):** tracks
+  `release/contraclaim-rc1`; the compose file set is the two tracked files — the R-A8Z ClamAV
+  override was **retired** 2026-09-20, never add it back. Receipt:
+  `docs/R_A9H_POST_PRODUCTION_CLOSURE.md`.
+- **FalkorDB is in a temporary out-of-band topology until normalization.** The live engine is
+  `contraclaim-falkordb-cutover` (alias `falkordb`); the compose `falkordb` service is the
+  preserved original — stopped, stale, on a dead credential. `backend`, `contract-worker` and
+  `document-worker` `depends_on` it, so **never run a blanket `up -d`/`start`, and always pass
+  `--no-deps`**, or two containers answer to `falkordb`.
+- **`docker stop` does not gracefully stop `falkordb:v4.0.8`**: PID 1 is `/bin/sh -c run.sh`
+  and does not forward SIGTERM. Set the restart policy to `no`, run an authenticated
+  `redis-cli SHUTDOWN SAVE` inside the container, and require `Exited (0)`.
+- **Never put a credential on a host command line.** `sudo` logs argv to `/var/log/auth.log`
+  and the journal keeps it. R-A9H leaked the live Falkor password there by *checking* for it
+  with `sudo grep -F -- "$PW" /var/log`; search as root inside `sudo bash -s <<'EOF'`, reading
+  the value from the env file there, so it never becomes an argument. Expand secrets
+  inside the container as `REDISCLI_AUTH="$FALKORDB_PASSWORD" redis-cli …` — not `-a`, whose
+  argv is world-readable in the host's `/proc` — and redact evidence **by value**
+  with `scripts/evidence_secret_scan.py`, never by key name.
 - **`preflight.py` and the migration dry-run must run inside the backend container.** The
   host interpreter has none of the app's dependencies, so on the host they fail with
   `No module named 'motor'` / `'dotenv'` — an environment artefact, not a real gate failure
@@ -152,6 +193,11 @@ Production is `contraclaim.com` (SSH alias `contraclaim`), checkout
   `get_*_controller` factories, so a broken factory ships past 1000+ passing tests.
   `git add -A` once swept an unreviewed orphaned-`return` factory into production and took
   `GET /api/organizations` down. Diff files you did not personally edit before staging.
+  Same class, 2026-09-23: `contract_master_api.get_policy` imported the nonexistent
+  `core.policy` inside the function, so every `/api/contract-master/*` route raised `ModuleNotFoundError` while its
+  only route suite (which overrides `get_policy`) stayed green. Every router needs one test
+  that resolves its real dependencies; `test_every_package_import_names_a_module_that_exists`
+  now guards deferred imports.
 - **Backend async tests each get their own `asyncio.run` loop** (`backend/conftest.py`, no
   pytest-asyncio). Module-level Motor globals must be cleared between tests or a test passes
   alone and fails in the suite with "Event loop is closed". Async *fixtures* are unsupported —
@@ -171,6 +217,14 @@ Production is `contraclaim.com` (SSH alias `contraclaim`), checkout
   deleted; FalkorDB keeps `GRAPH.*` use only (letter/clause references).
 - Contract retrieval is **clause-first**: structured `contract_clauses` records + the
   `contract_clauses` Qdrant namespace. Legacy `document_vectors`/token chunks are fallback only.
+- Contract Master projection becomes CURRENT **only** through the contract-worker's
+  reprojection runtime (`services/contract_reprojection_runtime.py`, flag
+  `START_CONTRACT_REPROJECTION_WORKERS` on `contract-worker` only): claim `(instrument,
+  revision)`, rebuild, then rows + CURRENT in one fenced transaction. Never call
+  `mark_projection_current()` from production code or set `projection_status` by hand to
+  make a gate green — that is exactly what hid the 2026-09-25 staging NO-GO. An applicable
+  instrument that is not projection-current answers evidence `409 projection_not_current`,
+  never `valid_empty`.
 - Arbitration LangGraph engine is code-complete but intentionally **not primary**:
   `ARBITRATION_ENGINE_DEFAULT=arbitration_v2`, `ROLLOUT_MODE=off`,
   `PRODUCTION_ACCEPTED=false`. Flipping to primary requires the acceptance receipt chain.
@@ -185,11 +239,16 @@ Production is `contraclaim.com` (SSH alias `contraclaim`), checkout
 
 ## Known open debt
 
+- **FalkorDB compose normalization is pending** (R-A9H §4, earliest 2026-09-22): until then the
+  live engine has no healthcheck and unbounded logs, the original container and
+  `.env.bak-ra9g-a2` are retained for rollback, and the current Falkor credential sits in
+  `/var/log/auth.log` (re-rotate in the same window). Third-party image exception expires
+  2026-10-15 (re-scan 2026-10-06). G32 not run.
+
 - Client consumes neither `selection_required` nor `context_forbidden` (no scope-selection
   prompt exists yet).
-- `test_route_control_manifest` can fail on clean HEAD: the checked-in manifest claims an
-  `authorize()` gate on `/api/notifications` that the live route lacks — notifications has no
-  permission dependency at all.
+- `/api/notifications` has no permission dependency at all. (The note that a checked-in
+  route manifest disagreed is obsolete: no manifest and no manifest test exist.)
 - Deferred from the AI-harness work: Learning Update persistence, OTel workflow spans, v3
   domain-adapter double-run, claim-support verification via NLI/LLM-judge.
 - Arbitration acceptance is unproven in production (zero cases/runs), plus outstanding

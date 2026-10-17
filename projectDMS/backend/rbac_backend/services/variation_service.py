@@ -103,6 +103,21 @@ def decorate(variation: Dict[str, Any]) -> Dict[str, Any]:
     return v
 
 
+class AmbiguousLegacyVariationRelationshipError(ValueError):
+    """A raw ``linked_document_ids`` write carries no role and no authorization.
+
+    New Variation evidence goes through the canonical relationship endpoint
+    (``/entities/variation/{id}/document-links``); legacy arrays are read-only
+    discovery input for the operator backfill.
+    """
+
+
+LEGACY_WRITE_REFUSAL = (
+    "Variation linked_document_ids is read-only legacy data; link Documents "
+    "through /entities/variation/{id}/document-links"
+)
+
+
 class VariationService:
     def __init__(self, db: Any = None) -> None:
         self.db = db
@@ -137,7 +152,12 @@ class VariationService:
 
     async def create(self, payload: VariationCreate, current_user: Any) -> Dict[str, Any]:
         db = await self._get_db()
+        if getattr(payload, "linked_document_ids", None):
+            raise AmbiguousLegacyVariationRelationshipError(LEGACY_WRITE_REFUSAL)
         doc = Variation(**payload.model_dump()).model_dump(by_alias=True)
+        # An empty create array carries no relationship intent; canonical
+        # relationships own every link write.
+        doc.pop("linked_document_ids", None)
         if not doc.get("organization_id"):
             doc["organization_id"] = getattr(current_user, "organization_id", None)
         if not doc.get("contract_id"):
@@ -178,6 +198,8 @@ class VariationService:
 
     async def update(self, variation: Dict[str, Any], payload: Dict[str, Any], current_user: Any) -> Optional[Dict[str, Any]]:
         db = await self._get_db()
+        if "linked_document_ids" in payload:
+            raise AmbiguousLegacyVariationRelationshipError(LEGACY_WRITE_REFUSAL)
         update = {k: v for k, v in payload.items() if v is not None}
         update["updated_at"] = datetime.utcnow()
         update["updated_by"] = getattr(current_user, "id", None)
@@ -189,12 +211,34 @@ class VariationService:
         await self._sync_contract_value(target.get("organization_id"), target.get("project_id"), target.get("contract_id"))
         return decorate(target)
 
-    async def delete(self, variation: Dict[str, Any], current_user: Any) -> bool:
+    async def delete(self, variation: Dict[str, Any], current_user: Any, *, policy: Any = None) -> bool:
+        """Delete through the canonical target cleanup.
+
+        ``delete_target`` authorizes ``dms.variation.delete`` on the canonical
+        scope, deletes the row, soft-removes every active link and audits each
+        ``document_relationship.unlinked`` plus ``variation.deleted`` in one
+        transaction. Linked Documents are never touched.
+        """
+        from .document_relationship_service import DocumentRelationshipService
+
         db = await self._get_db()
-        res = await db.variations.delete_one({"_id": variation["_id"]})
-        await self._emit("variation.deleted", current_user, variation, before=variation)
+        if not variation.get("organization_id") or not variation.get("project_id"):
+            # A legacy row without explicit scope can hold no canonical link (the
+            # relationship service refuses scope-less targets), so there is
+            # nothing to clean up - and delete_target's 409 must not make it
+            # undeletable. The caller has already authorized dms.variation.delete.
+            result = await db.variations.delete_one({"_id": variation["_id"]})
+            await self._emit("variation.deleted", current_user, variation, before=variation)
+            await self._sync_contract_value(variation.get("organization_id"), variation.get("project_id"), variation.get("contract_id"))
+            return bool(getattr(result, "deleted_count", 0))
+        await DocumentRelationshipService(db, policy=policy).delete_target(
+            current_user,
+            "variation",
+            str(variation["_id"]),
+            reason="Variation deleted",
+        )
         await self._sync_contract_value(variation.get("organization_id"), variation.get("project_id"), variation.get("contract_id"))
-        return res.deleted_count > 0
+        return True
 
     async def summary(self, scope_filter: Dict[str, Any], *, project_id: Optional[str] = None,
                       contract_id: Optional[str] = None, original_contract_value: Optional[float] = None) -> Dict[str, Any]:

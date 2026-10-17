@@ -13,9 +13,14 @@ import logging
 
 from fastapi import APIRouter, Depends, Request
 
+from ..core.config import settings
 from ..core.database import get_db
 from ..services.billing_webhook_service import BillingWebhookService
 from ..services.payment_gateway import get_payment_gateway
+from ..services.upload_streaming import (
+    UploadTooLargeError,
+    read_request_body_within_limit,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/billing", tags=["billing"])
@@ -33,7 +38,30 @@ _EVENT_ID_HEADERS = {
 
 @router.post("/webhooks/{provider}")
 async def handle_billing_webhook(provider: str, request: Request, db=Depends(get_db)):
-    raw_body = await request.body()
+    # Bounded, not `await request.body()`. This endpoint is unauthenticated by
+    # design, so an anonymous caller decided how much the process held; the only
+    # limit was the gateway's `client_max_body_size 200m`. The Gate 5 upload
+    # guard could not see it because it watched `UploadFile` parameters and this
+    # route has none (R-A8U, F-A8T2-5/6 class).
+    try:
+        raw_body = await read_request_body_within_limit(
+            request, max_size_bytes=int(settings.WEBHOOK_MAX_BODY_SIZE_KB) * 1024
+        )
+    except UploadTooLargeError:
+        # A refused webhook is a LOST BILLING EVENT, not a rejected upload. The
+        # provider retries, the retries are refused the same way, and after the
+        # retry window the event is gone - subscription state then diverges
+        # silently, which the idempotency design cannot recover from because the
+        # event was never recorded. The generic 413 in the request log does not
+        # say that, so the billing channel says it here.
+        logger.error(
+            "billing webhook REFUSED as oversize provider=%s cap_kb=%s: the "
+            "provider will retry and be refused again; raise "
+            "WEBHOOK_MAX_BODY_SIZE_KB or this event is lost",
+            provider,
+            settings.WEBHOOK_MAX_BODY_SIZE_KB,
+        )
+        raise
     signature = request.headers.get(_SIGNATURE_HEADERS.get(provider, "x-webhook-signature"))
     event_id = request.headers.get(_EVENT_ID_HEADERS.get(provider, "x-webhook-event-id"))
 

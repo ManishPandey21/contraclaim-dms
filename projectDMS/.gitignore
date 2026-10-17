@@ -3,6 +3,11 @@
 .env.*
 !.env.example
 !**/.env.example
+# The staging template carries placeholders only; it is the one artefact
+# that tells an operator which variables a staging host needs, so it has to
+# survive a fresh clone. Real values live in `.env.staging`, still ignored.
+!.env.staging.example
+!**/.env.staging.example
 secrets/
 **/secrets/
 config/secrets/

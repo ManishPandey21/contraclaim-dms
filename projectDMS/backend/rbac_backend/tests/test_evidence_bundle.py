@@ -107,7 +107,12 @@ async def test_gather_excludes_out_of_scope_and_missing_documents():
         "linked_document_ids": ["in", "foreign", "ghost"],
     }
     svc = EvidenceBundleService(_DB(docs), file_object_service=_FileService({"f1": b"OURS", "f2": b"THEIRS"}))
-    content = await svc.build(claim, [{"action": "claim.created", "resource_id": "c1"}], generated_by="u1")
+    content = await svc.build(
+        claim,
+        [{"action": "claim.created", "resource_id": "c1"}],
+        document_ids=["in", "foreign", "ghost"],
+        generated_by="u1",
+    )
 
     archived = [n for n in _names(content) if n.startswith("documents/")]
     assert archived == ["documents/ours.pdf"]  # foreign + ghost excluded
@@ -115,3 +120,31 @@ async def test_gather_excludes_out_of_scope_and_missing_documents():
     manifest = json.loads(_read(content, "manifest.json"))
     statuses = {d["document_id"]: d["status"] for d in manifest["documents"]}
     assert statuses == {"in": "included", "foreign": "out_of_scope", "ghost": "not_found"}
+
+
+@pytest.mark.asyncio
+async def test_frozen_evidence_source_uses_pinned_file_object() -> None:
+    docs = {
+        "in": {
+            "_id": "in",
+            "organization_id": "org-A",
+            "filename": "ours.pdf",
+            "file_object_id": "current-file",
+        }
+    }
+    claim = {"_id": "c1", "organization_id": "org-A"}
+    svc = EvidenceBundleService(
+        _DB(docs),
+        file_object_service=_FileService(
+            {"current-file": b"CURRENT", "pinned-file": b"PINNED"}
+        ),
+    )
+    content = await svc.build(
+        claim,
+        [],
+        document_sources=[
+            {"document_id": "in", "file_object_id": "pinned-file", "document_version_id": "v1"}
+        ],
+    )
+
+    assert _read(content, "documents/ours.pdf") == b"PINNED"

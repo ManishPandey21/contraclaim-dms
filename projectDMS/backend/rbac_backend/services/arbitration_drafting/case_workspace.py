@@ -39,6 +39,7 @@ from ..observability import observability_registry
 from ..task_sync_service import TaskSyncService
 from .agents import agent_run_metadata, run_arbitration_agent
 from .exporter import ArbitrationDraftExporter
+from .matrix_evidence_authority import matrix_clause_fence
 from .matrix_registry import MATRIX_COLLECTIONS
 from .repository import ArbitrationDraftingRepository, _collect, _jsonable
 from .approval_policy import (
@@ -231,6 +232,9 @@ def _date_sort_value(row: Dict[str, Any]) -> str:
     return str(value)
 
 
+from ..publication_policy import consumable_derived_text, resolve_derived_authority
+
+
 class ArbitrationCaseWorkspaceService:
     def __init__(self, db: Any) -> None:
         self.db = db
@@ -331,7 +335,13 @@ class ArbitrationCaseWorkspaceService:
         rows = await _collect(self._collection(matrix_slug).find(query).sort("created_at", 1))
         if matrix_slug == "document-index":
             rows.sort(key=lambda row: (str(row.get("exhibit_prefix") or ""), int(row.get("exhibit_number") or 0), _date_sort_value(row)))
-        return rows
+        # Publication boundary: this is the API read path and it wraps each row
+        # in ArbitrationMatrixRow(**row) (extra="allow"), so a blocked document's
+        # derived fields would serialize raw. One shared projection, the same
+        # authority resolver as the internal agent read - they must agree.
+        from ..publication_policy import safe_matrix_rows
+
+        return await safe_matrix_rows(self.db, rows, matrix_slug)
 
     async def create_matrix_row(
         self,
@@ -737,7 +747,7 @@ class ArbitrationCaseWorkspaceService:
             draft = await self.draft_repo.get_draft(draft_id)
             draft_type = (draft or {}).get("draft_type")
         rows = {slug: await self.list_matrix_rows(case_id, slug) for slug in MATRIX_COLLECTIONS}
-        checks = self._compute_readiness_checks(case, rows, draft_id=draft_id, draft_type=draft_type)
+        checks = await self._compute_readiness_checks(case, rows, draft_id=draft_id, draft_type=draft_type)
         evidence_manifest = await self._authoritative_evidence_manifest(case, rows)
         unresolved_sources = [item for item in evidence_manifest if item.get("resolution_status") != "resolved"]
         if unresolved_sources:
@@ -1107,7 +1117,9 @@ class ArbitrationCaseWorkspaceService:
         ]
         clause_rows = [row for row in await self.list_matrix_rows(str(case_id), "clause-matrix") if _is_ready_row(row)]
         claim_rows = [row for row in await self.list_matrix_rows(str(case_id), "claim-matrix") if _is_ready_row(row)]
-        references = self._references_from_case_rows(draft_id, document_rows, clause_rows, current_user)
+        references = await self._references_from_case_rows(
+            draft_id, document_rows, clause_rows, current_user, draft=draft
+        )
         claim_heads = self._claim_heads_from_case_rows(draft_id, claim_rows)
         await self.draft_repo.replace_references(draft_id, references)
         if claim_heads:
@@ -1369,7 +1381,19 @@ class ArbitrationCaseWorkspaceService:
             if not exhibit_id:
                 continue
             loaded = await self._load_exhibit_file(row)
-            volume = _exhibit_volume(row)
+            # Bundle volume is a material legal-filing decision: it determines
+            # where an exhibit appears in the arbitration bundle. Authority
+            # protects against unsafe INFLUENCE, not only disclosure, so a
+            # relevance_note derived from a now-blocked document must not steer
+            # placement. document_type and title are metadata and still do.
+            volume = _exhibit_volume(
+                {
+                    **row,
+                    "relevance_note": await consumable_derived_text(
+                        self.db, row, "relevance_note"
+                    ),
+                }
+            )
             filename = str(loaded.get("filename") or f"{exhibit_id}.bin")
             suffix = Path(filename).suffix or ".bin"
             title = re.sub(r"[^A-Za-z0-9 _.-]+", "", str(row.get("title") or row.get("document_type") or "exhibit")).strip()
@@ -2255,7 +2279,7 @@ class ArbitrationCaseWorkspaceService:
         completed = {str(role).lower() for role in row.get("review_completed_roles") or [] if role}
         return bool(required and not required.issubset(completed))
 
-    def _compute_readiness_checks(
+    async def _compute_readiness_checks(
         self,
         case: Dict[str, Any],
         rows: Dict[str, List[Dict[str, Any]]],
@@ -2263,6 +2287,14 @@ class ArbitrationCaseWorkspaceService:
         draft_id: Optional[str] = None,
         draft_type: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
+        """Async because readiness is an authority question, not only an approval one.
+
+        Approval says a human looked at the matrix row. It says nothing about
+        whether the extraction underneath it is still trusted, and readiness is
+        the gate that authorises filing - so a document rejected by the quality
+        gate after approval was still counted as filing-ready evidence. Nothing
+        is displayed on this path, which is why every text-side guard missed it.
+        """
         checks: List[Dict[str, Any]] = []
 
         def add(check_key: str, check_group: str, check_status: ReadinessCheckStatus, message: str, row_id: Optional[str] = None) -> None:
@@ -2283,7 +2315,14 @@ class ArbitrationCaseWorkspaceService:
         usable_documents = [
             row
             for row in document_rows
-            if row.get("source_id") and row.get("exhibit_id") and _is_ready_row(row)
+            if row.get("source_id")
+            and row.get("exhibit_id")
+            and _is_ready_row(row)
+            and (
+                await resolve_derived_authority(
+                    self.db, row.get("source_type"), row.get("source_id")
+                )
+            ).consumable
         ]
         add(
             "document_index_verified",
@@ -2303,7 +2342,15 @@ class ArbitrationCaseWorkspaceService:
 
         clause_rows = rows.get("clause-matrix") or []
         usable_clauses = [
-            row for row in clause_rows if (row.get("clause_number") or row.get("clause_text_excerpt")) and _is_ready_row(row)
+            row
+            for row in clause_rows
+            if (row.get("clause_number") or row.get("clause_text_excerpt"))
+            and _is_ready_row(row)
+            and (
+                await resolve_derived_authority(
+                    self.db, "clause", row.get("clause_source_id")
+                )
+            ).consumable
         ]
         add(
             "clause_support",
@@ -2648,14 +2695,27 @@ class ArbitrationCaseWorkspaceService:
             },
         )
 
-    def _references_from_case_rows(
+    async def _references_from_case_rows(
         self,
         draft_id: str,
         document_rows: List[Dict[str, Any]],
         clause_rows: List[Dict[str, Any]],
         current_user: Any,
+        *,
+        draft: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
+        """Turn approved case rows into the draft's standing selected references.
+
+        `draft` is keyword-only and defaults to None so that a caller which
+        omits it resolves every document-governed clause row inside an EMPTY
+        canonical universe - i.e. persists none of them. An approved matrix row
+        is a curation verdict; it cannot make an instrument applicable, and a
+        selection written here becomes the draft's standing evidence and is
+        rebuilt into every sealed version, so it must be lawful before it is
+        stored rather than only when it is read back.
+        """
         references: List[Dict[str, Any]] = []
+        matrix_fence = matrix_clause_fence(self.db, draft, current_user)
         for row in document_rows:
             references.append(
                 ArbitrationSelectedReference(
@@ -2664,7 +2724,14 @@ class ArbitrationCaseWorkspaceService:
                     source_id=str(row.get("source_id")),
                     label=row.get("title") or row.get("document_type") or row.get("exhibit_id") or "Case document",
                     citation=row.get("exhibit_id") or row.get("letter_no") or row.get("title"),
-                    snippet=row.get("relevance_note") or row.get("summary") or row.get("document_type"),
+                    # Both relevance_note and summary are derived from the
+                    # source document's extracted text, so they are gated by
+                    # that document's current authority. document_type is
+                    # metadata and remains, so a blocked exhibit is still
+                    # identifiable without asserting its content as evidence.
+                    snippet=await consumable_derived_text(
+                        self.db, row, "relevance_note", "summary"
+                    ) or row.get("document_type"),
                     page_numbers=row.get("page_numbers") or [],
                     letter_no=row.get("letter_no"),
                     event_date=row.get("document_date") if isinstance(row.get("document_date"), datetime) else None,
@@ -2680,6 +2747,11 @@ class ArbitrationCaseWorkspaceService:
         for row in clause_rows:
             if not row.get("clause_number") and not row.get("clause_text_excerpt"):
                 continue
+            if not await matrix_fence.admits_clause_row(row):
+                # Approved, and not currently eligible. The row stays in the
+                # case matrix as history; it just does not become this draft's
+                # evidence. See matrix_evidence_authority.
+                continue
             references.append(
                 ArbitrationSelectedReference(
                     draft_id=draft_id,
@@ -2687,7 +2759,15 @@ class ArbitrationCaseWorkspaceService:
                     source_id=str(row.get("clause_source_id") or row.get("_id")),
                     label=row.get("topic") or row.get("clause_number") or "Clause matrix row",
                     citation=row.get("clause_number") or row.get("topic"),
-                    snippet=row.get("clause_text_excerpt") or row.get("obligation_or_right"),
+                    # The excerpt is parent-document text; the obligation is
+                    # matrix-authored. See context.py:_clause_matrix_sources.
+                    snippet=await consumable_derived_text(
+                        self.db,
+                        row,
+                        "clause_text_excerpt",
+                        source_type="clause",
+                        source_id=row.get("clause_source_id"),
+                    ) or row.get("obligation_or_right"),
                     clause_number=row.get("clause_number"),
                     allowed_use="clause",
                     selected_by=_actor_id(current_user),

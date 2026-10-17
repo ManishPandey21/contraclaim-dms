@@ -11,7 +11,7 @@
 ### Phase 1: Backend Fixes
 - [x] Analyze current backend structure
 - [ ] Create missing AuthorizationService stub
-- [ ] Create missing RateLimiter stub  
+- [ ] Create missing RateLimiter stub
 - [ ] Create missing AuditLogger stub
 - [ ] Simplify permissions router dependencies
 - [ ] Ensure basic /api/permissions endpoint works
@@ -25,7 +25,7 @@
 
 ### Phase 3: Testing & Validation
 - [ ] Test permissions API endpoints
-- [ ] Test roles API endpoints  
+- [ ] Test roles API endpoints
 - [ ] Test frontend data loading
 - [ ] Verify permission matrix functionality
 

@@ -1,10 +1,10 @@
 # Contraclaim DMS Production Docker Migration Report
 
-Date: 2026-07-09  
-Host: `contraclaim` (`vps-5dec80c1`)  
-Primary domain: `web.contraclaim.com`  
-API domain retained: `api.contraclaim.com`  
-Deployment path: `/opt/contraclaim-dms`  
+Date: 2026-07-09
+Host: `contraclaim` (`vps-5dec80c1`)
+Primary domain: `web.contraclaim.com`
+API domain retained: `api.contraclaim.com`
+Deployment path: `/opt/contraclaim-dms`
 Backup root: `/var/backups/contraclaim-migration/20260709-082356`
 
 This report intentionally omits secret values.

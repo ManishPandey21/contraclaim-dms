@@ -221,4 +221,3 @@ Do not treat the reference-linking process as production-complete until the high
 6. Add candidate selection UI for ambiguous letter number matches.
 7. Make frontend controls permission-aware.
 8. Fix `ShareDocumentPage` linked-reference response handling.
-

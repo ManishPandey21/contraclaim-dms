@@ -25,11 +25,12 @@ import {
 } from "lucide-react";
 import { api } from "@/services/api";
 import { joinApiUrl } from "@/config/api";
-import { authenticatedFetch } from "@/services/http";
+import { fetchApiFileBlob } from "@/services/http";
 import { reindexContract } from "@/services/contracts-api";
 import ClauseIndexTab from "@/components/contracts/ClauseIndexTab";
 import { enhancedApi } from "@/services/enhanced-api";
 import { extractErrorMessage } from "@/lib/error-logger";
+import { usePinnedPageScope } from "@/hooks/useRegisterProjectScope";
 
 type Organization = { id: string; name: string; shortName?: string | null };
 type Project = { _id: string; name: string; organization_id: string };
@@ -51,6 +52,8 @@ const ContractViewerPage: React.FC = () => {
   const [projects, setProjects] = useState<Project[]>([]);
   const [orgId, setOrgId] = useState<string>(() => window.localStorage.getItem("org_id") || "");
   const [projId, setProjId] = useState<string>(() => window.localStorage.getItem("proj_id") || "");
+  // CL-4A: while the navbar selects a project, this page's picker follows it.
+  usePinnedPageScope(orgId, setOrgId, projId, setProjId);
   const [uploads, setUploads] = useState<UploadOption[]>([]);
   const [selectedDocId, setSelectedDocId] = useState<string>(routeDocId || "");
   const [fetching, setFetching] = useState(false);
@@ -205,14 +208,7 @@ const ContractViewerPage: React.FC = () => {
         const meta = await enhancedApi.getDocument(selectedDocId).catch(() => null);
         if (!cancelled && meta) setDocMeta(meta as Record<string, any>);
 
-        const resp = await authenticatedFetch(
-          joinApiUrl(`/contracts/${selectedDocId}/download`),
-        );
-        if (!resp.ok) {
-          const text = await resp.text().catch(() => "");
-          throw new Error(text || `Failed to load contract (${resp.status})`);
-        }
-        const blob = await resp.blob();
+        const blob = await fetchApiFileBlob(joinApiUrl(`/contracts/${selectedDocId}/download`));
         if (blob.size === 0) throw new Error("The contract file is empty.");
         if (cancelled) return;
         const objectUrl = URL.createObjectURL(blob);

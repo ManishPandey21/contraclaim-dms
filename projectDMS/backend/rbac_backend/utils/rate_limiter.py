@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import math
 from typing import Dict, Any, Optional
 from datetime import datetime, timedelta
 
@@ -10,6 +11,20 @@ from fastapi import HTTPException, status
 from ..services.runtime_state import get_runtime_state
 
 logger = logging.getLogger(__name__)
+
+
+def _rate_limit_exceeded(retry_after_seconds: float) -> HTTPException:
+    """429 carrying ``Retry-After`` (delay-seconds) until the window resets.
+
+    Clients use it to tell the user when to try again instead of retrying
+    blindly into a bucket that is still full.
+    """
+    return HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail="Rate limit exceeded",
+        headers={"Retry-After": str(max(1, math.ceil(retry_after_seconds)))},
+    )
+
 
 class RateLimiter:
     """Simple rate limiter implementation.
@@ -174,21 +189,24 @@ class RateLimiter:
         if redis is not None:
             redis_key = f"rate:{key}"
             count = await redis.incrby(redis_key, int(cost))
-            if int(count) == int(cost):
-                await redis.expire(redis_key, window)
-            else:
+            # Seconds until this window resets; a new or healed key has a full window.
+            retry_after = window
+            if int(count) != int(cost):
                 # Heal keys left without a TTL (e.g. the creating request lost
                 # the race or the expire call failed): a persistent counter
                 # would otherwise rate-limit the key forever.
                 ttl = await redis.ttl(redis_key)
-                if ttl is not None and int(ttl) < 0:
+                if ttl is None or int(ttl) == -1:
                     await redis.expire(redis_key, window)
+                else:
+                    # TTL 0 (under a second left, rounded down) or -2 (expired
+                    # between INCRBY and TTL): the window is resetting now.
+                    retry_after = max(1, int(ttl))
+            else:
+                await redis.expire(redis_key, window)
             if int(count) > limit:
                 logger.warning("Rate limit exceeded for %s: %s/%s", key, count, limit)
-                raise HTTPException(
-                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                    detail="Rate limit exceeded",
-                )
+                raise _rate_limit_exceeded(retry_after)
             return
 
         async with self._lock:
@@ -203,9 +221,6 @@ class RateLimiter:
             current_count = float(bucket.get("count", 0))
             if current_count + float(cost) > limit:
                 logger.warning("Rate limit exceeded for %s: %s/%s", key, current_count, limit)
-                raise HTTPException(
-                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                    detail="Rate limit exceeded",
-                )
+                raise _rate_limit_exceeded(window - (now - bucket["window_start"]))
 
             bucket["count"] = current_count + float(cost)

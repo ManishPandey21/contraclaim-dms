@@ -1,0 +1,198 @@
+# AUTHORITY BAND — permanent document/graph publication-authority regressions.
+#
+# (Formerly called the "G31 Band". Renamed because G29/G30/G31/G32 are graph
+# CERTIFICATION GATES; this file is a pytest regression suite and is not one of
+# them. A green Authority Band is not a certified gate.)
+#
+# These are the accepted regressions that pin who may write derived graph and
+# evidence material, and whose final state may influence a consumer. They are
+# load-bearing: any ticket that touches a production seam intersecting graph or
+# Document publication authority runs this band BEFORE and AFTER its change,
+# and the two runs must be comparable.
+#
+# Run it:
+#
+#   backend/.venv/Scripts/python.exe -m pytest \
+#       $(grep -v '^#' backend/rbac_backend/tests/AUTHORITY_BAND.txt) -q
+#
+# Only `backend/.venv` has the full dependency set; other interpreters produce
+# phantom collection errors.
+#
+# Rules:
+#   - never delete a line from this file;
+#   - never weaken an assertion in a listed file to make new code pass;
+#   - a new authority regression must be ADDED here (test_authority_band_manifest.py
+#     fails if a discovered one is missing);
+#   - the ENTRIES are the contract. Any count is observational only, and the
+#     guard deliberately permits the band to GROW.
+#
+# What the guard pins, and what it does not:
+#
+#   - REQUIRED_SLICE_FILES     - the thirteen accepted vertical slices;
+#   - REQUIRED_GRAPH_GATE_FILES - the graph certification-gate regressions
+#     (the five Falkor suites plus the four reader/consumer files below);
+#   - anything else here is a legitimate member whose deletion the discovery
+#     rule is expected to catch. Adding a member needs no guard edit unless it
+#     is outside both discovery patterns, in which case pin it by name.
+#
+# Being pinned means the regression may not disappear. It does NOT mean the
+# gate it belongs to is closed: G29/G30/G31/G32 are all OPEN. See
+# .claude/context/contract-master/GRAPH-GATES.md.
+#
+# If a Contract Master change conflicts with an accepted invariant in this band,
+# STOP. Do not adjust the regression to fit the implementation.
+
+# --- Vertical slice 1: storage resync writer
+backend/rbac_backend/tests/test_storage_resync_authority_red.py
+# --- Vertical slice 2: vector reconciler
+backend/rbac_backend/tests/test_vector_reconciler_authority_red.py
+# --- Vertical slice 3: clause chunking agent
+backend/rbac_backend/tests/test_clause_chunking_authority_red.py
+# --- Vertical slice 4: normal document embedding
+backend/rbac_backend/tests/test_normal_document_embedding_authority_red.py
+# --- Vertical slice 5: deferred document embedding
+backend/rbac_backend/tests/test_deferred_document_embedding_authority_red.py
+# --- Vertical slice 6: ingestion pipeline
+backend/rbac_backend/tests/test_ingestion_pipeline_authority_red.py
+# --- Vertical slice 7: contract ingestor
+backend/rbac_backend/tests/test_contract_ingestor_authority_red.py
+# --- Vertical slices 8 + 9: DocumentService graph AND evidence publication
+backend/rbac_backend/tests/test_document_graph_evidence_authority_red.py
+# --- Vertical slice 10: evidence graph backfill service
+backend/rbac_backend/tests/test_evidence_graph_backfill_authority_red.py
+# --- Vertical slice 11: chronology document-derived evidence
+backend/rbac_backend/tests/test_chronology_evidence_authority_red.py
+# --- Vertical slice 11a: chronology verification authority (A0a: edit never confers verify,
+# material edits to verified content return to review, server-owned sync state)
+backend/rbac_backend/tests/test_chronology_verification_authority_red.py
+# --- Vertical slice 12: direct LangGraph letter-draft Falkor writer
+backend/rbac_backend/tests/test_letterdraft_graph_writer_authority_red.py
+# --- Vertical slice 13: evidence register linked_document_ids
+backend/rbac_backend/tests/test_evidence_register_document_authority_red.py
+
+# --- Falkor containment integration
+backend/rbac_backend/tests/integration/test_graph_invalidation_falkor.py
+backend/rbac_backend/tests/integration/test_graph_letter_ownership_falkor.py
+backend/rbac_backend/tests/integration/test_graph_project_scope_falkor.py
+backend/rbac_backend/tests/integration/test_graph_stale_containment_falkor.py
+backend/rbac_backend/tests/integration/test_graph_writer_authority_falkor.py
+
+# --- Graph consumer / reader authority
+backend/rbac_backend/tests/test_graph_consumer_authority.py
+backend/rbac_backend/tests/test_graph_letter_reader_properties.py
+backend/rbac_backend/tests/test_contract_graph_retrieval.py
+backend/rbac_backend/tests/test_falkor_ro_query.py
+
+# --- G-A1 containment: linked-chain report scope + published graph thread
+backend/rbac_backend/tests/test_report_linked_chain_scope_authority_red.py
+backend/rbac_backend/tests/test_letterdraft_graph_thread_identity_authority_red.py
+
+# --- G-A2 containment: report scope organisation-AND-project intersection
+backend/rbac_backend/tests/test_report_scope_intersection_authority_red.py
+
+# --- G-A3 containment: letter context-document scope + publication authority
+backend/rbac_backend/tests/test_letter_context_document_authority_red.py
+
+# --- G-A4 containment: strategy-context thread + curated-document material influence
+backend/rbac_backend/tests/test_strategy_context_authority_red.py
+
+# --- G-A5 containment: LangGraph draft thread + letterNo document-fallback material influence
+backend/rbac_backend/tests/test_letterdraft_pipeline_source_authority_red.py
+
+# --- G-A6 containment: drafting-v2 prior-correspondence material influence in DraftRun
+backend/rbac_backend/tests/test_letterdraft_v2_prior_correspondence_authority_red.py
+
+# --- G-A7 containment: drafting-v2 contract-clause evidence authority in DraftRun
+backend/rbac_backend/tests/test_letterdraft_v2_contract_clause_authority_red.py
+
+# --- G-A8 containment: LangGraph letter-pipeline contract-clause evidence authority
+backend/rbac_backend/tests/test_letterdraft_pipeline_contract_evidence_authority_red.py
+
+# --- G-A9 containment: arbitration drafting contract-clause evidence authority
+backend/rbac_backend/tests/test_arbitration_contract_evidence_authority_red.py
+
+# --- G-A10 containment: drafting v3 real-actor authority propagation
+backend/rbac_backend/tests/test_letterdraft_v3_actor_authority_red.py
+
+# --- G-A11 containment: user-selected arbitration clause reference authority
+backend/rbac_backend/tests/test_arbitration_selected_reference_authority_red.py
+
+# --- G-A12 containment: arbitration evidence-search suggestion disclosure authority
+backend/rbac_backend/tests/test_arbitration_evidence_suggestion_authority_red.py
+
+# --- G-A13 containment: approved case clause-matrix evidence authority
+backend/rbac_backend/tests/test_arbitration_matrix_evidence_authority_red.py
+
+# --- G-A17 containment: real-engine end-to-end graph material influence.
+# The first regression that joins REAL contaminated FalkorDB state to a FINAL
+# material object (GRAPH-GATES.md U6), and the one that pins CAPACITY: an
+# inadmissible graph candidate may not consume a report slot ahead of authority
+# resolution. Evidence toward G29, with the drafting half toward G30. Neither
+# gate is certified by it.
+backend/rbac_backend/tests/integration/test_graph_end_to_end_material_influence_falkor.py
+
+# --- G-A18 containment: clause-graph writer authority CURRENCY.
+# The clause-graph writer resolved publication authority once, at the entry to
+# a fire-and-forget background run, and then wrote (:Contract)/(:ContractDocument)/
+# (:Clause) into FalkorDB after clause persistence and a vector round trip. An
+# authority change landing in that window - human review, quarantine, deletion -
+# was published anyway. Its two siblings (ContractIngestor, the LangGraph letter
+# pipeline) already recheck immediately before their writes; this pins that the
+# clause writer does too, against a REAL engine. Evidence toward G31. The gate
+# is not certified by it.
+backend/rbac_backend/tests/test_clause_graph_writer_authority_red.py
+
+# --- G-A19 containment: graph reader content + candidate capacity.
+# Two consumer defects, both terminating at a FINAL material object.
+# (1) RetrievalService._graph_rows_to_search_results fell back to row["text"] -
+# Clause.text_content read straight off the FalkorDB node - whenever the
+# canonical chunk store had no row for that clause, so a superseded clause
+# generation (nothing deletes or reprojects a (:Clause) node) became the
+# contract-QA prompt clause text; the same seam carried section_type into
+# section_heading, bypassing the strip contract_graph_containment exists to
+# perform. (2) ContractService._assemble_results let a graph candidate with no
+# canonical document join RRF, inflate total_count and spend a page slot -
+# influence without disclosure, the class G-A17 pinned for the linked-chain
+# report. Also pins that the health endpoint reports graph tenant attribution
+# as unavailable rather than inventing it from properties G32 removed.
+# Evidence toward G30. The gate is not certified by it.
+backend/rbac_backend/tests/test_graph_reader_content_authority_red.py
+
+# --- G-A20 containment: G32-STATE legacy graph migration and its validator.
+# G32-CODE stopped the writer contaminating the shared (:Letter) node and stopped
+# every reader reading one. Neither touches state that already exists: 215 nodes
+# still carry document/tenant-owned properties and 307 of 310 CITES edges have no
+# owner_document_id, so they can never be retracted by any cleanup path. These two
+# suites pin the rules the migration over that state obeys, under the accepted R11
+# amendment (GRAPH-GATES.md, "R11 / U3 - owner amendment"): ownership comes only
+# from canonical Mongo evidence; an ambiguous owner is never guessed; NULL is a
+# valid terminal state; owner_document_id='' is never an outcome and a pre-existing
+# one is repaired; a non-NULL owner naming no canonical document is INVALID, not
+# valid; a dry run writes nothing; and the production graphs are structurally
+# unreachable without a recorded authorization.
+# Evidence toward G32-STATE. The gate is NOT certified by it, and a green run
+# against a disposable graph proves nothing about deployed state.
+backend/rbac_backend/tests/test_graph_letter_state_migration_authority_red.py
+backend/rbac_backend/tests/integration/test_graph_letter_state_migration_falkor.py
+
+# --- G-A21 containment: the G29 umbrella, composed against a real engine.
+# Every predecessor was proven on its own seam with hand-seeded state standing in
+# for its neighbour. These two remove the stand-ins.
+# (1) The umbrella composition: the REAL writer publishes, the REAL G32-STATE
+# migration runs over legacy ownership, the REAL retraction executes, and the
+# REAL linked-chain report / CSV / drafting SourceEvidence is the assertion -
+# including the case where canonical authority is withdrawn while the stale
+# artefact is left PHYSICALLY in the graph, because presence is not permission
+# to serve.
+# (2) R12-state, which every earlier phase carried forward as "physical
+# residency, inert, state hygiene". Against a real engine it was not inert:
+# nothing deletes, deactivates or reprojects a (:Clause) node, both generic
+# consumers bounded their traversal with the engine's LIMIT and resolved
+# authority afterwards, and twelve dead clauses filled a three-row window while
+# the live contract's clause never arrived. Suppression with zero disclosure is
+# material influence. The fence now sits inside the query, as it has on the
+# contract evidence path since ticket 12.
+# Evidence toward G29. The gate is NOT certified by it, and a green run against
+# a disposable graph proves nothing about deployed state.
+backend/rbac_backend/tests/integration/test_g29_umbrella_material_influence_falkor.py
+backend/rbac_backend/tests/integration/test_g29_clause_state_material_influence_falkor.py

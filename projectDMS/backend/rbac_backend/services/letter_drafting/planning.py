@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from ...models.letter import Letter
 from ...models.letter_drafting import (
@@ -9,10 +9,21 @@ from ...models.letter_drafting import (
     IncomingLetterAnalysis,
     PlanningSheet,
     ReplyMatrixRow,
+    ReplyPointOrigin,
     SourceEvidence,
     SourceIntegritySummary,
 )
 from .context import condense_text
+
+#: How each reply-matrix row is framed in the plan handed to the drafter. An
+#: AI reply consideration must never read as something the letter states.
+_POINT_LABELS: Dict[str, str] = {
+    "incoming_letter": "Incoming point",
+    "ai_reply_consideration": (
+        "AI-derived reply consideration (advisory; not stated in the incoming letter)"
+    ),
+    "user_direction": "User-directed point",
+}
 
 
 class PlanningSheetBuilder:
@@ -92,7 +103,15 @@ class PlanningSheetBuilder:
                 for row in reply_matrix
                 if row.status == "unsupported"
             ],
-            warnings=[],
+            warnings=(
+                [
+                    "Incoming letter metadata was only partially extracted; "
+                    "verify its letter number, date, parties and references before relying on them."
+                ]
+                if analysis is not None
+                and analysis.source_metadata_quality == "partial_extraction"
+                else []
+            ),
         )
         return planning_sheet, reply_matrix, source_summary, self._plan_text(planning_sheet, reply_matrix)
 
@@ -102,22 +121,23 @@ class PlanningSheetBuilder:
         sources: List[SourceEvidence],
         analysis: Optional[IncomingLetterAnalysis],
     ) -> List[ReplyMatrixRow]:
-        points: List[str] = []
-        # Key Reply Points extracted from the incoming letter's stored AI
-        # metadata are the agenda for the reply — they lead the matrix.
+        points: List[Tuple[str, ReplyPointOrigin]] = []
+        # Key Reply Points are AI advice generated at extraction time, not
+        # words of the incoming letter. They still lead the agenda, but as
+        # advisory rows: no borrowed evidence, always needing confirmation.
         if analysis:
             for point in analysis.key_reply_points or []:
                 cleaned = str(point).strip(" -\t")
                 if cleaned:
-                    points.append(cleaned)
+                    points.append((cleaned, "ai_reply_consideration"))
         if analysis and analysis.main_request:
-            points.append(analysis.main_request)
+            points.append((analysis.main_request, "incoming_letter"))
         for line in (request.points or "").splitlines():
             line = line.strip(" -\t")
             if line:
-                points.append(line)
+                points.append((line, "user_direction"))
         if request.required_action:
-            points.append(request.required_action)
+            points.append((request.required_action, "user_direction"))
 
         source_ids = [source.source_id for source in sources if source.allowed_use in {"fact", "clause"}][:5]
         clause_refs = [
@@ -125,16 +145,31 @@ class PlanningSheetBuilder:
             for source in sources
             if source.source_type == "contract_clause" and source.clause_number
         ][:5]
+        origins: Dict[str, ReplyPointOrigin] = {}
+        for point, origin in points:
+            # A point the letter or the user states is never demoted to
+            # advisory because the AI suggested the same words.
+            if origins.get(point, "ai_reply_consideration") == "ai_reply_consideration":
+                origins[point] = origin
         rows: List[ReplyMatrixRow] = []
-        for point in list(dict.fromkeys(points))[:10]:
+        for point, origin in list(origins.items())[:10]:
+            advisory = origin == "ai_reply_consideration"
+            # The retrieved sources were never matched to an AI suggestion;
+            # stamping them on it would dress advice up as evidenced fact.
+            row_source_ids = [] if advisory else source_ids
             rows.append(
                 ReplyMatrixRow(
                     incoming_point=condense_text(point, 500) or point,
                     proposed_reply=request.desired_position or "[CONFIRM: response position for this incoming point]",
-                    source_ids=source_ids,
-                    clause_refs=[ref for ref in clause_refs if ref],
-                    risk_note=None,
-                    status="supported" if source_ids else "needs_confirmation",
+                    source_ids=row_source_ids,
+                    clause_refs=[] if advisory else [ref for ref in clause_refs if ref],
+                    risk_note=(
+                        "AI-derived reply consideration; not stated in the incoming letter"
+                        if advisory
+                        else None
+                    ),
+                    status="supported" if row_source_ids else "needs_confirmation",
+                    point_origin=origin,
                 )
             )
         return rows
@@ -172,7 +207,8 @@ class PlanningSheetBuilder:
     @staticmethod
     def _plan_text(sheet: PlanningSheet, rows: List[ReplyMatrixRow]) -> str:
         matrix_text = "\n".join(
-            f"- Incoming point: {row.incoming_point}\n  Proposed reply: {row.proposed_reply}"
+            f"- {_POINT_LABELS.get(row.point_origin or '', 'Incoming point')}: {row.incoming_point}"
+            f"\n  Proposed reply: {row.proposed_reply}"
             for row in rows[:8]
         ) or "- No reply matrix points available."
         return "\n".join(

@@ -9,13 +9,26 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from .chunker import chunk_text
 from .enrichment import ChunkEnricher
-from .models import Chunk, IngestionJob, IngestionJobCreate, IngestionOptions, IngestionStage, StageTiming, compute_content_hash
+from .models import (
+    Chunk,
+    IngestionJob,
+    IngestionJobCreate,
+    IngestionOptions,
+    IngestionStage,
+    StageTiming,
+    compute_content_hash,
+)
 from ..observability.service import ObservabilityService
 from ..retrieval.embeddings import EmbeddingClient
+from ..retrieval.namespaces import selectable_vector_namespace
+from ..retrieval.point_ids import generic_chunk_point_id
 from ..retrieval.vector_client import VectorClient
-from ..services.database_service import DocumentProcessingError
 
 logger = logging.getLogger(__name__)
+
+
+class GovernedContractIngestionRefused(ValueError):
+    """Generic ingestion may not rewrite a governed contract's derived evidence."""
 
 
 class IngestionPipeline:
@@ -34,15 +47,32 @@ class IngestionPipeline:
         self.observability = observability_service
         self.enricher = ChunkEnricher(embedding_client)
 
+    def _selectable_namespace(self, requested: Optional[str]) -> Optional[str]:
+        """The request's namespace, if it may select it (``retrieval.namespaces``)."""
+        return selectable_vector_namespace(
+            requested, getattr(self.vector_client, "default_collection", None)
+        )
+
     async def create_job(self, payload: IngestionJobCreate) -> IngestionJob:
+        # Refused before the job exists: an unselectable namespace never reaches
+        # VectorClient, which would create the collection it names.
+        options = payload.options.model_copy(
+            update={
+                "vector_namespace": self._selectable_namespace(
+                    payload.options.vector_namespace
+                )
+            }
+        )
         job = IngestionJob(
             org_id=payload.org_id,
             project_id=payload.project_id,
             document_id=payload.document_id,
-            options=payload.options,
+            options=options,
             content_hash=payload.content_hash,
         )
-        await self.db.ingestion_jobs.insert_one(job.model_dump(by_alias=True, exclude_none=True))
+        await self.db.ingestion_jobs.insert_one(
+            job.model_dump(by_alias=True, exclude_none=True)
+        )
         return job
 
     async def get_job(self, job_id: str) -> Optional[IngestionJob]:
@@ -60,7 +90,9 @@ class IngestionPipeline:
         stage_timings: List[StageTiming] = []
         timing_breakdown: Dict[str, float] = {}
 
-        async def _update_stage(stage: IngestionStage, progress: float, error: Optional[str] = None):
+        async def _update_stage(
+            stage: IngestionStage, progress: float, error: Optional[str] = None
+        ):
             update = {
                 "stage": stage.value,
                 "status": stage.value,
@@ -69,28 +101,51 @@ class IngestionPipeline:
                 "error": error,
                 "stage_timings": [st.model_dump() for st in stage_timings],
             }
-            await self.db.ingestion_jobs.update_one({"job_id": job_id}, {"$set": update})
+            await self.db.ingestion_jobs.update_one(
+                {"job_id": job_id}, {"$set": update}
+            )
 
         try:
+            # A job stored before the allowlist, or around create_job, is refused
+            # here - before any vector work - and fails visibly.
+            job.options.vector_namespace = self._selectable_namespace(
+                job.options.vector_namespace
+            )
             existing_chunks: Dict[str, Dict[str, Any]] = {
-                chunk["chunk_id"]: chunk async for chunk in self.db.chunks.find({"document_id": job.document_id})
+                chunk["chunk_id"]: chunk
+                async for chunk in self.db.chunks.find({"document_id": job.document_id})
             }
 
             extract_started_at = datetime.utcnow()
             extract_start = time.perf_counter()
             await _update_stage(IngestionStage.EXTRACTING, progress=0.05)
             document = await self._load_document(job.document_id)
+            self._refuse_foreign_scope(job, document)
+            await self._refuse_governed_contract(job.document_id, document)
             text = self._extract_text(document)
             if not text:
                 raise ValueError("Document has no text to ingest")
             job.content_hash = job.content_hash or compute_content_hash(text)
             if await self._is_dedup(job):
                 stage_timings.append(
-                    StageTiming(stage=IngestionStage.EXTRACTING.value, started_at=extract_started_at, completed_at=datetime.utcnow(), duration_ms=0.0)
+                    StageTiming(
+                        stage=IngestionStage.EXTRACTING.value,
+                        started_at=extract_started_at,
+                        completed_at=datetime.utcnow(),
+                        duration_ms=0.0,
+                    )
                 )
-                await self._mark_complete(job_id, stage_timings, progress=1.0, deduped=True, content_hash=job.content_hash)
+                await self._mark_complete(
+                    job_id,
+                    stage_timings,
+                    progress=1.0,
+                    deduped=True,
+                    content_hash=job.content_hash,
+                )
                 return
-            timing_breakdown["extracting"] = (time.perf_counter() - extract_start) * 1000
+            timing_breakdown["extracting"] = (
+                time.perf_counter() - extract_start
+            ) * 1000
             stage_timings.append(
                 StageTiming(
                     stage=IngestionStage.EXTRACTING.value,
@@ -115,7 +170,10 @@ class IngestionPipeline:
                 c.embedding_model = job.options.embedding_model
                 c.embedding_version = job.options.embedding_version
                 c.embedding_provider = job.options.embedding_provider
-                c.embedding_dim = job.options.embedding_dim or self.vector_client.config.qdrant_vector_size
+                c.embedding_dim = (
+                    job.options.embedding_dim
+                    or self.vector_client.config.qdrant_vector_size
+                )
                 c.chunking_version = job.options.chunking_version
             timing_breakdown["chunking"] = (time.perf_counter() - chunk_start) * 1000
             stage_timings.append(
@@ -135,7 +193,11 @@ class IngestionPipeline:
             for idx, c in enumerate(chunks):
                 cached = existing_chunks.get(c.id)
                 same_hash = cached and cached.get("content_hash") == c.content_hash
-                same_model = cached and cached.get("embedding_model") == c.embedding_model and cached.get("embedding_version") == c.embedding_version
+                same_model = (
+                    cached
+                    and cached.get("embedding_model") == c.embedding_model
+                    and cached.get("embedding_version") == c.embedding_version
+                )
                 if same_hash and same_model:
                     continue
                 embed_indices.append(idx)
@@ -143,7 +205,9 @@ class IngestionPipeline:
 
             vectors: List[List[float]] = []
             if embed_indices:
-                vectors = await self.embedding_client.embed(texts_to_embed, model=job.options.embedding_model)
+                vectors = await self.embedding_client.embed(
+                    texts_to_embed, model=job.options.embedding_model
+                )
             timing_breakdown["embedding"] = (time.perf_counter() - embed_start) * 1000
             stage_timings.append(
                 StageTiming(
@@ -154,7 +218,12 @@ class IngestionPipeline:
                 )
             )
 
-            await _update_stage(IngestionStage.ENRICHING if job.options.enrichment_on else IngestionStage.INDEXING, progress=0.55)
+            await _update_stage(
+                IngestionStage.ENRICHING
+                if job.options.enrichment_on
+                else IngestionStage.INDEXING,
+                progress=0.55,
+            )
 
             if job.options.enrichment_on:
                 enrich_started_at = datetime.utcnow()
@@ -164,7 +233,9 @@ class IngestionPipeline:
                     vectors,
                     strategies=job.options.enrichment_strategies or ["neighborhood"],
                 )
-                timing_breakdown["enriching"] = (time.perf_counter() - enrich_start) * 1000
+                timing_breakdown["enriching"] = (
+                    time.perf_counter() - enrich_start
+                ) * 1000
                 stage_timings.append(
                     StageTiming(
                         stage=IngestionStage.ENRICHING.value,
@@ -178,6 +249,16 @@ class IngestionPipeline:
 
             index_started_at = datetime.utcnow()
             index_start = time.perf_counter()
+            from ..services.publication_policy import is_publication_blocked
+
+            current_document = await self._load_document(job.document_id)
+            if is_publication_blocked(current_document):
+                raise ValueError(
+                    f"Document {job.document_id} is no longer authoritative for publication"
+                )
+            # Re-read at the write boundary: a promotion that committed while
+            # this job was embedding makes the document governed from here on.
+            await self._refuse_governed_contract(job.document_id, current_document)
             await self._persist_chunks(chunks, job.content_hash, job.options)
 
             changed_chunks = [chunks[i] for i in embed_indices]
@@ -203,8 +284,15 @@ class IngestionPipeline:
                         for c in changed_chunks
                     ],
                     namespace=job.options.vector_namespace,
+                    point_id_for=generic_chunk_point_id,
                 )
 
+            # Last check before the one destructive step: a promotion committing,
+            # or an upload type edited, since the write-boundary check must still
+            # stop the prune - so the document is read again, too.
+            await self._refuse_governed_contract(
+                job.document_id, await self._load_document(job.document_id)
+            )
             await self._prune_stale_vectors(
                 job=job,
                 current_chunks=set(c.id for c in chunks),
@@ -244,7 +332,9 @@ class IngestionPipeline:
                 )
             )
 
-            await self._mark_complete(job_id, stage_timings, progress=1.0, content_hash=job.content_hash)
+            await self._mark_complete(
+                job_id, stage_timings, progress=1.0, content_hash=job.content_hash
+            )
             await self.observability.log_run(
                 run_type="ingestion",
                 org_id=job.org_id,
@@ -269,22 +359,76 @@ class IngestionPipeline:
                 },
             )
 
+    @staticmethod
+    def _refuse_foreign_scope(job: IngestionJob, document: Dict[str, Any]) -> None:
+        """The job's scope is what its chunks are stamped with; it must be the
+        document's own, or another tenant's text is indexed under this one."""
+        if str(document.get("organization_id") or "") != str(job.org_id or "") or str(
+            document.get("project_id") or ""
+        ) != str(job.project_id or ""):
+            raise ValueError(f"Document {job.document_id} is not in the job's scope")
+
+    async def _refuse_governed_contract(
+        self, document_id: str, document: Dict[str, Any]
+    ) -> None:
+        """A contract source is not this pipeline's to write.
+
+        Its derived evidence has its own writers: contract ingest and the
+        contract reindex before promotion, the contract-worker's reprojection
+        after. This pipeline chunks differently and then prunes every point of
+        the document it did not just write - in the namespace evidence reads -
+        which deleted a CURRENT projection's vectors, and, for a contract upload
+        not yet promoted, its clause points and their page provenance.
+        Raised before any chunk, point or sync record is written.
+        """
+        from ..services.contract_source import is_contract_source
+
+        if await is_contract_source(self.db, document_id, document):
+            raise GovernedContractIngestionRefused(
+                f"Document {document_id} is a contract source (a contract upload, or "
+                "governed by a Contract Master instrument); its evidence is rebuilt by "
+                "the contract ingest, reindex and reprojection, not by generic ingestion"
+            )
+
     async def _load_document(self, document_id: str) -> Dict[str, Any]:
-        doc = await self.db.documents.find_one({"_id": document_id}) or await self.db.documents.find_one(
-            {"id": document_id}
-        )
+        # documents._id is ObjectId-keyed; the raw string never matched, so
+        # this reindex path raised "Document not found" for every real
+        # document - and its publication guard below never ran.
+        from ..services.publication_policy import resolve_canonical_document
+
+        doc = await resolve_canonical_document(
+            self.db, document_id
+        ) or await self.db.documents.find_one({"id": document_id})
         if not doc:
             raise ValueError(f"Document {document_id} not found")
         return doc
 
     def _extract_text(self, document: Dict[str, Any]) -> str:
-        for key in ("full_text", "ocrText", "text"):
-            value = document.get(key)
-            if value:
-                return str(value)
-        return ""
+        # This text becomes chunks and then vectors, so this is a publication
+        # producer, not an internal transformation stage. Without the guard a
+        # reindex of a blocked document would republish exactly the content the
+        # publication barrier withheld.
+        from ..services.publication_policy import is_consumable
 
-    async def _persist_chunks(self, chunks: List[Chunk], content_hash: Optional[str], options: IngestionOptions) -> None:
+        if not is_consumable(document):
+            return ""
+
+        # Source text outranks the LLM's retyped Item 25, and the extraction
+        # report is never indexed as the letter - the rule every writer shares.
+        from ..services.source_text import select_body_text
+
+        body = select_body_text(document, include_summary=False)
+        if body:
+            return body
+        value = document.get("text")
+        return str(value) if value else ""
+
+    async def _persist_chunks(
+        self,
+        chunks: List[Chunk],
+        content_hash: Optional[str],
+        options: IngestionOptions,
+    ) -> None:
         if not chunks:
             return
         ops = []
@@ -317,12 +461,20 @@ class IngestionPipeline:
     def _build_replace(self, spec):
         from pymongo import ReplaceOne
 
-        return ReplaceOne(spec["filter"], spec["replacement"], upsert=spec.get("upsert", False))
+        return ReplaceOne(
+            spec["filter"], spec["replacement"], upsert=spec.get("upsert", False)
+        )
 
-    async def _prune_stale_vectors(self, job: IngestionJob, current_chunks: Set[str], namespace: Optional[str]) -> None:
+    async def _prune_stale_vectors(
+        self, job: IngestionJob, current_chunks: Set[str], namespace: Optional[str]
+    ) -> None:
         try:
             existing_ids = await self.vector_client.list_chunk_ids(
-                {"org_id": job.org_id, "project_id": job.project_id, "document_id": job.document_id},
+                {
+                    "org_id": job.org_id,
+                    "project_id": job.project_id,
+                    "document_id": job.document_id,
+                },
                 namespace=namespace,
             )
         except Exception as exc:  # pragma: no cover - defensive
@@ -330,13 +482,21 @@ class IngestionPipeline:
             return
         stale = [cid for cid in existing_ids if cid not in current_chunks]
         if stale:
-            await self.vector_client.delete(stale, namespace=namespace)
+            await self.vector_client.delete(
+                stale, namespace=namespace, point_id_for=generic_chunk_point_id
+            )
 
-    async def _update_vector_sync(self, job: IngestionJob, expected: int, namespace: Optional[str]) -> None:
+    async def _update_vector_sync(
+        self, job: IngestionJob, expected: int, namespace: Optional[str]
+    ) -> None:
         """Update vector_sync_status bookkeeping to clear stale statuses."""
         try:
             qdrant_ids = await self.vector_client.list_chunk_ids(
-                {"org_id": job.org_id, "project_id": job.project_id, "document_id": job.document_id},
+                {
+                    "org_id": job.org_id,
+                    "project_id": job.project_id,
+                    "document_id": job.document_id,
+                },
                 namespace=namespace,
             )
             qdrant_count = len(qdrant_ids)

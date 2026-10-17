@@ -24,6 +24,8 @@ from ..core.security import (
     get_current_user,
     require_permission,
 )
+from ..core.tenant_context import ActiveScope, active_scope
+from ..utils.error_handler import BaseDomainError
 
 logger = logging.getLogger(__name__)
 
@@ -240,6 +242,7 @@ async def get_dashboard_stats(
     ),
     current_user: CurrentUser = Depends(get_current_user),
     db=Depends(get_db),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """
     Return aggregated dashboard statistics scoped to the current user's
@@ -248,13 +251,20 @@ async def get_dashboard_stats(
     - **superadmin**: sees all data across all organisations / projects
     - **orgadmin / orguser**: sees data within their organisation
     - **projectadmin / projectuser**: sees data within their assigned projects
+
+    CL-4A: with a project selected in the navbar every total (and the
+    Organizations / Projects tabs) is computed within that project; an
+    organisation-only selection pins the organisation; nothing selected is unchanged.
     """
 
     try:
         # -----------------------------------------------------------------
         # 1. Build the RBAC-scoped base query for the documents collection
         # -----------------------------------------------------------------
-        base_query = build_scope_query(current_user)
+        selected_org, selected_project = await selection.list_filters(None, None)
+        base_query = build_scope_query(
+            current_user, organization_id=selected_org, project_id=selected_project
+        )
 
         # Optional search filter
         if search:
@@ -579,7 +589,7 @@ async def get_dashboard_stats(
             projects=projects,
         )
 
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as exc:
         logger.exception("Failed to compute dashboard stats: %s", exc)
