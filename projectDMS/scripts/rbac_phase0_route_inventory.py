@@ -141,6 +141,20 @@ def _route_source(route: Any) -> str:
             [source]
             + [inspect.getsource(getattr(ExtractionReviewService, name)) for name in names]
         )
+    if route.endpoint.__module__ == "rbac_backend.routers.document_grounded_summary":
+        # Release 1.2: the same thin-router shape; the document gate lives in
+        # GroundedSummaryService.authorised_document.
+        from rbac_backend.services.grounded_summary.service import GroundedSummaryService
+
+        summary_methods = {
+            "get_grounded_summary": ("read_for_user", "authorised_document"),
+            "generate_grounded_summary": ("authorised_document",),
+        }
+        names = summary_methods.get(str(route.name), ())
+        source = "\n".join(
+            [source]
+            + [inspect.getsource(getattr(GroundedSummaryService, name)) for name in names]
+        )
     return source
 
 

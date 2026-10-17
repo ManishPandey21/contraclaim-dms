@@ -874,7 +874,17 @@ class ExtractionReviewService:
 
         stages.update(await self._publish_graph(document))
 
-        return await self._settle(doc_id, int(expected_revision), document, stages)
+        settled = await self._settle(doc_id, int(expected_revision), document, stages)
+        # The summary held while the document awaited review is generated now,
+        # from the same revision and with the reviewer's approval on it. It is
+        # derivative: its outcome never changes the settled status.
+        try:
+            from .grounded_summary.service import GroundedSummaryService
+
+            await GroundedSummaryService(self.db).generate(doc_id, trigger="review_resolved")
+        except Exception:
+            logger.warning("[extraction_review] Grounded summary skipped for %s", doc_id, exc_info=True)
+        return settled
 
     async def _vector_outcome(self, document_id: str) -> Optional[str]:
         """Mongo chunk rows and Qdrant points agree, or the stage did not finish."""
