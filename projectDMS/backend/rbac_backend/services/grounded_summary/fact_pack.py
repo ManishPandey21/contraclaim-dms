@@ -60,6 +60,16 @@ STATUS_ORDER: Tuple[str, ...] = (
 )
 
 
+#: Statuses a summary may state as plain fact. Anything else (``uncertain``,
+#: or ``not_checkable``: a human-entered header value the text does not state)
+#: appears only qualified, in the uncertainty section.
+ASSERTABLE_STATUSES = frozenset({"verified", "source_stated", "human_approved"})
+
+
+def is_assertable(fact: Any) -> bool:
+    return getattr(fact, "verification_status", None) in ASSERTABLE_STATUSES
+
+
 def weakest(statuses: Iterable[str]) -> str:
     ranked = [status for status in statuses if status in STATUS_ORDER]
     if not ranked:
@@ -156,6 +166,45 @@ _HEADER_LINE = re.compile(
 )
 
 
+#: A letterhead, header-block or salutation line: short, no terminal
+#: punctuation. Wrapped prose rarely leaves a short line mid-sentence, and when
+#: it does the line ends on a word that cannot end a sentence (_CONTINUES).
+_STANDALONE_LINE_MAX = 60
+_SALUTATION = re.compile(
+    r"^\s*(?:dear\s+\w[\w .]*|respected\s+\w[\w .]*|sir|madam|sir\s*/\s*madam|gentlemen)\s*[,:]?\s*$",
+    re.IGNORECASE,
+)
+_CONTINUES = frozenset(
+    {
+        "a", "an", "the", "to", "of", "and", "or", "in", "on", "at", "by", "for", "with", "from",
+        "under", "that", "which", "as", "is", "are", "was", "were", "be", "been", "has", "have",
+        "had", "not", "our", "your", "their", "its", "this", "these", "said", "per", "vide",
+        "dated", "no", "m/s", "into", "upon", "than", "if", "but", "we", "you", "it",
+    }
+)
+
+
+def _line_ends_unit(line: str, following: str) -> bool:
+    """Whether a line break after ``line`` closes it as a unit of its own.
+
+    A header field, a salutation, or a short line without terminal
+    punctuation (letterhead, address, reference block) is never the opening
+    of the next line's sentence. Fixing the boundary here keeps the first body
+    sentence intact; the prose test is unchanged.
+    """
+    stripped = line.strip()
+    if not stripped or not following.strip():
+        return False
+    if _HEADER_LINE.search(stripped) or _SALUTATION.match(stripped):
+        return True
+    if re.search(r"[.!?;,]$", stripped) or len(stripped) >= _STANDALONE_LINE_MAX:
+        return False
+    if not re.match(r"[\"'(“]?[A-Z0-9]", following.lstrip()):
+        return False
+    last = re.split(r"\s+", stripped)[-1].lower()
+    return last not in _CONTINUES
+
+
 @dataclass(frozen=True)
 class Sentence:
     start: int
@@ -180,6 +229,15 @@ def split_sentences(evidence: CanonicalEvidence) -> List[Sentence]:
             if word and word.group(1).lower().rstrip(".") in _ABBREVIATIONS:
                 continue
             cuts.append(page.start + match.start())
+        # Letterhead and header-block lines end at their own line break.
+        lines = segment.split("\n")
+        offset = 0
+        for index, line in enumerate(lines[:-1]):
+            offset += len(line)
+            if _line_ends_unit(line, lines[index + 1]):
+                cuts.append(page.start + offset)
+            offset += 1
+        cuts = sorted(set(cuts))
         bounds = cuts + [page.end]
         for cut in bounds:
             raw = text[cursor:cut]
@@ -213,7 +271,7 @@ _INSTRUCTION = re.compile(
 _REQUEST = re.compile(
     r"\b(?:we|i)\s+(?:(?:hereby|would|therefore|kindly|again|once\s+again)\s+)*(?:request|seek|urge|pray)\b|"
     r"\byou\s+are\s+(?:hereby\s+|kindly\s+)?requested\b|\bkindly\b|\bplease\b|"
-    r"\brequest(?:ed)?\s+(?:you|your|the\s+engineer|the\s+employer)\b|"
+    r"\brequest(?:s|ed)?\s+(?:you|your|the\s+engineer|the\s+employer)\b|"
     r"\bseek(?:s|ing)?\s+(?:your\s+)?(?:approval|determination|extension|consent|instructions?)\b",
     re.IGNORECASE,
 )
@@ -376,13 +434,41 @@ _QUANTITY = re.compile(
     r"MT|tonnes?|metres?|meters?|kg)\b",
     re.IGNORECASE,
 )
+_CLAUSE_SUFFIX = r"(?:\s?\([a-z0-9]{1,4}\))*"
+#: A further clause number in a list ("8.4.1 and 17.1", "8.4.1, 17.1 and
+#: 20.1", "8.4.1 / 17.1"). It must be dotted - a bare "and 20" is as likely a
+#: count of days as a clause - and must not run on into a date, a figure or a
+#: unit ("and 2.5 lakhs", "and 12.03.2024").
+_CLAUSE_MORE = re.compile(
+    r"(?:\s*,\s*(?:and\s+)?|\s+(?:and|or|&)\s+|\s*/\s*)(?:(?:Sub[-\s]?)?Clauses?\s*)?"
+    r"(\d{1,3}(?:\.\d{1,3}){1,3}" + _CLAUSE_SUFFIX + r")(?![\d])(?!\.\d)"
+    r"(?!\s*(?:%|per\s*cent|lakhs?|lacs?|crores?|cr\b|mn\b|million|days?|months?|weeks?|years?|hours?|hrs\b|"
+    r"nos\b|cum\b|m3\b|sqm\b|m2\b|rmt\b|km\b|mt\b|tonnes?|metres?|meters?|kg\b|mm\b|m\b))",
+    re.IGNORECASE,
+)
 _CLAUSE = re.compile(
-    r"\b(?:(?:Sub[-\s]?)?Clause|Cl\.|Article|GCC|SCC|PCC)\s*(?:No\.?\s*)?"
-    r"(\d+(?:\.\d+)*(?:\s?\([a-z0-9]{1,4}\))*)"
+    r"\b(?:(GCC|SCC|PCC)\s+(?=(?:Sub[-\s]?)?Clause))?"
+    r"((?:Sub[-\s]?)?Clauses?|Cl\.|Articles?|GCC|SCC|PCC)\s*(?:No\.?\s*)?"
+    r"(\d+(?:\.\d+)*" + _CLAUSE_SUFFIX + r")"
+    r"((?:" + _CLAUSE_MORE.pattern.replace(r"(\d{1,3}", r"(?:\d{1,3}", 1) + r")*)"
     r"(?:\s+of\s+(?:the\s+)?(GCC|SCC|PCC|General\s+Conditions(?:\s+of\s+Contract)?|"
     r"Special\s+Conditions(?:\s+of\s+Contract)?|Particular\s+Conditions(?:\s+of\s+Contract)?))?",
     re.IGNORECASE,
 )
+_CONDITIONS_FAMILY = {"general": "GCC", "special": "SCC", "particular": "PCC"}
+
+
+def _conditions_family(*names: Optional[str]) -> Optional[str]:
+    """GCC / SCC / PCC when the text names the conditions, else None."""
+    for name in names:
+        if not name:
+            continue
+        word = name.split()[0].lower()
+        if word in {"gcc", "scc", "pcc"}:
+            return word.upper()
+        if word in _CONDITIONS_FAMILY:
+            return _CONDITIONS_FAMILY[word]
+    return None
 
 
 def _decimal(text: str) -> Optional[Decimal]:
@@ -806,22 +892,47 @@ class _Builder:
 
     # -- clauses --
     def clauses(self, sentences: List[Sentence]) -> None:
-        seen: Dict[str, GroundedFact] = {}
+        """Every clause the text cites, each list member on its own.
+
+        One clause is listed once: a later mention of the same number is the
+        same clause unless both mentions name different conditions (GCC 17.1
+        and SCC 17.1 are two clauses).
+        """
+        #: number -> the conditions families already listed for it.
+        seen: Dict[str, List[Optional[str]]] = {}
+        facts: List[GroundedFact] = []
         for match in _CLAUSE.finditer(self.text):
-            label = _collapse(match.group(0))
-            key = _Locator.normalize(label)
-            if key in seen:
-                continue
-            if len(seen) >= MAX_CLAUSES:
-                break
+            prefix, keyword, first, more, conditions = match.groups()
+            family = _conditions_family(prefix, conditions, keyword)
+            of_text = f" of {_collapse(conditions)}" if conditions else ""
+            singular = re.sub(r"(?i)(clause|article)s$", r"\1", _collapse(keyword))
+            members: List[Tuple[int, int, str, str]] = [
+                (match.start(), match.start(3) + len(first),
+                 _collapse(self.text[match.start() : match.start(3) + len(first)]) + of_text, first)
+            ]
+            more_start = match.start(4)
+            for extra in _CLAUSE_MORE.finditer(more or ""):
+                number = extra.group(1)
+                start = more_start + extra.start(1)
+                members.append((start, start + len(number), f"{singular} {_collapse(number)}{of_text}", number))
             sentence = self._sentence_at(sentences, match.start())
-            seen[key] = self._add(
-                kind="clause", label="Contract clause cited", value=label,
-                normalized_value=re.sub(r"\s+", "", match.group(1)), status="source_stated",
-                origin="canonical_text", start=match.start(), end=match.end(),
-                quote=_quote(sentence.text) if sentence else None,
-            )
-        stated_numbers = {str(fact.normalized_value) for fact in seen.values()}
+            for start, end, value, number in members:
+                key = re.sub(r"\s+", "", number)
+                families = seen.setdefault(key, [])
+                if families and (family is None or None in families or family in families):
+                    if family is not None and None in families:
+                        families.append(family)
+                    continue
+                if len(facts) >= MAX_CLAUSES:
+                    break
+                families.append(family)
+                facts.append(self._add(
+                    kind="clause", label="Contract clause cited", value=value,
+                    normalized_value=key, status="source_stated",
+                    origin="canonical_text", start=start, end=end,
+                    quote=_quote(sentence.text) if sentence else None,
+                ))
+        stated_numbers = {str(fact.normalized_value) for fact in facts}
         for raw in self.document.get("contractual_clauses") or []:
             numbers = re.findall(r"\d+(?:\.\d+)*", str(raw))
             if numbers and any(number in stated_numbers for number in numbers):
@@ -930,14 +1041,21 @@ class _Builder:
                 page_numbers=sorted({p for f in ambiguous for p in f.page_numbers}),
             )
         for fact in self.facts:
-            if fact.type in {"letter_number", "subject", "from_party", "to_party", "letter_date"} and (
-                fact.verification_status == "uncertain"
-            ):
+            if fact.type not in {"letter_number", "subject", "from_party", "to_party", "letter_date"}:
+                continue
+            if fact.verification_status == "uncertain":
                 self._add(
                     kind="metadata_qualification", label=f"{fact.label} not found in the text",
                     value=f"{fact.label} '{fact.value}' was extracted but is not stated verbatim in the "
                           "canonical text of this revision.",
                     status="uncertain", origin="structured_metadata",
+                )
+            elif fact.verification_status == "not_checkable":
+                self._add(
+                    kind="metadata_qualification", label=f"{fact.label} entered by a reviewer",
+                    value=f"{fact.label} '{fact.value}' was entered by a reviewer and is not stated verbatim "
+                          "in the canonical text of this revision; it is not shown as read from the letter.",
+                    status="not_checkable", origin="human_edit",
                 )
 
 
@@ -961,11 +1079,7 @@ def build_fact_pack(
     builder = _Builder(evidence, document, review)
     header = builder.header()
     from_fact = next(iter(builder.by_type("from_party")), None)
-    party = (
-        str(from_fact.value)
-        if from_fact is not None and from_fact.verification_status != "uncertain"
-        else "The author"
-    )
+    party = str(from_fact.value) if from_fact is not None and is_assertable(from_fact) else "The author"
     sentences = split_sentences(evidence)
     builder.statements(sentences, party)
     builder.clauses(sentences)
@@ -987,11 +1101,13 @@ def build_fact_pack(
 
 
 __all__ = [
+    "ASSERTABLE_STATUSES",
     "FactPack",
     "STATUS_ORDER",
     "build_fact_pack",
     "classify_statement",
     "find_dates",
+    "is_assertable",
     "split_sentences",
     "weakest",
 ]
