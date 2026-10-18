@@ -2624,19 +2624,17 @@ class DocumentService:
         if not document:
             raise DocumentNotFoundError("Document not found")
 
-        remaining: List[Enclosure] = [
-            enc for enc in document.enclosures or [] if enc.id != enclosure_id
-        ]
-        if len(remaining) == len(document.enclosures or []):
+        if not any(enc.id == enclosure_id for enc in document.enclosures or []):
             raise DocumentServiceError("Enclosure not found")
 
+        # Edit the raw array in place. `Enclosure` omits the storage fields
+        # (`file_object_id`, `storage_key`, `storage_locations`), so rewriting
+        # the array from model dumps stripped them from every other entry.
         await db.documents.update_one(
             {"_id": self._validate_document_id(document_id)},
             {
-                "$set": {
-                    "enclosures": [enc.model_dump(by_alias=True) for enc in remaining],
-                    "updatedAt": datetime.utcnow(),
-                }
+                "$pull": {"enclosures": {"id": enclosure_id}},
+                "$set": {"updatedAt": datetime.utcnow()},
             },
         )
         return True
@@ -3394,6 +3392,7 @@ class DocumentService:
             logger.info(f"Deleting document: {document_id}")
 
             db = await self._get_db()
+            from .child_document_service import active_child_ids
             from .entity_adapter_registry import EntityAdapterRegistry
             from .publication_policy import is_consumable, resolve_canonical_document
 
@@ -3407,6 +3406,14 @@ class DocumentService:
                     {"document_id": str(doc_oid), "removed_at": None},
                     **session_kwargs,
                 )
+                # A parent's delete cascades to its children (Phase 8), so a
+                # child's active links block it exactly as the parent's own do.
+                child_ids = await active_child_ids(db, str(doc_oid), session=session)
+                if child_ids:
+                    count += await db.entity_document_links.count_documents(
+                        {"document_id": {"$in": child_ids}, "removed_at": None},
+                        **session_kwargs,
+                    )
                 if count:
                     return count
                 organization_id = str((current_document or {}).get("organization_id") or "")
@@ -3436,8 +3443,11 @@ class DocumentService:
             if active_relationship_count:
                 raise DocumentDependencyError(active_relationship_count)
 
+            cascaded_children: List[str] = []
+
             async def persist_delete(session: Any) -> bool:
                 session_kwargs = {"session": session} if session is not None else {}
+                cascaded_children.clear()  # with_transaction may retry this callback
                 transactional_document = await resolve_canonical_document(
                     db,
                     str(doc_oid),
@@ -3472,6 +3482,28 @@ class DocumentService:
                 )
                 if active_count:
                     raise DocumentDependencyError(active_count)
+                # Cascade to the live children, marked so a later restore of
+                # the parent can tell them from children deleted on their own.
+                cascaded_children.extend(
+                    await active_child_ids(db, str(doc_oid), session=session)
+                )
+                if cascaded_children:
+                    await db.documents.update_many(
+                        {
+                            "_id": {"$in": [ObjectId(child) for child in cascaded_children]},
+                            "lifecycle_state": {"$ne": "deleted"},
+                        },
+                        {
+                            "$set": {
+                                "lifecycle_state": "deleted",
+                                "deletedAt": now,
+                                "updatedAt": now,
+                                "lifecycle_cascade_parent_id": str(doc_oid),
+                            },
+                            "$inc": {"_revision": 1},
+                        },
+                        **session_kwargs,
+                    )
                 return True
 
             client = getattr(db, "client", None)
@@ -3499,6 +3531,11 @@ class DocumentService:
             if success:
                 logger.info(f"Deleted document: {document_id}")
                 cascade = await self.cascade_delete_cleanup(document_id)
+                cascade["children_deleted"] = list(cascaded_children)
+                for child_id in cascaded_children:
+                    cascade.setdefault("children_cleanup", {})[child_id] = (
+                        await self.cascade_delete_cleanup(child_id)
+                    )
             else:
                 logger.info(f"Document not found for deletion: {document_id}")
 

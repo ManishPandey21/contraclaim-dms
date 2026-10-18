@@ -104,6 +104,7 @@ class FileObjectService:
             }
         )
         if existing:
+            await self._record_dedupe_owner(db, existing, document_id)
             return self._result_from_file_object(existing, deduped=True)
 
         mime_type = content_type or sniff_mime_from_bytes(content or b"", original_filename)
@@ -232,6 +233,7 @@ class FileObjectService:
             }
         )
         if existing:
+            await self._record_dedupe_owner(db, existing, document_id)
             return self._result_from_file_object(existing, deduped=True)
 
         source = Path(source_path).expanduser().resolve()
@@ -335,6 +337,15 @@ class FileObjectService:
         result["filepath_local"] = filepath_local
         result["filepath_s3"] = filepath_s3
         return result
+
+    @staticmethod
+    async def _record_dedupe_owner(db: Any, existing: Dict[str, Any], document_id: Optional[str]) -> None:
+        """A dedupe hit is a new owner of the same bytes. Record it, or
+        `document_ids` under-counts and can never gate a purge."""
+        if document_id:
+            await db.file_objects.update_one(
+                {"_id": existing["_id"]}, {"$addToSet": {"document_ids": document_id}}
+            )
 
     def _result_from_file_object(self, file_object: Dict[str, Any], *, deduped: bool) -> Dict[str, Any]:
         locations = file_object.get("locations") or []
