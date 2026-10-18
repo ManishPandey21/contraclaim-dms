@@ -37,8 +37,20 @@ import rbac_backend.services.permission_service as permission_service
 import rbac_backend.services.runtime_state as runtime_state
 import rbac_backend.utils.audit_logger as audit_logger
 
+# Disposable test-only values; none is or was a real credential. Kept low-entropy
+# so the repository secret scan does not mistake them for keys.
 OLD_PASSWORD = "Old-Passw0rd-A"
 NEW_PASSWORD = "New-Passw0rd-B"
+LEGACY_PASSWORD = "Legacy-Pass-11"
+WRONG_PASSWORD_C = "Wrong-Pass-11"
+WRONG_PASSWORD = "Wrong-Pass-22"
+THIRD_PASSWORD = "Third-Pass-33"
+FRESH_PASSWORD = "Fresh-Pass-44"
+BODY_PASSWORD = "Body-Pass-55"
+PLAIN_PASSWORD = "Plain-Pass-66"
+PROBE_PASSWORD = "Probe-Pass-77"
+WEAK_PROBE_PASSWORD = "probe-pass-weak"
+STORED_PASSWORD = "Stored-Pass-88"
 EMAIL = "reset-target@example.com"
 
 
@@ -461,7 +473,7 @@ def test_http_login_disabled_account_is_distinguishable_from_bad_password(monkey
     user_id = asyncio.run(_created_user(db, disabled=True))
     asyncio.run(_admin_reset(db, user_id))
     with _login_client(monkeypatch, db) as client:
-        bad = _login(client, "Wrong-Passw0rd-C")
+        bad = _login(client, WRONG_PASSWORD_C)
         disabled = _login(client, NEW_PASSWORD)
     assert bad.status_code == 401
     assert disabled.status_code in (401, 403)
@@ -509,12 +521,12 @@ def test_canonical_field_wins_and_legacy_is_never_also_accepted():
         db.users.docs.append(
             _doc(
                 hashed_password=get_password_hash(OLD_PASSWORD),
-                passwordHash=get_password_hash("Legacy-Passw0rd-D"),
+                passwordHash=get_password_hash(LEGACY_PASSWORD),
             )
         )
         assert await _login_reader_accepts(db, OLD_PASSWORD) is True
         # A conflicting legacy copy must not become a second accepted password.
-        assert await _login_reader_accepts(db, "Legacy-Passw0rd-D") is False
+        assert await _login_reader_accepts(db, LEGACY_PASSWORD) is False
 
     asyncio.run(run())
 
@@ -572,7 +584,7 @@ def test_self_service_change_enforces_the_admin_reset_policy(monkeypatch):
         ("too short", {"password": "Ab1sh"}),
         ("fails a validator", {"password": "weakpassword"}),
         ("too long", {"password": "A1" + "x" * 200}),
-        ("missing field, whole body is the input", {"password": "Body-Passw0rd-H", "email": None}),
+        ("missing field, whole body is the input", {"password": BODY_PASSWORD, "email": None}),
     ],
 )
 def test_validation_error_responses_never_echo_the_password(label, body):
@@ -637,7 +649,7 @@ def test_create_validation_failure_message_never_echoes_the_password():
 
     from pydantic import ValidationError
 
-    secret = "Plain-Secret-9"
+    secret = PLAIN_PASSWORD
 
     async def run():
         db = _FakeDb()
@@ -664,7 +676,7 @@ def test_create_validation_failure_message_never_echoes_the_password():
 def test_create_response_and_audit_carry_no_credential():
     import asyncio
 
-    secret = "Fresh-Passw0rd-E"
+    secret = FRESH_PASSWORD
 
     async def run():
         db = _FakeDb()
@@ -692,7 +704,7 @@ def test_credential_flows_never_log_password_or_hash(caplog):
     import asyncio
     import logging
 
-    third, wrong = "Third-Passw0rd-F", "Wrong-Passw0rd-G"
+    third, wrong = THIRD_PASSWORD, WRONG_PASSWORD
 
     async def run():
         db = _FakeDb()
@@ -778,21 +790,21 @@ _NEW_USER = {"username": "abc", "email": "a@b.co", "first_name": "a", "last_name
     "label, method, url, body, expected",
     [
         ("create, wrong type", "post", "/api/users",
-         {**_NEW_USER, "password": {"nested": "Probe-Secret-77"}}, 422),
+         {**_NEW_USER, "password": {"nested": PROBE_PASSWORD}}, 422),
         # UserCreatePayload has no policy validator: the controller refuses with 400.
         ("create, weak password", "post", "/api/users",
-         {**_NEW_USER, "password": "Probe-secret-weak"}, 400),
-        ("login, whole body is the input", "post", "/api/login", {"password": "Probe-Secret-77"}, 422),
+         {**_NEW_USER, "password": WEAK_PROBE_PASSWORD}, 400),
+        ("login, whole body is the input", "post", "/api/login", {"password": PROBE_PASSWORD}, 422),
         ("admin reset, wrong type", "put", "/api/users/6ad3d0000000000000000001",
-         {"password": {"nested": "Probe-Secret-77"}}, 422),
+         {"password": {"nested": PROBE_PASSWORD}}, 422),
         ("self-service change, whole body is the input", "post",
-         "/api/profiles/change-password", {"new_password": "Probe-Secret-77"}, 422),
+         "/api/profiles/change-password", {"new_password": PROBE_PASSWORD}, 422),
     ],
 )
 def test_password_bearing_routes_never_echo_the_password(label, method, url, body, expected):
     from rbac_backend.main import app as production_app
 
-    secret = body["password"] if isinstance(body.get("password"), str) else "Probe-Secret-77"
+    secret = body["password"] if isinstance(body.get("password"), str) else PROBE_PASSWORD
 
     async def fake_user():
         return SimpleNamespace(
@@ -839,7 +851,7 @@ def test_self_service_change_removes_legacy_field_and_ends_sessions(monkeypatch)
             _doc(
                 _id=uid,
                 hashed_password=get_password_hash(OLD_PASSWORD),
-                passwordHash=get_password_hash("Legacy-Passw0rd-D"),
+                passwordHash=get_password_hash(LEGACY_PASSWORD),
             )
         )
         actor = SimpleNamespace(id=str(uid), roles=["user"])
@@ -873,7 +885,7 @@ def test_failed_self_service_change_ends_no_sessions(monkeypatch):
         actor = SimpleNamespace(id=user_id, roles=["user"])
         with pytest.raises(HTTPException) as exc:
             await change_my_password(
-                ChangePassword(current_password="Wrong-Passw0rd-G", new_password=NEW_PASSWORD),
+                ChangePassword(current_password=WRONG_PASSWORD, new_password=NEW_PASSWORD),
                 current_user=actor,
                 db=db,
             )
@@ -888,7 +900,7 @@ def test_unparseable_user_record_is_logged_without_its_contents(caplog):
     import asyncio
     import logging
 
-    secret, hashed = "Stored-Plain-1", get_password_hash("Stored-Plain-1")
+    secret, hashed = STORED_PASSWORD, get_password_hash(STORED_PASSWORD)
 
     async def run():
         db = _FakeDb()
