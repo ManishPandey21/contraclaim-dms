@@ -48,6 +48,12 @@ class Enclosure(BaseModel):
     filesize: int = Field(default=0)
     uploadedAt: datetime = Field(default_factory=now_utc)
     uploadedBy: str = Field(...)
+    #: The first-class child Document made from this entry (Phase 8), if any.
+    #: Storage fields (``storage_key``, ``file_object_id``,
+    #: ``storage_locations``) stay off this model on purpose; they are not for
+    #: the client, so writers must edit the raw array, never rewrite it from
+    #: model dumps.
+    child_document_id: Optional[str] = Field(default=None)
 
 class StorageLocation(BaseModel):
     """Represents one stored copy of a document."""
@@ -150,6 +156,17 @@ class Document(BaseModel):
     createdBy: str = Field(...)
     version: str = Field(default="1.0")
     enclosures: List[Enclosure] = Field(default_factory=list)
+    # Phase 8 child documents (services/child_document_service.py). Declared
+    # because this model drops undeclared fields: a child read through it
+    # without `parent_document_id` would pass for a top-level document.
+    parent_document_id: Optional[str] = Field(default=None)
+    relationship_type: Optional[str] = Field(default=None, pattern=r"^(enclosure|annexure|attachment)$")
+    source_page_range: Optional[Dict[str, int]] = Field(default=None)
+    parent_provenance: Optional[Dict[str, Any]] = Field(default=None)
+    original_filename: Optional[str] = Field(default=None)
+    #: Set when a parent's delete cascaded to this child, so a later parent
+    #: restore can tell cascaded children from ones deleted on their own.
+    lifecycle_cascade_parent_id: Optional[str] = Field(default=None)
     references: List[DocumentReference] = Field(default_factory=list)
     referencedBy: List[DocumentReference] = Field(default_factory=list)
     storage_locations: List[StorageLocation] = Field(default_factory=list)

@@ -245,6 +245,11 @@ async def ensure_indexes(db):
         [("organization_id", 1), ("project_id", 1), ("letterNo", 1)],
         background=True,
     )
+    # Phase 8 child documents: the partial unique identity and the parent
+    # lookup (services/child_document_service.py).
+    from ..services.child_document_service import ensure_child_document_indexes
+
+    await ensure_child_document_indexes(db)
 
     # Immutable file storage architecture
     await db.file_objects.create_index("sha256", background=True)

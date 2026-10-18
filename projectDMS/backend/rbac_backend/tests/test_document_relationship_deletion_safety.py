@@ -36,6 +36,15 @@ class _Collection:
                 return deepcopy(item)
         return None
 
+    def find(self, query: dict[str, Any], **kwargs: Any):
+        # Deletion now looks up Phase 8 child documents by parent.
+        async def _rows():
+            for item in self.documents:
+                if "parent_document_id" in query and item.get("parent_document_id") == query["parent_document_id"]:
+                    yield deepcopy(item)
+
+        return _rows()
+
     async def update_one(self, query: dict[str, Any], update: dict[str, Any]):
         for item in self.documents:
             if item.get("_id") == query.get("_id"):
