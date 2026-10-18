@@ -10,6 +10,7 @@ from jwt import PyJWTError as JWTError
 from ..core.config import settings
 from ..core.database import get_db
 from ..core.security import CurrentUser, get_current_user, verify_password
+from .credential_fields import stored_password_hash
 from ..services.audit_event_service import AuditEventService
 
 
@@ -66,7 +67,7 @@ class StepUpService:
         user_doc = await self.db.users.find_one({"_id": self._id_lookup(current_user.id)})
         if not user_doc:
             user_doc = await self.db.users.find_one({"email": current_user.email})
-        hashed = (user_doc or {}).get("hashed_password") or (user_doc or {}).get("passwordHash")
+        hashed = stored_password_hash(user_doc)
         if not hashed or not verify_password(password, hashed):
             await self.audit_service.emit(
                 action="security.step_up_failed",

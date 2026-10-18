@@ -15,6 +15,7 @@ from typing import Optional, Dict, Any
 
 from ..core.database import get_database
 from ..core.security import verify_password
+from .credential_fields import stored_password_hash
 from .runtime_state import get_runtime_state
 
 
@@ -52,7 +53,7 @@ class AuthenticationService:
         user.created_at = doc.get("created_at")
         user.last_login = doc.get("last_login")
         # Preserve hashed password for subsequent checks if needed
-        user.hashed_password = doc.get("hashed_password") or doc.get("passwordHash") or ""
+        user.hashed_password = stored_password_hash(doc) or ""
         return user
 
     # ------------------------------------------------------------------
@@ -67,7 +68,7 @@ class AuthenticationService:
         if not doc:
             return None
 
-        hashed = doc.get("hashed_password") or doc.get("passwordHash")
+        hashed = stored_password_hash(doc)
         if not hashed or not verify_password(password, hashed):
             return None
 

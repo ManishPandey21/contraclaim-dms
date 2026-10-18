@@ -292,7 +292,15 @@ class UserController:
 
         except (UserError, AuthenticationError, HTTPException):
             raise
-        except (ValueError, ValidationError, UserServiceError) as e:
+        except ValidationError as e:
+            # str(ValidationError) embeds each offending input, which for this
+            # payload can be the plaintext password. Return the messages only.
+            messages = "; ".join(str(err.get("msg", "")) for err in e.errors())
+            raise UserError(messages or "Invalid user data", status.HTTP_400_BAD_REQUEST)
+        except UserServiceError as e:
+            logger.error(f"User creation failed: {type(e).__name__}")
+            raise UserError("User creation failed", status.HTTP_400_BAD_REQUEST)
+        except ValueError as e:
             raise UserError(str(e), status.HTTP_400_BAD_REQUEST)
         except (BaseDomainError, HTTPException):
             raise
@@ -473,6 +481,10 @@ class UserController:
             updated_user = await self.user_service.update_user(
                 validated_user_id, validated_update
             )
+            if updated_user is None:
+                # Nothing was written (the user vanished after the lookup); never
+                # report a credential or profile change that did not happen.
+                raise UserError("User not found", status.HTTP_404_NOT_FOUND)
 
             # Audit log
             changed_fields = self._get_changed_fields(existing_user, validated_update)
@@ -481,7 +493,9 @@ class UserController:
             )
 
             # Invalidate sessions if critical fields changed
-            if any(field in changed_fields for field in ['roles', 'disabled', 'password']):
+            # A password change lands in changed_fields as 'hashed_password'
+            # ('password' is cleared before persistence and never compares).
+            if any(field in changed_fields for field in ['roles', 'disabled', 'hashed_password']):
                 await self.authentication_service.invalidate_user_sessions(validated_user_id)
 
             # Build response
@@ -495,7 +509,7 @@ class UserController:
             logger.error(f"Failed to update user {user_id}: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"User update failed: {str(e)}"
+                detail="User update failed"
             )
 
     async def delete_user(

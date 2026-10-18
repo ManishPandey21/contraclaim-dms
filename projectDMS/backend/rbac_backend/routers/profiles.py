@@ -3,10 +3,12 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
 from ..core.database import get_db
 from ..core.security import get_current_user, CurrentUser
 from ..schemas.profile import ProfileRead, ProfileUpdate, ChangePassword
+from ..services.authentication_service import AuthenticationService
 from ..services.user_service import UserService
 from ..services.upload_streaming import read_upload_within_limit
 from ..utils.file_validation import sniff_mime_from_bytes
 from ..utils.error_handler import BaseDomainError
+from ..utils.validation import validate_password_strength
 
 router = APIRouter(tags=["profiles"])
 
@@ -204,6 +206,13 @@ async def change_my_password(
     db = Depends(get_db),
 ):
     """Change password for the authenticated user."""
+    # Same policy as the admin reset (routers/users.py::_validate_user_update).
+    policy = validate_password_strength(payload.new_password)
+    if not policy.is_valid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Password requirements not met: {policy.error}",
+        )
     user_service = UserService(db)
     try:
         success = await user_service.change_password(
@@ -213,6 +222,9 @@ async def change_my_password(
         )
         if not success:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password change failed")
+        # Same as the admin reset: every existing session, this one included,
+        # ends with the old password. The client signs the user out.
+        await AuthenticationService().invalidate_user_sessions(current_user.id)
         return {"message": "Password changed successfully"}
     except ValueError as ve:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
