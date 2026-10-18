@@ -6,7 +6,7 @@ Document management module with secure file handling, proper authorization, and 
 
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Query, BackgroundTasks, Body, Header, Request
 from starlette.background import BackgroundTask
-from typing import List, Optional, Dict, Any, Union
+from typing import List, Literal, Optional, Dict, Any, Union
 from datetime import datetime, date
 import logging
 import os
@@ -3070,6 +3070,11 @@ def _resolve_document_search_term(
     return normalized_q or normalized_search
 
 
+#: ``sort_by`` values the listing accepts; the keys of
+#: ``document_service.DOCUMENT_LIST_SORT_FIELDS`` (a test pins the two together).
+DocumentListSortField = Literal["date", "createdAt", "status", "tags", "letterNo", "subject"]
+
+
 #: Pseudo upload type accepted by the listing: "incoming OR outgoing".
 CORRESPONDENCE_UPLOAD_TYPE_FILTER = "correspondence"
 
@@ -3118,11 +3123,17 @@ async def list_documents(
     subject: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
+    sort_by: Optional[DocumentListSortField] = Query(None),
+    sort_order: Literal["asc", "desc"] = Query("desc"),
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
     selection: ActiveScope = Depends(active_scope),
 ):
     """List documents with filtering and pagination.
+
+    Search, every filter and ``sort_by`` run in the query before ``skip``/``limit``,
+    so ``total`` counts the filtered set. Without ``sort_by`` the order is newest
+    upload first.
 
     CL-4A: with a project selected the list is pinned to it; a filter may narrow
     the selection, never leave it. The navbar always selects a project when the
@@ -3149,7 +3160,7 @@ async def list_documents(
         "include_organization_level": selection.has_project
         and bool(roles & {"orgadmin", "orguser", "superadmin"}),
     }
-    pagination = {"skip": skip, "limit": limit}
+    pagination = {"skip": skip, "limit": limit, "sort_by": sort_by, "sort_order": sort_order}
 
     scope_org, scope_project = _current_user_policy_scope(current_user)
     await PolicyService().authorize(
