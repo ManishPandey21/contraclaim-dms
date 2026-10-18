@@ -162,6 +162,33 @@ describe("Document Library filters", () => {
     expect(params.get("limit")).toBe("25");
   });
 
+  it("keeps the space typed before a pause at a word boundary", async () => {
+    // Found in browser acceptance: "notice ", a pause, then "of" became
+    // "noticeof" because the trimmed committed term was written back into the box.
+    renderPage();
+    await waitFor(() => expect(requests).toHaveLength(1));
+
+    fireEvent.change(searchBox(), { target: { value: "notice " } });
+    await waitFor(() => expect(lastParams().get("search")).toBe("notice"), { timeout: 2000 });
+    await settle();
+    expect(searchBox()).toHaveValue("notice ");
+
+    fireEvent.change(searchBox(), { target: { value: "notice of" } });
+    await waitFor(() => expect(lastParams().get("search")).toBe("notice of"), { timeout: 2000 });
+    expect(searchBox()).toHaveValue("notice of");
+  });
+
+  it("sends a search padded with spaces once, trimmed", async () => {
+    renderPage();
+    await waitFor(() => expect(requests).toHaveLength(1));
+    fireEvent.change(searchBox(), { target: { value: "  17.4  " } });
+    await waitFor(() => expect(requests).toHaveLength(2), { timeout: 2000 });
+    expect(lastParams().get("search")).toBe("17.4");
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(requests).toHaveLength(2); // no second, identical request
+    expect(searchBox()).toHaveValue("  17.4  ");
+  });
+
   it("debounces the search into one request carrying the whole term", async () => {
     renderPage();
     await waitFor(() => expect(requests).toHaveLength(1));

@@ -495,16 +495,20 @@ const DocumentsPage = () => {
   );
 
   // The box follows the committed search when it changes from elsewhere (the
-  // URL, a reset); typing commits it only after SEARCH_DEBOUNCE_MS of quiet.
+  // URL, a reset); typing commits it, trimmed, only after SEARCH_DEBOUNCE_MS of
+  // quiet. The box keeps what was typed: writing the trimmed term back would
+  // eat the space before the next word ("notice " + pause + "of").
   useEffect(() => {
-    setSearchInput(searchTerm);
+    setSearchInput((current) =>
+      current.trim() === searchTerm ? current : searchTerm
+    );
   }, [searchTerm]);
 
   useEffect(() => {
-    if (searchInput === searchTerm) return;
+    const term = searchInput.trim();
+    if (term === searchTerm) return;
     const handle = window.setTimeout(
-      () =>
-        updateDocumentFilters({ searchTerm: searchInput }, { resetPage: true }),
+      () => updateDocumentFilters({ searchTerm: term }, { resetPage: true }),
       SEARCH_DEBOUNCE_MS
     );
     return () => window.clearTimeout(handle);
