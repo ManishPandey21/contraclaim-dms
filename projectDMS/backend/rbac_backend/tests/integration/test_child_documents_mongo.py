@@ -720,6 +720,126 @@ def test_removing_one_enclosure_keeps_storage_and_child_links_on_the_others() ->
     _run(scenario())
 
 
+# --------------------------------------------------------------------------- #
+# Generic metadata updates must not rewrite the persisted enclosures array
+# --------------------------------------------------------------------------- #
+
+
+def _rich_entry(entry_id: str, fo_id: str, sha: str) -> Dict[str, Any]:
+    return {
+        "id": entry_id,
+        "filename": f"{entry_id}.pdf",
+        "filepath_local": f"/data/{fo_id}.pdf",
+        "filepath_s3": None,
+        "presigned_url": None,
+        "filetype": "application/pdf",
+        "filesize": 4096,
+        "uploadedAt": datetime(2026, 9, 2),
+        "uploadedBy": "user-project_admin",
+        "file_object_id": fo_id,
+        "storage_key": f"/org-a/proj-a1/enclosures/2026/09/{entry_id}",
+        "storage_locations": [
+            {"provider": "local", "path": f"/data/{fo_id}.pdf", "status": "ok"},
+            {"provider": "s3", "path": f"s3://bucket/{fo_id}.pdf", "status": "ok"},
+        ],
+        "sha256": sha,
+        "child_document_id": None,
+    }
+
+
+class _RecordingDocuments:
+    """Delegates to the real collection and records every update document."""
+
+    def __init__(self, collection: Any, log: List[Dict[str, Any]]) -> None:
+        self._collection = collection
+        self._log = log
+
+    async def update_one(self, query: Any, update: Dict[str, Any], *args: Any, **kwargs: Any) -> Any:
+        self._log.append(update)
+        return await self._collection.update_one(query, update, *args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._collection, name)
+
+
+class _RecordingDatabase:
+    def __init__(self, db: Any, log: List[Dict[str, Any]]) -> None:
+        self._db = db
+        self.documents = _RecordingDocuments(db.documents, log)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._db, name)
+
+
+async def _update_like_the_route(db: Any, document_id: str, **changes: Any) -> None:
+    """Exactly the controller's shape: load the model, model_copy, update_document."""
+    from rbac_backend.services.document_service import DocumentService
+
+    service = DocumentService(db=db)
+    document = await service.get_document(document_id)
+    await service.update_document(document_id, document.model_copy(update=changes))
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"subject": "Revised subject"},
+        {"tags": ["claims", "eot"], "subTags": ["rework"]},
+        {"status": "Under Process"},
+        {"letterNo": "ENG/A1/001-R1", "to": "Engineer"},
+    ],
+    ids=["subject", "tags", "status", "letter-number"],
+)
+def test_unrelated_metadata_update_preserves_every_enclosure_entry(changes: Dict[str, Any]) -> None:
+    async def scenario() -> None:
+        async with _env() as env:
+            entries = [
+                _rich_entry(env.entry_id, env.fo, env.sha),
+                _rich_entry(str(ObjectId()), env.fo_solo, "d" * 64),
+                _rich_entry(str(ObjectId()), "fo-third", "e" * 64),
+            ]
+            await env.db.documents.update_one({"_id": env.parent}, {"$set": {"enclosures": entries}})
+            before = (await env.doc(env.parent))["enclosures"]
+
+            await _update_like_the_route(env.db, str(env.parent), **changes)
+
+            after = await env.doc(env.parent)
+            for field, value in changes.items():
+                assert after[field] == value, field
+            assert after["enclosures"] == before  # every entry, field for field
+
+    _run(scenario())
+
+
+def test_generic_update_never_writes_the_enclosures_field() -> None:
+    async def scenario() -> None:
+        async with _env() as env:
+            log: List[Dict[str, Any]] = []
+            await _update_like_the_route(_RecordingDatabase(env.db, log), str(env.parent), subject="New")
+            writes = [u for u in log if "$set" in u and "subject" in u["$set"]]
+            assert writes, "the update was not observed"
+            for update in writes:
+                for operator in update.values():
+                    assert not any(str(key).split(".")[0] == "enclosures" for key in operator), update
+
+    _run(scenario())
+
+
+def test_remove_enclosure_still_removes_only_its_entry_after_a_metadata_update() -> None:
+    from rbac_backend.services.document_service import DocumentService
+
+    async def scenario() -> None:
+        async with _env() as env:
+            keep = _rich_entry(env.entry_id, env.fo, env.sha)
+            doomed = _rich_entry(str(ObjectId()), env.fo_solo, "d" * 64)
+            await env.db.documents.update_one({"_id": env.parent}, {"$set": {"enclosures": [keep, doomed]}})
+            await _update_like_the_route(env.db, str(env.parent), subject="Edited")
+            await DocumentService(db=env.db).remove_enclosure(str(env.parent), doomed["id"])
+            assert (await env.doc(env.parent))["enclosures"] == [keep]
+
+    _run(scenario())
+
+
 def test_dedupe_hit_in_store_path_records_the_new_owner() -> None:
     from rbac_backend.services.file_object_service import FileObjectService
 

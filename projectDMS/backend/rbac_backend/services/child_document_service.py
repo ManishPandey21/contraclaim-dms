@@ -36,6 +36,32 @@ Lifecycle:
   bytes. Once nothing references the ``FileObject`` any more, it is marked
   ``unreferenced_at``. That mark is a candidate for a future reviewed
   collector, not a deletion.
+
+**Hard gate for PR B: mandatory before any caller creates child rows.**
+``ensure_indexes`` runs as a background task that logs and gives up on
+failure. It is also one long sequence, so an earlier index failure means the
+child indexes are never created. A startup log line therefore proves nothing.
+Before creating a child, PR B must read ``db.documents.index_information()``
+and fail closed unless both of these hold:
+
+* ``uq_documents_child_identity`` exists and is ``unique``, with the partial
+  filter on ``parent_document_id``;
+* ``ix_documents_children_by_parent`` exists.
+
+Without the unique index, only the check-before-insert stands between a retry
+and a duplicate child.
+
+Deliberately left for PR B or later:
+
+* purge of the child's page, canonical-evidence and vector collections;
+* re-indexing a restored child;
+* the navbar selection check (``require_record``) on the routes PR B adds;
+* a parent restore that consumes ``lifecycle_cascade_parent_id``;
+* entity-link checks in the legacy adapter tables for children;
+* the semantics of an ``unreferenced_at`` collector, which must recount
+  references, and clearing the mark when a child links the FileObject again;
+* restricting which FileObject ``document_type`` a child may reuse;
+* moving children when their parent moves to another project.
 """
 
 from __future__ import annotations

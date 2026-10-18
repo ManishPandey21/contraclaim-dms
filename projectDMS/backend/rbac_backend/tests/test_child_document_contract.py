@@ -46,6 +46,17 @@ def test_remove_enclosure_never_rewrites_the_array_through_the_model() -> None:
     assert "model_dump" not in source
 
 
+def test_the_generic_update_schema_cannot_carry_enclosures() -> None:
+    """Enclosures are owned by the dedicated enclosure operations. The generic
+    metadata update schema ignores the field, as it ignores every other
+    unknown key."""
+    from rbac_backend.models.document import DocumentUpdate
+
+    update = DocumentUpdate(**{"subject": "s", "enclosures": [{"id": "x"}]})
+    assert "enclosures" not in DocumentUpdate.model_fields
+    assert "enclosures" not in update.model_dump(exclude_unset=True)
+
+
 def test_document_model_declares_the_child_fields() -> None:
     """``Document`` has no ``extra="allow"``: an undeclared field is dropped by
     every ``Document(**row)`` consumer, which would make a child read as a

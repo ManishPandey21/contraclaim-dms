@@ -3252,7 +3252,12 @@ class DocumentService:
             update_dict = updated_document.model_dump(
                 by_alias=True,
                 exclude_unset=True,
-                exclude={"_id"}  # Don't update the ID field via dump options
+                # `_id` is immutable. `enclosures` belongs to the dedicated
+                # enclosure operations: the model omits the storage fields
+                # (`file_object_id`, `storage_key`, `storage_locations`), so
+                # writing it back from a loaded model stripped them from every
+                # entry on any unrelated metadata edit.
+                exclude={"_id", "enclosures"},
             )
 
             # Hardening: make absolutely sure immutable identifiers never reach Mongo
