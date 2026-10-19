@@ -25,6 +25,7 @@ from ..core.security import (
     require_permission,
 )
 from ..core.tenant_context import ActiveScope, active_scope
+from ..services.child_document_service import TOP_LEVEL_DOCUMENTS
 from ..utils.error_handler import BaseDomainError
 
 logger = logging.getLogger(__name__)
@@ -265,6 +266,9 @@ async def get_dashboard_stats(
         base_query = build_scope_query(
             current_user, organization_id=selected_org, project_id=selected_project
         )
+        # Phase 8: child documents are counted with their parent, not as
+        # documents of their own.
+        base_query.update(TOP_LEVEL_DOCUMENTS)
 
         # Optional search filter
         if search:

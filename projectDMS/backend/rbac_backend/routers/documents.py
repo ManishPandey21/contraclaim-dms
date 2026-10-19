@@ -53,6 +53,13 @@ from ..services.storage_settings_service import StorageSettingsService
 from ..services.s3_service import S3Service
 from ..services.storage_key_builder import StorageKeyBuilder
 from ..services.file_object_service import FileObjectService
+from ..services.child_document_service import (
+    CHILD_LETTER_IDENTITY_FIELDS,
+    ChildDocumentService,
+    is_child_document,
+    require_child_document_indexes,
+    validate_child_attachment,
+)
 from ..services.document_audit_service import DocumentAuditService
 from ..services.document_bulk_download_service import DocumentBulkDownloadService
 from ..services.policy_service import PolicyService
@@ -150,6 +157,39 @@ async def _ensure_document_access(
     if selection is not None:
         await selection.require_record(document, allow_unscoped=True)
     await PolicyService(db).authorize_document(current_user, permission, document)
+
+
+async def _reusable_enclosure_entry(
+    db: Any, parent_id: str, file_object_id: Optional[str], relationship_type: str
+) -> Optional[Dict[str, Any]]:
+    """The parent's enclosure entry a retry of the same upload should reuse.
+
+    An entry for the same FileObject whose child has the same relationship is
+    the earlier attempt; failing that, an entry for the same FileObject with no
+    child yet (an attempt that stopped before its child, or an enclosure from
+    before Phase 8) is linked rather than duplicated. Otherwise None: a new
+    entry is pushed.
+    """
+    if not file_object_id:
+        return None
+    parent = await _find_raw_document(db, parent_id)
+    childless: Optional[Dict[str, Any]] = None
+    for entry in (parent or {}).get("enclosures") or []:
+        if str(entry.get("file_object_id") or "") != str(file_object_id):
+            continue
+        child_id = entry.get("child_document_id")
+        if not child_id:
+            childless = childless or entry
+            continue
+        try:
+            child = await db.documents.find_one(
+                {"_id": ObjectId(str(child_id))}, {"relationship_type": 1}
+            )
+        except Exception:
+            child = None
+        if child and child.get("relationship_type") == relationship_type:
+            return entry
+    return childless
 
 
 async def _hold_document(selection: ActiveScope, document_id: str) -> None:
@@ -698,6 +738,10 @@ class DocumentController:
             doc_id = str(metadata.get("document_id") or "").strip()
             document = doc_lookup.get(doc_id) if doc_id else None
             if document is None:
+                continue
+            if getattr(document, "parent_document_id", None):
+                # Phase 8: a child's vectors serve retrieval over evidence;
+                # the Document Library search lists top-level documents only.
                 continue
             await self.policy_service.authorize_document(
                 current_user, Permissions.DOCUMENT_VIEW, document
@@ -1925,6 +1969,14 @@ async def controller_update_document(
         update_payload = validated_update.model_dump(
             exclude_unset=True, exclude_none=True
         )
+        if is_child_document(document) and any(
+            update_payload.get(field) for field in CHILD_LETTER_IDENTITY_FIELDS
+        ):
+            # Phase 8 P0: a child is never a letter, by extraction or by hand.
+            raise DocumentError(
+                "A child document (enclosure, annexure or attachment) has no letter number",
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
         # Record which correspondence facts a person changed, so reprocessing
         # never silently overwrites them. Unchanged resubmitted values are not
         # edits.
@@ -2054,9 +2106,17 @@ async def controller_add_enclosure(
     self,
     document_id: str,
     file: UploadFile,
-    current_user: CurrentUser
+    current_user: CurrentUser,
+    relationship_type: str = "enclosure",
+    source_page_range: Optional[Dict[str, Any]] = None,
 ) -> EnclosureResponse:
-    """Add enclosure with security validation."""
+    """Store an enclosure and make it a first-class child Document (Phase 8).
+
+    The bytes become (or reuse) an immutable FileObject; the child Document,
+    its DocumentVersion and its ordinary processing job follow through
+    ``ChildDocumentService.intake_child``. A retry of the same upload reuses
+    the enclosure entry, the child, the version and the job.
+    """
     try:
         document = await self.document_service.get_document_by_id(document_id)
         if not document:
@@ -2068,6 +2128,14 @@ async def controller_add_enclosure(
 
         if not file.filename:
             raise DocumentError("No file provided", status.HTTP_400_BAD_REQUEST)
+
+        # Refusals that need no bytes come before any bytes are stored: the
+        # mandatory live-index gate, then the request and the parent's state.
+        db = await get_database()
+        await require_child_document_indexes(db)
+        source_page_range = validate_child_attachment(
+            document, relationship_type, source_page_range
+        )
 
         max_size = max(1, int(settings.GENERAL_UPLOAD_MAX_FILE_SIZE_MB)) * 1024 * 1024
         async with upload_concurrency_limiter.slot(
@@ -2143,18 +2211,56 @@ async def controller_add_enclosure(
             },
         )
 
-        return await self.document_service.add_enclosure(
-            document_id,
-            spooled.sample,
-            spooled.filename,
+        file_object_id = store_result.get("file_object_id")
+        entry = await _reusable_enclosure_entry(
+            db, document_id, file_object_id, relationship_type
+        )
+        if entry is not None:
+            response = EnclosureResponse(
+                enclosure=Enclosure(**entry), message="Enclosure already attached"
+            )
+        else:
+            response = await self.document_service.add_enclosure(
+                document_id,
+                spooled.sample,
+                spooled.filename,
+                current_user,
+                filepath_local=store_result.get("filepath_local"),
+                filepath_s3=store_result.get("filepath_s3"),
+                storage_key=store_result.get("storage_key"),
+                file_object_id=file_object_id,
+                storage_locations=store_result.get("storage_locations"),
+                filetype=spooled.mime_type,
+                filesize=spooled.size,
+            )
+
+        intake = await ChildDocumentService(
+            db,
+            policy=self.policy_service,
+            document_service=self.document_service,
+            file_object_service=self.file_object_service,
+        ).intake_child(
             current_user,
-            filepath_local=store_result.get("filepath_local"),
-            filepath_s3=store_result.get("filepath_s3"),
-            storage_key=store_result.get("storage_key"),
-            file_object_id=store_result.get("file_object_id"),
-            storage_locations=store_result.get("storage_locations"),
-            filetype=spooled.mime_type,
-            filesize=spooled.size,
+            parent_document_id=document_id,
+            relationship_type=relationship_type,
+            file_object_id=file_object_id,
+            enclosure_entry_id=response.enclosure.id,
+            source_page_range=source_page_range,
+        )
+        child = intake.document
+        return response.model_copy(
+            update={
+                "enclosure": response.enclosure.model_copy(
+                    update={"child_document_id": str(child["_id"])}
+                ),
+                "child_document_id": str(child["_id"]),
+                "child_created": intake.created,
+                "relationship_type": child.get("relationship_type"),
+                "version_id": intake.version_id,
+                "processing_job_id": intake.processing_job_id,
+                "pipeline_version": intake.pipeline_version,
+                "processing_status": child.get("processing_status"),
+            }
         )
 
     except (BaseDomainError, HTTPException):
@@ -3304,13 +3410,115 @@ async def list_enclosures(
 async def add_enclosure(
     id: str,
     file: UploadFile = File(...),
+    relationship_type: str = Form("enclosure"),
+    source_page_start: Optional[int] = Form(None),
+    source_page_end: Optional[int] = Form(None),
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
     selection: ActiveScope = Depends(active_scope),
 ):
-    """Add an enclosure to a document."""
+    """Add an enclosure to a document; it becomes a first-class child Document.
+
+    ``source_page_start``/``source_page_end`` record where the enclosure sits
+    in the parent, when known: both or neither.
+    """
     await _ensure_document_access(current_user, id, Permissions.DOCUMENT_EDIT_METADATA, selection)
-    return await controller_add_enclosure(controller, id, file, current_user)
+    if (source_page_start is None) != (source_page_end is None):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="source_page_start and source_page_end go together",
+        )
+    page_range = (
+        {"start": source_page_start, "end": source_page_end}
+        if source_page_start is not None
+        else None
+    )
+    return await controller_add_enclosure(
+        controller,
+        id,
+        file,
+        current_user,
+        relationship_type=relationship_type,
+        source_page_range=page_range,
+    )
+
+
+async def _held_child(
+    selection: ActiveScope,
+    current_user: CurrentUser,
+    parent_id: str,
+    child_id: str,
+    permission: str,
+) -> None:
+    """Hold the parent and the child to the navbar selection and the actor's
+    authority, and require that the child is this parent's. Path ids are never
+    trusted on their own."""
+    await _ensure_document_access(current_user, parent_id, permission, selection)
+    await _ensure_document_access(current_user, child_id, permission, selection)
+    db = await get_database()
+    parent = await _find_raw_document(db, parent_id)
+    child = await _find_raw_document(db, child_id)
+    if not parent or not child or str(child.get("parent_document_id") or "") != str(parent["_id"]):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Child document not found")
+
+
+def _child_service(controller: DocumentController) -> ChildDocumentService:
+    return ChildDocumentService(
+        policy=controller.policy_service,
+        document_service=controller.document_service,
+        file_object_service=controller.file_object_service,
+    )
+
+
+@router.get("/documents/{id}/children", response_model=List[Document])
+@handle_exceptions
+async def list_child_documents(
+    id: str,
+    controller: DocumentController = Depends(get_document_controller),
+    current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
+):
+    """The parent's live child documents (enclosures, annexures, attachments)."""
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_VIEW, selection)
+    rows = await _child_service(controller).list_children(current_user, id)
+    return [Document(**{**row, "_id": str(row["_id"])}) for row in rows]
+
+
+@router.post("/documents/{id}/children/{child_id}/restore", response_model=Document)
+@handle_exceptions
+async def restore_child_document(
+    id: str,
+    child_id: str,
+    controller: DocumentController = Depends(get_document_controller),
+    current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
+):
+    """Restore a soft-deleted child and schedule its reprocessing."""
+    await _held_child(selection, current_user, id, child_id, Permissions.DOCUMENT_DELETE)
+    row = await _child_service(controller).restore_child(current_user, child_id)
+    return Document(**{**row, "_id": str(row["_id"])})
+
+
+@router.post("/documents/{id}/children/{child_id}/purge", response_model=Dict[str, Any])
+@handle_exceptions
+async def purge_child_document(
+    id: str,
+    child_id: str,
+    request: Request,
+    controller: DocumentController = Depends(get_document_controller),
+    current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
+):
+    """Permanently remove a soft-deleted child and everything it owns. The
+    shared FileObject's bytes are never deleted."""
+    await require_step_up(request, current_user, action="documents.delete")
+    await _held_child(selection, current_user, id, child_id, Permissions.DOCUMENT_DELETE)
+    result = await _child_service(controller).purge_child(current_user, child_id)
+    return {
+        "purged": result.purged,
+        "remaining_references": result.remaining_references,
+        "file_object_unreferenced": result.file_object_unreferenced,
+    }
 
 
 @router.delete("/documents/{id}/enclosures/{enclosure_id}", status_code=204)

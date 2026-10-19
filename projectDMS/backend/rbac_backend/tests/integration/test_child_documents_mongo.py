@@ -1173,6 +1173,8 @@ def test_lifecycle_transitions_are_audited() -> None:
                 "document.child_created",
                 "document.child_deleted",
                 "document.child_restored",
+                # PR B: a restored child is reprocessed, never left unindexed.
+                "document.child_restore_reprocess_queued",
                 "document.child_deleted",
                 "document.child_purged",
             ]

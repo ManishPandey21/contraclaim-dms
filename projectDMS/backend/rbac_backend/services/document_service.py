@@ -8,6 +8,7 @@ import tempfile
 
 from pymongo import ReturnDocument
 from pymongo.database import Database
+from pymongo.errors import DuplicateKeyError
 from bson.objectid import ObjectId
 from bson.errors import InvalidId
 
@@ -50,6 +51,7 @@ from .duplicate_detection_service import (
     CLASSIFICATION_DUPLICATE,
     DuplicateDetectionService,
 )
+from .child_document_service import is_child_document, without_letter_identity
 from .falkor_graph_service import normalize_letter_code
 from .evidence_graph_service import EvidenceGraphService
 from .reference_parser import parse_legacy_reference_text
@@ -859,6 +861,11 @@ class DocumentService:
             "lifecycle_state",
             {"$nin": ["deleted", "duplicate_review", "duplicate"]},
         )
+        # Phase 8: child documents (enclosures, annexures, attachments) are
+        # reached through their parent, not listed beside it.
+        from .child_document_service import top_level_only
+
+        query = top_level_only(query)
         raw_items, page = await fetch_paginated(
             db.documents,
             filter=query,
@@ -949,10 +956,20 @@ class DocumentService:
         *,
         requested_by: Optional[str] = None,
         force: bool = False,
+        job_id: Optional[str] = None,
     ) -> str:
-        """Create a durable processing job for an uploaded document."""
+        """Create a durable processing job for an uploaded document.
+
+        With ``job_id`` the job is inserted under that ``_id`` at most once: a
+        repeat after the job settled, or a concurrent duplicate, returns the
+        existing job instead of queueing the document again.
+        """
 
         db = await self._get_db()
+        if job_id is not None and await db.document_processing_jobs.find_one(
+            {"_id": job_id}, {"_id": 1}
+        ):
+            return job_id
         now = datetime.utcnow()
         active_statuses = ["queued", "processing", "retrying"]
         if not force:
@@ -977,7 +994,8 @@ class DocumentService:
                 )
                 return job_id
 
-        job_id = str(ObjectId())
+        requested_job_id = job_id
+        job_id = job_id or str(ObjectId())
         job: Dict[str, Any] = {
             "_id": job_id,
             "document_id": document.id,
@@ -1016,7 +1034,13 @@ class DocumentService:
             "page_attempts": {},
             "resume_count": 0,
         }
-        await db.document_processing_jobs.insert_one(job)
+        try:
+            await db.document_processing_jobs.insert_one(job)
+        except DuplicateKeyError:
+            if requested_job_id is None:
+                raise
+            # A concurrent duplicate queued it first; that job is this job.
+            return job_id
         await db.documents.update_one(
             {"_id": self._validate_document_id(document.id)},
             {
@@ -1744,6 +1768,25 @@ class DocumentService:
         # direction. Persisting the block first means every intermediate state
         # is non-consumable.
         await self._invalidate_stale_publication(document_id)
+        try:
+            from .document_audit_service import DocumentAuditService
+
+            document = await self.get_document(document_id)
+            await DocumentAuditService(db).emit(
+                resource_type="document",
+                resource_id=document_id,
+                event_type="document.extraction_review_required",
+                organization_id=getattr(document, "organization_id", None),
+                project_id=getattr(document, "project_id", None),
+                # Page numbers only: never page text.
+                metadata={
+                    "job_id": job_id,
+                    "unresolved_pages": unresolved,
+                    "quality_review_pages": quality,
+                },
+            )
+        except Exception:
+            logger.debug("Failed to emit review-required audit for %s", document_id, exc_info=True)
 
     async def _mark_stored_only(self, job_id: str, document_id: str) -> None:
         """Terminal, non-success: stored deliberately, never extracted."""
@@ -2255,6 +2298,14 @@ class DocumentService:
                     metadata_source,
                 )
                 metadata = getattr(result, "metadata", None)
+                processing_child = is_child_document(stored)
+                if processing_child:
+                    # Phase 8 P0: a child is never a letter. Strip the extracted
+                    # letter number before anything below can persist or publish
+                    # it, and reset any identity a row picked up earlier.
+                    metadata = without_letter_identity(metadata)
+                    update_fields["letterNo"] = None
+                    update_fields["letterNoNormalized"] = None
                 update_fields["ocrEnabled"] = True
                 # `success` means extraction ran; `publishable` means the gate
                 # raised no unresolved blocking finding. Writing the settled
@@ -2346,7 +2397,7 @@ class DocumentService:
                 update_fields.update(full_text_updates(metadata))
                 if getattr(metadata, "subject", None):
                     update_fields["subject"] = metadata.subject
-                if getattr(metadata, "letter_no", None):
+                if getattr(metadata, "letter_no", None) and not processing_child:
                     update_fields["letterNo"] = metadata.letter_no
                     update_fields["letterNoNormalized"] = normalize_letter_code(str(metadata.letter_no))
                 if getattr(metadata, "from_company", None):
