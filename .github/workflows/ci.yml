@@ -61,7 +61,11 @@ jobs:
 
   backend-checks:
     name: Backend lint and tests
-    runs-on: ubuntu-latest
+    # mongo:8.0 refuses to start on Linux kernels 6.19-7.0.13
+    # (MongoDB SERVER-121912). Pin this Mongo-backed job to ubuntu-22.04
+    # while that runner remains on a compatible 6.8 kernel.
+    # Revisit before ubuntu-22.04 runner retirement.
+    runs-on: ubuntu-22.04
     services:
       mongo:
         image: mongo:8.0
