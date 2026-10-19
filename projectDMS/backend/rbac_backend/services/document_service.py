@@ -66,6 +66,29 @@ configure_pipeline_logger(logger)
 #: document is a confirmed duplicate; ``unknown`` is an unreadable row.
 _UNFINISHED_VECTOR_SYNC = frozenset({"error", "mismatch", "pending", "deferred", "unknown"})
 
+#: Columns the Document Library may sort on, by stored field. The sort runs in
+#: the query, before skip/limit, so it orders the whole filtered set rather than
+#: one page. A name outside this table is refused at the route (422).
+DOCUMENT_LIST_SORT_FIELDS: Dict[str, str] = {
+    "date": "date",
+    "createdAt": "createdAt",
+    "status": "status",
+    "tags": "tags",
+    "letterNo": "letterNo",
+    "subject": "subject",
+}
+
+_DEFAULT_DOCUMENT_LIST_SORT: List[Tuple[str, int]] = [("createdAt", -1), ("date", -1), ("_id", -1)]
+
+
+def document_list_sort(sort_by: Optional[str], sort_order: Optional[str]) -> List[Tuple[str, int]]:
+    """The listing's sort; ``_id`` breaks ties so pages never overlap or skip rows."""
+    field = DOCUMENT_LIST_SORT_FIELDS.get(sort_by or "")
+    if field is None:
+        return list(_DEFAULT_DOCUMENT_LIST_SORT)
+    direction = 1 if sort_order == "asc" else -1
+    return [(field, direction), ("_id", direction)]
+
 
 def _human_review_message(unresolved: List[int], quality: List[int]) -> str:
     """Name every page a person must look at, and why."""
@@ -849,7 +872,7 @@ class DocumentService:
             # Fall back to empty update
             return DocumentUpdate()
 
-    async def list_documents(self, query: Dict[str, Any], pagination: Dict[str, int]) -> tuple[list[Document], int]:
+    async def list_documents(self, query: Dict[str, Any], pagination: Dict[str, Any]) -> tuple[list[Document], int]:
         db = await self._get_db()
         skip = int(pagination.get("skip", 0) or 0)
         limit = int(pagination.get("limit", 50) or 50)
@@ -869,7 +892,7 @@ class DocumentService:
         raw_items, page = await fetch_paginated(
             db.documents,
             filter=query,
-            sort=[("createdAt", -1), ("date", -1), ("_id", -1)],
+            sort=document_list_sort(pagination.get("sort_by"), pagination.get("sort_order")),
             skip=skip,
             limit=limit,
             count_total=True,

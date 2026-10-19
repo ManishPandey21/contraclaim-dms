@@ -658,13 +658,10 @@ class AuthorizationService:
                 except Exception:
                     query["letterNo"] = str(letter_no)
 
-        # Subject contains (case-insensitive)
-        subject = filters.get("subject")
+        # Subject contains (case-insensitive). Literal text, never a caller's regex.
+        subject = str(filters.get("subject") or "").strip()
         if subject:
-            try:
-                query["subject"] = {"$regex": str(subject), "$options": "i"}
-            except Exception:
-                query["subject"] = str(subject)
+            query["subject"] = {"$regex": re.escape(subject), "$options": "i"}
 
         # Tags and SubTags inclusion
         tags = filters.get("tags")
