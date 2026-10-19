@@ -569,6 +569,13 @@ def test_07_the_same_file_under_another_parent_is_a_separate_child(monkeypatch, 
 
 def test_08_concurrent_identical_uploads_make_one_child_one_version_one_job(monkeypatch, tmp_path) -> None:
     async def scenario() -> None:
+        from rbac_backend.core.config import settings
+
+        # The race under test is child identity, not the upload limiter: hold
+        # the per-user slot count above the 4 concurrent requests explicitly.
+        # The default is 3, so inheriting it - as CI does - answers the fourth
+        # request 429 before it reaches child creation.
+        monkeypatch.setattr(settings, "UPLOAD_MAX_CONCURRENT_PER_USER", 8)
         async with _env(monkeypatch, tmp_path) as env:
             content = env.pdf("native")
             # Warm the FileObject so the race is on the child layers.
