@@ -6,6 +6,7 @@ from http import HTTPStatus
 from typing import Any, Iterable, Optional
 
 from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError as PydanticValidationError
@@ -163,6 +164,34 @@ async def domain_error_handler(request: Request, exc: BaseDomainError) -> JSONRe
     # what the client reads (`err.response.data.detail`); no HTTPException
     # handler is registered on the app, so every other error has this shape.
     return JSONResponse(status_code=status_code, content={"detail": response.model_dump_non_null()})
+
+
+async def redacted_request_validation_handler(
+    request: Request,
+    exc: Exception,
+) -> JSONResponse:
+    """FastAPI's default 422, minus the submitted values.
+
+    Pydantic records each offending ``input`` in the error (for a missing field,
+    the whole body), so the default handler sends a rejected password straight
+    back in the response. Same ``{"detail": [...]}`` shape, without ``input``.
+    """
+    if not isinstance(exc, RequestValidationError):  # registered for this type only
+        raise exc
+    errors = [
+        {key: value for key, value in error.items() if key != "input"}
+        for error in exc.errors()
+    ]
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={"detail": jsonable_encoder(errors)},
+    )
+
+
+def register_request_validation_redaction(app: FastAPI) -> None:
+    """Replace FastAPI's default 422 handler with the value-free one."""
+
+    app.add_exception_handler(RequestValidationError, redacted_request_validation_handler)
 
 
 def register_domain_error_handler(app: FastAPI) -> None:

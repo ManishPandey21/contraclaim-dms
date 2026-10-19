@@ -22,6 +22,7 @@ from ..core.config import settings
 from ..core.database import get_db
 from ..core.security import create_access_token
 from ..services.authentication_service import AuthenticationService
+from ..services.credential_fields import CREDENTIAL_VERSION_CLAIM, credential_version
 from ..services.oidc_service import OidcError, OidcService, resolve_or_provision_user
 from .auth import _set_auth_cookie
 from ..utils.error_handler import BaseDomainError
@@ -111,6 +112,7 @@ async def sso_callback(
             "user_id": user_id,
             "roles": user.get("roles", []),
             "session_id": session_id,
+            CREDENTIAL_VERSION_CLAIM: credential_version(user),
         },
         expires_delta=expires,
     )

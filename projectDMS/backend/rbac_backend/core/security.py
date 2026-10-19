@@ -13,6 +13,7 @@ import uuid
 from bson import ObjectId
 from pydantic import ConfigDict
 from ..services.permission_service import PermissionService, fetch_role_documents
+from ..services.credential_fields import credential_version, token_credential_version
 from .role_reference import ROLE_ALIASES as _ROLE_REFERENCE_ALIASES, normalize_role_key, resolve_role_reference
 from ..utils.audit_logger import get_audit_logger
 
@@ -93,6 +94,10 @@ class CurrentUser(BaseModel):
     projects: List[str] = Field(default_factory=list)
     account_type: str = "client_user"
     disabled: bool = False
+    # Authentication metadata, never profile data: the credential generation the
+    # request authenticated under (services/credential_fields.py). Excluded from
+    # serialization; no request model carries it.
+    credential_version: int = Field(default=0, exclude=True)
 class StoredPrincipalUnavailableError(Exception):
     """A durable actor reference could not be resolved to a real principal.
 
@@ -165,6 +170,7 @@ def _principal_from_user_document(user: Dict[str, Any], email: Optional[str] = N
         projects=projects_sanitized,
         account_type=user.get("account_type", "client_user"),
         disabled=user.get("disabled", False),
+        credential_version=credential_version(user),
     )
 
 
@@ -268,6 +274,16 @@ async def principal_from_access_token(token: str, db) -> Optional[CurrentUser]:
         if not user:
             return None
         user_id_str = str(user["_id"])
+
+        # Credential generation (durable, in the user record just loaded): a token
+        # minted under an earlier password is stale, whatever the session store
+        # says. Checked before, and independently of, the Redis checks below.
+        try:
+            current_generation = credential_version(user)
+        except ValueError:
+            raise revoked
+        if token_credential_version(payload) != current_generation:
+            raise revoked
 
         # JWT Invalidation Check (Phase 3)
         from ..services.runtime_state import get_runtime_state
@@ -422,6 +438,7 @@ async def get_current_user(request: Request, db = Depends(get_db)):
             projects=projects,
             account_type=(user_doc.get("account_type") if user_doc else None) or "client_user",
             disabled=disabled,
+            credential_version=credential_version(user_doc) if user_doc else 0,
         )
 
     # No valid auth found
