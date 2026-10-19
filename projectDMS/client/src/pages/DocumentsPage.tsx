@@ -17,6 +17,7 @@ import {
   Info,
   ChevronLeft,
   ChevronRight,
+  RotateCcw,
   Tag,
   Link,
   PenSquare,
@@ -42,6 +43,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -177,11 +184,33 @@ type DocumentsFilterUrlState = {
   statusFilter: string;
   tagFilter: string;
   directionFilter: string;
-  projectFilter: string;
   dateFrom: string;
   dateTo: string;
   currentPage: number;
 };
+
+/** Typing settles for this long before the search reaches the server. */
+const SEARCH_DEBOUNCE_MS = 350;
+
+/**
+ * The table's sortable columns, as the server's `sort_by` names them. The sort
+ * runs in the query before pagination, so it orders every matching document,
+ * not just the page on screen.
+ */
+const SERVER_SORT_FIELDS: Partial<Record<keyof Document, string>> = {
+  dateTs: "date",
+  uploadDateTs: "createdAt",
+  tag: "tags",
+  status: "status",
+};
+
+/**
+ * The navbar selection the library last listed. `MainLayout` remounts the page
+ * on a navbar switch, so only module state survives it: a remount under a
+ * different selection returns to page 1 instead of keeping `?page=N` of the
+ * previous project. Filters and search stay, as on any other remount.
+ */
+let lastListedScopeKey: string | null = null;
 
 const parseDocumentsPageParam = (value: string | null): number => {
   const page = Number.parseInt(value || "", 10);
@@ -208,7 +237,6 @@ const filtersFromSearchParams = (
   statusFilter: params.get("status") || "all",
   tagFilter: params.get("tags") || "all",
   directionFilter: directionFromUploadType(params.get("uploadType")),
-  projectFilter: params.get("project_id") || "all",
   dateFrom: params.get("date_from") || "",
   dateTo: params.get("date_to") || "",
   currentPage: parseDocumentsPageParam(params.get("page")),
@@ -220,9 +248,6 @@ const searchParamsFromFilters = (
   const params = new URLSearchParams();
   const search = filters.searchTerm.trim();
   if (search) params.set("search", search);
-  if (filters.projectFilter !== "all") {
-    params.set("project_id", filters.projectFilter);
-  }
   if (filters.statusFilter !== "all") {
     params.set("status", filters.statusFilter);
   }
@@ -246,7 +271,21 @@ const searchParamsFromFilters = (
 const DocumentsPage = () => {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
+  // Project scope is the navbar selection alone: the HTTP client sends it as
+  // X-Org-Id / X-Proj-Id and the server bounds the list by it and by the
+  // caller's membership. The page keeps no project filter of its own.
+  const { selectedProjectId, selectedOrganizationId, tenantLoading } =
+    useRegisterProjectScope();
+  const scopeKey = `${selectedOrganizationId}|${selectedProjectId}`;
+  const [navbarScopeChanged] = useState(
+    () =>
+      !tenantLoading &&
+      lastListedScopeKey !== null &&
+      lastListedScopeKey !== scopeKey
+  );
+  const pendingScopePageReset = useRef(navbarScopeChanged);
   const initialFilters = filtersFromSearchParams(searchParams);
+  if (navbarScopeChanged) initialFilters.currentPage = 1;
   const [isViewingReferences, setIsViewingReferences] = useState(false);
   const [selectedDocument, setSelectedDocument] = useState<Document | null>(
     null
@@ -265,6 +304,9 @@ const DocumentsPage = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState(initialFilters.searchTerm);
+  // What the search box shows; it becomes `searchTerm` (and a request) once
+  // typing settles.
+  const [searchInput, setSearchInput] = useState(initialFilters.searchTerm);
   const [statusFilter, setStatusFilter] = useState<string>(
     initialFilters.statusFilter
   );
@@ -272,14 +314,6 @@ const DocumentsPage = () => {
   const [directionFilter, setDirectionFilter] = useState<string>(
     initialFilters.directionFilter
   );
-  const [chosenProjectFilter, setProjectFilter] = useState<string>(
-    initialFilters.projectFilter
-  );
-  // CL-4A: with a project selected in the navbar the register is that project
-  // (the server pins the list to it and refuses any other); the page's own
-  // picker applies only when nothing is selected.
-  const { selectedProjectId, projectLocked, tenantLoading } = useRegisterProjectScope();
-  const projectFilter = selectedProjectId || chosenProjectFilter;
   const [dateFrom, setDateFrom] = useState(initialFilters.dateFrom);
   const [dateTo, setDateTo] = useState(initialFilters.dateTo);
   const [availableTags, setAvailableTags] = useState<
@@ -384,6 +418,14 @@ const DocumentsPage = () => {
 
   useEffect(() => {
     const filters = filtersFromSearchParams(searchParams);
+    if (pendingScopePageReset.current) {
+      // First pass after a navbar switch: drop the previous project's page.
+      pendingScopePageReset.current = false;
+      if (filters.currentPage !== 1) {
+        filters.currentPage = 1;
+        setSearchParams(searchParamsFromFilters(filters), { replace: true });
+      }
+    }
     setSearchTerm((current) =>
       current === filters.searchTerm ? current : filters.searchTerm
     );
@@ -396,9 +438,6 @@ const DocumentsPage = () => {
     setDirectionFilter((current) =>
       current === filters.directionFilter ? current : filters.directionFilter
     );
-    setProjectFilter((current) =>
-      current === filters.projectFilter ? current : filters.projectFilter
-    );
     setDateFrom((current) =>
       current === filters.dateFrom ? current : filters.dateFrom
     );
@@ -408,7 +447,11 @@ const DocumentsPage = () => {
     setCurrentPage((current) =>
       current === filters.currentPage ? current : filters.currentPage
     );
-  }, [searchParams]);
+  }, [searchParams, setSearchParams]);
+
+  useEffect(() => {
+    if (!tenantLoading) lastListedScopeKey = scopeKey;
+  }, [tenantLoading, scopeKey]);
 
   const updateDocumentFilters = useCallback(
     (
@@ -420,7 +463,6 @@ const DocumentsPage = () => {
         statusFilter,
         tagFilter,
         directionFilter,
-        projectFilter,
         dateFrom,
         dateTo,
         currentPage,
@@ -435,7 +477,6 @@ const DocumentsPage = () => {
       setStatusFilter(nextFilters.statusFilter);
       setTagFilter(nextFilters.tagFilter);
       setDirectionFilter(nextFilters.directionFilter);
-      setProjectFilter(nextFilters.projectFilter);
       setDateFrom(nextFilters.dateFrom);
       setDateTo(nextFilters.dateTo);
       setCurrentPage(nextFilters.currentPage);
@@ -446,7 +487,6 @@ const DocumentsPage = () => {
       statusFilter,
       tagFilter,
       directionFilter,
-      projectFilter,
       dateFrom,
       dateTo,
       currentPage,
@@ -454,23 +494,44 @@ const DocumentsPage = () => {
     ]
   );
 
+  // The box follows the committed search when it changes from elsewhere (the
+  // URL, a reset); typing commits it, trimmed, only after SEARCH_DEBOUNCE_MS of
+  // quiet. The box keeps what was typed: writing the trimmed term back would
+  // eat the space before the next word ("notice " + pause + "of").
+  useEffect(() => {
+    setSearchInput((current) =>
+      current.trim() === searchTerm ? current : searchTerm
+    );
+  }, [searchTerm]);
+
+  useEffect(() => {
+    const term = searchInput.trim();
+    if (term === searchTerm) return;
+    const handle = window.setTimeout(
+      () => updateDocumentFilters({ searchTerm: term }, { resetPage: true }),
+      SEARCH_DEBOUNCE_MS
+    );
+    return () => window.clearTimeout(handle);
+  }, [searchInput, searchTerm, updateDocumentFilters]);
+
+  // Clears the page's own filters and search only; the navbar organisation and
+  // project are not page state and stay selected.
   const resetDocumentFilters = useCallback(() => {
     const resetFilters: DocumentsFilterUrlState = {
       searchTerm: "",
       statusFilter: "all",
       tagFilter: "all",
       directionFilter: "all",
-      projectFilter: "all",
       dateFrom: "",
       dateTo: "",
       currentPage: 1,
     };
 
+    setSearchInput(resetFilters.searchTerm);
     setSearchTerm(resetFilters.searchTerm);
     setStatusFilter(resetFilters.statusFilter);
     setTagFilter(resetFilters.tagFilter);
     setDirectionFilter(resetFilters.directionFilter);
-    setProjectFilter(resetFilters.projectFilter);
     setDateFrom(resetFilters.dateFrom);
     setDateTo(resetFilters.dateTo);
     setCurrentPage(resetFilters.currentPage);
@@ -478,11 +539,11 @@ const DocumentsPage = () => {
   }, [setSearchParams]);
 
   const hasActiveFilters =
+    searchInput.trim() !== "" ||
     searchTerm.trim() !== "" ||
     statusFilter !== "all" ||
     tagFilter !== "all" ||
     directionFilter !== "all" ||
-    projectFilter !== "all" ||
     dateFrom !== "" ||
     dateTo !== "";
 
@@ -535,9 +596,6 @@ const DocumentsPage = () => {
     if (searchTerm.trim()) {
       params.append("search", searchTerm.trim());
     }
-    if (projectFilter && projectFilter !== "all") {
-      params.append("project_id", projectFilter);
-    }
     if (statusFilter !== "all") {
       params.append("status", statusFilter);
     }
@@ -554,6 +612,14 @@ const DocumentsPage = () => {
       params.append(
         "uploadType",
         directionFilter === "Incoming" ? "incoming" : "outgoing"
+      );
+    }
+    const sortBy = SERVER_SORT_FIELDS[sortConfig.key];
+    if (sortBy) {
+      params.append("sort_by", sortBy);
+      params.append(
+        "sort_order",
+        sortConfig.direction === "ascending" ? "asc" : "desc"
       );
     }
     const skip = (currentPage - 1) * documentsPerPage;
@@ -684,9 +750,9 @@ const DocumentsPage = () => {
     statusFilter,
     tagFilter,
     directionFilter,
-    projectFilter,
     dateFrom,
     dateTo,
+    sortConfig,
     buildAuthHeaders,
   ]);
 
@@ -1006,6 +1072,8 @@ const DocumentsPage = () => {
     }
   };
 
+  // The server sorts the whole filtered set before paginating (`sort_by`);
+  // a new order starts again at page 1.
   const handleSort = (key: keyof Document) => {
     const direction =
       sortConfig.key === key && sortConfig.direction === "ascending"
@@ -1013,47 +1081,15 @@ const DocumentsPage = () => {
         : "ascending";
 
     setSortConfig({ key, direction });
+    updateDocumentFilters({}, { resetPage: true });
   };
-
-  const sortedDocuments = [...documents].sort((a, b) => {
-    const key = sortConfig.key;
-    const av: any = a[key];
-    const bv: any = b[key];
-    // Numeric date sorts for both raw strings and precomputed timestamps
-    if (
-      key === "date" ||
-      key === "uploadDate" ||
-      key === "dateTs" ||
-      key === "uploadDateTs"
-    ) {
-      const at =
-        key === "dateTs" || key === "uploadDateTs"
-          ? Number(av || 0)
-          : parseDateToTs(av);
-      const bt =
-        key === "dateTs" || key === "uploadDateTs"
-          ? Number(bv || 0)
-          : parseDateToTs(bv);
-      if (at === bt) return 0;
-      return sortConfig.direction === "ascending" ? at - bt : bt - at;
-    }
-    // Robust string comparison for fields like tag/status/subject/etc.
-    const as = (av ?? "").toString().toLowerCase();
-    const bs = (bv ?? "").toString().toLowerCase();
-    const cmp = as.localeCompare(bs, undefined, {
-      numeric: true,
-      sensitivity: "base",
-    });
-    return sortConfig.direction === "ascending" ? cmp : -cmp;
-  });
-
-  const filteredDocuments = sortedDocuments;
 
   const totalPages = Math.ceil(totalDocuments / documentsPerPage);
   const startIndex = (currentPage - 1) * documentsPerPage;
 
-  // Backend applies filters before pagination; the frontend only sorts the current page.
-  const paginatedDocuments = filteredDocuments;
+  // The server searches, filters, sorts and paginates; the page renders its
+  // rows as returned and never re-filters or re-sorts them.
+  const paginatedDocuments = documents;
 
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
@@ -1126,7 +1162,6 @@ const DocumentsPage = () => {
       setIsExporting(true);
       const params = new URLSearchParams();
       if (searchTerm.trim()) params.append("search", searchTerm.trim());
-      if (projectFilter !== "all") params.append("project_id", projectFilter);
       if (statusFilter !== "all") params.append("status", statusFilter);
       if (directionFilter !== "all") {
         params.append(
@@ -1203,7 +1238,6 @@ const DocumentsPage = () => {
     }
   }, [
     searchTerm,
-    projectFilter,
     statusFilter,
     directionFilter,
     tagFilter,
@@ -1481,13 +1515,9 @@ const DocumentsPage = () => {
                   type="text"
                   placeholder="Search by name, subject, letter number..."
                   className="pl-10"
-                  value={searchTerm}
-                  onChange={(e) =>
-                    updateDocumentFilters(
-                      { searchTerm: e.target.value },
-                      { resetPage: true }
-                    )
-                  }
+                  aria-label="Search documents"
+                  value={searchInput}
+                  onChange={(e) => setSearchInput(e.target.value)}
                 />
               </div>
 
@@ -1539,29 +1569,6 @@ const DocumentsPage = () => {
                     <SelectItem value="all">All Directions</SelectItem>
                     <SelectItem value="Incoming">Incoming</SelectItem>
                     <SelectItem value="Outgoing">Outgoing</SelectItem>
-                  </SelectContent>
-                </Select>
-
-                <Select
-                  value={projectFilter}
-                  disabled={projectLocked}
-                  onValueChange={(value) =>
-                    updateDocumentFilters(
-                      { projectFilter: value },
-                      { resetPage: true }
-                    )
-                  }
-                >
-                  <SelectTrigger className="w-full md:w-[180px]">
-                    <SelectValue placeholder="Project" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">All Projects</SelectItem>
-                    {projs.map((p) => (
-                      <SelectItem key={p.id} value={p.id}>
-                        {p.name || p.id}
-                      </SelectItem>
-                    ))}
                   </SelectContent>
                 </Select>
 
@@ -1654,17 +1661,24 @@ const DocumentsPage = () => {
                   </SelectContent>
                 </Select>
 
-                {hasActiveFilters && (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    className="w-full md:w-auto"
-                    onClick={resetDocumentFilters}
-                  >
-                    <X size={14} className="mr-2" />
-                    Reset
-                  </Button>
-                )}
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        aria-label="Reset filters"
+                        className="shrink-0 focus-visible:ring-2 focus-visible:ring-ring"
+                        disabled={!hasActiveFilters}
+                        onClick={resetDocumentFilters}
+                      >
+                        <RotateCcw size={16} aria-hidden="true" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>Reset filters</TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
               </div>
             </div>
 
@@ -1684,7 +1698,7 @@ const DocumentsPage = () => {
                   {error}
                 </p>
               </div>
-            ) : filteredDocuments.length === 0 ? (
+            ) : paginatedDocuments.length === 0 ? (
               <div className="text-center py-12">
                 <div className="flex justify-center">
                   <div className="w-16 h-16 rounded-full bg-gray-100 flex items-center justify-center mb-4">
