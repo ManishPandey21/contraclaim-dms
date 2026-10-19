@@ -11,6 +11,22 @@ from ..services.falkor_graph_service import FalkorGraphService, normalize_letter
 logger = logging.getLogger(__name__)
 
 
+def _skip_child(document_id: str, document: Any, step: str) -> bool:
+    """Phase 8 P0: a child document is never a Letter in the graph.
+
+    Letter nodes (FalkorDB and Graphiti) merge on the normalised letter code
+    alone, so a child published as a Letter would merge into, overwrite, or on
+    deletion destroy the real letter whose number it quotes. Its evidence is
+    published by the evidence graph and the vector index instead.
+    """
+    from ..services.child_document_service import is_child_document
+
+    if is_child_document(document):
+        logger.info("Skipping %s for child document %s: a child is not a letter", step, document_id)
+        return True
+    return False
+
+
 class GraphIngestionService:
     """Transforms processed document metadata into graph nodes and edges."""
 
@@ -35,6 +51,8 @@ class GraphIngestionService:
         upload_type: Optional[str] = None,
     ) -> None:
         """Ingest a processed document into the graph layer."""
+        if _skip_child(document_id, document_data, "graph ingestion"):
+            return
         adapter_enabled = self.adapter.config.enabled
 
         try:
@@ -381,6 +399,8 @@ class GraphIngestionService:
     ) -> None:
         if not self.falkor.enabled:
             return
+        if _skip_child(document_id, document, "FalkorDB sync"):
+            return
         # G31: the graph must not (re-)create support for a document that may not
         # be published. Without this, containment was undone by the next sync -
         # the physical purge removed the contribution and the writer put it back.
@@ -425,6 +445,10 @@ class GraphIngestionService:
         created. Returns True when a deletion was executed.
         """
         if not self.falkor.enabled:
+            return False
+        if _skip_child(document_id, document, "FalkorDB delete"):
+            # A child never had a Letter node. Deleting by its (possibly
+            # stale) letter code would DETACH DELETE the real letter's node.
             return False
         letter_code = self._coalesce(
             document.get("letterNo"),

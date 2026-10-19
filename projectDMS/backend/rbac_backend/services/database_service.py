@@ -366,7 +366,14 @@ class DatabaseService:
             # Add parsed metadata fields (assuming dataclass or dict)
             if hasattr(parsed_metadata, "subject") and parsed_metadata.subject:
                 updates["subject"] = parsed_metadata.subject
-            if hasattr(parsed_metadata, "letter_no") and parsed_metadata.letter_no:
+            from .child_document_service import is_child_document
+
+            if is_child_document(doc):
+                # Phase 8 P0: a child is never a letter. A number it quotes
+                # stays in its source text; it never becomes its identity.
+                updates["letterNo"] = None
+                updates["letterNoNormalized"] = None
+            elif hasattr(parsed_metadata, "letter_no") and parsed_metadata.letter_no:
                 updates["letterNo"] = parsed_metadata.letter_no
                 # Kept in step: reference resolution matches on the normalized
                 # form, so a stale one points links at the old number.
