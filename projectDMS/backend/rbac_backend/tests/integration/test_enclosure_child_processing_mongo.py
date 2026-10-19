@@ -1025,6 +1025,51 @@ def test_dashboard_vector_search_and_export_do_not_expose_children(monkeypatch, 
     _run(scenario())
 
 
+@pytest.mark.parametrize(
+    "sort_by", [None, "date", "createdAt", "status", "tags", "letterNo", "subject"]
+)
+def test_library_search_sort_and_total_compose_with_child_hiding(monkeypatch, tmp_path, sort_by) -> None:
+    """PR #76 x PR B: scope AND search AND parent_document_id-is-null form one
+    filter; the sort orders it and the total counts it before skip/limit. Walk
+    every page in both directions: the top-level matches are all there, the
+    total counts only them, and no child appears on any page."""
+
+    async def scenario() -> None:
+        async with _env(monkeypatch, tmp_path) as env:
+            for doc in (DOC_IN, ObjectId(DOC_OUT_ID)):
+                await env.db.documents.update_one({"_id": doc}, {"$set": {"subject": "Annexure covering letter"}})
+            children = [
+                _ok(await env.upload(env.pdf("native"), filename="Annexure A.pdf"))["child_document_id"],
+                _ok(await env.upload(env.pdf("native"), parent=DOC_OUT_ID, filename="Annexure B.pdf"))[
+                    "child_document_id"
+                ],
+            ]
+            for child_id in children:  # give children every sortable value a parent has
+                await env.db.documents.update_one(
+                    {"_id": ObjectId(child_id)},
+                    {"$set": {"subject": "Annexure covering letter", "status": "active", "tags": []}},
+                )
+            for order in ("asc", "desc"):
+                seen: List[str] = []
+                totals = set()
+                skip = 0
+                while True:
+                    params: Dict[str, Any] = {"search": "annexure", "limit": 1, "skip": skip, "sort_order": order}
+                    if sort_by:
+                        params["sort_by"] = sort_by
+                    page = _ok(await env.client.get("/api/documents", params=params, headers=env.headers("org_admin")))
+                    totals.add(page["total"])
+                    seen.extend(_rid(row) for row in page["documents"])
+                    if not page["has_next"]:
+                        break
+                    skip += 1
+                assert sorted(seen) == sorted([DOC_IN_ID, DOC_OUT_ID]), (sort_by, order, seen)
+                assert totals == {2}, (sort_by, order, totals)
+                assert not set(children) & set(seen)
+
+    _run(scenario())
+
+
 def _unordered(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: _unordered(item) for key, item in value.items()}
