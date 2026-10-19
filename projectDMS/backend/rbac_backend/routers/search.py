@@ -8,6 +8,7 @@ from ..core.tenant_context import ActiveScope, active_scope
 from ..models.user import User
 from ..services.policy_service import PolicyService
 from ..services.scope_service import ScopeService
+from ..services.child_document_service import TOP_LEVEL_DOCUMENTS
 import re
 from bson import ObjectId
 import logging
@@ -82,7 +83,9 @@ async def search_documents(
 
         # Build search pipeline
         pipeline = []
-        match_conditions: Dict[str, Any] = {}
+        # Phase 8: child documents are reached through their parent, not
+        # listed beside it (also bounds the facets built from this match).
+        match_conditions: Dict[str, Any] = dict(TOP_LEVEL_DOCUMENTS)
 
         # RBAC scoping
         roles = set(current_user.roles or [])
@@ -309,7 +312,8 @@ async def get_search_suggestions(
         # be restricted to the caller's org/project the same way /search/documents
         # is — otherwise a user sees document names from other tenants (leak).
         match_condition: Dict[str, Any] = {
-            "name": {"$regex": re.escape(q), "$options": "i"}
+            "name": {"$regex": re.escape(q), "$options": "i"},
+            **TOP_LEVEL_DOCUMENTS,
         }
         roles = set(current_user.roles or [])
         if "superadmin" not in roles:

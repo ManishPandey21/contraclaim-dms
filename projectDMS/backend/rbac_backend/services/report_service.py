@@ -17,6 +17,7 @@ from ..models.report import (
     ReportPreview,
     ReportRequest,
 )
+from .child_document_service import TOP_LEVEL_DOCUMENTS
 
 logger = logging.getLogger(__name__)
 
@@ -275,7 +276,9 @@ class ReportService:
             requested_organization_id=request.organization_id,
             requested_project_id=request.project_id,
         )
-        match = self._combine_clauses([self._combine_clauses(match_clauses), scope_clause])
+        match = self._combine_clauses(
+            [self._combine_clauses(match_clauses), scope_clause, dict(TOP_LEVEL_DOCUMENTS)]
+        )
         status_values = [s for s in (request.statuses or []) if s]
         if status_values:
             status_clause = (
@@ -388,7 +391,9 @@ class ReportService:
             requested_organization_id=request.organization_id,
             requested_project_id=request.project_id,
         )
-        match = self._combine_clauses([self._combine_clauses(match_clauses), scope_clause])
+        match = self._combine_clauses(
+            [self._combine_clauses(match_clauses), scope_clause, dict(TOP_LEVEL_DOCUMENTS)]
+        )
         if request.direction and request.direction.lower() in ("incoming", "outgoing"):
             direction_value = request.direction.lower()
             direction_clause = {
@@ -495,7 +500,9 @@ class ReportService:
             requested_organization_id=request.organization_id,
             requested_project_id=request.project_id,
         )
-        base_match = self._combine_clauses([self._combine_clauses(match_clauses), scope_clause])
+        base_match = self._combine_clauses(
+            [self._combine_clauses(match_clauses), scope_clause, dict(TOP_LEVEL_DOCUMENTS)]
+        )
 
         tag_values = [t for t in (request.tags or []) if t]
         subtag_values = [t for t in (request.sub_tags or []) if t]
@@ -945,12 +952,17 @@ class ReportService:
         current_user: CurrentUser,
     ) -> ReportPreview:
         db = await self._get_db()
-        match = self._build_match(
-            request,
-            date_field="createdAt",
-            organization_field="organization_id",
-            project_field="project_id",
-            current_user=current_user,
+        match = self._combine_clauses(
+            [
+                self._build_match(
+                    request,
+                    date_field="createdAt",
+                    organization_field="organization_id",
+                    project_field="project_id",
+                    current_user=current_user,
+                ),
+                dict(TOP_LEVEL_DOCUMENTS),
+            ]
         )
         status_breakdown = await db.documents.aggregate(
             [

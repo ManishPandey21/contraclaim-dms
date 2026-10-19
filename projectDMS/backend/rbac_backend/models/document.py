@@ -361,6 +361,15 @@ class EnclosureResponse(BaseModel):
     """Response model for enclosure operations."""
     enclosure: Enclosure = Field(...)
     message: str = Field(default="Enclosure added successfully")
+    #: Phase 8 PR B: the first-class child Document the upload became. Its
+    #: processing is independent of the parent's.
+    child_document_id: Optional[str] = Field(default=None)
+    child_created: Optional[bool] = Field(default=None)
+    relationship_type: Optional[str] = Field(default=None)
+    version_id: Optional[str] = Field(default=None)
+    processing_job_id: Optional[str] = Field(default=None)
+    pipeline_version: Optional[str] = Field(default=None)
+    processing_status: Optional[str] = Field(default=None)
 
 class ReferenceCreate(BaseModel):
     """Model for creating document references."""
