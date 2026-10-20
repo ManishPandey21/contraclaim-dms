@@ -10,7 +10,7 @@ import {
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
 import { toast } from "sonner";
-import { AlertTriangle, FileText, RefreshCw } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronRight, FileText, PanelRightClose, RefreshCw } from "lucide-react";
 import {
   enhancedApi,
   Document,
@@ -103,6 +103,7 @@ const DocumentViewerPage: React.FC = () => {
     "enclosure",
     "references",
     "details",
+    "records",
     "review",
   ]);
   const initialTabParam = (searchParams.get("tab") || "metadata").toLowerCase();
@@ -528,15 +529,15 @@ const DocumentViewerPage: React.FC = () => {
         },
         {
           id: "letterNo",
-          label: "Letter No.",
+          label: "Letter number",
           value: document.letterNo || "",
-          type: "text",
+          type: "textarea",
         },
         {
           id: "subject",
           label: "Subject",
           value: document.subject || "",
-          type: "text",
+          type: "textarea",
         },
         {
           id: "from_",
@@ -849,7 +850,15 @@ const DocumentViewerPage: React.FC = () => {
   };
 
   return (
-    <div className="h-screen flex flex-col bg-gray-100">
+    <div className="flex h-full min-h-[640px] flex-col overflow-hidden bg-slate-50 text-slate-900">
+      <nav aria-label="Breadcrumb" className="flex shrink-0 items-center gap-2 px-4 pt-4 text-sm md:px-6">
+        <button type="button" onClick={() => navigate(-1)} className="rounded text-blue-600 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">
+          Back
+        </button>
+        <ChevronRight aria-hidden="true" className="h-3.5 w-3.5 text-slate-400" />
+        <span className="text-slate-500">Document viewer</span>
+      </nav>
+      <div className="shrink-0 px-4 py-3 md:px-6 [&>header]:border-0 [&>header]:bg-transparent [&>div]:rounded-lg [&_h1]:break-words [&_h1]:text-xl [&_h1]:font-semibold [&_button]:rounded-lg">
       <DocumentHeader
         document={document}
         showMetadata={showMetadata}
@@ -861,9 +870,10 @@ const DocumentViewerPage: React.FC = () => {
         relatedDocuments={relatedDocuments}
       />
       <ChildDocumentContext document={document} />
+      </div>
       {showProcessingBanner && (
         <div
-          className={`border-b px-4 py-2 text-sm ${
+          className={`mx-4 mb-3 shrink-0 rounded-lg border px-4 py-2.5 text-sm md:mx-6 ${
             effectiveProcessingStatus === "failed" ||
             effectiveProcessingStatus === "dead_lettered"
               ? "border-red-200 bg-red-50 text-red-800"
@@ -873,9 +883,14 @@ const DocumentViewerPage: React.FC = () => {
           }`}
         >
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <span className="font-medium">{processingLabel}</span>
-              {processingStatus?.stage && (
+            <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
+              {effectiveProcessingStatus === "completed" ? (
+                <CheckCircle2 aria-hidden="true" className="h-4 w-4 shrink-0" />
+              ) : (
+                <AlertTriangle aria-hidden="true" className="h-4 w-4 shrink-0" />
+              )}
+              <span className="font-medium">{effectiveProcessingStatus === "completed" ? "Metadata extracted successfully" : processingLabel}</span>
+              {processingStatus?.stage && effectiveProcessingStatus !== "completed" && (
                 <span className="ml-2 text-xs opacity-80">
                   Stage: {processingStatus.stage}
                 </span>
@@ -963,9 +978,9 @@ const DocumentViewerPage: React.FC = () => {
           </div>
         </div>
       )}
-      <div className="flex-1 overflow-hidden">
-        <ResizablePanelGroup direction="horizontal">
-          <ResizablePanel defaultSize={75} minSize={50}>
+      <div className="min-h-[480px] flex-1 overflow-hidden px-4 pb-4 md:px-6 md:pb-6">
+        <ResizablePanelGroup direction="horizontal" className="rounded-xl border border-slate-200 bg-white shadow-sm">
+          <ResizablePanel defaultSize={65} minSize={40} className="min-w-0 bg-slate-200/60">
             <Suspense
               fallback={
                 <div className="flex h-full min-h-[480px] flex-col items-center justify-center bg-white text-muted-foreground">
@@ -978,30 +993,55 @@ const DocumentViewerPage: React.FC = () => {
             </Suspense>
           </ResizablePanel>
 
-          {showMetadata && <ResizableHandle withHandle />}
+          {showMetadata && <ResizableHandle withHandle className="bg-slate-200 transition-colors hover:bg-blue-300 focus-visible:bg-blue-400" />}
 
           {showMetadata && (
-            <ResizablePanel defaultSize={25} minSize={20}>
+            <ResizablePanel defaultSize={35} minSize={28} className="min-w-0 bg-white">
               <div className="h-full min-h-0 flex flex-col">
                 <Tabs
                   value={activeTab}
                   onValueChange={setActiveTab}
                   className="w-full h-full min-h-0 flex flex-col"
                 >
-                  <div className="bg-white border-b p-3">
-                    <TabsList className="flex h-auto w-full flex-wrap gap-[5px] [&>*]:flex-[1_1_30%]">
+                  <div className="shrink-0 border-b border-slate-200 bg-white px-2">
+                    <TabsList aria-label="Document information" className="flex h-auto min-h-12 w-full flex-wrap justify-start gap-1 rounded-none bg-transparent p-0 [&>button]:rounded-none [&>button]:border-b-2 [&>button]:border-transparent [&>button]:px-2 [&>button]:py-3 [&>button]:text-xs [&>button]:text-slate-500 [&>button]:shadow-none [&>button[data-state=active]]:border-blue-600 [&>button[data-state=active]]:bg-transparent [&>button[data-state=active]]:text-blue-600">
                       <TabsTrigger value="metadata">Metadata</TabsTrigger>
                       <TabsTrigger value="enclosure">Enclosures</TabsTrigger>
-                      <TabsTrigger value="references">References</TabsTrigger>
-                      <TabsTrigger value="details">Details</TabsTrigger>
-                      <TabsTrigger value="records">Records</TabsTrigger>
-                      {showReviewTab && <TabsTrigger value="review">Review</TabsTrigger>}
+                      <TabsTrigger value="references">
+                        References
+                        {linkedReferences.length > 0 && <span className="ml-1 rounded-full bg-slate-100 px-1.5 text-[10px] text-slate-600">{linkedReferences.length}</span>}
+                      </TabsTrigger>
+                      <TabsTrigger value="details" className="hidden">Details</TabsTrigger>
+                      <TabsTrigger value="records" className="hidden">Linked records</TabsTrigger>
+                      {showReviewTab && <TabsTrigger value="review" className="hidden">Extraction review</TabsTrigger>}
+                      <label className="ml-auto flex items-center px-1 text-xs text-slate-500">
+                        <span className="sr-only">More document information</span>
+                        <select
+                          aria-label="More document information"
+                          value={["details", "records", "review"].includes(activeTab) ? activeTab : ""}
+                          onChange={(event) => setActiveTab(event.target.value)}
+                          className="max-w-[140px] rounded-md border-0 bg-transparent py-2 text-xs focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600"
+                        >
+                          <option value="" disabled>More</option>
+                          <option value="details">Details</option>
+                          <option value="records">Linked records</option>
+                          {showReviewTab && <option value="review">Extraction review</option>}
+                        </select>
+                      </label>
                     </TabsList>
                   </div>
 
                   <ScrollArea className="flex-1 min-h-0">
-                    <div className="p-4 space-y-5">
-                      <TabsContent value="metadata" className="m-0">
+                    <div className="space-y-5 p-4 lg:p-5">
+                      <div className="flex items-center justify-between gap-2">
+                        <h2 className="text-base font-semibold tracking-tight text-slate-900">
+                          {activeTab === "metadata" ? "Document metadata" : activeTab === "enclosure" ? "Enclosures" : activeTab === "references" ? "References" : activeTab === "records" ? "Linked records" : activeTab === "review" ? "Extraction review" : "Document details"}
+                        </h2>
+                        <Button type="button" variant="ghost" size="sm" aria-label="Hide document information" title="Hide document information" onClick={() => setShowMetadata(false)} className="h-8 w-8 p-0 text-slate-400 hover:text-blue-600">
+                          <PanelRightClose aria-hidden="true" className="h-4 w-4" />
+                        </Button>
+                      </div>
+                      <TabsContent value="metadata" className="m-0 [&_label]:text-sm [&_label]:font-medium [&_label]:text-slate-700 [&_input]:min-w-0 [&_input]:rounded-lg [&_input]:border-slate-200 [&_textarea]:min-h-[72px] [&_textarea]:resize-y [&_textarea]:rounded-lg [&_textarea]:border-slate-200 [&_textarea]:leading-relaxed [&_button]:rounded-lg">
                         <MetadataEditor
                           metadataFields={metadataFields}
                           onMetadataChange={handleMetadataChange}
