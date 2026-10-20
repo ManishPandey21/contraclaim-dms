@@ -34,9 +34,10 @@ export const withoutChildLetterIdentity = <T extends { id: string }>(
 export const childStatusText = (status: string | null | undefined): string => {
   switch ((status || "").toLowerCase()) {
     case "queued":
-    case "retrying":
     case "not_queued":
       return "Queued";
+    case "retrying":
+      return "Retrying";
     case "processing":
     case "metadata_extracted":
       return "Processing";

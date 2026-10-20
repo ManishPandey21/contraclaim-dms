@@ -164,6 +164,7 @@ describe("EnclosuresPanel", () => {
 
   it.each([
     ["queued", "Queued"],
+    ["retrying", "Retrying"],
     ["processing", "Processing"],
     ["completed", "Completed"],
     ["human_review_required", "Review required"],
