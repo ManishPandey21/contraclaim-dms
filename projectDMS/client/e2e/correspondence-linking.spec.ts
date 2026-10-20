@@ -226,7 +226,7 @@ test("links an existing incoming letter to a Variation and unlinks it without de
   // Open the letter -> Linked Records shows the Variation
   await linkedRow.getByRole("link").click();
   await expect(page).toHaveURL(new RegExp(`/documentviewer/${INCOMING._id}`));
-  await page.getByRole("tab", { name: "Records" }).click();
+  await page.getByRole("combobox", { name: "More document information" }).selectOption("records");
   const record = page.getByTestId("linked-record");
   await expect(record).toHaveCount(1);
   await expect(record).toContainText("VO-001");
@@ -249,7 +249,7 @@ test("links an existing incoming letter to a Variation and unlinks it without de
   // The letter remains, and its Linked Records no longer shows the Variation
   expect(store.documents.some((doc) => doc._id === INCOMING._id)).toBe(true);
   await page.goto(`/documentviewer/${INCOMING._id}`);
-  await page.getByRole("tab", { name: "Records" }).click();
+  await page.getByRole("combobox", { name: "More document information" }).selectOption("records");
   await expect(page.getByText("No linked records.")).toBeVisible();
 });
 
