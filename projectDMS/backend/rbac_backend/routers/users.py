@@ -21,7 +21,8 @@ from ..core.config import settings
 from ..core.database import get_db
 from ..services.step_up_service import require_step_up
 from ..services.user_service import UserService, UserServiceError
-from ..services.authentication_service import AuthenticationService
+from ..services.authentication_service import AuthenticationService, SessionRevocationUnavailableError
+from ..services.credential_fields import CREDENTIAL_VERSION_CLAIM
 from ..services.authorization_service import AuthorizationService
 from ..services.permission_service import PermissionService
 from ..services.role_service import RoleService
@@ -202,7 +203,8 @@ class UserController:
                 data={
                     "sub": user.email,
                     "user_id": str(user.id),
-                    "roles": user.roles
+                    "roles": user.roles,
+                    CREDENTIAL_VERSION_CLAIM: getattr(user, "credential_version", 0),
                 },
                 expires_delta=access_token_expires
             )
@@ -292,7 +294,15 @@ class UserController:
 
         except (UserError, AuthenticationError, HTTPException):
             raise
-        except (ValueError, ValidationError, UserServiceError) as e:
+        except ValidationError as e:
+            # str(ValidationError) embeds each offending input, which for this
+            # payload can be the plaintext password. Return the messages only.
+            messages = "; ".join(str(err.get("msg", "")) for err in e.errors())
+            raise UserError(messages or "Invalid user data", status.HTTP_400_BAD_REQUEST)
+        except UserServiceError as e:
+            logger.error(f"User creation failed: {type(e).__name__}")
+            raise UserError("User creation failed", status.HTTP_400_BAD_REQUEST)
+        except ValueError as e:
             raise UserError(str(e), status.HTTP_400_BAD_REQUEST)
         except (BaseDomainError, HTTPException):
             raise
@@ -465,7 +475,14 @@ class UserController:
                     )
 
             # Hash new password if provided
+            # An admin reset is deliberately last-write-wins: it has no current
+            # password to compare-and-set against, and every committed reset
+            # advances the credential generation once ($inc), so the latest one
+            # is live and every earlier token is stale. (Self-service change is
+            # compare-and-set: UserService.change_password.)
+            password_change = False
             if validated_update.password:
+                password_change = True
                 validated_update.hashed_password = get_password_hash(validated_update.password)
                 validated_update.password = None  # Don't store plain password
 
@@ -473,15 +490,37 @@ class UserController:
             updated_user = await self.user_service.update_user(
                 validated_user_id, validated_update
             )
+            if updated_user is None:
+                # Nothing was written (the user vanished after the lookup); never
+                # report a credential or profile change that did not happen.
+                raise UserError("User not found", status.HTTP_404_NOT_FOUND)
+
+            # The write above advanced the credential generation atomically with
+            # the hash, so every token minted under the old password (including
+            # one from a login racing this reset) is already rejected on its next
+            # request. Session-store cleanup is defence in depth: a failure is
+            # recorded, never reported as a failed reset.
+            audit_details = {}
+            if password_change:
+                try:
+                    await self.authentication_service.revoke_all_sessions(validated_user_id)
+                    audit_details["session_cleanup"] = "complete"
+                except SessionRevocationUnavailableError as exc:
+                    logger.error(
+                        f"Password reset for user {validated_user_id} applied; session-store cleanup "
+                        f"failed (old tokens are already stale by credential generation): {exc}"
+                    )
+                    audit_details["session_cleanup"] = "failed"
 
             # Audit log
             changed_fields = self._get_changed_fields(existing_user, validated_update)
             await self.audit_logger.log_user_updated(
-                current_user.id, validated_user_id, changed_fields
+                current_user.id, validated_user_id, changed_fields, **audit_details
             )
 
-            # Invalidate sessions if critical fields changed
-            if any(field in changed_fields for field in ['roles', 'disabled', 'password']):
+            # Invalidate sessions if other critical fields changed (a password
+            # change was fenced above).
+            if any(field in changed_fields for field in ['roles', 'disabled']):
                 await self.authentication_service.invalidate_user_sessions(validated_user_id)
 
             # Build response
@@ -495,7 +534,7 @@ class UserController:
             logger.error(f"Failed to update user {user_id}: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"User update failed: {str(e)}"
+                detail="User update failed"
             )
 
     async def delete_user(

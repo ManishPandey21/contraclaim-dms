@@ -26,6 +26,9 @@ class Preferences(BaseModel):
 
 
 def _validate_password_strength(value: str) -> str:
+    # Login strips the submitted password; a padded secret could never authenticate.
+    if value != value.strip():
+        raise ValueError("Password must not start or end with a space")
     if len(value) < 8:
         raise ValueError("Password must be at least 8 characters long")
     if not re.search(r"[A-Z]", value):

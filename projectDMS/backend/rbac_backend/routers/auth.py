@@ -15,6 +15,7 @@ from ..core.csrf import clear_csrf_cookie, create_csrf_token, set_csrf_cookie
 from ..core.database import get_db
 from ..core.config import settings
 from ..services.authentication_service import AuthenticationService
+from ..services.credential_fields import CREDENTIAL_VERSION_CLAIM
 from ..services.authorization_service import AuthorizationService
 from ..services.permission_service import PermissionService
 from ..services.user_service import UserService
@@ -202,7 +203,9 @@ class AuthController:
                     "sub": user.email,
                     "user_id": str(user.id),
                     "roles": user.roles,
-                    "session_id": session_id
+                    "session_id": session_id,
+                    # The generation of the password just verified (same document).
+                    CREDENTIAL_VERSION_CLAIM: user.credential_version,
                 },
                 expires_delta=access_token_expires
             )
@@ -278,6 +281,17 @@ class AuthController:
                     status.HTTP_401_UNAUTHORIZED
                 )
 
+            # Never mint from a stale principal: the credential generation this
+            # request authenticated under must still be the user's current one.
+            if getattr(user, "credential_version", 0) != current_user.credential_version:
+                await self.audit_logger.log_token_refresh_failed(
+                    current_user.id, "credential_changed"
+                )
+                raise AuthenticationError(
+                    "Session has expired",
+                    status.HTTP_401_UNAUTHORIZED
+                )
+
             # Create new access token
             access_token_expires = timedelta(minutes=60)
             access_token = create_access_token(
@@ -286,6 +300,7 @@ class AuthController:
                     "user_id": str(user.id),
                     "roles": user.roles,
                     "session_id": session_id,
+                    CREDENTIAL_VERSION_CLAIM: current_user.credential_version,
                 },
                 expires_delta=access_token_expires
             )

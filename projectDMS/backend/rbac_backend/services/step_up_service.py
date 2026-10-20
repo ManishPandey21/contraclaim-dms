@@ -10,6 +10,12 @@ from jwt import PyJWTError as JWTError
 from ..core.config import settings
 from ..core.database import get_db
 from ..core.security import CurrentUser, get_current_user, verify_password
+from .credential_fields import (
+    CREDENTIAL_VERSION_CLAIM,
+    credential_version as stored_credential_version,
+    stored_password_hash,
+    token_credential_version,
+)
 from ..services.audit_event_service import AuditEventService
 
 
@@ -23,18 +29,22 @@ class StepUpService:
         self.db = db
         self.audit_service = AuditEventService(db)
 
-    def create_token(self, *, user_id: str, action: str) -> str:
+    def create_token(self, *, user_id: str, action: str, credential_version: int = 0) -> str:
         now = datetime.utcnow()
         payload = {
             "sub": str(user_id),
             "typ": "step_up",
             "action": str(action),
+            # Bound to the password generation it was proven with.
+            CREDENTIAL_VERSION_CLAIM: credential_version,
             "iat": int(now.timestamp()),
             "exp": now + timedelta(minutes=STEP_UP_TTL_MINUTES),
         }
         return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
-    def verify_token(self, *, token: str, user_id: str, action: str) -> None:
+    def verify_token(
+        self, *, token: str, user_id: str, action: str, credential_version: int = 0
+    ) -> None:
         try:
             payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
         except JWTError as exc:
@@ -46,6 +56,13 @@ class StepUpService:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Step-up token is not valid for this user",
+            )
+        # A password change makes every earlier step-up token stale; a token
+        # without the claim is generation 0 and only valid while the user is.
+        if token_credential_version(payload) != credential_version:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Step-up token is no longer valid; verify again",
             )
         token_action = str(payload.get("action") or "")
         if token_action not in {str(action), "*"}:
@@ -66,7 +83,7 @@ class StepUpService:
         user_doc = await self.db.users.find_one({"_id": self._id_lookup(current_user.id)})
         if not user_doc:
             user_doc = await self.db.users.find_one({"email": current_user.email})
-        hashed = (user_doc or {}).get("hashed_password") or (user_doc or {}).get("passwordHash")
+        hashed = stored_password_hash(user_doc)
         if not hashed or not verify_password(password, hashed):
             await self.audit_service.emit(
                 action="security.step_up_failed",
@@ -77,7 +94,11 @@ class StepUpService:
                 metadata={"step_up_action": action},
             )
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid password")
-        token = self.create_token(user_id=current_user.id, action=action)
+        token = self.create_token(
+            user_id=current_user.id,
+            action=action,
+            credential_version=stored_credential_version(user_doc),
+        )
         await self.audit_service.emit(
             action="security.step_up_issued",
             actor_id=current_user.id,
@@ -110,7 +131,12 @@ async def require_step_up(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Step-up verification is required for this action",
         )
-    StepUpService(db).verify_token(token=token, user_id=current_user.id, action=action)
+    StepUpService(db).verify_token(
+        token=token,
+        user_id=current_user.id,
+        action=action,
+        credential_version=current_user.credential_version,
+    )
 
 
 def step_up_dependency(action: str):
