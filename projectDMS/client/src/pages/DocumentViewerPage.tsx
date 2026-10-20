@@ -30,6 +30,8 @@ import ReferencesPanel from "@/components/document-viewer/ReferencesPanel";
 import DocumentDetailsPanel from "@/components/document-viewer/DocumentDetailsPanel";
 import LinkedRecordsPanel from "@/components/document-viewer/LinkedRecordsPanel";
 import ExtractionReviewPanel from "@/components/document-viewer/ExtractionReviewPanel";
+import ChildDocumentContext from "@/components/document-viewer/ChildDocumentContext";
+import { withoutChildLetterIdentity } from "@/utils/childDocument";
 import {
   REVIEW_PUBLICATION_PENDING_STAGE,
   isTerminalProcessingStatus,
@@ -510,7 +512,7 @@ const DocumentViewerPage: React.FC = () => {
         }
       };
 
-      setMetadataFields([
+      setMetadataFields(withoutChildLetterIdentity([
         {
           id: "uploadType",
           label: "Direction",
@@ -589,7 +591,7 @@ const DocumentViewerPage: React.FC = () => {
             "Reply Not Required",
           ],
         },
-      ]);
+      ], document));
     }
   }, [
     document,
@@ -858,6 +860,7 @@ const DocumentViewerPage: React.FC = () => {
         setIsLinkReferenceDialogOpen={setIsLinkReferenceDialogOpen}
         relatedDocuments={relatedDocuments}
       />
+      <ChildDocumentContext document={document} />
       {showProcessingBanner && (
         <div
           className={`border-b px-4 py-2 text-sm ${
