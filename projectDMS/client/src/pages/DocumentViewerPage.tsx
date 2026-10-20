@@ -986,9 +986,7 @@ const DocumentViewerPage: React.FC = () => {
                   className="w-full h-full min-h-0 flex flex-col"
                 >
                   <div className="bg-white border-b p-3">
-                    <TabsList
-                      className={`grid w-full ${showReviewTab ? "grid-cols-6" : "grid-cols-5"}`}
-                    >
+                    <TabsList className="flex h-auto w-full flex-wrap gap-[5px] [&>*]:flex-[1_1_30%]">
                       <TabsTrigger value="metadata">Metadata</TabsTrigger>
                       <TabsTrigger value="enclosure">Enclosures</TabsTrigger>
                       <TabsTrigger value="references">References</TabsTrigger>
