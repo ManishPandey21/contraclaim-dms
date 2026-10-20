@@ -41,6 +41,7 @@ import type { LocalDocument } from "@/pages/DocumentViewerPage";
 import { emailService, EmailSuggestion } from "@/services/email-service";
 import { joinApiUrl } from "@/config/api";
 import { fetchApiFileBlob } from "@/services/http";
+import { isChildDocument, relationshipLabel } from "@/utils/childDocument";
 
 interface DocumentHeaderProps {
   document: LocalDocument | null;
@@ -450,7 +451,10 @@ const DocumentHeader: React.FC<DocumentHeaderProps> = ({
               <h1 className="text-lg font-medium">{document.filename}</h1>
               <div className="flex items-center space-x-2">
                 <Badge variant="outline" className="text-xs">
-                  {document.uploadType}
+                  {/* A child is never an incoming/outgoing letter. */}
+                  {isChildDocument(document)
+                    ? relationshipLabel(document.relationship_type)
+                    : document.uploadType}
                 </Badge>
                 <Badge variant={statusBadgeVariant} className="text-xs">
                   {document.status}
