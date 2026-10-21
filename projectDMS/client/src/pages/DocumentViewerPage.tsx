@@ -997,7 +997,7 @@ const DocumentViewerPage: React.FC = () => {
           </div>
         </div>
       )}
-      <div className="min-h-[480px] flex-1 overflow-hidden px-4 pb-4 md:px-6 md:pb-6">
+      <div className="min-h-0 flex-1 overflow-hidden px-4 pb-4 md:px-6 md:pb-6">
         <ResizablePanelGroup direction="horizontal" className="rounded-xl border border-slate-200 bg-white shadow-sm">
           <ResizablePanel defaultSize={65} minSize={40} className="min-w-0 bg-slate-200/60">
             <Suspense
