@@ -512,7 +512,7 @@ REQUIREMENTS_FILES = (
 # cryptography 50.0.0 while both other files still pinned 44.0.2, which the
 # same advisory covers. A pin that only one file carries is not a fix, and
 # nothing scans the other two.
-SECURITY_PINNED_PACKAGES = ("cryptography", "PyJWT")
+SECURITY_PINNED_PACKAGES = ("cryptography", "PyJWT", "certifi", "pillow")
 
 
 def _pinned_version(text: str, package: str) -> str | None:
