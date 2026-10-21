@@ -247,7 +247,8 @@ test("one letter across Programme and Chronology, bounded by the navbar selectio
 
   // Open Letter L: Linked Records shows both, with their deep links.
   await page.goto(`/documentviewer/${LETTER._id}`);
-  await page.getByRole("combobox", { name: "More document information" }).selectOption("records");
+  await page.getByRole("button", { name: "More" }).click();
+  await page.getByRole("menuitem", { name: "Linked records" }).click();
   const records = page.getByTestId("linked-record");
   await expect(records).toHaveCount(2);
   await expect(records.filter({ hasText: "PM-110" })).toContainText("Programme milestone · Progress evidence");
@@ -261,7 +262,8 @@ test("one letter across Programme and Chronology, bounded by the navbar selectio
   const switchedAt = store.requests.length;
   await selectProject(page, A2.name);
   // The switch remounts the routed page (MainLayout), back on its default tab.
-  await page.getByRole("combobox", { name: "More document information" }).selectOption("records");
+  await page.getByRole("button", { name: "More" }).click();
+  await page.getByRole("menuitem", { name: "Linked records" }).click();
   await expect(page.getByText("No linked records.")).toBeVisible();
   await expect(page.getByRole("button", { name: /Link to Record/ })).toHaveCount(0);
   await page.goto("/programme-milestones/pm-A1");
@@ -297,7 +299,8 @@ test("one letter across Programme and Chronology, bounded by the navbar selectio
   await expect(page.getByText("No linked Documents yet.")).toBeVisible();
   expect(store.links().map((link) => `${link.target_type}:${link.target_id}`)).toEqual(["chronology_event:ev-A1"]);
   await page.goto(`/documentviewer/${LETTER._id}`);
-  await page.getByRole("combobox", { name: "More document information" }).selectOption("records");
+  await page.getByRole("button", { name: "More" }).click();
+  await page.getByRole("menuitem", { name: "Linked records" }).click();
   await expect(page.getByTestId("linked-record")).toHaveCount(1);
   await expect(page.getByTestId("linked-record")).toContainText("Chronology event");
 });

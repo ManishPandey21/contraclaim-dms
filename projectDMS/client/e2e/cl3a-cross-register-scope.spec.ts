@@ -240,7 +240,8 @@ test("one letter across Variation and Hindrance, bounded by the navbar selection
 
   // Open Letter L: Linked Records shows Variation A1 and Hindrance A1.
   await page.goto(`/documentviewer/${LETTER._id}`);
-  await page.getByRole("combobox", { name: "More document information" }).selectOption("records");
+  await page.getByRole("button", { name: "More" }).click();
+  await page.getByRole("menuitem", { name: "Linked records" }).click();
   const records = page.getByTestId("linked-record");
   await expect(records).toHaveCount(2);
   await expect(records.filter({ hasText: "VO-A1-001" })).toContainText("Variation · Correspondence");
@@ -275,7 +276,8 @@ test("one letter across Variation and Hindrance, bounded by the navbar selection
 
   // Letter L under A2 reveals neither A1 record.
   await page.goto(`/documentviewer/${LETTER._id}`);
-  await page.getByRole("combobox", { name: "More document information" }).selectOption("records");
+  await page.getByRole("button", { name: "More" }).click();
+  await page.getByRole("menuitem", { name: "Linked records" }).click();
   await expect(page.getByText("No linked records.")).toBeVisible();
 
   // Switch back to A1: both are reachable again.

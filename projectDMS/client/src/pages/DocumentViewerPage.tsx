@@ -10,7 +10,13 @@ import {
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
 import { toast } from "sonner";
-import { AlertTriangle, CheckCircle2, ChevronRight, FileText, PanelRightClose, RefreshCw } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, FileText, PanelRightClose, RefreshCw, X } from "lucide-react";
 import {
   enhancedApi,
   Document,
@@ -144,6 +150,8 @@ const DocumentViewerPage: React.FC = () => {
   const [processingStatus, setProcessingStatus] =
     useState<DocumentProcessingJobStatus | null>(null);
   const [isRetryingProcessing, setIsRetryingProcessing] = useState(false);
+  // The processing status the user dismissed the banner for; a new status shows it again.
+  const [dismissedBannerStatus, setDismissedBannerStatus] = useState<string | null>(null);
   const [createdByName, setCreatedByName] = useState<string>("");
   const [usersMap, setUsersMap] = useState<Record<string, string>>({});
   const [isLoadingReferences, setIsLoadingReferences] = useState(false);
@@ -871,7 +879,7 @@ const DocumentViewerPage: React.FC = () => {
       />
       <ChildDocumentContext document={document} />
       </div>
-      {showProcessingBanner && (
+      {showProcessingBanner && dismissedBannerStatus !== effectiveProcessingStatus && (
         <div
           className={`mx-4 mb-3 shrink-0 rounded-lg border px-4 py-2.5 text-sm md:mx-6 ${
             effectiveProcessingStatus === "failed" ||
@@ -928,6 +936,17 @@ const DocumentViewerPage: React.FC = () => {
                   {isRetryingProcessing ? "Retrying..." : "Retry Processing"}
                 </Button>
               )}
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                aria-label="Dismiss processing status"
+                title="Dismiss"
+                onClick={() => setDismissedBannerStatus(effectiveProcessingStatus)}
+                className="h-7 w-7 p-0 opacity-70 hover:opacity-100"
+              >
+                <X aria-hidden="true" className="h-4 w-4" />
+              </Button>
             </div>
           </div>
         </div>
@@ -1004,30 +1023,60 @@ const DocumentViewerPage: React.FC = () => {
                   className="w-full h-full min-h-0 flex flex-col"
                 >
                   <div className="shrink-0 border-b border-slate-200 bg-white px-2">
-                    <TabsList aria-label="Document information" className="flex h-auto min-h-12 w-full flex-wrap justify-start gap-1 rounded-none bg-transparent p-0 [&>button]:rounded-none [&>button]:border-b-2 [&>button]:border-transparent [&>button]:px-2 [&>button]:py-3 [&>button]:text-xs [&>button]:text-slate-500 [&>button]:shadow-none [&>button[data-state=active]]:border-blue-600 [&>button[data-state=active]]:bg-transparent [&>button[data-state=active]]:text-blue-600">
-                      <TabsTrigger value="metadata">Metadata</TabsTrigger>
-                      <TabsTrigger value="enclosure">Enclosures</TabsTrigger>
-                      <TabsTrigger value="references">
-                        References
-                        {linkedReferences.length > 0 && <span className="ml-1 rounded-full bg-slate-100 px-1.5 text-[10px] text-slate-600">{linkedReferences.length}</span>}
+                    <TabsList className="flex w-full h-auto bg-transparent p-0 border-b border-slate-200">
+                      <TabsTrigger
+                        value="metadata"
+                        className="flex-1 min-w-0 text-sm px-3 py-2.5 rounded-none border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:text-blue-600 data-[state=active]:bg-transparent data-[state=active]:shadow-none"
+                      >
+                        Metadata
                       </TabsTrigger>
-                      <TabsTrigger value="details" className="hidden">Details</TabsTrigger>
-                      <TabsTrigger value="records" className="hidden">Linked records</TabsTrigger>
-                      {showReviewTab && <TabsTrigger value="review" className="hidden">Extraction review</TabsTrigger>}
-                      <label className="ml-auto flex items-center px-1 text-xs text-slate-500">
-                        <span className="sr-only">More document information</span>
-                        <select
-                          aria-label="More document information"
-                          value={["details", "records", "review"].includes(activeTab) ? activeTab : ""}
-                          onChange={(event) => setActiveTab(event.target.value)}
-                          className="max-w-[140px] rounded-md border-0 bg-transparent py-2 text-xs focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600"
-                        >
-                          <option value="" disabled>More</option>
-                          <option value="details">Details</option>
-                          <option value="records">Linked records</option>
-                          {showReviewTab && <option value="review">Extraction review</option>}
-                        </select>
-                      </label>
+                      <TabsTrigger
+                        value="enclosure"
+                        className="flex-1 min-w-0 text-sm px-3 py-2.5 rounded-none border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:text-blue-600 data-[state=active]:bg-transparent data-[state=active]:shadow-none"
+                      >
+                        Enclosures
+                      </TabsTrigger>
+
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <button
+                            className={`flex-1 min-w-0 inline-flex items-center justify-center gap-1 rounded-none px-3 py-2.5 text-sm font-medium border-b-2 bg-transparent transition-all ${
+                              ["references", "details", "records", "review"].includes(activeTab)
+                                ? "border-blue-600 text-blue-600"
+                                : "border-transparent text-slate-500 hover:text-slate-900"
+                            }`}
+                          >
+                            <span className="truncate">
+                              {activeTab === "references" ? "References" :
+                               activeTab === "details" ? "Details" :
+                               activeTab === "records" ? "Linked records" :
+                               activeTab === "review" ? "Extraction review" : "More"}
+                            </span>
+                            <ChevronDown className="h-4 w-4 shrink-0" />
+                          </button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" className="w-48 bg-popover z-50">
+                          <DropdownMenuItem onClick={() => setActiveTab("references")}>
+                            References
+                            {linkedReferences.length > 0 && (
+                              <span className="ml-auto rounded-full bg-slate-100 px-1.5 text-[10px] text-slate-600">
+                                {linkedReferences.length}
+                              </span>
+                            )}
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => setActiveTab("details")}>
+                            Details
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => setActiveTab("records")}>
+                            Linked records
+                          </DropdownMenuItem>
+                          {showReviewTab && (
+                            <DropdownMenuItem onClick={() => setActiveTab("review")}>
+                              Extraction review
+                            </DropdownMenuItem>
+                          )}
+                        </DropdownMenuContent>
+                      </DropdownMenu>
                     </TabsList>
                   </div>
 
