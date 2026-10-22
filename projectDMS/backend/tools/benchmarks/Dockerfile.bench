@@ -1,0 +1,17 @@
+# Disposable benchmark layer on top of the UNMODIFIED production backend image.
+#
+# Base: built from projectDMS/backend/Dockerfile (python:3.12-slim + the exact
+# rbac_backend/requirements.txt), tagged locally as contraclaim-backend:bench-base.
+# This layer only adds the benchmark script and the repo PDF fixture helpers.
+# Build context: projectDMS/backend
+#
+#   docker build -t contraclaim-backend:bench-base -f Dockerfile .
+#   docker build -t contraclaim-bufsiz-bench:99ab522 -f tools/benchmarks/Dockerfile.bench .
+FROM contraclaim-backend:bench-base
+USER root
+COPY tools/benchmarks/measure_pdfminer_bufsiz_memory.py /bench/measure_pdfminer_bufsiz_memory.py
+COPY rbac_backend/tests/fixtures/pdf_builders.py /app/rbac_backend/tests/fixtures/pdf_builders.py
+RUN chown -R appuser:appuser /bench /app/rbac_backend/tests
+USER appuser
+ENV PYTHONPATH=/app
+WORKDIR /app
