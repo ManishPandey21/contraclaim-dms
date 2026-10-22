@@ -10,6 +10,22 @@ Those are canonical; this file holds the things that are easy to get wrong.
 
 ---
 
+## Working principles
+
+1. **Don't assume.** Read the relevant code and the canonical docs above before changing
+   anything, and verify each premise against the code, config, or a command's output. When a
+   material ambiguity cannot be resolved from the repository, ask one focused question before
+   proceeding.
+2. **Write the minimum necessary code.** Use the simplest implementation that fully meets the
+   requirement, reusing existing patterns and utilities. Leave out speculative features, new
+   abstractions or dependencies, and unrelated refactoring.
+3. **Touch only what you must.** Every changed file and line directly supports the requested
+   outcome; unrelated code, formatting, and the user's uncommitted changes stay as they are
+   (see *Lessons* on staging).
+4. **Define success criteria first.** Before implementing, state observable acceptance criteria
+   and the checks that will prove them. Afterwards, report each criterion as passed or failed,
+   what was actually run, and what remains unverified.
+
 ## Layout & repo facts
 
 | Path | What |
@@ -46,11 +62,17 @@ cd client && npm run test && npm run test:e2e
 ```
 
 After adding or changing any route or its authorization, regenerate the route
-contract or `test_route_authz_gate_evidence.py` / `test_route_control_manifest.py` fail:
+inventory and diff it — `test_route_inventory.py` is the gate that fails:
 
 ```bash
-backend/.venv/Scripts/python.exe scripts/rbac_phase0_route_inventory.py --format contract-json --output backend/rbac_backend/route_control_manifest.json
+backend/.venv/Scripts/python.exe scripts/rbac_phase0_route_inventory.py --format json
 ```
+
+The generator supports `--format {summary,json,markdown}` and **no `--output`** — redirect
+to a file yourself. There is no `contract-json` format, no
+`route_control_manifest.json`, and no `test_route_authz_gate_evidence.py` or
+`test_route_control_manifest.py`; that instruction described tooling this repo does
+not have. Verified 2026-08-26 against `--help` and the tests directory.
 
 Migrations (dry run first, always, before any deploy):
 
@@ -68,10 +90,16 @@ Local dev: `make front` (client) / `make back` (uvicorn `rbac_backend.main:app` 
   Pre-commit `forbid-legacy-authz` blocks `Depends(has_permission(...))`.
 - **Permission names use the `dms.*` convention** (`dms.contract.clause.read`, …), not
   `contract:read`.
-- **Role normalization lives once** in `core/permissions.py` (`CANONICAL_ROLE_ALIASES`,
-  `normalize_role_name`). Never add a module-local `ROLE_ALIASES` or private normalizer —
-  `test_role_alias_single_source.py` fails on it. Adding an alias is a *behaviour change*
-  (a previously unresolvable role becomes effective).
+- **Role normalization is NOT single-source on `main` or `release/contraclaim-rc1`.** Those
+  carry four module-local `ROLE_ALIASES` tables (`core/security.py`,
+  `services/authorization_service.py`, `services/permission_service.py`,
+  `services/rbac_service.py`) that disagree (e.g. only `permission_service` maps
+  `"super user"`). `CANONICAL_ROLE_ALIASES` in `core/permissions.py` and
+  `test_role_alias_single_source.py` exist only on `codex/csv-import-scope` and
+  `codex/arbitration-llm-drafting-p3` (from `ff07bc0`). Verified 2026-09-15 with `git grep`
+  per ref — check the branch you are on before relying on either. Never add a *new* local
+  table. Adding an alias is a *behaviour change* (a previously unresolvable role becomes
+  effective).
 - **Routers must re-raise domain errors as a group:** `except (BaseDomainError, HTTPException)`.
   Re-raising one domain error and letting siblings fall to `except Exception` turns 403s
   into 500s; `test_domain_error_reraise_guard.py` walks every router's AST for this shape.
@@ -101,7 +129,15 @@ Local dev: `make front` (client) / `make back` (uvicorn `rbac_backend.main:app` 
 - Tenant-bound accounts hit `403 "No active subscription is configured…"` in
   `policy_service` *before* any scope logic; superadmin bypasses it. Any RBAC test run needs
   a `subscriptions` row per test org (`status`/`billing_status` `active`, `plan_code`
-  `dms_enterprise`, `project_id: null`) **and** a `superuser` document in `roles`.
+  `dms_enterprise`, `project_id: null`). It does **not** need a `superuser` role document:
+  Super User is dormant (see `CONTEXT.md`) — production has no `superuser` document and no
+  holders (2026-09-15). Never seed one to turn a preflight green.
+- **Super Admin authority is name-based by decision** ([ADR 0001](docs/adr/0001-super-admin-authority-is-name-based.md)):
+  `"superadmin"` in the normalised roles bypasses everything. The only role-document check
+  (release tip `93bbc30`, R-A9B) drops a reference whose document has `is_active=False`; a
+  reference with *no* document is kept, so an alias such as `super-admin` stored in
+  `users.roles` still becomes Super Admin. Role-assignment validation is therefore a security
+  boundary, not input hygiene.
 
 ## Deployment
 
@@ -185,11 +221,22 @@ Production is `contraclaim.com` (SSH alias `contraclaim`), checkout
 
 ## Known open debt
 
+- **Open, blocks cutover: an org admin can make itself Super Admin.** User create/update never
+  check that a role exists, `routers/users.py::_resolve_role_scope` treats an unknown string as
+  organisation scope, and `core/security.py` maps `super-admin` / `super admin` /
+  `superadministrator` to `superadmin`. This is a code read (2026-09-15), not yet a red test.
+  Production has been exposed since the initial commit, with no sign of use. Planned fix (owner
+  decision Q12(b)): normalise the role string, require a role document for the canonical key,
+  store the canonical `_id`, and decide system scope from that document; anything else answers 400.
+  Fix implemented 2026-09-15 on `fix/role-assignment-resolution` (worktree
+  `C:\SaaS-fix-role-resolution`, off `release/contraclaim-rc1` @ `93bbc30`), uncommitted: red→green
+  tests, `scripts/system_role_audit.py` gate in `pre_deploy_readiness.sh`, full suite 4815 passed /
+  308 skipped / 0 failed. Still open until the staging Q6/Q8 evidence is captured and the commit is
+  approved and merged. Never probe it on production.
 - Client consumes neither `selection_required` nor `context_forbidden` (no scope-selection
   prompt exists yet).
-- `test_route_control_manifest` can fail on clean HEAD: the checked-in manifest claims an
-  `authorize()` gate on `/api/notifications` that the live route lacks — notifications has no
-  permission dependency at all.
+- `/api/notifications` has no permission dependency at all. (The note that a checked-in
+  route manifest disagreed is obsolete: no manifest and no manifest test exist.)
 - Deferred from the AI-harness work: Learning Update persistence, OTel workflow spans, v3
   domain-adapter double-run, claim-support verification via NLI/LLM-judge.
 - Arbitration acceptance is unproven in production (zero cases/runs), plus outstanding

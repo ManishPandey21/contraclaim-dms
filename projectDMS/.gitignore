@@ -121,3 +121,6 @@ __MACOSX/
 # "graphify" code-graph tool output — keep only the human-readable .md reports
 graphify-out/*
 !graphify-out/*.md
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
