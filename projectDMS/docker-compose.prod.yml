@@ -136,6 +136,12 @@ x-backend-env: &backend-env
   FILING_EXPORT_QUEUE_VISIBILITY_TIMEOUT_SECONDS: "${FILING_EXPORT_QUEUE_VISIBILITY_TIMEOUT_SECONDS:-300}"
   FILING_EXPORT_QUEUE_HEARTBEAT_SECONDS: "${FILING_EXPORT_QUEUE_HEARTBEAT_SECONDS:-20}"
   FILING_EXPORT_QUEUE_METADATA_TTL_SECONDS: "${FILING_EXPORT_QUEUE_METADATA_TTL_SECONDS:-604800}"
+  # Grounded letter summary: the model pass rewords the deterministic Fact
+  # Pack and is discarded unless validation accepts it. Read on the API (on
+  # demand, extraction review) and on the workers (after processing), so it
+  # lives in this shared anchor. On in production; set false in .env to
+  # fall back to the deterministic summary.
+  GROUNDED_SUMMARY_LLM_ENABLED: "${GROUNDED_SUMMARY_LLM_ENABLED:-true}"
   METRICS_ENABLED: "${METRICS_ENABLED:-true}"
   METRICS_TOKEN: "${METRICS_TOKEN:?METRICS_TOKEN is required when metrics are enabled}"
   LOG_LEVEL: "${LOG_LEVEL:-INFO}"
