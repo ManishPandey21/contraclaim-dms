@@ -2,7 +2,8 @@
 
 **Bullet:** "Production Org-Admin permissions are manually validated in staging/prod."
 
-**Status: NOT EARNED — UNTICKED.** R-A8W Stage B measured it against staging on
+**Status: EARNED — TICKED in R-A9C Stage B (2026-09-15); see "R-A9C Stage B — run of
+record" below.** History: R-A8W Stage B measured it against staging on
 2026-09-13 and it failed on F-A8W-B3 (a foreign organisation read by id answered
 500). R-A8X fixed that defect offline; an offline fix earns nothing, so the bullet
 stays unticked until a real staging execution of the updated spec passes on a
@@ -72,6 +73,65 @@ org admin a billing/subscription administrator (F-A9B-1, fixed). The default
 under measurement, so **the staging run of record must execute against the final
 R-A9B HEAD**; a run against an earlier release measures authorization that no
 longer ships.
+
+### R-A9C Stage B — run of record (2026-09-15)
+
+Run `R-A9C-20260915T045825Z`, release `93bbc30` (the R-A9B HEAD, tree `169041c4`),
+backend image `b143564e761a`, client `368b0f7ef4ec`, a fresh `contraclaim-stg`
+deployment on replica set `rsstg` (19/19 migrations, re-apply 19 skipped), reached
+over a run-owned TLS edge. Evidence files are named by their number in that
+directory.
+
+* **Spec (`22`): 12/12 passed on the first attempt**, one worker, no retries,
+  0 skipped, 0 flaky, `CONTRACLAIM_STAGING_E2E=1`, spec sha identical in the
+  checkout and the runner, 0 backend 5xx during the run.
+* **Fixture preflight (`21b`)**: every assertion this document makes mandatory
+  PASSed - org1/org2 exist and differ; proj2, the foreign user and the foreign role
+  exist, are active and name org2; proj1 names org1 as a string; the `orgadmin`
+  role document holds `dms.dashboard.view`, `dms.project.manage` and
+  `organizations:update`. The run's own plan added one assertion beyond this
+  document - a `superuser` role document - which FAILed and is recorded in `21c`
+  as inapplicable: role documents are resolved only by `_id` from a user's own
+  `users.roles`, no persona in rows 1-14 holds `superuser`, and neither the
+  initializer nor production holds such a document. The preflight printed
+  `PREFLIGHT=FAIL` because of that one extra line; it was not edited or re-run.
+* **Independent probes (`23`) and database/audit read-back (`23b`)**, reviewed row
+  by row:
+
+| Row | Positive control (same account, same run) | Measured | Read-back | Verdict |
+|---|---|---|---|---|
+| 1 | step-up POST 200 org1; step-up PUT 200 | read-back exactly `[dms.document.share, dms.document.view]`; spec browser leg passed | `role.created` 5, `role.updated` 4 by the org admin; terms acceptances 0 -> 1 | PASS |
+| 2 | row-1 step-up PUT 200 | PUT without step-up 403; read-back unchanged | - | PASS |
+| 3 | - | `GET /api/organizations` 200, ids `[org1]` | every `policy.authorize allow` for the admin names org1 (22 rows) | PASS |
+| 4 | `GET /api/organizations/org1` 200 | org2 403, no foreign field | `deny scope_denied` naming org2: 2 | PASS |
+| 5 | - | project list 200, 2 projects, all org1 | - | PASS |
+| 6 | `GET /api/projects/proj1` 200 | proj2 403 (existence from the preflight) | - | PASS |
+| 7 | unfiltered list 200 | `?organization_id=org2` 200 with 0 foreign rows; `X-Org-Id: org2` 200 with 0; header + `GET /api/organizations/org2` 403 | - | PASS |
+| 8 | role list 200; unfiltered user list 200 | 0 org2 roles, seeded foreign role not listed; `users?organization_id=org2` 403 | - | PASS |
+| 9 | each page's own `h1` and own API call after navigation | spec test passed: no 401, no foreign object | - | PASS |
+| 10 | POST role naming org1 200, stored org1 | POST naming org2 200, stored **org1** (Disposition A) | roles naming org2 created/updated since the spec: 0 | PASS |
+| 11 | `GET /api/users/me` 200 org1 | PUT own `organization_id=org2` 403; `me` still org1 | users organisation map hash `70cad2e3bc2b440a` before = after | PASS |
+| 12 | GET proj1 200 org1; unchanged PUT 200 | re-parent into org2 403 with the superadmin text; proj1 org1, same name | `allow dms.project.manage` on proj1: 4; `organization_id` still a string | PASS |
+| 13 | own user by id 200; own-org role by id 200 | foreign user 403; foreign role 403 | - | PASS |
+| 14 | `PUT /api/organizations/org1` unchanged name 200 | `PUT /api/organizations/org2` 403, no foreign field | org2 `updated_at` unchanged (null) | PASS |
+
+**All 14 rows PASS from one staging run of record, every refusal after its positive
+control. The bullet is ticked.**
+
+R-A9B sanity checks on the same stack (no gate point):
+
+* **S1, soft-deleted role: PASS.** The revoke account read proj1 (200); the org admin
+  soft-deleted its role with step-up (200); the pre-delete session answered 401
+  (min-iat revocation); a fresh login authenticated (200) and proj1 answered **403**.
+  Read-back: role `is_active=false`, `deleted_at` set by the org admin, one
+  `role.deleted` row, the account still references the role - F-A9A-1 closed on a
+  deployed stack.
+* **S2, alias fan-out: NOT MEASURED.** Both the task-only negative and the
+  project-manager control answered **422**, and the task-only account has no
+  `policy.authorize` row, so the request was refused by validation before
+  authorization ran. The probe sent `{name}` without `organization_id`, where row
+  12's control (200) sends both. A probe-body defect; F-A9A-2 remains proven offline
+  only. Re-measuring it needs the corrected body on a staging stack.
 
 ### Row 12, traced from source
 
