@@ -3,6 +3,14 @@
  * Frontend checks are UX only; backend policy remains authoritative.
  */
 
+import {
+  PERMISSION_ALIASES as GENERATED_PERMISSION_ALIASES,
+  PERMISSION_CONTRACT_VERSION,
+  ROUTE_ACCESS_RULES,
+} from "./generatedPermissionContract";
+
+export { PERMISSION_CONTRACT_VERSION };
+
 export const Roles = {
   SuperAdmin: "superadmin",
   OrgAdmin: "orgadmin",
@@ -52,8 +60,6 @@ export const ROLE_ALIASES: Record<string, string> = {
   "super user": "superuser",
   superuser: "superuser",
   superadmin: Roles.SuperAdmin,
-  admin: Roles.SuperAdmin,
-  administrator: Roles.SuperAdmin,
   "document-controller": Roles.DocumentController,
   "document controller": Roles.DocumentController,
   documentcontroller: Roles.DocumentController,
@@ -157,54 +163,8 @@ const DRAFTING_ROLES: Role[] = [
 // Keep frontend aliases aligned with backend core.permissions.LEGACY_PERMISSION_ALIASES
 // plus the non-document org/project aliases retained by PermissionService.
 // Document access is intentionally canonical-only, matching backend policy.
-export const PERMISSION_ALIASES: Record<string, string[]> = {
-  "dms.dashboard.view": ["projects:read"],
-  "dms.report.view": ["reports:view"],
-  "dms.user.manage": ["users:create", "users:update", "users:delete"],
-  "dms.project.manage": [
-    "projects:create",
-    "projects:update",
-    "projects:delete",
-    "projects:assign",
-  ],
-  "dms.audit.view": ["audit:read"],
-  "dms.claim.manage": ["projects:update"],
-  "dms.contract.appraisal.approve": ["projects:update"],
-  "dms.contract.appraisal.reject": ["projects:update"],
-  "dms.task.manage": ["projects:update"],
-  "dms.keydate.eot_approve": ["projects:update"],
-  "dms.keydate.manage": ["projects:update"],
-  "dms.variation.approve": ["projects:update"],
-  "dms.bankguarantee.release": ["projects:update"],
-  "dms.contract.master.view": ["projects:read"],
-  "dms.contract.master.manage": ["projects:update"],
-  "dms.ipc.approve": ["projects:update"],
-  "dms.evidence_graph.manage": ["projects:update"],
-  "dms.chronology.admin": ["projects:update"],
-  "dms.arbitration.approve": ["projects:update"],
-  "dms.arbitration.admin": ["projects:update"],
-  "dms.admin": ["system:admin"],
-  "billing.plan.view": ["organizations:read"],
-  "billing.plan.manage": ["system:admin"],
-  "billing.invoice.view": ["organizations:read"],
-  "billing.invoice.download": ["organizations:read"],
-  "subscription.entitlement.manage": ["system:admin"],
-  "subscription.upgrade": ["system:admin"],
-  "subscription.downgrade": ["system:admin"],
-  "subscription.cancel": ["system:admin"],
-  "subscription.trial.manage": ["system:admin"],
-  "subscription.addon.manage": ["system:admin"],
-  "subscription.history.view": ["organizations:read"],
-  "subscription.usage.view": ["reports:view"],
-  "subscription.archive_access": [],
-  "subscription.offboarding_export": [],
-  "organizations:read": ["orgs:view"],
-  "organizations:create": ["orgs:create"],
-  "organizations:update": ["orgs:edit"],
-  "organizations:delete": ["orgs:delete"],
-  "projects:read": ["projects:view"],
-  "projects:update": ["projects:edit"],
-};
+export const PERMISSION_ALIASES: Record<string, readonly string[]> =
+  GENERATED_PERMISSION_ALIASES;
 
 const ALIAS_TO_CANONICAL = Object.entries(PERMISSION_ALIASES).reduce(
   (acc, [canonical, aliases]) => {
@@ -246,93 +206,24 @@ export function expandPermissionSet(permissions: Iterable<string>): Set<string> 
   return expanded;
 }
 
-export const OPEN_AUTHENTICATED_ROUTES = [
-  "/overview",
-  "/security-terms",
-  "/profile",
-  "/notifications",
-] as const;
+export const ROUTE_PERMISSIONS: Record<string, readonly string[]> =
+  Object.fromEntries(
+    Object.entries(ROUTE_ACCESS_RULES).map(([path, rule]) => [
+      path,
+      rule.required_any_permissions,
+    ]),
+  );
 
-export const ROUTE_PERMISSIONS: Record<string, string[]> = {
-  "/overview": [], // Open to all authenticated users
-  "/security-terms": [],
-  "/dashboard": ["dms.dashboard.view"],
-  // C3: align with backend permission names. `admin.user.create` does not exist
-  // on the backend; user creation requires `users:create` (POST /api/users).
-  "/register": ["users:create"],
-  "/organizations": ["organizations:read"],
-  "/projects": ["projects:read"],
-  "/parties": ["parties:read"],
-  "/representatives": ["representatives:read"],
-  "/email-groups": ["email_groups:read"],
-  "/upload": ["dms.document.upload"],
-  "/documents": ["dms.document.view"],
-  "/documentsearch": ["dms.document.view"],
-  "/documentviewer": ["dms.document.view"],
-  "/reference": ["dms.document.view"],
-  "/share": ["dms.document.share"],
-  // C3: canonical backend permission is `drafting.request.view` (default_roles.py,
-  // letter_drafting.py), not `draft.request.view`.
-  "/letters": ["drafting.request.view"],
-  "/letter-quality": ["drafting.request.view"],
-  "/letter-templates": ["letter_templates:read"],
-  "/contracts": ["dms.document.view"],
-  "/contracts/viewer": ["dms.document.view"],
-  "/contracts/clauses": ["dms.document.view"],
-  // Must be listed explicitly so it wins over the `/contracts` prefix match.
-  "/contracts/appraisal": ["dms.contract.appraisal.view", "dms.document.view"],
-  "/contracts/timeline": ["dms.contract.timeline.view", "dms.evidence_graph.view", "dms.document.view"],
-  "/chronology": ["dms.chronology.view", "dms.document.view"],
-  "/chronology/new": ["dms.chronology.create", "dms.chronology.view", "dms.document.view"],
-  "/arbitration": ["dms.arbitration.view", "dms.document.view"],
-  "/arbitration/cases": ["dms.arbitration.view", "dms.document.view"],
-  "/arbitration/cases/new": ["dms.arbitration.create", "dms.arbitration.view", "dms.document.view"],
-  "/arbitration/claim": ["dms.arbitration.create", "dms.arbitration.view", "dms.document.view"],
-  "/arbitration/defence": ["dms.arbitration.create", "dms.arbitration.view", "dms.document.view"],
-  "/arbitration/rejoinder": ["dms.arbitration.create", "dms.arbitration.view", "dms.document.view"],
-  "/arbitration/counterclaim": ["dms.arbitration.create", "dms.arbitration.view", "dms.document.view"],
-  "/arbitration/drafts": ["dms.arbitration.view", "dms.document.view"],
-  "/claims": ["dms.claim.view", "dms.document.view"],
-  "/sla": ["dms.claim.view", "dms.document.view"],
-  "/key-dates": ["dms.keydate.view", "dms.document.view"],
-  "/variations": ["dms.variation.view", "dms.document.view"],
-  "/bank-guarantees": ["dms.bankguarantee.view", "dms.document.view"],
-  "/insurance": ["dms.insurance.view", "dms.document.view"],
-  "/ipc-bills": ["dms.ipc.view", "dms.document.view"],
-  "/concerns": ["concerns:read"],
-  "/admin/billing-catalog": ["billing.plan.manage", "system:admin"],
-  "/retrieval-console": ["dms.document.view"],
-  "/observability": ["reports:view", "system:admin"],
-  // Contract Master (backend dms.contract.master.view aliased to projects:read).
-  // Explicit so it wins over the /contracts prefix mapping.
-  "/contracts/master": ["dms.contract.master.view", "dms.document.view"],
-  // C3: no `dms.folder.view` permission exists on the backend; folders organize
-  // documents, so gate on `dms.document.view` (matches /documents and /contracts).
-  "/folders": ["dms.document.view"],
-  "/reports": ["reports:view"],
-  "/health": ["system:admin"],
-  "/users": ["users:read"],
-  "/permissions": ["roles:read", "permissions:read"],
-  "/plan-settings": ["billing.plan.view", "subscription.entitlement.manage"],
-  "/subscription-management": ["billing.plan.view", "subscription.entitlement.manage", "subscription.upgrade"],
-  // Razorpay hosted-checkout return landing (Phase 4). Same billing audience.
-  "/billing/return": ["billing.plan.view", "subscription.entitlement.manage", "subscription.upgrade"],
-  "/settings": ["settings:view"],
-  "/notifications": [],
-  "/legal-words": [],
-  "/admin/legal-words": ["system:admin"],
-  "/profile": ["profile:read"],
-  "/tags": ["tags:read"],
-  // Tasks: backend currently gates by ownership/scope, not a task permission
-  // (a `dms.task.*` family is planned for Phase 2). Accept `tasks:read` or any
-  // document viewer so the (functional) Tasks module is reachable in the meantime.
-  "/tasks": ["tasks:read", "dms.document.view"],
-};
+export const OPEN_AUTHENTICATED_ROUTES = Object.entries(ROUTE_ACCESS_RULES)
+  .filter(([, rule]) => rule.open_authenticated)
+  .map(([path]) => path);
 
 export type RouteAccessDescriptor = {
   normalizedPath: string;
   matchedPath: string | null;
   requiredAnyPermissions: string[];
+  requiredAllPermissions: string[];
+  requiredAllFeatures: string[];
   isOpen: boolean;
   isMapped: boolean;
 };
@@ -343,28 +234,29 @@ export function normalizeRoutePath(path: string): string {
 
 export function getRouteAccessDescriptor(path: string): RouteAccessDescriptor {
   const normalizedPath = normalizeRoutePath(path);
-  if (OPEN_AUTHENTICATED_ROUTES.includes(normalizedPath as any)) {
-    return {
-      normalizedPath,
-      matchedPath: normalizedPath,
-      requiredAnyPermissions: [],
-      isOpen: true,
-      isMapped: true,
-    };
-  }
-
-  const exact = ROUTE_PERMISSIONS[normalizedPath];
+  const rules = ROUTE_ACCESS_RULES as unknown as Record<
+    string,
+    {
+      required_any_permissions: readonly string[];
+      required_all_permissions: readonly string[];
+      required_all_features: readonly string[];
+      open_authenticated: boolean;
+    }
+  >;
+  const exact = rules[normalizedPath];
   if (exact) {
     return {
       normalizedPath,
       matchedPath: normalizedPath,
-      requiredAnyPermissions: exact,
-      isOpen: exact.length === 0,
+      requiredAnyPermissions: [...exact.required_any_permissions],
+      requiredAllPermissions: [...exact.required_all_permissions],
+      requiredAllFeatures: [...exact.required_all_features],
+      isOpen: exact.open_authenticated,
       isMapped: true,
     };
   }
 
-  const matchedPath = Object.keys(ROUTE_PERMISSIONS)
+  const matchedPath = Object.keys(rules)
     .sort((a, b) => b.length - a.length)
     .find((base) => normalizedPath === base || normalizedPath.startsWith(base + "/"));
 
@@ -373,19 +265,32 @@ export function getRouteAccessDescriptor(path: string): RouteAccessDescriptor {
       normalizedPath,
       matchedPath: null,
       requiredAnyPermissions: [],
+      requiredAllPermissions: [],
+      requiredAllFeatures: [],
       isOpen: false,
       isMapped: false,
     };
   }
 
-  const requiredAnyPermissions = ROUTE_PERMISSIONS[matchedPath];
+  const rule = rules[matchedPath];
   return {
     normalizedPath,
     matchedPath,
-    requiredAnyPermissions,
-    isOpen: requiredAnyPermissions.length === 0,
+    requiredAnyPermissions: [...rule.required_any_permissions],
+    requiredAllPermissions: [...rule.required_all_permissions],
+    requiredAllFeatures: [...rule.required_all_features],
+    isOpen: rule.open_authenticated,
     isMapped: true,
   };
+}
+
+export function isRouteAllowedByEntitlement(
+  hasFeature: (feature: string) => boolean,
+  path: string,
+): boolean {
+  const descriptor = getRouteAccessDescriptor(path);
+  if (!descriptor.isMapped) return false;
+  return descriptor.requiredAllFeatures.every((feature) => hasFeature(feature));
 }
 
 export function isRouteAllowedByPermission(
@@ -395,5 +300,9 @@ export function isRouteAllowedByPermission(
   const descriptor = getRouteAccessDescriptor(path);
   if (!descriptor.isMapped) return false;
   if (descriptor.isOpen) return true;
-  return descriptor.requiredAnyPermissions.some((p) => can(p));
+  if (!descriptor.requiredAllPermissions.every((p) => can(p))) return false;
+  return (
+    descriptor.requiredAnyPermissions.length === 0 ||
+    descriptor.requiredAnyPermissions.some((p) => can(p))
+  );
 }

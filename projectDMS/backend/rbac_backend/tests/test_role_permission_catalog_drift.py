@@ -192,6 +192,7 @@ async def test_user_has_permission_handles_raw_role_permissions_without_catalog_
     service = _PermissionService(_DB())
 
     assert await service.user_has_permission("user-1", "dms.document.delete", log=False)
+    assert await service.user_has_permission("user-1", "custom:direct", log=False)
 
 
 async def test_role_service_saves_and_retrieves_full_client_dms_permissions():

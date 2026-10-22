@@ -3,6 +3,16 @@ import { API_BASE_URL } from "../config/api";
 
 const SAFE_METHODS = ["GET", "HEAD", "OPTIONS", "TRACE"];
 
+const selectedScopeHeaders = (): Record<string, string> => {
+  if (typeof window === "undefined") return {};
+  const organizationId = window.localStorage.getItem("org_id") || "";
+  const projectId = window.localStorage.getItem("proj_id") || "";
+  return {
+    ...(organizationId ? { "X-Org-Id": organizationId } : {}),
+    ...(projectId ? { "X-Proj-Id": projectId } : {}),
+  };
+};
+
 const isApiRequest = (input: RequestInfo | URL): boolean => {
   const value =
     typeof input === "string"
@@ -58,6 +68,11 @@ export const installCsrfFetchInterceptor = () => {
         if (!headers.has("X-CSRF-Token")) {
           headers.set("X-CSRF-Token", csrfToken);
         }
+      }
+    }
+    if (isApiRequest(input)) {
+      for (const [name, value] of Object.entries(selectedScopeHeaders())) {
+        if (!headers.has(name)) headers.set(name, value);
       }
     }
     init = { ...init, headers };
@@ -121,6 +136,10 @@ export const createHttpClient = () => {
         config.headers = config.headers || {};
         config.headers["X-CSRF-Token"] = csrfToken;
       }
+    }
+    for (const [name, value] of Object.entries(selectedScopeHeaders())) {
+      config.headers = config.headers || {};
+      config.headers[name] = value;
     }
     return config;
   });

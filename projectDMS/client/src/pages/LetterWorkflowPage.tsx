@@ -11,6 +11,7 @@ import {
 } from '@/utils/letterWorkflowMapping';
 import enhancedApi from '@/services/enhanced-api';
 import { LETTER_INITIATION_PREFILL_KEY } from '@/constants/storageKeys';
+import { useTenant } from '@/contexts/TenantContext';
 
 const normalizeName = (value?: string | null) =>
   typeof value === 'string' ? value.toLowerCase().trim() : undefined;
@@ -28,6 +29,7 @@ interface LetterInitiationPrefill {
 }
 
 const LetterWorkflowPage = () => {
+  const { selectedOrganizationId, selectedProjectId, selectOrganization, selectProject } = useTenant();
   const {
     activeTab,
     setActiveTab,
@@ -169,20 +171,14 @@ const LetterWorkflowPage = () => {
 
       if (prefill && typeof window !== 'undefined') {
         try {
-          if (prefill.organization_id && !window.localStorage.getItem('org_id')) {
-            window.localStorage.setItem(
-              'org_id',
-              String(prefill.organization_id)
-            );
+          if (prefill.organization_id && !selectedOrganizationId) {
+            selectOrganization(String(prefill.organization_id));
           }
-          if (prefill.project_id && !window.localStorage.getItem('proj_id')) {
-            window.localStorage.setItem(
-              'proj_id',
-              String(prefill.project_id)
-            );
+          if (prefill.project_id && !selectedProjectId) {
+            selectProject(String(prefill.project_id));
           }
         } catch {
-          // Storage failures are non-blocking
+          // Invalid or inaccessible deep-link scope is non-blocking.
         }
       }
     };
@@ -192,7 +188,7 @@ const LetterWorkflowPage = () => {
     return () => {
       isActive = false;
     };
-  }, [initiatingDocId]);
+  }, [initiatingDocId, selectedOrganizationId, selectedProjectId, selectOrganization, selectProject]);
 
   const clearInitiationContext = useCallback(() => {
     setInitiatingDocId(null);

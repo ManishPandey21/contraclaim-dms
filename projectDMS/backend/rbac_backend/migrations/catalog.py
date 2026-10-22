@@ -67,6 +67,10 @@ from .v20260730_0001_tenant_context_active_flags import DESCRIPTION as TENANT_CO
 from .v20260730_0001_tenant_context_active_flags import NAME as TENANT_CONTEXT_NAME
 from .v20260730_0001_tenant_context_active_flags import VERSION as TENANT_CONTEXT_VERSION
 from .v20260730_0001_tenant_context_active_flags import upgrade as upgrade_tenant_context_flags
+from .v20260806_0001_subscription_current_scope_unique import DESCRIPTION as SUBSCRIPTION_SCOPE_DESCRIPTION
+from .v20260806_0001_subscription_current_scope_unique import NAME as SUBSCRIPTION_SCOPE_NAME
+from .v20260806_0001_subscription_current_scope_unique import VERSION as SUBSCRIPTION_SCOPE_VERSION
+from .v20260806_0001_subscription_current_scope_unique import upgrade as upgrade_subscription_scope_unique
 
 
 MIGRATIONS = [
@@ -159,5 +163,11 @@ MIGRATIONS = [
         name=TENANT_CONTEXT_NAME,
         description=TENANT_CONTEXT_DESCRIPTION,
         upgrade=upgrade_tenant_context_flags,
+    ),
+    Migration(
+        version=SUBSCRIPTION_SCOPE_VERSION,
+        name=SUBSCRIPTION_SCOPE_NAME,
+        description=SUBSCRIPTION_SCOPE_DESCRIPTION,
+        upgrade=upgrade_subscription_scope_unique,
     ),
 ]

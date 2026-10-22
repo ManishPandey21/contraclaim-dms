@@ -18,6 +18,7 @@ from rbac_backend.services.billing_receipt import (
     tax_invoice_to_html,
 )
 from rbac_backend.services.monetization_service import MonetizationService
+from rbac_backend.services.subscription_scope_key import subscription_scope_key
 from rbac_backend.services.subscription_lifecycle_service import SubscriptionLifecycleService
 
 
@@ -188,6 +189,7 @@ async def test_update_plan_settings_scope_sets_org_subscription_with_billing_per
     assert inserted["project_id"] is None
     assert inserted["plan_code"] == "dms_pro"
     assert inserted["billing_period"] == "annual"
+    assert inserted["current_scope_key"] == subscription_scope_key("org_1", None, None)
     assert result["effective"]["organizations"]["org_1"]["plan_code"] == "dms_pro"
     assert result["effective"]["organizations"]["org_1"]["billing_period"] == "annual"
     assert db.audit_events.inserted[-1]["action"] == "subscription.scope_plan_set"
@@ -382,6 +384,7 @@ async def test_reactivate_calls_gateway() -> None:
     assert ("reactivate", "gw_3") in gw.calls
     sub = await db.subscriptions.find_one({"_id": "sub_3"})
     assert sub["status"] == "active"
+    assert sub["current_scope_key"] == subscription_scope_key("org_1", None, None)
 
 
 @pytest.mark.asyncio

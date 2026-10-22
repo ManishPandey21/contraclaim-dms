@@ -17,6 +17,8 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict
 
+from ..services.subscription_scope_key import subscription_scope_key
+
 logger = logging.getLogger(__name__)
 
 DEMO_ORG_ID = "demo-org-metro"
@@ -96,6 +98,7 @@ def _demo_subscription(now: datetime) -> Dict[str, Any]:
         "plan_code": "demo",
         "billing_period": "monthly",
         "status": "trial",
+        "current_scope_key": subscription_scope_key(DEMO_ORG_ID, None, None),
         "billing_status": "active",
         "trial": True,
         "trial_ends_at": end,

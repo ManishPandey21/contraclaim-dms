@@ -9,6 +9,7 @@ from typing import List, Optional, Dict, Any
 import logging
 
 from ..core.security import get_current_user, CurrentUser, require_permission
+from ..core.permissions import CANONICAL_PERMISSIONS, equivalent_permissions
 from ..services.permission_service import PermissionService
 from ..services.role_service import RoleService, RoleServiceError
 from ..services.audit_event_service import AuditEventService
@@ -35,19 +36,34 @@ async def check_permission_endpoint(
     payload: Dict[str, Any],
     permission_service: PermissionService = Depends(get_permission_service),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """
-    Check whether the current user (or provided user_id) has a given permission.
+    Check whether the current user has a canonical permission.
     """
     permission_name = payload.get("permission") or payload.get("permission_name")
-    target_user_id = payload.get("user_id") or current_user.id
+    requested_user_id = payload.get("user_id")
+    target_user_id = current_user.id
     if not permission_name:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="permission is required",
         )
+    if requested_user_id and str(requested_user_id) != str(current_user.id):
+        # Cross-user probing is deliberately not supported by this endpoint.
+        # Administrative permission inspection belongs to the scoped role/user
+        # management APIs where the target tenant is loaded and audited.
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Permission checks are restricted to the current user",
+        )
+    if not (set(equivalent_permissions(str(permission_name))) & set(CANONICAL_PERMISSIONS)):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="permission must be a canonical permission",
+        )
     granted = await permission_service.user_has_permission(target_user_id, permission_name)
-    return {"granted": granted, "permission": permission_name, "user_id": target_user_id}
+    return {"granted": granted, "permission": permission_name}
 
 # Permissions endpoints
 @router.get("/permissions", response_model=Dict[str, Any])
@@ -61,6 +77,14 @@ async def get_permissions(
 ):
     """Get permissions with basic filtering and pagination."""
     try:
+        await policy.authorize(
+            current_user,
+            "permissions:read",
+            organization_id=getattr(current_user, "organization_id", None),
+            project_id=getattr(current_user, "project_id", None),
+            resource_type="permission_catalog",
+            audit=False,
+        )
         filters = {'search': search}
         pagination = {'skip': skip, 'limit': limit}
         
@@ -89,10 +113,20 @@ async def get_permission(
     permission_id: str,
     permission_service: PermissionService = Depends(get_permission_service),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
     _: None = Depends(require_permission("permissions:read")),
 ):
     """Get specific permission by ID."""
     try:
+        await policy.authorize(
+            current_user,
+            "permissions:read",
+            organization_id=getattr(current_user, "organization_id", None),
+            project_id=getattr(current_user, "project_id", None),
+            resource_type="permission",
+            resource_id=permission_id,
+            audit=False,
+        )
         permission = await permission_service.get_permission_by_id(permission_id)
         if not permission:
             raise HTTPException(
@@ -214,4 +248,3 @@ async def delete_permission(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Permission deletion error: {str(e)}"
         )
-

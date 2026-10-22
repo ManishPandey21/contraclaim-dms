@@ -44,6 +44,15 @@ export interface Organization {
   billingEnabled?: boolean;
 }
 
+/** Live per-project counts from GET /projects/stats, one row per visible project. */
+export interface ProjectStats {
+  project_id: string;
+  letterCount: number;
+  incomingCount: number;
+  outgoingCount: number;
+  teamSize: number;
+}
+
 export interface User {
   // Backend returns "id" in /api/users response model; keep both for compatibility
   id?: string;
@@ -753,6 +762,29 @@ class EnhancedApiService {
       delete normalized.id;
       return normalized as Project;
     });
+  }
+
+  /**
+   * Live letter / team-member counts for every project the caller can list.
+   * One aggregated request for the whole page - never one call per card.
+   */
+  async getProjectStats(): Promise<ProjectStats[]> {
+    const res = await this.request<any>("/projects/stats");
+    const list: any[] = Array.isArray(res) ? res : res?.stats || res?.items || [];
+    const toCount = (value: unknown) => {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+    };
+    return (list || [])
+      .filter(Boolean)
+      .map((entry) => ({
+        project_id: String(entry.project_id ?? entry.projectId ?? entry._id ?? ""),
+        letterCount: toCount(entry.letterCount),
+        incomingCount: toCount(entry.incomingCount),
+        outgoingCount: toCount(entry.outgoingCount),
+        teamSize: toCount(entry.teamSize),
+      }))
+      .filter((entry) => entry.project_id.length > 0);
   }
 
   async getProject(id: string): Promise<Project> {

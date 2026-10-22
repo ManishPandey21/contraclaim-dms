@@ -100,6 +100,9 @@ class ScopeService:
         project_ids = await self.client_project_ids(user)
         roles = self.role_names(user)
 
+        if roles & {"projectadmin", "projectuser"} and not project_id:
+            return False
+
         if organization_id and str(organization_id) not in org_ids:
             return False
 

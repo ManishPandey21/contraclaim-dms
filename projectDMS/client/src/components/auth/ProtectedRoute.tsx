@@ -2,9 +2,15 @@ import { lazy, Suspense } from "react";
 import { useAuth } from "@/hooks/use-auth";
 import { Navigate, Outlet, useLocation } from "react-router-dom";
 import useRBAC from "@/hooks/useRBAC";
-import { isRouteAllowedByPermission } from "@/config/rolePermissions";
+import useEntitlements from "@/hooks/useEntitlements";
+import {
+  getRouteAccessDescriptor,
+  isRouteAllowedByEntitlement,
+  isRouteAllowedByPermission,
+} from "@/config/rolePermissions";
 import RouteSkeleton from "@/components/layout/RouteSkeleton";
 import AccessDenied from "@/components/auth/AccessDenied";
+import PlanUnavailable from "@/components/auth/PlanUnavailable";
 import { getSecurityTermsStatus } from "@/services/security-terms-api";
 import { useEffect, useState } from "react";
 
@@ -23,6 +29,7 @@ const ProtectedRoute = ({ children }) => {
   const { isAuthenticated, isAuthLoading } = useAuth();
   const location = useLocation();
   const { roles, can, loading, error } = useRBAC();
+  const entitlementState = useEntitlements(isAuthenticated && !isAuthLoading);
   const [termsState, setTermsState] = useState<{
     loading: boolean;
     requiresAcceptance: boolean;
@@ -100,6 +107,32 @@ const ProtectedRoute = ({ children }) => {
       return <InlineLogin />;
     }
     return <AccessDenied path={location.pathname} fallback="/overview" />;
+  }
+
+  const routeAccess = getRouteAccessDescriptor(location.pathname);
+  const requiresPlan = routeAccess.requiredAllFeatures.length > 0;
+
+  if (requiresPlan && entitlementState.loading) {
+    return <RouteSkeleton />;
+  }
+
+  if (
+    requiresPlan &&
+    (entitlementState.error ||
+      !isRouteAllowedByEntitlement(entitlementState.hasFeature, location.pathname))
+  ) {
+    return (
+      <PlanUnavailable
+        path={location.pathname}
+        canManageSubscription={
+          can("subscription.upgrade") || can("subscription.entitlement.manage")
+        }
+        unavailableReason={
+          entitlementState.error ? "entitlements_unavailable" : entitlementState.entitlements?.unavailable_reason
+        }
+        onRetry={() => void entitlementState.refresh()}
+      />
+    );
   }
 
   return children ? children : <Outlet />;

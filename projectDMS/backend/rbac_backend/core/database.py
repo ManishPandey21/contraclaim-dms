@@ -766,6 +766,13 @@ async def ensure_indexes(db):
         [("organization_id", 1), ("project_id", 1), ("package_id", 1), ("status", 1)],
         background=True,
     )
+    await db.subscriptions.create_index(
+        [("current_scope_key", 1)],
+        name="subscription_one_current_per_scope",
+        unique=True,
+        partialFilterExpression={"current_scope_key": {"$type": "string"}},
+        background=True,
+    )
     await db.entitlements.create_index(
         [("subscription_id", 1), ("key", 1)],
         background=True,

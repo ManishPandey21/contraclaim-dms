@@ -6,6 +6,7 @@ import ProjectsPage from "../ProjectsPage";
 
 const getProjectsMock = vi.fn();
 const getOrganizationsMock = vi.fn();
+const getProjectStatsMock = vi.fn();
 
 vi.mock("@/services/enhanced-api", () => {
   return {
@@ -13,6 +14,7 @@ vi.mock("@/services/enhanced-api", () => {
     enhancedApi: {
       getProjects: (...args: any[]) => getProjectsMock(...args),
       getOrganizations: (...args: any[]) => getOrganizationsMock(...args),
+      getProjectStats: (...args: any[]) => getProjectStatsMock(...args),
       deactivateProject: vi.fn(),
     },
   };
@@ -79,6 +81,7 @@ describe("ProjectsPage organization-scoped navigation", () => {
       { _id: "org-1", name: "Org One" },
       { _id: "org-2", name: "Org Two" },
     ]);
+    getProjectStatsMock.mockResolvedValue([]);
   });
 
   afterEach(() => {

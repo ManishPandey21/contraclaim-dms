@@ -16,6 +16,8 @@ import {
   StorageBasePaths,
 } from '@/services/storage-settings-api';
 import { listOrganizations, Organization } from '@/services/organizations-api';
+import { useTenant } from '@/contexts/TenantContext';
+import { useRBAC } from '@/hooks/useRBAC';
 
 interface ProviderOption {
   id: StorageProviderId;
@@ -77,8 +79,10 @@ const defaultProviderState = (): StorageProviderConfig[] =>
 
 const OrganizationStorageSettings = () => {
   const { toast } = useToast();
+  const { can } = useRBAC();
+  const canManageStorage = can('settings.storage.manage');
+  const { selectedOrganizationId: selectedOrgId, selectOrganization: setSelectedOrgId } = useTenant();
   const [organizations, setOrganizations] = useState<Organization[]>([]);
-  const [selectedOrgId, setSelectedOrgId] = useState<string>(() => window.localStorage.getItem('org_id') || '');
   const [shortName, setShortName] = useState('');
   const [isShortNameSet, setIsShortNameSet] = useState(false);
   const [isSuperAdmin] = useState(true); // This would come from auth context
@@ -167,7 +171,6 @@ const OrganizationStorageSettings = () => {
         if (!selectedOrgId && orgs.length) {
           const first = orgs[0]._id;
           setSelectedOrgId(first);
-          window.localStorage.setItem('org_id', first);
           await loadSettings(first);
         } else if (selectedOrgId) {
           await loadSettings(selectedOrgId);
@@ -260,12 +263,11 @@ const OrganizationStorageSettings = () => {
 
   const handleOrgChange = (value: string) => {
     setSelectedOrgId(value);
-    window.localStorage.setItem('org_id', value);
     loadSettings(value);
   };
 
   const canEditShortName = !isShortNameSet || isSuperAdmin;
-  const disableForm = !selectedOrgId || loading;
+  const disableForm = !selectedOrgId || loading || !canManageStorage;
   const previewPaths = useMemo(() => {
     const org = (shortName || 'ORG').trim().toUpperCase() || 'ORG';
     const fill = (tpl: string) => tpl.replace(/ORG/gi, org);
@@ -478,7 +480,7 @@ const OrganizationStorageSettings = () => {
       </Card>
 
       <div className="flex justify-end">
-        <Button onClick={handleSave} disabled={saving || loading || !selectedOrgId} className="flex items-center gap-2">
+        <Button onClick={handleSave} disabled={saving || loading || !selectedOrgId || !canManageStorage} className="flex items-center gap-2">
           {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
           {saving ? 'Saving...' : 'Save Organization Settings'}
         </Button>

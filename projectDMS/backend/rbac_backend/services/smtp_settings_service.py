@@ -193,8 +193,11 @@ class SmtpSettingsService:
         organization_id: str,
         payload: SmtpSettingsUpsert | SmtpSettingsUpdate,
         current_user: CurrentUser,
+        *,
+        authorization_checked: bool = False,
     ) -> SmtpSettingsResponse:
-        await self.ensure_manage_organization(current_user, organization_id)
+        if not authorization_checked:
+            await self.ensure_manage_organization(current_user, organization_id)
         return await self._upsert(
             query=self._query_organization(organization_id),
             base={"scope_type": "organization", "organization_id": str(organization_id), "project_id": None},
@@ -207,8 +210,12 @@ class SmtpSettingsService:
         project_id: str,
         payload: SmtpSettingsUpsert | SmtpSettingsUpdate,
         current_user: CurrentUser,
+        *,
+        authorization_checked: bool = False,
     ) -> SmtpSettingsResponse:
-        org_id = await self.ensure_manage_project(current_user, project_id)
+        org_id = await self.get_project_org_id(project_id)
+        if not authorization_checked:
+            await self.ensure_manage_project(current_user, project_id)
         return await self._upsert(
             query=self._query_project(project_id),
             base={"scope_type": "project", "organization_id": str(org_id), "project_id": str(project_id)},

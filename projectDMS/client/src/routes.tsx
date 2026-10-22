@@ -89,6 +89,10 @@ const EmailGroupsPage = lazyWithRetry(() => import("./pages/EmailGroupsPage"));
 const NotFound = lazyWithRetry(() => import("./pages/NotFound"));
 const HealthPage = lazyWithRetry(() => import("./pages/HealthPage"));
 const LandingPage = lazyWithRetry(() => import("./pages/LandingPage"));
+const BlogPage = lazyWithRetry(() => import("./pages/BlogPage"));
+const BlogArticlePage = lazyWithRetry(() => import("./pages/BlogArticlePage"));
+const BlogVideoPage = lazyWithRetry(() => import("./pages/BlogVideoPage"));
+const BlogNotFound = lazyWithRetry(() => import("./pages/BlogNotFound"));
 
 const AppRoutes = () => (
   <Suspense fallback={<RouteSkeleton />}>
@@ -97,6 +101,12 @@ const AppRoutes = () => (
         path="/"
         element={<LandingPage />}
       />
+      {/* Public blog. Sits outside ProtectedRoute on purpose: these pages are
+          static editorial content and must be reachable without a session. */}
+      <Route path="/blog" element={<BlogPage />} />
+      <Route path="/blog/articles/:slug" element={<BlogArticlePage />} />
+      <Route path="/blog/videos/:slug" element={<BlogVideoPage />} />
+      <Route path="/blog/*" element={<BlogNotFound />} />
       <Route
         path="/security-terms"
         element={

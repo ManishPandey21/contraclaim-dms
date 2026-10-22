@@ -1,4 +1,5 @@
 import React, { useCallback, useMemo, useRef, useState } from "react";
+import { useTenant } from "@/contexts/TenantContext";
 import { toast } from "sonner";
 import {
   uploadContractsMultipart,
@@ -27,12 +28,12 @@ const bytesToHuman = (n: number) => {
 };
 
 const ContractsPage: React.FC = () => {
-  const [orgId, setOrgId] = useState<string>(
-    () => window.localStorage.getItem("org_id") || ""
-  );
-  const [projId, setProjId] = useState<string>(
-    () => window.localStorage.getItem("proj_id") || ""
-  );
+  const {
+    selectedOrganizationId: orgId,
+    selectedProjectId: projId,
+    selectOrganization: setOrgId,
+    selectProject: setProjId,
+  } = useTenant();
   const [tags, setTags] = useState<string>("");
   const [files, setFiles] = useState<File[]>([]);
   const [uploads, setUploads] = useState<UploadProgress[]>([]);
@@ -254,7 +255,7 @@ const ContractsPage: React.FC = () => {
               onChange={(e) => setOrgId(e.target.value)}
             />
             <small className="text-gray-500">
-              Defaulted from your session (localStorage org_id)
+              Uses the active organisation scope
             </small>
           </div>
           <div>

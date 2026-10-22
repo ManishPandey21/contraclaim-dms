@@ -735,6 +735,42 @@ async def get_tag_controller() -> TagController:
     return TagController(tag_service, auth_service, rate_limiter, audit_logger)
 
 
+async def _authorize_subtag_target(
+    controller: TagController,
+    current_user: CurrentUser,
+    permission: str,
+    *,
+    tag_id: Optional[str] = None,
+    subtag_id: Optional[str] = None,
+) -> tuple[Tag, Optional[Subtag]]:
+    subtag = None
+    if subtag_id:
+        subtag = await controller.tag_service.get_subtag_by_id(validate_object_id(subtag_id))
+        if not subtag:
+            raise TagError("Subtag not found", status.HTTP_404_NOT_FOUND)
+        tag_id = str(subtag.tag_id)
+    if not tag_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Tag scope is required")
+    tag = await controller.tag_service.get_tag_by_id(validate_object_id(tag_id))
+    if not tag:
+        raise TagError("Tag not found", status.HTTP_404_NOT_FOUND)
+    organization_id = getattr(tag, "organization_id", None)
+    policy = PolicyService()
+    if not organization_id and not policy.scope_service.is_superadmin(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Tag has no authoritative organization scope",
+        )
+    await policy.authorize(
+        current_user,
+        permission,
+        organization_id=str(organization_id) if organization_id else None,
+        resource_type="subtag",
+        resource_id=subtag_id or tag_id,
+    )
+    return tag, subtag
+
+
 # API Endpoints - Tags
 @router.get("/tags", response_model=TagListResponse)
 @handle_exceptions
@@ -884,6 +920,12 @@ async def get_subtags(
     current_user: CurrentUser = Depends(get_current_user)
 ):
     """Get subtags for a tag with pagination."""
+    await _authorize_subtag_target(
+        controller,
+        current_user,
+        "dms.document.view",
+        tag_id=tag_id,
+    )
     pagination = {'skip': skip, 'limit': limit}
     return await controller.get_subtags(tag_id, pagination, current_user)
 
@@ -897,6 +939,12 @@ async def create_subtag(
     current_user: CurrentUser = Depends(get_current_user)
 ):
     """Create subtag for a tag."""
+    await _authorize_subtag_target(
+        controller,
+        current_user,
+        "dms.document.edit_metadata",
+        tag_id=tag_id,
+    )
     return await controller.create_subtag(tag_id, subtag_data, current_user)
 
 
@@ -909,6 +957,12 @@ async def update_subtag(
     current_user: CurrentUser = Depends(get_current_user)
 ):
     """Update subtag with validation."""
+    await _authorize_subtag_target(
+        controller,
+        current_user,
+        "dms.document.edit_metadata",
+        subtag_id=subtag_id,
+    )
     return await controller.update_subtag(subtag_id, update_data, current_user)
 
 
@@ -920,4 +974,10 @@ async def delete_subtag(
     current_user: CurrentUser = Depends(get_current_user)
 ):
     """Delete subtag with validation."""
+    await _authorize_subtag_target(
+        controller,
+        current_user,
+        "dms.document.edit_metadata",
+        subtag_id=subtag_id,
+    )
     return await controller.delete_subtag(subtag_id, current_user)

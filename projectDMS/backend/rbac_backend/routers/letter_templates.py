@@ -7,6 +7,7 @@ from typing import Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from ..core.database import get_db
 from ..core.security import CurrentUser, get_current_user
 from ..models.letter_template import (
     LetterTemplate,
@@ -16,6 +17,7 @@ from ..models.letter_template import (
 )
 from ..services.authorization_service import AuthorizationService
 from ..services.letter_template_service import LetterTemplateService
+from ..services.policy_service import PolicyService
 from ..utils.error_handler import AuthorizationError, TemplateError, handle_exceptions
 from ..utils.rate_limiter import RateLimiter
 
@@ -180,6 +182,39 @@ async def get_letter_template_controller() -> LetterTemplateController:
     return LetterTemplateController(template_service, auth_service, rate_limiter)
 
 
+async def get_policy_service(db=Depends(get_db)) -> PolicyService:
+    return PolicyService(db)
+
+
+async def _authorize_template_target(
+    policy: PolicyService,
+    controller: LetterTemplateController,
+    current_user: CurrentUser,
+    template_id: str,
+    permission: str,
+) -> LetterTemplate:
+    template = await controller.template_service.get_template_by_id(template_id)
+    if not template:
+        raise TemplateError("Template not found", status.HTTP_404_NOT_FOUND)
+    if (
+        not template.organization_id
+        and not policy.scope_service.is_superadmin(current_user)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Global or unscoped templates require Super Admin access",
+        )
+    await policy.authorize(
+        current_user,
+        permission,
+        organization_id=template.organization_id,
+        project_id=template.project_id,
+        resource_type="letter_template",
+        resource_id=template_id,
+    )
+    return template
+
+
 @router.get("", response_model=LetterTemplateListResponse)
 @handle_exceptions
 async def list_templates(
@@ -193,6 +228,7 @@ async def list_templates(
     project_id: Optional[str] = Query(None),
     controller: LetterTemplateController = Depends(get_letter_template_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     filters = {
         "search": search,
@@ -202,8 +238,32 @@ async def list_templates(
         "organization_id": organization_id,
         "project_id": project_id,
     }
+    requested_org = organization_id or getattr(current_user, "organization_id", None)
+    requested_project = project_id or getattr(current_user, "project_id", None)
+    if not requested_org and not policy.scope_service.is_superadmin(current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Organization scope is required")
+    await policy.authorize(
+        current_user,
+        "letter_templates:read",
+        organization_id=str(requested_org) if requested_org else None,
+        project_id=str(requested_project) if requested_project else None,
+        resource_type="letter_template_collection",
+        audit=False,
+    )
     pagination = {"skip": skip, "limit": limit}
-    return await controller.get_templates(pagination, filters, current_user)
+    result = await controller.get_templates(pagination, filters, current_user)
+    for template in result.templates:
+        item_org = template.organization_id or requested_org
+        await policy.authorize(
+            current_user,
+            "letter_templates:read",
+            organization_id=str(item_org) if item_org else None,
+            project_id=template.project_id,
+            resource_type="letter_template",
+            resource_id=str(template.id or ""),
+            audit=False,
+        )
+    return result
 
 
 @router.get("/{template_id}", response_model=LetterTemplate)
@@ -212,7 +272,23 @@ async def get_template(
     template_id: str,
     controller: LetterTemplateController = Depends(get_letter_template_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ):
+    template = await controller.template_service.get_template_by_id(template_id)
+    if not template:
+        raise TemplateError("Template not found", status.HTTP_404_NOT_FOUND)
+    organization_id = template.organization_id or getattr(current_user, "organization_id", None)
+    if not organization_id and not policy.scope_service.is_superadmin(current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Organization scope is required")
+    await policy.authorize(
+        current_user,
+        "letter_templates:read",
+        organization_id=str(organization_id) if organization_id else None,
+        project_id=template.project_id,
+        resource_type="letter_template",
+        resource_id=template_id,
+        audit=False,
+    )
     return await controller.get_template(template_id, current_user)
 
 
@@ -222,7 +298,20 @@ async def create_template(
     data: LetterTemplateCreate,
     controller: LetterTemplateController = Depends(get_letter_template_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ):
+    if not data.organization_id and not policy.scope_service.is_superadmin(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Organization scope is required for non-global templates",
+        )
+    await policy.authorize(
+        current_user,
+        "letter_templates:create",
+        organization_id=data.organization_id,
+        project_id=data.project_id,
+        resource_type="letter_template",
+    )
     return await controller.create_template(data, current_user)
 
 
@@ -233,7 +322,11 @@ async def update_template(
     data: LetterTemplateUpdate,
     controller: LetterTemplateController = Depends(get_letter_template_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ):
+    await _authorize_template_target(
+        policy, controller, current_user, template_id, "letter_templates:update"
+    )
     return await controller.update_template(template_id, data, current_user)
 
 
@@ -243,5 +336,9 @@ async def delete_template(
     template_id: str,
     controller: LetterTemplateController = Depends(get_letter_template_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ):
+    await _authorize_template_target(
+        policy, controller, current_user, template_id, "letter_templates:delete"
+    )
     return await controller.delete_template(template_id, current_user)

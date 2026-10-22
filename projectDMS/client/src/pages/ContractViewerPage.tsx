@@ -28,6 +28,7 @@ import { joinApiUrl } from "@/config/api";
 import { authenticatedFetch } from "@/services/http";
 import { reindexContract } from "@/services/contracts-api";
 import ClauseIndexTab from "@/components/contracts/ClauseIndexTab";
+import { useTenant } from "@/contexts/TenantContext";
 import { enhancedApi } from "@/services/enhanced-api";
 import { extractErrorMessage } from "@/lib/error-logger";
 
@@ -49,8 +50,12 @@ const ContractViewerPage: React.FC = () => {
 
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
-  const [orgId, setOrgId] = useState<string>(() => window.localStorage.getItem("org_id") || "");
-  const [projId, setProjId] = useState<string>(() => window.localStorage.getItem("proj_id") || "");
+  const {
+    selectedOrganizationId: orgId,
+    selectedProjectId: projId,
+    selectOrganization: setOrgId,
+    selectProject: setProjId,
+  } = useTenant();
   const [uploads, setUploads] = useState<UploadOption[]>([]);
   const [selectedDocId, setSelectedDocId] = useState<string>(routeDocId || "");
   const [fetching, setFetching] = useState(false);
@@ -137,21 +142,14 @@ const ContractViewerPage: React.FC = () => {
 
   useEffect(() => {
     if (orgId) {
-      window.localStorage.setItem("org_id", orgId);
       loadProjects(orgId).catch(() => {});
     } else {
-      window.localStorage.removeItem("org_id");
       setProjects([]);
       setUploads([]);
     }
   }, [orgId, loadProjects]);
 
   useEffect(() => {
-    if (projId) {
-      window.localStorage.setItem("proj_id", projId);
-    } else {
-      window.localStorage.removeItem("proj_id");
-    }
     if (orgId) {
       loadUploads(orgId, projId).catch(() => {});
     }
@@ -299,8 +297,6 @@ const ContractViewerPage: React.FC = () => {
   }, [selectedDocId]);
 
   const goToQA = useCallback(() => {
-    if (orgId) window.localStorage.setItem("org_id", orgId);
-    if (projId) window.localStorage.setItem("proj_id", projId);
     navigate("/contracts/qa");
   }, [navigate, orgId, projId]);
 

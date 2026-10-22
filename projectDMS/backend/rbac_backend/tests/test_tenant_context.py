@@ -15,7 +15,9 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from starlette.requests import Request
 
+from rbac_backend.core.security import CurrentUser, _apply_request_tenant_context
 from rbac_backend.core.tenant_context import (
     CONTEXT_FORBIDDEN,
     SELECTION_REQUIRED,
@@ -105,6 +107,33 @@ def org_user(org="org-A", role="orguser"):
 def project_user(org="org-A", projects=("proj-A1",), role="projectuser"):
     return SimpleNamespace(
         id="u-proj", roles=[role], organization_id=org, organizations=[org], projects=list(projects)
+    )
+
+
+def current_project_user(projects=("proj-A1",)):
+    return CurrentUser(
+        id="u-proj",
+        username="u-proj",
+        email="u-proj@example.com",
+        roles=["projectuser"],
+        organization_id="org-A",
+        organizations=["org-A"],
+        projects=list(projects),
+    )
+
+
+def request_with_headers(**headers):
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/dashboard/stats",
+            "query_string": b"",
+            "headers": [
+                (name.replace("_", "-").encode(), value.encode())
+                for name, value in headers.items()
+            ],
+        }
     )
 
 
@@ -256,6 +285,55 @@ async def test_project_user_without_assignment_is_denied():
             project_user(projects=()), organization_id=None, project_id=None, require_project=True
         )
     assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_request_headers_apply_validated_active_scope():
+    result = await _apply_request_tenant_context(
+        CurrentUser(
+            id="u-org",
+            username="u-org",
+            email="u-org@example.com",
+            roles=["orguser"],
+            organization_id="org-A",
+            organizations=["org-A"],
+            projects=[],
+        ),
+        request_with_headers(x_org_id="org-A", x_proj_id="proj-A2"),
+        _DB(),
+    )
+    assert result.organization_id == "org-A"
+    assert result.project_id == "proj-A2"
+
+
+@pytest.mark.asyncio
+async def test_request_headers_reject_cross_tenant_pair():
+    with pytest.raises(TenantContextError) as exc:
+        await _apply_request_tenant_context(
+            CurrentUser(
+                id="u-org",
+                username="u-org",
+                email="u-org@example.com",
+                roles=["orguser"],
+                organization_id="org-A",
+                organizations=["org-A"],
+                projects=[],
+            ),
+            request_with_headers(x_org_id="org-A", x_proj_id="proj-B1"),
+            _DB(),
+        )
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_single_project_role_is_pinned_when_client_has_no_selection():
+    result = await _apply_request_tenant_context(
+        current_project_user(),
+        request_with_headers(),
+        _DB(),
+    )
+    assert result.organization_id == "org-A"
+    assert result.project_id == "proj-A1"
 
 
 # --- active-state enforcement ---------------------------------------------

@@ -3,7 +3,7 @@ Secure performance monitoring API with comprehensive authorization, rate limitin
 and proper error handling. Addresses admin-only operations and security concerns.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, Request, status, Query
 from typing import Dict, Any, List, Optional
 import logging
 from datetime import datetime, timedelta
@@ -11,6 +11,8 @@ from datetime import datetime, timedelta
 from ..core.security import get_current_user, CurrentUser
 from ..services.performance_service import PerformanceService
 from ..services.authorization_service import AuthorizationService
+from ..services.policy_service import PolicyService
+from ..services.step_up_service import require_step_up
 from ..models.performance_models import (
     HealthStatus, PerformanceMetrics, EndpointStats, JobStats
 )
@@ -362,10 +364,17 @@ async def get_cache_stats(
 @router.post("/cache/clear")
 @handle_exceptions
 async def clear_cache(
+    request: Request,
     controller: PerformanceController = Depends(get_performance_controller),
     current_user: CurrentUser = Depends(get_current_user)
 ):
     """Clear all cache entries (superadmin only)."""
+    await require_step_up(request, current_user, action="performance.cache.clear")
+    await PolicyService().authorize(
+        current_user,
+        "performance:superadmin",
+        resource_type="system_cache",
+    )
     return await controller.clear_cache(current_user)
 
 
@@ -383,8 +392,16 @@ async def get_job_stats(
 @handle_exceptions
 async def cancel_job(
     job_id: str,
+    request: Request,
     controller: PerformanceController = Depends(get_performance_controller),
     current_user: CurrentUser = Depends(get_current_user)
 ):
     """Cancel a background job (admin only)."""
+    await require_step_up(request, current_user, action="performance.job.cancel")
+    await PolicyService().authorize(
+        current_user,
+        "performance:admin",
+        resource_type="background_job",
+        resource_id=job_id,
+    )
     return await controller.cancel_job(job_id, current_user)

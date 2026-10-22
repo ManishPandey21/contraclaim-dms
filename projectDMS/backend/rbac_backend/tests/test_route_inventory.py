@@ -1,4 +1,5 @@
 import inspect
+import re
 from pathlib import Path
 
 from fastapi.routing import APIRoute
@@ -15,6 +16,18 @@ def _api_routes():
         for route in app.routes
         if isinstance(route, APIRoute) and str(getattr(route, "path", "")).startswith("/api")
     ]
+
+
+def _source_or_single_delegate_contains(endpoint, marker: str) -> bool:
+    """Follow a compatibility route's single internal delegate exactly once."""
+    source = inspect.getsource(endpoint)
+    if marker in source:
+        return True
+    match = re.search(r"return\s+await\s+([A-Za-z_][A-Za-z0-9_]*)\(", source)
+    if not match:
+        return False
+    delegated = endpoint.__globals__.get(match.group(1))
+    return bool(delegated and marker in inspect.getsource(delegated))
 
 
 def test_frontend_referenced_route_families_are_mounted():
@@ -217,8 +230,8 @@ def test_critical_dangerous_routes_require_step_up():
 
     missing_step_up = []
     for key in critical_routes:
-        source = inspect.getsource(indexed[key].endpoint)
-        if "require_step_up(" not in source and "step_up_dependency(" not in source:
+        endpoint = indexed[key].endpoint
+        if not _source_or_single_delegate_contains(endpoint, "require_step_up(") and not _source_or_single_delegate_contains(endpoint, "step_up_dependency("):
             missing_step_up.append(f"{key[0]} {key[1]}")
 
     assert missing_step_up == []

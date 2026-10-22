@@ -39,6 +39,7 @@ import {
   updateContractMaster,
 } from "@/services/contract-master-api";
 import { enhancedApi } from "@/services/enhanced-api";
+import { useTenant } from "@/contexts/TenantContext";
 
 const fmtDate = (d?: string | null) => (d ? new Date(d).toLocaleDateString() : "—");
 const toISO = (d: string) => (d ? new Date(d).toISOString() : undefined);
@@ -59,6 +60,7 @@ const EMPTY: CForm = {
 
 const ContractMasterPage: React.FC = () => {
   const navigate = useNavigate();
+  const { selectOrganization, selectProject } = useTenant();
   const [projects, setProjects] = useState<{ id: string; name: string; organizationId: string }[]>([]);
   const [projectId, setProjectId] = useState("");
   const [master, setMaster] = useState<ContractMasterDTO | null>(null);
@@ -220,8 +222,8 @@ const ContractMasterPage: React.FC = () => {
               className="gap-2"
               onClick={() => {
                 const org = projects.find((p) => p.id === projectId)?.organizationId;
-                if (org) window.localStorage.setItem("org_id", org);
-                window.localStorage.setItem("proj_id", projectId);
+                if (org) selectOrganization(org);
+                selectProject(projectId);
                 navigate("/contracts/viewer");
               }}
             >

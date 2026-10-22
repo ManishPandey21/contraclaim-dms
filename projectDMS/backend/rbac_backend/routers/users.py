@@ -19,11 +19,13 @@ from ..core.security import (
 )
 from ..core.config import settings
 from ..core.database import get_db
+from ..core.permissions import Permissions
 from ..services.step_up_service import require_step_up
 from ..services.user_service import UserService, UserServiceError
 from ..services.authentication_service import AuthenticationService
 from ..services.authorization_service import AuthorizationService
 from ..services.permission_service import PermissionService
+from ..services.policy_service import PolicyService
 from ..services.role_service import RoleService
 from ..models.user_models import (
     User, UserCreate, UserUpdate, UserResponse, UserListResponse,
@@ -953,6 +955,32 @@ async def get_user_controller(db = Depends(get_db)) -> UserController:
     )
 
 
+async def get_policy_service(db=Depends(get_db)) -> PolicyService:
+    return PolicyService(db)
+
+
+async def _authorize_user_target(
+    policy: PolicyService,
+    current_user: CurrentUser,
+    target_user: Any,
+    *,
+    resource_id: Optional[str] = None,
+) -> None:
+    organization_id = str(getattr(target_user, "organization_id", None) or "") or None
+    if not organization_id and not policy.scope_service.is_superadmin(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Target user has no authoritative tenant scope",
+        )
+    await policy.authorize(
+        current_user,
+        Permissions.USER_MANAGE,
+        organization_id=organization_id,
+        resource_type="user",
+        resource_id=resource_id or str(getattr(target_user, "id", "") or "") or None,
+    )
+
+
 # API Endpoints
 @router.post("/token", response_model=LoginResponse, deprecated=True)
 @handle_exceptions
@@ -974,9 +1002,19 @@ async def create_user(
     user_data: UserCreatePayload,
     controller: UserController = Depends(get_user_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("users:create")),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Create new user with validation."""
+    organization_id = str(user_data.organization_id or "") or None
+    if not organization_id and not policy.scope_service.is_superadmin(current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User tenant scope required")
+    await policy.authorize(
+        current_user,
+        Permissions.USER_MANAGE,
+        organization_id=organization_id,
+        project_id=str(user_data.projects[0]) if len(user_data.projects) == 1 else None,
+        resource_type="user",
+    )
     return await controller.create_user(user_data, current_user)
 
 
@@ -991,7 +1029,7 @@ async def get_users(
     disabled: Optional[bool] = Query(None),
     controller: UserController = Depends(get_user_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("users:read")),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Get users with filtering and pagination."""
     filters = {
@@ -1002,7 +1040,20 @@ async def get_users(
     }
     pagination = {'skip': skip, 'limit': limit}
     
-    return await controller.get_users(pagination, filters, current_user)
+    result = await controller.get_users(pagination, filters, current_user)
+    if not result.users:
+        scope_org = organization_id or (
+            str(current_user.organization_id) if current_user.organization_id else None
+        )
+        await policy.authorize(
+            current_user,
+            Permissions.USER_MANAGE,
+            organization_id=scope_org,
+            resource_type="user_collection",
+        )
+    for target_user in result.users:
+        await _authorize_user_target(policy, current_user, target_user)
+    return result
 
 
 @router.get("/users/me", response_model=UserResponse)
@@ -1021,10 +1072,12 @@ async def get_user(
     user_id: str,
     controller: UserController = Depends(get_user_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("users:read")),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Get specific user by ID."""
-    return await controller.get_user(user_id, current_user)
+    target_user = await controller.get_user(user_id, current_user)
+    await _authorize_user_target(policy, current_user, target_user, resource_id=user_id)
+    return target_user
 
 
 @router.put("/users/{user_id}", response_model=UserResponse)
@@ -1034,9 +1087,13 @@ async def update_user(
     update_data: UserUpdate,
     controller: UserController = Depends(get_user_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("users:update")),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Update user with validation."""
+    target_user = await controller.user_service.get_user_by_id(validate_object_id(user_id))
+    if not target_user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    await _authorize_user_target(policy, current_user, target_user, resource_id=user_id)
     return await controller.update_user(user_id, update_data, current_user)
 
 
@@ -1047,10 +1104,14 @@ async def delete_user(
     request: Request,
     controller: UserController = Depends(get_user_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("users:delete")),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Delete user with dependency checks."""
     await require_step_up(request, current_user, action="users.delete")
+    target_user = await controller.user_service.get_user_by_id(validate_object_id(user_id))
+    if not target_user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    await _authorize_user_target(policy, current_user, target_user, resource_id=user_id)
     return await controller.delete_user(user_id, current_user)
 
 
@@ -1066,10 +1127,14 @@ async def lock_user_account(
     request: Request,
     controller: UserController = Depends(get_user_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("users:update")),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Lock user account for security purposes."""
     await require_step_up(request, current_user, action="users.lock")
+    target_user = await controller.user_service.get_user_by_id(validate_object_id(user_id))
+    if not target_user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    await _authorize_user_target(policy, current_user, target_user, resource_id=user_id)
     await controller.auth_service.require_permission(current_user, "users:lock")
     
     validated_user_id = validate_object_id(user_id)
@@ -1086,10 +1151,14 @@ async def unlock_user_account(
     request: Request,
     controller: UserController = Depends(get_user_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("users:update")),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Unlock user account."""
     await require_step_up(request, current_user, action="users.unlock")
+    target_user = await controller.user_service.get_user_by_id(validate_object_id(user_id))
+    if not target_user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    await _authorize_user_target(policy, current_user, target_user, resource_id=user_id)
     await controller.auth_service.require_permission(current_user, "users:unlock")
     
     validated_user_id = validate_object_id(user_id)

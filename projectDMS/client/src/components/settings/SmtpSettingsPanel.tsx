@@ -20,6 +20,8 @@ import {
   testOrganizationSmtpSettings,
   testProjectSmtpSettings,
 } from "@/services/smtp-settings-api";
+import { useTenant } from "@/contexts/TenantContext";
+import { useRBAC } from "@/hooks/useRBAC";
 
 type Scope = "organization" | "project";
 
@@ -68,10 +70,16 @@ function isEmail(value: string) {
 
 const SmtpSettingsPanel = ({ scope }: SmtpSettingsPanelProps) => {
   const { toast } = useToast();
+  const { can } = useRBAC();
+  const canManageSmtp = can("settings.smtp.manage");
+  const {
+    selectedOrganizationId: selectedOrgId,
+    selectedProjectId,
+    selectOrganization: setSelectedOrgId,
+    selectProject: setSelectedProjectId,
+  } = useTenant();
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [projects, setProjects] = useState<ProjectOption[]>([]);
-  const [selectedOrgId, setSelectedOrgId] = useState(() => window.localStorage.getItem("org_id") || "");
-  const [selectedProjectId, setSelectedProjectId] = useState("");
   const [settings, setSettings] = useState<SmtpSettings | null>(null);
   const [form, setForm] = useState<FormState>(emptyForm);
   const [loading, setLoading] = useState(false);
@@ -145,7 +153,6 @@ const SmtpSettingsPanel = ({ scope }: SmtpSettingsPanelProps) => {
         const firstOrg = selectedOrgId || orgs[0]?._id || "";
         if (firstOrg && !selectedOrgId) {
           setSelectedOrgId(firstOrg);
-          window.localStorage.setItem("org_id", firstOrg);
         }
         const projs = await listProjects(firstOrg ? { organization_id: firstOrg } : undefined);
         const normalized = projs.map((project: Project) => ({
@@ -184,7 +191,6 @@ const SmtpSettingsPanel = ({ scope }: SmtpSettingsPanelProps) => {
 
   const handleOrgChange = async (orgId: string) => {
     setSelectedOrgId(orgId);
-    window.localStorage.setItem("org_id", orgId);
     if (scope === "project") {
       const projs = await listProjects({ organization_id: orgId });
       const normalized = projs.map((project: Project) => ({
@@ -375,11 +381,11 @@ const SmtpSettingsPanel = ({ scope }: SmtpSettingsPanelProps) => {
           {validationError && <p className="text-sm text-destructive">{validationError}</p>}
 
           <div className="flex justify-end gap-3">
-            <Button variant="outline" onClick={handleTest} disabled={testing || loading || !hasExisting}>
+            <Button variant="outline" onClick={handleTest} disabled={testing || loading || !hasExisting || !canManageSmtp}>
               {testing ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlugZap className="h-4 w-4" />}
               Test
             </Button>
-            <Button onClick={handleSave} disabled={saving || loading || !canLoad || Boolean(validationError)}>
+            <Button onClick={handleSave} disabled={saving || loading || !canLoad || !canManageSmtp || Boolean(validationError)}>
               {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
               Save
             </Button>

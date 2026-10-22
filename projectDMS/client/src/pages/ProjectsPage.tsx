@@ -25,7 +25,11 @@ import {
   Folder,
   Filter as FilterIcon,
 } from "lucide-react";
-import { enhancedApi, Organization } from "../services/enhanced-api";
+import {
+  enhancedApi,
+  Organization,
+  ProjectStats,
+} from "../services/enhanced-api";
 import { getCurrentUserProfile } from "@/services/session-api";
 import { Project } from "../types/api";
 import useRBAC from "../hooks/useRBAC";
@@ -47,10 +51,14 @@ type ProjectsLocationState = {
   organizationName?: string;
 };
 
+type StatsStatus = "loading" | "ready" | "error";
+
 const ProjectsPage = () => {
   const [projects, setProjects] = useState<Project[]>([]);
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [loading, setLoading] = useState(false);
+  const [statsById, setStatsById] = useState<Record<string, ProjectStats>>({});
+  const [statsStatus, setStatsStatus] = useState<StatsStatus>("loading");
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [organizationFilter, setOrganizationFilter] = useState("all");
@@ -69,6 +77,9 @@ const ProjectsPage = () => {
     navigationSource === "organization" && requestedOrganizationId.length > 0;
 
   const { roles } = useRBAC();
+  // Stable dependency: `roles` is a fresh array on every render, so keying the
+  // stats effect on its contents keeps it to a single request per role change.
+  const rolesKey = roles.join("|");
   const isSuperadmin = roles.includes("superadmin");
   const canCreateProject = useHasPermission(ENTITY_PERMISSIONS.projects.create);
   const canUpdateProject = useHasPermission(ENTITY_PERMISSIONS.projects.update);
@@ -182,6 +193,40 @@ const ProjectsPage = () => {
     fetchData();
   }, [roles]);
 
+  // Live card counts come from a single aggregated endpoint that is already
+  // RBAC-scoped server-side, so it only ever returns projects this user may see.
+  // It loads independently of the project list: a slow or failing stats call
+  // degrades the two counters, never the page.
+  useEffect(() => {
+    let cancelled = false;
+
+    setStatsStatus("loading");
+    enhancedApi
+      .getProjectStats()
+      .then((stats) => {
+        if (cancelled) return;
+        const byId: Record<string, ProjectStats> = {};
+        stats.forEach((entry) => {
+          byId[entry.project_id] = entry;
+        });
+        setStatsById(byId);
+        setStatsStatus("ready");
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        console.error(
+          "Error fetching project statistics:",
+          error instanceof Error ? error.message : "Unknown error"
+        );
+        setStatsById({});
+        setStatsStatus("error");
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [rolesKey]);
+
   const handleDeactivateProject = async (id: string) => {
     if (!canDeleteProject) {
       toast.error("You do not have permission to deactivate projects.");
@@ -215,6 +260,40 @@ const ProjectsPage = () => {
       default:
         return "bg-gray-500";
     }
+  };
+
+  // A count shows a real number only when the aggregated response actually
+  // carried a row for that project. A missing row means the value could not be
+  // retrieved, which must never be rendered as a genuine zero.
+  const renderProjectCount = (
+    projectId: string,
+    field: "letterCount" | "teamSize",
+    label: string
+  ) => {
+    if (statsStatus === "loading") {
+      return (
+        <span
+          role="status"
+          aria-label={`Loading ${label}`}
+          className="inline-block h-6 w-8 animate-pulse rounded bg-gray-200"
+        />
+      );
+    }
+
+    const stats = statsById[String(projectId)];
+    if (statsStatus === "error" || !stats) {
+      return (
+        <span
+          className="font-bold text-gray-400"
+          title={`${label} unavailable`}
+          aria-label={`${label} unavailable`}
+        >
+          &mdash;
+        </span>
+      );
+    }
+
+    return <span className="font-bold">{stats[field]}</span>;
   };
 
   const getOrganizationById = (orgId: string) => {
@@ -415,18 +494,22 @@ const ProjectsPage = () => {
                     <div className="text-center">
                       <div className="flex items-center justify-center gap-1">
                         <FileText size={14} className="text-blue-500" />
-                        <span className="font-bold">
-                          {project.letterCount || 0}
-                        </span>
+                        {renderProjectCount(
+                          project._id,
+                          "letterCount",
+                          "letter count"
+                        )}
                       </div>
                       <p className="text-xs text-gray-500">Letters</p>
                     </div>
                     <div className="text-center">
                       <div className="flex items-center justify-center gap-1">
                         <Users size={14} className="text-blue-500" />
-                        <span className="font-bold">
-                          {project.teamSize || 0}
-                        </span>
+                        {renderProjectCount(
+                          project._id,
+                          "teamSize",
+                          "team member count"
+                        )}
                       </div>
                       <p className="text-xs text-gray-500">Team Members</p>
                     </div>

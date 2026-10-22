@@ -385,6 +385,21 @@ async def send_notification_email(
     current_user: CurrentUser = Depends(get_current_user)
 ):
     """Send template-based notification email."""
+    organization_id = getattr(current_user, "organization_id", None)
+    project_id = getattr(current_user, "project_id", None)
+    policy = PolicyService()
+    if not organization_id and not policy.scope_service.is_superadmin(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Organization scope is required",
+        )
+    await policy.authorize(
+        current_user,
+        "emails:send_notifications",
+        organization_id=str(organization_id) if organization_id else None,
+        project_id=str(project_id) if project_id else None,
+        resource_type="notification_email",
+    )
     return await controller.send_notification_email(
         background_tasks, template_name, recipients, template_data, current_user
     )

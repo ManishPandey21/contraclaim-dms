@@ -5,11 +5,12 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-from rbac_backend.core.permissions import CLIENT_DMS_PERMISSIONS, Permissions
+from rbac_backend.core.permissions import CLIENT_DMS_PERMISSIONS, DRAFTING_PERMISSIONS, Permissions
 from rbac_backend.models.rbac_monetization import AccountType
 from rbac_backend.routers.storage_sync import _require_superadmin_user
 from rbac_backend.services.entitlement_service import (
     DMS_FEATURE_PERMISSIONS,
+    DRAFTING_FEATURE_PERMISSIONS,
     EntitlementService,
     required_feature_keys,
 )
@@ -189,6 +190,57 @@ async def test_superadmin_bypasses_entitlement_but_is_audited() -> None:
     assert entitlement.calls == 0
     assert audit.events[-1]["result"] == "allow"
     assert audit.events[-1]["reason"] == "superadmin"
+
+
+@pytest.mark.asyncio
+async def test_superuser_consolidated_scope_requires_entitlement_for_every_org() -> None:
+    class ConsolidatedScope(_ScopeService):
+        async def client_organization_ids(self, _user):
+            return {"org-A", "org-B"}
+
+    class PerOrgEntitlements:
+        def __init__(self):
+            self.calls = []
+
+        async def check_permission_entitlement(self, **kwargs):
+            organization_id = kwargs.get("organization_id")
+            self.calls.append(organization_id)
+            return (organization_id != "org-B", "no_active_subscription")
+
+    entitlements = PerOrgEntitlements()
+    policy = PolicyService(
+        permission_service=_PermissionService(True),
+        scope_service=ConsolidatedScope(scope_allowed=True),
+        entitlement_service=entitlements,
+        audit_service=_AuditService(),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await policy.authorize(_user(roles=["superuser"]), Permissions.DASHBOARD_VIEW)
+
+    assert exc.value.status_code == 403
+    assert entitlements.calls == ["org-A", "org-B"]
+
+
+@pytest.mark.asyncio
+async def test_entitlement_lookup_excludes_cancelled_subscriptions() -> None:
+    class CapturingSubscriptions:
+        def __init__(self):
+            self.query = None
+
+        async def find_one(self, query, **_kwargs):
+            self.query = query
+            return None
+
+    subscriptions = CapturingSubscriptions()
+    service = EntitlementService(SimpleNamespace(subscriptions=subscriptions))
+
+    result = await service._active_subscription(organization_id="org-A")
+
+    assert result is None
+    status_clause = subscriptions.query["$and"][0]["status"]["$in"]
+    assert set(status_clause) == {"active", "trial", "pilot", "archive", "offboarding"}
+    assert "cancelled" not in status_clause
 
 
 @pytest.mark.asyncio
@@ -444,6 +496,21 @@ async def test_entitlement_does_not_require_subscription_for_non_service_permiss
 def test_every_client_dms_permission_is_entitlement_scoped() -> None:
     missing = sorted(set(CLIENT_DMS_PERMISSIONS) - DMS_FEATURE_PERMISSIONS)
     assert not missing, f"Client DMS permissions bypass entitlement checks: {missing}"
+
+
+def test_every_canonical_drafting_permission_is_entitlement_scoped() -> None:
+    assert DRAFTING_FEATURE_PERMISSIONS == set(DRAFTING_PERMISSIONS)
+
+
+@pytest.mark.asyncio
+async def test_unknown_commercial_permission_fails_closed() -> None:
+    allowed, reason = await EntitlementService(db=None).check_permission_entitlement(
+        permission="drafting.future.unmapped",
+        organization_id="org-A",
+        project_id="proj-A",
+    )
+    assert allowed is False
+    assert reason == "unmapped_commercial_permission"
 
 
 def test_phase3_module_permissions_declare_granular_feature_keys() -> None:

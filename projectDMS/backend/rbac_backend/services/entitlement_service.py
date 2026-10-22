@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from ..core.config import settings
 from ..core.database import get_database
-from ..core.permissions import CLIENT_DMS_PERMISSIONS
+from ..core.permissions import CLIENT_DMS_PERMISSIONS, DRAFTING_PERMISSIONS
 
 
 WRITE_PERMISSIONS = {
@@ -20,21 +20,10 @@ WRITE_PERMISSIONS = {
     "dms.admin",
 }
 
-DRAFTING_FEATURE_PERMISSIONS = {
-    "drafting.request.create",
-    "drafting.request.view",
-    "drafting.request.accept",
-    "drafting.request.assign",
-    "drafting.draft.create",
-    "drafting.draft.edit",
-    "drafting.draft.submit_for_review",
-    "drafting.review.perform",
-    "drafting.review.approve",
-    "drafting.review.return_for_revision",
-    "drafting.final.view",
-    "drafting.audit.view",
-    "drafting.admin",
-}
+# Keep the commercial entitlement boundary exhaustive by deriving it from the
+# canonical permission registry. A newly-added drafting permission must never
+# silently bypass subscription enforcement because this local set drifted.
+DRAFTING_FEATURE_PERMISSIONS = set(DRAFTING_PERMISSIONS)
 
 DMS_FEATURE_PERMISSIONS = set(CLIENT_DMS_PERMISSIONS)
 
@@ -133,7 +122,13 @@ PERMISSION_FEATURE_REQUIREMENTS: Dict[str, Tuple[str, ...]] = {
     "drafting.review.approve": ("feature.drafting.review",),
     "drafting.review.return_for_revision": ("feature.drafting.review",),
     "drafting.final.view": ("feature.drafting.final",),
+    "drafting.final.approve": ("feature.drafting.final",),
     "drafting.audit.view": ("feature.drafting.audit",),
+    "drafting.workflow.state": ("feature.drafting.workflow",),
+    "drafting.workflow.resume": ("feature.drafting.workflow",),
+    "drafting.workflow.cancel": ("feature.drafting.workflow",),
+    "drafting.workflow.checkpoints": ("feature.drafting.workflow",),
+    "drafting.workflow.force_v2": ("feature.drafting.admin",),
     "drafting.admin": ("feature.drafting.admin",),
 }
 
@@ -161,6 +156,7 @@ FULL_DRAFTING_MODULE_FEATURES = {
     "feature.drafting.review": True,
     "feature.drafting.final": True,
     "feature.drafting.audit": True,
+    "feature.drafting.workflow": True,
     "feature.drafting.admin": True,
 }
 
@@ -271,6 +267,15 @@ class EntitlementService:
         query = {
             "$or": scope_or,
             "$and": [
+                {
+                    "status": {
+                        "$in": sorted(
+                            self.ACTIVE_STATUSES
+                            | self.ARCHIVE_STATUSES
+                            | self.OFFBOARDING_STATUSES
+                        )
+                    }
+                },
                 {"$or": [{"starts_at": {"$exists": False}}, {"starts_at": None}, {"starts_at": {"$lte": now}}]},
                 {"$or": [{"ends_at": {"$exists": False}}, {"ends_at": None}, {"ends_at": {"$gte": now}}]},
             ],
@@ -407,6 +412,8 @@ class EntitlementService:
             | {"subscription.archive_access", "subscription.offboarding_export"}
         )
         if permission not in service_scoped_permissions:
+            if permission.startswith(("dms.", "drafting.")):
+                return False, "unmapped_commercial_permission"
             return True, "not_entitlement_scoped"
         if permission in {"drafting.request.assign", "drafting.admin"} and not organization_id and not project_id:
             return True, "drafting_admin_global"
@@ -457,7 +464,7 @@ class EntitlementService:
                     return False, f"feature_disabled:{feature_key}"
             return True, "drafting_entitlement"
 
-        return True, "not_entitlement_scoped"
+        return False, "unmapped_commercial_permission"
 
     async def assert_quota_available(
         self,

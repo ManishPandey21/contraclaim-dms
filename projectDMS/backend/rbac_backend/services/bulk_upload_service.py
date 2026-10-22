@@ -435,16 +435,32 @@ class BulkUploadService:
         except Exception as e:
             logger.error(f"Failed to update job failure for {job_id}: {str(e)}")
     
-    async def get_job_status(self, job_id: str) -> Optional[BulkUploadStatus]:
+    async def get_job_status(
+        self,
+        job_id: str,
+        *,
+        organization_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> Optional[BulkUploadStatus]:
         """Get job status."""
         try:
             # Check memory cache first
             if job_id in self._active_jobs:
-                return self._active_jobs[job_id]
+                cached = self._active_jobs[job_id]
+                if organization_id and str(cached.organization_id or "") != str(organization_id):
+                    return None
+                if project_id and str(cached.project_id or "") != str(project_id):
+                    return None
+                return cached
             
             # Check database
             db = await self._get_db()
-            job_data = await db.bulk_upload_jobs.find_one({"job_id": job_id})
+            query: Dict[str, Any] = {"job_id": job_id}
+            if organization_id:
+                query["organization_id"] = str(organization_id)
+            if project_id:
+                query["project_id"] = str(project_id)
+            job_data = await db.bulk_upload_jobs.find_one(query)
             
             if job_data:
                 # Convert results back to objects

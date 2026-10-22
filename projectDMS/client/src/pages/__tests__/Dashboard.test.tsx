@@ -10,6 +10,13 @@ vi.mock("@/services/dashboard-api", () => ({
   getDashboardStats: (...args: any[]) => getDashboardStatsMock(...args),
 }));
 
+vi.mock("@/contexts/TenantContext", () => ({
+  useTenant: () => ({
+    selectedOrganizationId: "org-1",
+    selectedProjectId: "proj-1",
+  }),
+}));
+
 vi.mock("recharts", () => ({
   ResponsiveContainer: ({ children }: any) => <div>{children}</div>,
   BarChart: ({ children }: any) => <div>{children}</div>,
