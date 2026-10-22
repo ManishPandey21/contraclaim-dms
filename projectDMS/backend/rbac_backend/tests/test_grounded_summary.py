@@ -351,7 +351,56 @@ async def test_valid_model_output_is_used_and_its_items_inherit_fact_provenance(
 
 
 def test_prompt_version_is_pinned() -> None:
-    assert GROUNDED_SUMMARY_PROMPT_VERSION == "grounded_letter_summary.v1"
+    assert GROUNDED_SUMMARY_PROMPT_VERSION == "grounded_letter_summary.v4"
+
+
+def test_prompt_asks_for_less_than_the_validator_accepts() -> None:
+    from rbac_backend.services.grounded_summary.presentation import PROMPT, SHORT_SUMMARY_MAX
+
+    assert "fewer than 240 characters" in PROMPT and SHORT_SUMMARY_MAX >= 240
+    assert "{{" not in PROMPT and "FACTS_JSON" not in PROMPT
+
+
+async def test_the_model_sees_the_status_under_the_name_the_prompt_uses() -> None:
+    from rbac_backend.services.grounded_summary.presentation import fact_pack_payload
+
+    db = FakeDb()
+    pack, _ = await _pack(db, await _seed(db))
+
+    rows = fact_pack_payload(pack)
+    assert rows and all("verification_status" in row and "status" not in row for row in rows)
+
+
+async def test_a_declined_summary_field_keeps_its_deterministic_text_and_the_sections_are_used() -> None:
+    db = FakeDb()
+    pack, evidence = await _pack(db, await _seed(db))
+    deterministic_short, _ = await compose(pack, evidence)
+
+    def reply(user: str) -> str:
+        request = next(f for f in _facts_of(user) if f.get("role") == "request")
+        return json.dumps({
+            "short_summary": {"text": "", "fact_ids": []},
+            "executive_overview": {"text": "", "fact_ids": []},
+            "sections": {"requests_relief": [
+                {"text": "The Contractor requests determination of the claim under Clause 17.1 of GCC.",
+                 "fact_ids": [request["id"]]}
+            ]},
+        })
+
+    short, detailed = await compose(pack, evidence, model=FakeModel(reply))
+
+    assert detailed.generator.mode == "llm_assisted", detailed.generator.llm_rejection
+    assert short == deterministic_short
+    assert detailed.requests_relief[0].text.startswith("The Contractor requests determination")
+
+
+async def test_empty_text_that_still_cites_a_fact_is_rejected() -> None:
+    db = FakeDb()
+    pack, _ = await _pack(db, await _seed(db))
+    subject = pack.by_type("subject")[0]
+
+    with pytest.raises(PresentationRejected, match="empty text"):
+        validate_presentation(json.dumps({"short_summary": {"text": "", "fact_ids": [subject.id]}}), pack)
 
 
 # --- 5/6. human review ----------------------------------------------------------------
