@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from ..core.database import get_db
 from ..core.security import get_current_user, CurrentUser, authorize_scope, build_scope_query
+from ..core.tenant_context import RequestedScope, requested_scope
 from ..models.letter import Letter
 from ..models.document import Document
 from typing import List, Optional, Dict, Tuple, Any
@@ -875,15 +876,26 @@ async def get_enhanced_context(db, letter_id: str, current_user: CurrentUser) ->
 async def generate_deep_planning_draft(
     request: DeepPlanningRequest,
     db = Depends(get_db),
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    selection: RequestedScope = Depends(requested_scope),
 ):
     """Generate a comprehensive letter draft with deep planning capabilities."""
     try:
         logger.info(f"Generating deep planning draft for subject: {request.subject}")
 
+        # EffectiveScope = Entitlement ∩ Navbar Selection. The selection is
+        # validated (a stale or foreign project is 403 context_forbidden; an
+        # explicit ALL from anyone but Super Admin likewise), and the body's
+        # organisation/project may narrow it but never leave it. A token Super
+        # Admin principal carries no organisation, so without this the navbar
+        # never bounded the drafting context: All/All is global, Organisation A
+        # is A, Project A1 is A1.
+        active = await selection.resolve()
+        sel_org, sel_project = await active.list_filters(request.organization_id, request.project_id)
+
         # Authorization check
-        org_id = request.organization_id or getattr(current_user, "organization_id", None)
-        proj_id = request.project_id or (getattr(current_user, "projects", []) or [None])[0]
+        org_id = sel_org or getattr(current_user, "organization_id", None)
+        proj_id = sel_project or (getattr(current_user, "projects", []) or [None])[0]
         authorize_scope(current_user, organization_id=org_id, project_id=proj_id)
         await PolicyService(db).authorize(
             current_user,
@@ -896,7 +908,7 @@ async def generate_deep_planning_draft(
         # Same scope as the similar letters and the reply target: refuse before
         # any driving-document content is read if one id falls outside it.
         await validate_document_ids(
-            db, request.document_ids, current_user, org_id, request.project_id
+            db, request.document_ids, current_user, org_id, sel_project
         )
 
         # Extract content from driving documents (including OCR text and summary)
@@ -912,15 +924,13 @@ async def generate_deep_planning_draft(
                 request.project_id
             )
 
-        # Find similar letters for reference. `org_id` is the organisation the
-        # gate just authorised: the request's, else the principal's - for Super
-        # Admin that is the validated navbar selection, so a selected org bounds
-        # the context and no selection keeps the consolidated view.
+        # Find similar letters for reference, inside the selection-bounded scope
+        # the gate just authorised (`org_id`, `sel_project`).
         similar_letters = await find_similar_letters(
             db,
             request.subject,
             org_id,
-            request.project_id,
+            sel_project,
             current_user
         )
 
@@ -938,7 +948,7 @@ async def generate_deep_planning_draft(
                     request.target_letter_id,
                     current_user,
                     org_id,
-                    request.project_id,
+                    sel_project,
                 )
                 if tl:
                     parts = []
@@ -1010,8 +1020,8 @@ async def generate_deep_planning_draft(
 
         # Store the generated draft in the database for future reference.
         # This is best-effort and must not block draft delivery.
-        effective_org_id = request.organization_id or getattr(current_user, "organization_id", None)
-        effective_proj_id = request.project_id or _effective_project_id(current_user)
+        effective_org_id = org_id
+        effective_proj_id = sel_project or _effective_project_id(current_user)
         draft_data: Dict[str, Any] = {
             "subject": request.subject,
             "recipient": request.recipient,
