@@ -24,7 +24,7 @@ SCHEMA_VERSION = "1"
 
 #: Pinned. Changing the presentation prompt or the deterministic renderer's
 #: wording rules requires bumping this; tests pin the value.
-GROUNDED_SUMMARY_PROMPT_VERSION = "grounded_letter_summary.v1"
+GROUNDED_SUMMARY_PROMPT_VERSION = "grounded_letter_summary.v4"
 
 VerificationStatus = Literal[
     "verified",

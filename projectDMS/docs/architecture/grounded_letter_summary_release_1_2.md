@@ -117,7 +117,7 @@ their span, and attributed to the letter's author — never restated as establis
 quotes), returns JSON whose every item cites `fact_ids`, and is validated: unknown ids, items with
 no ids, and any number/date/clause token not present in the cited facts reject the whole output,
 which falls back to the deterministic render (`generator.degraded=false`, `mode=deterministic`,
-`llm_rejection` recorded). Prompt `grounded_letter_summary.v1` (pinned by test).
+`llm_rejection` recorded). Prompt `grounded_letter_summary.v4` (pinned by test).
 
 ## 5. Human review, consumability, staleness
 
