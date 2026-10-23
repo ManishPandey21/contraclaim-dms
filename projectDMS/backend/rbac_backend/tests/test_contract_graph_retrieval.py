@@ -57,7 +57,7 @@ class _Collection:
     def __init__(self, docs: List[Dict[str, Any]]) -> None:
         self.docs = docs
 
-    def find(self, query: Dict[str, Any]):
+    def find(self, query: Dict[str, Any], projection: Dict[str, Any] | None = None):
         return _Cursor([doc for doc in self.docs if _matches(doc, query)])
 
 
@@ -116,6 +116,16 @@ class _Observability:
 
 
 class _Graph:
+    def candidate_document_ids(self, **_kwargs):
+        """The documents this fake's traversal could draw a related clause from.
+
+        Answering it is not optional: the generic expansion now resolves
+        canonical eligibility over exactly this population BEFORE choosing the
+        clause window, because filtering afterwards let dead `(:Clause)`
+        residue spend the window and starve a live clause (G29).
+        """
+        return ["doc-scc"]
+
     def find_related_clauses(self, **_kwargs):
         return [
             {
@@ -198,7 +208,8 @@ async def test_contract_qa_augments_retrieval_with_graph_related_clauses(monkeyp
                 "text": "SCC 8.4 modifies the GCC extension of time clause.",
                 "page_numbers": [7],
             }
-        ]
+        ],
+        documents=[{"_id": "doc-scc", "processing_status": "completed"}],
     )
     service = RetrievalService(
         db=db,  # type: ignore[arg-type]
@@ -230,6 +241,60 @@ async def test_contract_qa_augments_retrieval_with_graph_related_clauses(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_graph_expansion_denies_clause_whose_canonical_document_is_absent(monkeypatch):
+    """G29/G30: a Clause node outliving its document must not reach the prompt.
+
+    Nothing deletes FalkorDB Clause nodes when a contract is hard-deleted, so
+    the clause text stays permanently servable unless this path fails closed.
+    `blocked_document_ids` cannot catch it - by contract it returns only
+    documents it positively resolved and judged unusable.
+    """
+    import rbac_backend.services.contract_graph_service as graph_module
+
+    monkeypatch.setattr(graph_module, "ContractGraphService", lambda: _Graph())
+    db = _DB(
+        [
+            {
+                "uploadType": "contract",
+                "document_id": "doc-scc",
+                "clause_number": "8.4",
+                "clause_title": "SCC amendment to EOT",
+                "chunk_id": "scc-chunk-1",
+                "chunk_index": 0,
+                "text": "SCC 8.4 modifies the GCC extension of time clause.",
+                "page_numbers": [7],
+            }
+        ],
+        documents=[],  # canonical document deleted; graph node survived
+    )
+    service = RetrievalService(
+        db=db,  # type: ignore[arg-type]
+        embedding_client=_Embedding(),
+        vector_client=_Vector(),  # type: ignore[arg-type]
+        llm_generator=_LLM(),  # type: ignore[arg-type]
+        observability=_Observability(),  # type: ignore[arg-type]
+    )
+    seed = SearchResult(
+        document_id="doc-gcc",
+        chunk_id="gcc-chunk-1",
+        score=1.0,
+        snippet="GCC 8.4 extension of time",
+        payload={"uploadType": "contract", "document_id": "doc-gcc", "clause_number": "8.4", "text": "GCC 8.4 extension of time"},
+    )
+    request = ContractQARequest(
+        query="How does GCC 8.4 work?",
+        filters=SearchFilters(org_id="org-A", project_id="proj-A", metadata={"uploadType": "contract"}),
+    )
+
+    expanded = await service._augment_with_contract_graph_results([seed], request, limit=5)
+
+    # Assert the FINAL result set, not that a helper ran.
+    assert [r.document_id for r in expanded] == ["doc-gcc"]
+    assert all(not r.payload.get("graph_expanded") for r in expanded)
+    assert not any("SCC 8.4 modifies" in (r.snippet or "") for r in expanded)
+
+
+@pytest.mark.asyncio
 async def test_contract_search_assembles_graph_candidates_into_clause_chunks():
     service = ContractService()
     db = _DB(
@@ -245,8 +310,30 @@ async def test_contract_search_assembles_graph_candidates_into_clause_chunks():
                 "text": "SCC 8.4 modifies the GCC extension of time clause.",
                 "page_numbers": [7],
             }
-        ]
+        ],
+        # The canonical record the graph candidate resolves to. It was absent,
+        # which made this a positive control for a clause whose document does
+        # not exist - and a graph candidate with no canonical document is
+        # exactly what `_assemble_results` now fences out, because such a
+        # candidate spends a page slot and inflates `total_count` while
+        # disclosing nothing (G-A19). The assertions below are unchanged; the
+        # fixture is now complete enough for them to mean what they say.
+        documents=[
+            {
+                "_id": "doc-scc",
+                "organization_id": "org-A",
+                "project_id": "proj-A",
+                "uploadType": "contract",
+                "processing_status": "metadata_extracted",
+                "duplicate_status": "unique",
+                "lifecycle_state": "active",
+            }
+        ],
     )
+    # `_assemble_results` resolves its authority database from
+    # `collection.database`, which the fake collection does not expose, then
+    # falls back to `self._db`.
+    service._db = db
 
     rows, total, has_more = await service._assemble_results(
         db.document_vectors,

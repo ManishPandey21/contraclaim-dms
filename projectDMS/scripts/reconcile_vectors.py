@@ -28,6 +28,18 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from backend.rbac_backend.config.document_processing_config import DocumentProcessingConfig
+from backend.rbac_backend.retrieval.correspondence_payload import (
+    CORRESPONDENCE_PAYLOAD_SCHEMA_VERSION,
+    PAYLOAD_SCHEMA_VERSION_FIELD,
+    CorrespondencePayloadError,
+    build_correspondence_chunks,
+    refuse_unpublishable_stored_rows,
+)
+from backend.rbac_backend.services.contract_source import is_contract_upload
+from backend.rbac_backend.services.publication_policy import (
+    is_consumable,
+    resolve_canonical_document,
+)
 from backend.rbac_backend.core.database import get_database
 from backend.rbac_backend.services.langchain_vector_service import LangChainVectorService
 
@@ -85,31 +97,53 @@ async def _repair_document(
         logger.info("No Mongo vector chunks available to repair document %s", document_id)
         return None
 
-    payloads = []
-    for index, chunk in enumerate(vector_docs):
-        text = chunk.get("text")
-        if not isinstance(text, str) or not text.strip():
-            continue
-        metadata = {
-            "document_id": document_id,
-            "organization_id": chunk.get("organization_id"),
-            "org_id": chunk.get("organization_id"),
-            "project_id": chunk.get("project_id"),
-            "uploadType": chunk.get("uploadType"),
-            "letterNo": chunk.get("letterNo"),
-            "filepath_local": chunk.get("filepath_local"),
-            "filepath_s3": chunk.get("filepath_s3"),
-            "chunk_index": chunk.get("chunk_index", index),
-            "chunk_id": chunk.get("chunk_id"),
-            "source": chunk.get("source", "reconcile"),
-        }
-        payloads.append(
-            {
-                "text": text,
-                "metadata": metadata,
-                "checksum": chunk.get("checksum_sha256"),
-            }
+    # Authority comes from the canonical document row, never from the stored
+    # vector rows; the payload from the one correspondence builder (DI-B1).
+    document = await resolve_canonical_document(db, document_id)
+    if not is_consumable(document):
+        logger.info("Skipped repair for %s; document is not consumable", document_id)
+        return None
+    if is_contract_upload(document):
+        # A contract's points are clause points written by contract ingest; the
+        # count above compares them with nothing correspondence-shaped, and the
+        # rebuild below would replace every one with correspondence chunks and
+        # drop their clause and page provenance. The contract reindex owns them,
+        # as storage-sync's repair already says; the mismatch stays reported.
+        logger.warning(
+            "Skipped repair for %s; contract uploads are rebuilt by the contract reindex",
+            document_id,
         )
+        return None
+    vector_docs.sort(key=lambda row: str(row.get("chunk_index") or 0).zfill(12))
+    texts = [
+        chunk["text"]
+        for chunk in vector_docs
+        if isinstance(chunk.get("text"), str) and chunk["text"].strip()
+    ]
+    written_canonically = all(
+        row.get(PAYLOAD_SCHEMA_VERSION_FIELD) == CORRESPONDENCE_PAYLOAD_SCHEMA_VERSION
+        for row in vector_docs
+    )
+    try:
+        refuse_unpublishable_stored_rows(
+            document, texts, canonically_written=written_canonically
+        )
+    except CorrespondencePayloadError:
+        logger.warning(
+            "Skipped repair for %s; stored rows are extraction-report text, not the "
+            "letter (reprocess the document instead)",
+            document_id,
+        )
+        return None
+    try:
+        payloads = build_correspondence_chunks(
+            document,
+            texts,
+            embedding_model=langchain_service.config.openai_embedding_model,
+        )
+    except CorrespondencePayloadError as exc:
+        logger.warning("Skipped repair for %s; %s", document_id, exc)
+        return None
 
     if not payloads:
         logger.info("Skipped repair for %s; no valid payloads derived from Mongo", document_id)
@@ -207,7 +241,44 @@ async def reconcile(args: argparse.Namespace) -> None:
 
     summary: List[Tuple[str, str, int, Optional[int]]] = []
 
+    from backend.rbac_backend.services.document_service import governed_by_contract_master
+
     for document_id in document_ids:
+        if await governed_by_contract_master(db, document_id):
+            # The contract-worker's reprojection is the only writer of a
+            # governed contract's evidence. Replacing its points here (LangChain
+            # shape, no revision tag) would rewrite a CURRENT projection behind
+            # its fence; storage repair delegates the same way.
+            logger.info("document=%s status=delegated (Contract Master reprojection)", document_id)
+            if args.repair and not args.dry_run:
+                # Never over "mismatch": storage repair records a damaged or
+                # unverifiable projection that way, and it must stay counted.
+                # One row per document: no upsert against a filter a "mismatch"
+                # row would fail, which inserted a second row beside it.
+                existing = await db.vector_sync_status.find_one({"document_id": document_id})
+                if existing is None:
+                    await db.vector_sync_status.insert_one(
+                        {
+                            "document_id": document_id,
+                            "sync_status": "delegated",
+                            "delegated_to": "contract_master_reprojection",
+                            "updatedAt": datetime.utcnow(),
+                            "createdAt": datetime.utcnow(),
+                        }
+                    )
+                elif existing.get("sync_status") != "mismatch":
+                    await db.vector_sync_status.update_one(
+                        {"_id": existing["_id"], "sync_status": {"$ne": "mismatch"}},
+                        {
+                            "$set": {
+                                "sync_status": "delegated",
+                                "delegated_to": "contract_master_reprojection",
+                                "updatedAt": datetime.utcnow(),
+                            }
+                        },
+                    )
+            summary.append((document_id, "delegated", 0, None))
+            continue
         mongo_count = await db.document_vectors.count_documents({"document_id": document_id})
         qdrant_count = await _fetch_qdrant_count(qclient, config.qdrant_collection, document_id)
 

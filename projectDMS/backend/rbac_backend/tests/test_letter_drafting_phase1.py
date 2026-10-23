@@ -20,6 +20,7 @@ from rbac_backend.models.letter_drafting import (
     IncomingLetterAnalysis,
     SourceEvidence,
 )
+from rbac_backend.services.contract_scope_resolver import ProjectEvidenceUniverse
 from rbac_backend.services.letter_drafting.context import DraftContextBuilder
 from rbac_backend.services.letter_drafting.incoming_analyzer import IncomingLetterAnalyzer
 from rbac_backend.services.letter_drafting.planning import PlanningSheetBuilder
@@ -62,11 +63,20 @@ class FakeCollection:
         self.docs = list(docs or [])
         self.last_query = None
 
+    @staticmethod
+    def _matches(doc, key, expected):
+        # `$in` is now part of the clause query itself: G-A7/R14 puts the
+        # canonical eligible document set into the FIRST match stage rather
+        # than filtering after a bounded window.
+        if isinstance(expected, dict) and "$in" in expected:
+            return doc.get(key) in expected["$in"]
+        return doc.get(key) == expected
+
     def find(self, query):
         self.last_query = query
         out = []
         for doc in self.docs:
-            if all(doc.get(k) == v for k, v in query.items()):
+            if all(self._matches(doc, k, v) for k, v in query.items()):
                 out.append(dict(doc))
         return _Cursor(out)
 
@@ -230,7 +240,18 @@ async def test_clause_record_sources_use_structured_records():
     request = DraftRunCreateRequest(clauses_to_consider=["8.4"], purpose="extension of time reply")
 
     warnings: list = []
-    sources = await builder._clause_record_sources(LETTER, request, "org-A", "proj-A", warnings)
+    # G-A7/R14: the clause store is no longer trusted to authorise itself. The
+    # canonical eligible universe is an INPUT, and it is part of the query
+    # rather than a filter over its result.
+    universe = ProjectEvidenceUniverse(
+        organization_id="org-A",
+        project_id="proj-A",
+        contract_ids=("MAIN",),
+        eligible_document_ids=frozenset({"doc-gcc"}),
+    )
+    sources = await builder._clause_record_sources(
+        LETTER, request, "org-A", "proj-A", universe, warnings
+    )
 
     assert len(sources) == 1
     src = sources[0]

@@ -5,7 +5,38 @@ import re
 from typing import Any, Dict, Iterable, List, Optional
 
 from ...core.config import settings
+from .context import PRODUCIBLE_QUALITY_FLAGS
 from .workflow_repository import artifact_hash
+
+#: Quality flags that make a source unfit to support a FILING.
+#:
+#: Derived from the producer's vocabulary, not restated beside it. The previous
+#: set named three flags nothing writes, so `source_drift` - the only branch
+#: that inspects per-source safety state, and the gate on `legal_review`
+#: approval - could never fire for any row that can exist.
+BLOCKING_QUALITY_FLAGS = frozenset(
+    {
+        # The source document may not be consumed at all.
+        "authority_denied",
+        # Explicitly not verified for filing, or a bare AI suggestion.
+        "not_verified_for_filing",
+        "unverified_ai_suggestion",
+        # Manual facts are usable in a working draft and blocked at filing -
+        # this is the gate that was supposed to be doing that blocking.
+        "user_supplied",
+    }
+)
+
+#: Completeness problems. Real, reported elsewhere, but not a statement that the
+#: source is unauthoritative - so they must not block a filing from this branch.
+NON_BLOCKING_QUALITY_FLAGS = frozenset(
+    {
+        "missing_citation",
+        "missing_snippet",
+        "missing_exhibit_id",
+        "missing_source_link",
+    }
+)
 
 
 VALIDATION_SCHEMA_VERSION = "phase4-v1"
@@ -235,8 +266,9 @@ class ArbitrationValidationOrchestrator:
                         and row.get("sha256")
                         and str(row.get("current_sha256")) != str(row.get("sha256"))
                     )
-                    if flags.intersection({"manual_or_unverified", "source_drift", "stale"}) or verification in {
+                    if flags.intersection(BLOCKING_QUALITY_FLAGS) or verification in {
                         "draft", "needs_review", "pending", "selected", "unverified",
+                        "authority_denied",
                     } or revision_drift or content_drift:
                         issues.append(
                             _issue(

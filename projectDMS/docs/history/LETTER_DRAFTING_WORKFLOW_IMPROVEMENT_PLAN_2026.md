@@ -596,7 +596,7 @@ Retrieval/source APIs:
 
 ### Phase 1: Stabilize Current Workflow
 
-Duration: **2-3 weeks**  
+Duration: **2-3 weeks**
 Expected score after phase: **72/100**
 
 Scope:
@@ -618,7 +618,7 @@ Deliverables:
 
 ### Phase 2: Source-Grounded RAG
 
-Duration: **4-6 weeks**  
+Duration: **4-6 weeks**
 Expected score after phase: **82/100**
 
 Scope:
@@ -640,7 +640,7 @@ Deliverables:
 
 ### Phase 3: Cyclic RAG Orchestration
 
-Duration: **5-7 weeks**  
+Duration: **5-7 weeks**
 Expected score after phase: **90/100**
 
 Scope:
@@ -672,7 +672,7 @@ Deliverables:
 
 ### Phase 4: Production Governance and Collaboration
 
-Duration: **4-6 weeks**  
+Duration: **4-6 weeks**
 Expected score after phase: **95/100**
 
 Scope:

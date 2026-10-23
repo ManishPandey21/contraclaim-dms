@@ -11,6 +11,22 @@ from ..services.falkor_graph_service import FalkorGraphService, normalize_letter
 logger = logging.getLogger(__name__)
 
 
+def _skip_child(document_id: str, document: Any, step: str) -> bool:
+    """Phase 8 P0: a child document is never a Letter in the graph.
+
+    Letter nodes (FalkorDB and Graphiti) merge on the normalised letter code
+    alone, so a child published as a Letter would merge into, overwrite, or on
+    deletion destroy the real letter whose number it quotes. Its evidence is
+    published by the evidence graph and the vector index instead.
+    """
+    from ..services.child_document_service import is_child_document
+
+    if is_child_document(document):
+        logger.info("Skipping %s for child document %s: a child is not a letter", step, document_id)
+        return True
+    return False
+
+
 class GraphIngestionService:
     """Transforms processed document metadata into graph nodes and edges."""
 
@@ -35,6 +51,8 @@ class GraphIngestionService:
         upload_type: Optional[str] = None,
     ) -> None:
         """Ingest a processed document into the graph layer."""
+        if _skip_child(document_id, document_data, "graph ingestion"):
+            return
         adapter_enabled = self.adapter.config.enabled
 
         try:
@@ -381,12 +399,32 @@ class GraphIngestionService:
     ) -> None:
         if not self.falkor.enabled:
             return
+        if _skip_child(document_id, document, "FalkorDB sync"):
+            return
+        # G31: the graph must not (re-)create support for a document that may not
+        # be published. Without this, containment was undone by the next sync -
+        # the physical purge removed the contribution and the writer put it back.
+        # The canonical document is already in hand, so authority resolves through
+        # the certified predicate; the graph never gets its own policy.
+        from ..services.publication_policy import is_consumable
+
+        if not is_consumable(document):
+            logger.info(
+                "Skipping FalkorDB sync for %s: source is not currently publishable",
+                document_id,
+            )
+            return
         try:
             payload = self._build_falkor_payload(document_id, document, metadata, upload_type)
             if not payload:
                 return
             letter, references = payload
-            self.falkor.upsert_letter_with_refs(letter, references, cleanup=True)
+            # Attribute the edges to this document so the cleanup pass reconciles
+            # only ITS OWN references - the shared node is cited by many
+            # documents across tenants, and an unscoped cleanup deleted theirs.
+            self.falkor.upsert_letter_with_refs(
+                letter, references, cleanup=True, owner_document_id=str(document_id)
+            )
         except Exception:
             logger.exception("Failed to sync document %s with FalkorDB", document_id)
             if raise_on_error:
@@ -407,6 +445,10 @@ class GraphIngestionService:
         created. Returns True when a deletion was executed.
         """
         if not self.falkor.enabled:
+            return False
+        if _skip_child(document_id, document, "FalkorDB delete"):
+            # A child never had a Letter node. Deleting by its (possibly
+            # stale) letter code would DETACH DELETE the real letter's node.
             return False
         letter_code = self._coalesce(
             document.get("letterNo"),
@@ -556,7 +598,3 @@ class GraphIngestionService:
 
 
 __all__ = ["GraphIngestionService"]
-
-
-
-

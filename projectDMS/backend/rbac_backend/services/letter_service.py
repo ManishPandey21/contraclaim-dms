@@ -1,6 +1,6 @@
 import logging
 import re
-from typing import List, Optional, Dict, Any, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING
 from datetime import datetime, timezone
 
 from pymongo.database import Database
@@ -48,40 +48,41 @@ class InvalidLetterTransitionError(LetterServiceError):
 
 class LetterService:
     """Async service for letter CRUD operations with proper error handling"""
-    
+
     def __init__(self, db: Database, notification_service: Optional[NotificationService] = None):
         if db is None:
             raise ValueError("Database connection cannot be None")
         self.db = db
         self.notification_service = notification_service
-    
+
     def _validate_letter_id(self, letter_id: str) -> ObjectId:
         """
         Validate and convert letter ID to ObjectId.
-        
+
         Args:
             letter_id: Letter ID string to validate
-            
+
         Returns:
             ObjectId instance
-            
+
         Raises:
             InvalidLetterIdError: If ID format is invalid
         """
         if not letter_id or not isinstance(letter_id, str):
             raise InvalidLetterIdError(f"Invalid letter ID: {letter_id}")
-        
+
         try:
             return ObjectId(letter_id)
         except InvalidId as e:
             raise InvalidLetterIdError(f"Invalid ObjectId format: {letter_id}") from e
-    
+
     async def get_letters(
         self,
         skip: int = 0,
         limit: int = 50,
         filters: Optional[Dict[str, Any]] = None,
         search_query: Optional[str] = None,
+        scope: Optional[Dict[str, Any]] = None,
     ) -> List[Optional[Letter]]:
         """
         Retrieve multiple letters with pagination and optional filtering.
@@ -91,6 +92,7 @@ class LetterService:
             limit: Maximum number of letters to return
             filters: Optional filter dictionary (status/org/project)
             search_query: Optional free-text search term
+            scope: Optional authorization constraint, ANDed with the query as given
 
         Returns:
             List of Letter instances
@@ -118,6 +120,9 @@ class LetterService:
                     {"recipient": pattern},
                     {"letter_no": pattern},
                 ]
+
+            if scope:
+                query = {"$and": [dict(scope), query]} if query else dict(scope)
 
             logger.info(
                 "Retrieving letters: skip=%s, limit=%s, query_keys=%s",
@@ -156,6 +161,52 @@ class LetterService:
         except Exception as e:
             logger.error(f"Failed to retrieve letters: {e}")
             raise LetterServiceError(f"Letter retrieval failed: {str(e)}")
+
+    async def authorized_letter_ids(
+        self,
+        letter_ids: List[str],
+        current_user: Any,
+        organization_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> Set[str]:
+        """Of these letter ids, the ones the ACTOR may actually see.
+
+        `get_letters` takes no actor. It filters on whatever `organization_id` /
+        `project_id` the caller hands it and DROPS a falsy value entirely, so a
+        letter with no project silently widens a "related correspondence" lookup
+        to the whole organisation - and a caller that passes neither gets every
+        tenant's letters.
+
+        This answers row visibility the one canonical way, through
+        `build_scope_query`, and returns ids rather than rows so a caller can
+        filter a list it already holds without a second parse. Any supplied
+        organisation/project NARROWS inside the actor's entitlement - a value
+        outside it denies every row - and is never the authority source. No
+        role name is read here.
+
+        `current_user` carries no default: a helper over an unbounded list must
+        fail closed by construction, not by each caller remembering to pass one.
+        """
+        if not letter_ids or current_user is None:
+            return set()
+
+        from ..core.security import build_scope_query, _expand_object_ids
+
+        scope = build_scope_query(
+            current_user,
+            organization_id=organization_id,
+            project_id=project_id,
+        )
+
+        identifiers = [str(letter_id) for letter_id in letter_ids if letter_id]
+        if not identifiers:
+            return set()
+
+        id_clause: Dict[str, Any] = {"_id": {"$in": _expand_object_ids(identifiers)}}
+        query = {"$and": [id_clause, scope]} if scope else id_clause
+
+        rows = await self.db.letters.find(query, {"_id": 1}).to_list(length=None)
+        return {str(row.get("_id")) for row in rows}
 
     async def get_letter(self, letter_id: str) -> Optional[Letter]:
         """
@@ -498,15 +549,49 @@ class LetterService:
             logger.error(f"Failed to update letter {letter_id}: {exc}")
             raise LetterServiceError(f"Letter update failed: {str(exc)}")
 
-    async def get_context_documents(self, letter_id: str) -> Dict[str, Any]:
-        """Return stored context documents and associated metadata for a letter."""
+    async def get_context_documents(
+        self,
+        letter_id: str,
+        current_user: Any,
+    ) -> Dict[str, Any]:
+        """Return stored context documents and associated metadata for a letter.
+
+        Authorisation to view the LETTER does not authorise the documents.
+        Letter numbers are global strings that collide across projects and
+        organisations, a curated id list is not authority, and a document's
+        publication state can turn adverse after it was curated. Every row
+        served here therefore has to clear two INDEPENDENT gates before it is
+        serialized:
+
+        * the actor's canonical row visibility (`build_scope_query`), narrowed
+          - not authorised - by this letter's own organisation and project;
+        * canonical publication authority (`is_consumable`).
+
+        `current_user` carries no default so a caller cannot omit the identity
+        the result is bounded by.
+        """
         letter = await self.get_letter(letter_id)
         if not letter:
             raise LetterNotFoundError(f"Letter not found: {letter_id}")
 
+        # The letter's own scope narrows INSIDE entitlement. It is passed to
+        # the canonical helper as a request-style filter, so a value outside
+        # the actor's entitlement denies every row rather than granting one.
+        letter_org = str(letter.organization_id) if letter.organization_id else None
+        letter_project = str(letter.project_id) if letter.project_id else None
+
         context_ids = list(getattr(letter, "context_document_ids", []) or [])
         document_service = DocumentService(self.db)
-        documents = await document_service.get_documents_by_ids(context_ids)
+        documents = await document_service.get_documents_by_ids_in_scope(
+            context_ids,
+            current_user,
+            organization_id=letter_org,
+            project_id=letter_project,
+        )
+        # `document_ids` echoes the stored selection, so it is narrowed to the
+        # documents that survived both gates. An id alone still discloses that
+        # a document exists.
+        authorized_ids = [str(doc.id) for doc in documents]
 
         def _serialize(doc: Document) -> Dict[str, Any]:
             return {
@@ -525,7 +610,10 @@ class LetterService:
         if getattr(letter, "letter_no", None):
             candidates = await document_service.list_documents_by_letter_no(
                 letter.letter_no,
+                current_user,
                 limit=12,
+                organization_id=letter_org,
+                project_id=letter_project,
             )
             for candidate in candidates:
                 candidate_id = str(candidate.id)
@@ -534,7 +622,7 @@ class LetterService:
                 suggested_documents.append(_serialize(candidate))
 
         return {
-            "document_ids": context_ids,
+            "document_ids": authorized_ids,
             "documents": [_serialize(doc) for doc in documents],
             "suggested_documents": suggested_documents,
         }
@@ -596,44 +684,44 @@ class LetterService:
                 }
             },
         )
-        return await self.get_context_documents(letter_id)
+        return await self.get_context_documents(letter_id, current_user)
 
     async def add_comment(self, letter_id: str, comment: str, user_id: Optional[str] = None) -> bool:
         """
         Add a comment to a letter.
-        
+
         Args:
             letter_id: Letter ID string
             comment: Comment text to add
             user_id: Optional user ID who added the comment
-            
+
         Returns:
             True if comment was added successfully
-            
+
         Raises:
             LetterServiceError: If adding comment fails
             InvalidLetterIdError: If letter ID is invalid
         """
         try:
             letter_oid = self._validate_letter_id(letter_id)
-            
+
             if not comment or not isinstance(comment, str):
                 raise ValueError("Comment must be a non-empty string")
-            
+
             # Create comment object with metadata
             comment_obj = {
                 "text": comment.strip(),
                 "timestamp": datetime.now(timezone.utc),
                 "user_id": user_id
             }
-            
+
             logger.info(f"Adding comment to letter: {letter_id}")
-            
+
             result = await self.db.letters.update_one(
                 {"_id": letter_oid},
                 {"$push": {"comments": comment_obj}}
             )
-            
+
             success = result.matched_count > 0
             if success:
                 logger.info(f"Added comment to letter: {letter_id}")
@@ -647,9 +735,9 @@ class LetterService:
                 )
             else:
                 logger.warning(f"Letter not found when adding comment: {letter_id}")
-            
+
             return success
-            
+
         except InvalidLetterIdError:
             raise
         except ValueError:
@@ -657,7 +745,7 @@ class LetterService:
         except Exception as e:
             logger.error(f"Failed to add comment to letter {letter_id}: {e}")
             raise LetterServiceError(f"Add comment failed: {str(e)}")
-    
+
     async def delete_letter(self, letter_id: str) -> bool:
         """
         Delete a letter by ID, including its FalkorDB graph node.
@@ -751,7 +839,7 @@ class LetterService:
                 letter_oid,
                 exc,
             )
-    
+
     async def change_status(
         self,
         letter_id: str,
@@ -884,24 +972,24 @@ class LetterService:
             raise LetterServiceError(f"Status change failed: {str(e)}")
 
     async def request_input(
-        self, 
-        letter_id: str, 
-        requested_from: str, 
+        self,
+        letter_id: str,
+        requested_from: str,
         message: str,
         user_id: Optional[str] = None
     ) -> bool:
         """
         Request input from a user for a letter.
-        
+
         Args:
             letter_id: Letter ID string
             requested_from: User ID or name to request input from
             message: Input request message
             user_id: Optional user ID who requested the input
-            
+
         Returns:
             True if input request was recorded successfully
-            
+
         Raises:
             LetterServiceError: If request fails
             InvalidLetterIdError: If letter ID is invalid
@@ -909,54 +997,54 @@ class LetterService:
         try:
             if not requested_from or not isinstance(requested_from, str):
                 raise ValueError("requested_from must be a non-empty string")
-            
+
             if not message or not isinstance(message, str):
                 raise ValueError("message must be a non-empty string")
-            
+
             # Create input request comment
             request_comment = f"Input requested from {requested_from}: {message}"
-            
+
             logger.info(f"Recording input request for letter {letter_id}")
-            
+
             # Add as special comment with metadata
             success = await self.add_comment(letter_id, request_comment, user_id)
-            
+
             # TODO: In a real application, you might want to:
             # 1. Add this request to a separate "requests" collection
             # 2. Send notification to the requested user
             # 3. Track request status and responses
-            
+
             if success:
                 logger.info(f"Input request recorded for letter {letter_id}")
-            
+
             return success
-            
+
         except (InvalidLetterIdError, ValueError):
             raise
         except Exception as e:
             logger.error(f"Failed to request input for letter {letter_id}: {e}")
             raise LetterServiceError(f"Input request failed: {str(e)}")
-    
+
     async def letter_exists(self, letter_id: str) -> bool:
         """
         Check if a letter exists.
-        
+
         Args:
             letter_id: Letter ID string
-            
+
         Returns:
             True if letter exists, False otherwise
-            
+
         Raises:
             LetterServiceError: If check fails
             InvalidLetterIdError: If letter ID is invalid
         """
         try:
             letter_oid = self._validate_letter_id(letter_id)
-            
+
             count = await self.db.letters.count_documents({"_id": letter_oid}, limit=1)
             return count > 0
-            
+
         except InvalidLetterIdError:
             raise
         except Exception as e:
@@ -1118,21 +1206,27 @@ class LetterService:
     async def get_letters_paginated(self, authorized_query: Dict[str, Any], pagination: Dict[str, int]) -> List[Optional[Letter]]:
         """
         Retrieve letters respecting authorization filters and pagination.
+
+        Apart from ``search_query``, ``tab`` and ``status``, every key of
+        ``authorized_query`` is a scope constraint from
+        ``AuthorizationService.build_letter_query`` (tenant scope, deny-all,
+        drafter assignment) and is applied verbatim. It must not pass through
+        ``get_letters``' request-filter whitelist, which would drop it.
         """
-        filters = dict(authorized_query or {})
+        scope = dict(authorized_query or {})
         skip = int(pagination.get('skip', 0) or 0)
         limit = int(pagination.get('limit', 50) or 50)
 
-        search_query = filters.pop('search_query', None)
-        tab_value = filters.pop('tab', None)
-        if tab_value and 'status' not in filters:
-            filters['status'] = tab_value
+        search_query = scope.pop('search_query', None)
+        tab_value = scope.pop('tab', None)
+        status_value = scope.pop('status', None) or tab_value
 
         return await self.get_letters(
             skip=skip,
             limit=limit,
-            filters=filters,
+            filters={'status': status_value} if status_value else {},
             search_query=search_query,
+            scope=scope,
         )
 
     async def create_letter_with_chain(self, letter_data: Any, conversation_context: Optional[Dict[str, Any]], user: Any) -> Letter:
@@ -1177,15 +1271,26 @@ class LetterService:
         letter_id: str,
         graph_result: "LetterGraphResult",
         created_by: Optional[Any] = None,
+        *,
+        scope: Dict[str, Any],
     ) -> None:
-        """Persist LangGraph output for the given letter."""
+        """Persist LangGraph output for the given letter.
+
+        `scope` is the actor's canonical letter predicate (`build_scope_query`)
+        and is required: it is repeated in both the read and the mutation
+        predicate, so this helper cannot write a letter outside it even if a
+        caller skipped the upfront check. Super Admin's scope is `{}`.
+        """
         letter_oid = self._validate_letter_id(letter_id)
         payload = graph_result.to_storage_dict()
         author_id = self._resolve_user_id(created_by)
         now = datetime.now(timezone.utc)
 
+        id_clause: Dict[str, Any] = {"_id": letter_oid}
+        predicate = {"$and": [id_clause, scope]} if scope else id_clause
+
         existing_doc = await self.db.letters.find_one(
-            {"_id": letter_oid},
+            predicate,
             {
                 "draft_versions": 1,
                 "draft_output": 1,
@@ -1193,9 +1298,9 @@ class LetterService:
                 "current_draft_version": 1,
             },
         )
-        existing_versions = (
-            existing_doc.get("draft_versions", []) if existing_doc else []
-        )
+        if not existing_doc:
+            raise LetterNotFoundError(f"Letter not found: {letter_id}")
+        existing_versions = existing_doc.get("draft_versions", [])
         last_version_number = 0
         for version in existing_versions:
             try:
@@ -1230,7 +1335,7 @@ class LetterService:
 
         update_doc: Dict[str, Any]
         if is_analysis_only:
-            update_doc: Dict[str, Any] = {
+            update_doc = {
                 **base_doc,
                 "strategy_plan": payload.get("draft_plan"),
                 "strategic_outline": payload.get("strategy_outline"),
@@ -1280,7 +1385,9 @@ class LetterService:
             operations.setdefault("$push", {})
             operations["$push"]["draft_versions"] = version_entry
 
-        await self.db.letters.update_one({"_id": letter_oid}, operations)
+        result = await self.db.letters.update_one(predicate, operations)
+        if getattr(result, "matched_count", None) == 0:
+            raise LetterNotFoundError(f"Letter not found: {letter_id}")
 
     async def get_langgraph_snapshot(self, letter_id: str) -> Optional[Dict[str, Any]]:
         """Return the latest LangGraph run snapshot for the letter."""

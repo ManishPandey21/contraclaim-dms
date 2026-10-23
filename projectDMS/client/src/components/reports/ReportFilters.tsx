@@ -75,11 +75,11 @@ export const ReportFilters: React.FC<ReportFiltersProps> = ({
             </SelectContent>
           </Select>
         </div>
-        
+
         <div className="space-y-2">
           <Label>Project</Label>
-          <Select 
-            value={selectedProject} 
+          <Select
+            value={selectedProject}
             onValueChange={setSelectedProject}
             disabled={filteredProjects.length === 0}
           >
@@ -113,7 +113,7 @@ export const ReportFilters: React.FC<ReportFiltersProps> = ({
               <SelectItem value="custom">Custom Range</SelectItem>
             </SelectContent>
           </Select>
-          
+
           {dateRange === 'custom' && (
             <div className="flex flex-wrap gap-4">
               <div>
@@ -136,7 +136,7 @@ export const ReportFilters: React.FC<ReportFiltersProps> = ({
                   </PopoverContent>
                 </Popover>
               </div>
-              
+
               <div>
                 <Label className="text-xs">End Date</Label>
                 <Popover>

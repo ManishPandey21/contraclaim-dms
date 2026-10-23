@@ -64,6 +64,215 @@ cursor = db.documents.find(query)
 _: bool = Depends(require_permission("dms.report.view"))
 ```
 
+## Role lifecycle: a deleted role grants nothing
+
+`RoleService.delete_role` is a soft delete (`is_active=False`, `deleted_at`,
+`deleted_by`). The document stays: it is hidden from listings and still readable by
+id (behind `roles:read` + `can_view_role`) for history and audit.
+
+Readable is not effective. `PermissionService` resolves every `users.roles` entry
+through `_load_role`, and a role whose `is_active` is `False` contributes **no
+permission, no wildcard and no role name** to `user_has_permission`,
+`get_user_permissions`, `get_effective_permission_names` or `check_resource_access`
+(`role_is_active`; a document without the flag predates soft delete and is active).
+System roles are referenced by their key (`users.roles: ["superadmin"]`) and
+name-based decisions (superadmin bypass, scope, role manageability) read
+`CurrentUser.roles`, so the principal itself drops references to inactive roles:
+`get_current_user` and `resolve_stored_principal` both build it through
+`_without_revoked_roles`. A bare key with no role document is kept, as before.
+
+`delete_role` sets every holder's `user_jwt_min_iat` and then drops their cached
+grant, like every other role mutation. A cached grant stores `computed_at`, stamped
+before its roles were read. A hit is served only if it is strictly newer, in whole
+seconds, than `user_jwt_min_iat`. That way a check that read the roles just before
+a deletion cannot write back a grant that outlives it. There is no second lifecycle
+flag and no reactivation API. `DataInitializer.initialize_roles` (reached
+only through `SetupService`) rewrites `is_active` from `DEFAULT_ROLES`, so re-running
+setup would reactivate a deleted system role.
+
+Build cache keys with `permission_cache_key(user_id)` only. The key moved off
+`user_perms:{id}` in R-A9B so entries computed before the fix are never read.
+
+## Authority changes are announced before they are written (R-A9D, D4-B)
+
+`user_has_permission` serves a cached grant for up to `PERMISSION_CACHE_TTL_SECONDS`
+(one hour). Every mutation that changes someone's authority - `RoleService`
+`update_role`, `delete_role`, `update_role_permissions`, `add_permission_to_role`,
+`remove_permission_from_role`, and a `roles` change in `UserService.update_user` - uses
+the three functions in `services/permission_service.py`:
+
+1. **`begin_authority_change(user_ids)` before the write.** It sets
+   `authz_change_pending:{id}` for every affected user (role holders, legacy spellings
+   included). While that marker exists no cached grant is served and no new one is
+   written. If the holders cannot be read, the store is configured but unreachable, or a
+   marker cannot be written, it raises `AuthorityChangeUnavailableError` and **the
+   mutation is not made**: the role routes answer 503 through `RoleServiceError`, the user
+   route through the domain-error handler.
+2. **The write.**
+3. **`complete_authority_change(user_ids)` after it**: `user_jwt_min_iat`, then the cached
+   grant, then the marker, in that order. If any step fails the marker stays. It lives
+   `AUTHORITY_CHANGE_PENDING_TTL_SECONDS`, longer than any entry that could predate the
+   change, so a failed invalidation costs cache bypass, never stale authority. A write
+   that matched nothing calls `cancel_authority_change` instead.
+
+A deployment with no runtime Redis has no permission cache, so there is nothing to
+announce and the mutation proceeds. `test_authority_cache_invalidation_fail_closed.py`
+pins every branch; do not add a role or user mutation that bypasses these three calls.
+
+## System administration is nobody's alias (R-A9D, F-A9B-2)
+
+`system:admin` ("Full system administration", non-delegable) gates the platform-wide
+`/api/admin/legal-words`. It is declared as no canonical permission's legacy name, in the
+backend `LEGACY_PERMISSION_ALIASES` and the client `PERMISSION_ALIASES` alike. Holding
+`dms.admin`, `billing.plan.manage` or any `subscription.*` administration does not satisfy
+it, and holding it does not satisfy them. It is reached only by holding it (only a Super
+Admin can grant it), a `*` wildcard, or the Super Admin principal.
+`test_system_admin_authority_contract.py` pins this at the resolver and at the route.
+
+## SSO default role (R-A9D)
+
+`OIDC_DEFAULT_ROLE` becomes the stored role of every newly provisioned SSO user, and Super
+Admin authority is name-based (ADR 0001). `oidc_service.resolve_default_role` therefore
+refuses provisioning unless the setting is a canonical key (no alias, case or spacing
+variant), not `superadmin`/`superuser`, and names exactly one active, non-system-scoped
+role document; the production config gate refuses the unsafe spellings before startup.
+
+## Role documents are aligned to the release contract by an explicit operation (R-A9D/R-A9E)
+
+`services/role_contract_alignment.py` brings the `orgadmin` and `projectadmin` documents
+to this release's `DEFAULT_ROLES` contract, and touches nothing else: no user write, no
+other role, no creation, no reactivation, nothing for an organisation-bound document. It
+is a cutover step, **not** a catalogued migration: it must not run unreviewed on
+`migrate_database --apply`, and a catalogue entry would expire the proven fresh-install
+and upgrade-path evidence. Run `python -m rbac_backend.scripts.align_role_contract`
+(inspect) and then `--apply`, which prints the report and proves a second apply is a
+no-op.
+
+Every permission it looks at falls into exactly one of three classes, and the report
+names all three:
+
+- **canonical additions** — in the release definition of the role and not held;
+- **owner-approved removals** — `OWNER_APPROVED_REMOVALS`, which is
+  `billing.plan.manage` for `orgadmin` and `projectadmin` and nothing else (owner
+  decision F-A9D-1, R-A9E: it gates the platform-wide plan catalogue, and
+  `PolicyService`'s billing branch allows it with no tenant scope). A listed permission
+  that the role's own release definition contains is refused, not removed;
+- **everything else the document holds outside the contract** — `billing.plan.view`,
+  `roles:assign`, `drafting.*` and the rest are **preserved and reported**. The decision
+  is deliberately not generalised into "remove every production-only permission", and no
+  role outside `ALIGNED_ROLE_IDS` is touched at all.
+
+An addition can only make a cached decision briefly more restrictive. A removal is a
+**revocation**, so it carries the D4-B contract: the operation reads the role's holders
+(by id and by legacy spelling, both of which receive this document's permissions),
+announces the authority change before the write and invalidates it afterwards. If the
+holders cannot be read, or the announcement cannot be made, the role is **not changed at
+all** — the alignment fails closed rather than leaving a revoked grant readable for a
+cache TTL.
+
+## Role references: one resolver for tier, permissions and the audit
+
+A `users.roles` entry is resolved by `core/role_reference.py::resolve_role_reference`
+and nothing else. The principal (`_without_revoked_roles`, which decides the tier the
+account carries) and `PermissionService._load_role` (which decides whose permissions
+apply) both call it, so an account can never again have a role's tier without its
+permissions, or the reverse. `scripts/system_role_audit.py` embeds a byte-identical copy
+(pinned by `test_role_reference_single_definition.py`) and fails when the running image's
+copy classifies any reference differently.
+
+- A reference equal to a role document's `_id` resolves to that document.
+- Otherwise the key the principal carries for it (`normalize_role_key`: `ROLE_ALIASES`,
+  else the lowercased reference) is tried ONE hop: a legacy spelling such as
+  `organization-admin` resolves to the `orgadmin` document and receives exactly its
+  permissions, and `DocController` resolves to `doccontroller`. It resolves only if no
+  other role document carries the reference as its exact name; otherwise it is ambiguous
+  and grants nothing.
+- A reference contributes to the name-based grants (`users:create`, `users:read`,
+  superadmin `*`) exactly the key the principal carries. `permission_service`'s wider
+  `_normalize_role_name` table applies to role document display names only.
+- Role mutations reach every holder the resolver would give the role to: cache
+  invalidation and holder counts match legacy spellings as well as the id. No role may
+  be created or renamed so its name spells another role - a legacy spelling of a canonical
+  key, or an existing role's key (400, every actor; re-sending an unchanged name is not a
+  rename), because such a lookalike would make every holder of that spelling, in every
+  organisation, ambiguous. Non-superadmins also may not use a `superadmin`/`superuser`
+  key as a name.
+- An alias of a system role (`super-admin`) never loads the system document. The
+  principal still carries `superadmin` by name (ADR 0001); assignment stores the canonical
+  id, and the audit fails the stored alias.
+- A deactivated target, reached directly or through an alias, revokes the reference: no
+  permission, no role name, no tier.
+- Anything else grants nothing. There is no second hop, no lookup by name, and no link to
+  permission aliases, which resolve separately (next section).
+
+New writes never store a legacy spelling: `routers/users.py::_resolve_assigned_roles`
+stores the resolved document's `_id`. The audit WARNs for a stored legacy spelling only
+when authorization really resolves it to an active non-system canonical document.
+
+## Legacy permission aliases translate a name; they never create authority
+
+`LEGACY_PERMISSION_ALIASES` declares, per canonical permission, the legacy names
+that used to gate the same capability; `LEGACY_LABEL_ALIASES` holds one-to-one older
+spellings (`orgs:view` = `organizations:read`). `equivalent_permissions` is the
+only function that reads them:
+
+- A **canonical holder passes a legacy route gate** its alias names
+  (`dms.task.manage` passes `require_permission("projects:update")`).
+- A **stored legacy name passes each canonical check that declares it**
+  (`projects:update` in a role passes `dms.project.manage`).
+- **Nothing is transitive.** Canonicals sharing a legacy alias are not equivalent
+  (`dms.task.manage` does **not** pass `dms.project.manage`), and legacy names
+  sharing a canonical are not either (`projects:create` does not pass
+  `projects:delete`).
+
+So a legacy route dependency is coarse by design; the canonical
+`PolicyService.authorize(...)` behind it is the precise gate. Do not pre-expand a
+name before calling `user_has_permission` - that re-creates the second hop
+(R-A9B: it let `billing.plan.manage` reach `dms.admin`).
+`test_permission_alias_contract.py` holds the matrix over every shared alias.
+
+## The authorised scope must bind the record you then load (Contract Master v1)
+
+Authorising against a scope *the caller names* and then loading a record *by id
+alone* is an IDOR: the gate answers "may this user act in X?" and the load acts on
+whatever the id points at. The Contract Master reconciliation routes
+(`/contract-master/reconciliation/candidates/{id}/claim|adjudicate|promote`) did
+exactly this until the policy-scope fix; a manager of X could claim, adjudicate and
+promote a candidate of Y.
+
+- The organisation passed to the service is the one the route authorised, and the
+  service loads - and updates - with it:
+  `scoped_candidate_filter(candidate_id, organization_id)` in
+  `services/contract_migration_reconciliation.py`. Never load by id and compare the
+  organisation afterwards, and never take the organisation from the body or the row.
+- A record in another organisation is **404, identical to a missing one**
+  (`CandidateNotFound`, "reconciliation candidate not found"), not a 403 that
+  confirms it exists.
+- Derived authority tokens are minted only by their helper:
+  `AuthorizedContractScope` comes from `authorize_contract_scope(...)`, which runs
+  `PolicyService.authorize` and then proves the (organisation, project) pair.
+  `AuthorizedContractScope.for_tests` is test-only and a static guard
+  (`tests/test_contract_master_evidence_scope.py`) fails on any production use.
+- Contract evidence search is project-specific: it needs the CL-4A selection
+  (`Depends(active_scope)`), the body's project must BE the selected one, and nothing
+  is inferred from the body or the account (400 `selection_required` / 403
+  `context_forbidden`, superadmin included); never `str(None)`.
+- **Organisation membership is not authority over another project's record.**
+  `PolicyService.authorize(..., project_id=None)` is true for any member of the
+  organisation, a Project Admin included, so a record with a project must be
+  authorised at that project. For reconciliation candidates the trustworthy anchor is
+  `candidate.project_id` or the canonical Document's own `project_id` (they must
+  agree, and the project must be in the organisation);
+  `session_evidence` and `scope_hint` are evidence, never authority
+  (`services/contract_candidate_authority.py`). No anchor, or an act that creates
+  organisation-wide authority, needs `ScopeService.has_organization_wide_scope` -
+  the same rule `is_client_scope_allowed` uses for unassigned project reach.
+- **A permission cannot express organisation tier here.** Project Admin's seeded role
+  carries `dms.admin`, which `PolicyService.has_permission` accepts for every
+  `dms.*` check, and legacy aliases give `dms.contract.catalogue.browse` to Project
+  User - so `ORG_TIER_ONLY_PERMISSIONS` does not survive to the policy. Measured
+  against the real seeds on 2026-09-24.
+
 ## Removed / forbidden
 
 These were removed in the Week-1 consolidation and are blocked by a pre-commit hook

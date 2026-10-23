@@ -5,7 +5,7 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
-import { 
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -14,14 +14,14 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog';
-import { 
-  HardDrive, 
-  Cloud, 
-  Server, 
-  Plus, 
-  Settings, 
-  Trash2, 
-  CheckCircle2, 
+import {
+  HardDrive,
+  Cloud,
+  Server,
+  Plus,
+  Settings,
+  Trash2,
+  CheckCircle2,
   XCircle,
   Edit,
   ExternalLink,
@@ -51,24 +51,24 @@ const StorageProvidersSettings = () => {
   const [isDialogOpen, setIsDialogOpen] = useState(false);
 
   const [providers, setProviders] = useState<StorageProvider[]>([
-    { 
-      id: 'local', 
-      name: 'Local Disk Storage', 
-      type: 'local', 
-      icon: <HardDrive className="h-5 w-5" />, 
-      configured: true, 
+    {
+      id: 'local',
+      name: 'Local Disk Storage',
+      type: 'local',
+      icon: <HardDrive className="h-5 w-5" />,
+      configured: true,
       enabled: true,
       description: 'Store files directly on the server\'s local file system',
       config: {
         path: '/var/storage/documents'
       }
     },
-    { 
-      id: 's3', 
-      name: 'Amazon S3', 
-      type: 's3', 
-      icon: <Cloud className="h-5 w-5" />, 
-      configured: true, 
+    {
+      id: 's3',
+      name: 'Amazon S3',
+      type: 's3',
+      icon: <Cloud className="h-5 w-5" />,
+      configured: true,
       enabled: true,
       description: 'Amazon Simple Storage Service (S3) for scalable cloud storage',
       config: {
@@ -76,33 +76,33 @@ const StorageProvidersSettings = () => {
         region: 'us-east-1'
       }
     },
-    { 
-      id: 'azure', 
-      name: 'Azure Blob Storage', 
-      type: 'azure', 
-      icon: <Cloud className="h-5 w-5" />, 
-      configured: true, 
+    {
+      id: 'azure',
+      name: 'Azure Blob Storage',
+      type: 'azure',
+      icon: <Cloud className="h-5 w-5" />,
+      configured: true,
       enabled: true,
       description: 'Microsoft Azure Blob Storage for enterprise cloud storage',
       config: {
         endpoint: 'https://myaccount.blob.core.windows.net'
       }
     },
-    { 
-      id: 'gcs', 
-      name: 'Google Cloud Storage', 
-      type: 'gcs', 
-      icon: <Cloud className="h-5 w-5" />, 
-      configured: false, 
+    {
+      id: 'gcs',
+      name: 'Google Cloud Storage',
+      type: 'gcs',
+      icon: <Cloud className="h-5 w-5" />,
+      configured: false,
       enabled: false,
       description: 'Google Cloud Storage for unified object storage'
     },
-    { 
-      id: 'custom', 
-      name: 'Custom Server', 
-      type: 'custom', 
-      icon: <Server className="h-5 w-5" />, 
-      configured: false, 
+    {
+      id: 'custom',
+      name: 'Custom Server',
+      type: 'custom',
+      icon: <Server className="h-5 w-5" />,
+      configured: false,
       enabled: false,
       description: 'Connect to a custom storage server via SFTP, WebDAV, or API'
     },
@@ -137,8 +137,8 @@ const StorageProvidersSettings = () => {
 
   const handleSaveConfiguration = () => {
     if (editingProvider) {
-      setProviders(prev => prev.map(p => 
-        p.id === editingProvider.id 
+      setProviders(prev => prev.map(p =>
+        p.id === editingProvider.id
           ? { ...editingProvider, configured: true }
           : p
       ));
@@ -187,19 +187,19 @@ const StorageProvidersSettings = () => {
         <CardContent>
           <div className="space-y-4">
             {providers.map(provider => (
-              <div 
+              <div
                 key={provider.id}
                 className={`p-5 rounded-xl border transition-all ${
-                  provider.enabled 
-                    ? 'border-primary/30 bg-card shadow-sm' 
+                  provider.enabled
+                    ? 'border-primary/30 bg-card shadow-sm'
                     : 'border-border bg-muted/30'
                 }`}
               >
                 <div className="flex items-start justify-between">
                   <div className="flex items-start gap-4">
                     <div className={`p-3 rounded-lg ${
-                      provider.enabled 
-                        ? 'bg-primary/10 text-primary' 
+                      provider.enabled
+                        ? 'bg-primary/10 text-primary'
                         : 'bg-muted text-muted-foreground'
                     }`}>
                       {provider.icon}
@@ -214,7 +214,7 @@ const StorageProvidersSettings = () => {
                       <p className="text-sm text-muted-foreground max-w-md">
                         {provider.description}
                       </p>
-                      
+
                       {/* Configuration Details */}
                       {provider.configured && provider.config && (
                         <div className="mt-3 flex flex-wrap gap-2">
@@ -261,8 +261,8 @@ const StorageProvidersSettings = () => {
 
                     {/* Actions */}
                     <div className="flex items-center gap-2">
-                      <Button 
-                        variant="ghost" 
+                      <Button
+                        variant="ghost"
                         size="sm"
                         onClick={() => handleConfigure(provider)}
                         className="flex items-center gap-1"
@@ -279,7 +279,7 @@ const StorageProvidersSettings = () => {
                           </>
                         )}
                       </Button>
-                      
+
                       <Switch
                         checked={provider.enabled}
                         onCheckedChange={() => toggleProvider(provider.id)}
@@ -302,7 +302,7 @@ const StorageProvidersSettings = () => {
             <div>
               <h4 className="font-medium text-foreground">Security Notice</h4>
               <p className="text-sm text-muted-foreground mt-1">
-                All storage provider credentials are encrypted at rest and in transit. 
+                All storage provider credentials are encrypted at rest and in transit.
                 Access keys and secrets are never exposed in logs or error messages.
               </p>
             </div>
@@ -322,14 +322,14 @@ const StorageProvidersSettings = () => {
               Enter the configuration details for this storage provider
             </DialogDescription>
           </DialogHeader>
-          
+
           {editingProvider && (
             <div className="space-y-4 py-4">
               {editingProvider.type === 'local' && (
                 <div className="space-y-2">
                   <Label htmlFor="local-path">Storage Path</Label>
-                  <Input 
-                    id="local-path" 
+                  <Input
+                    id="local-path"
                     placeholder="/var/storage/documents"
                     defaultValue={editingProvider.config?.path}
                   />
@@ -338,92 +338,92 @@ const StorageProvidersSettings = () => {
                   </p>
                 </div>
               )}
-              
+
               {editingProvider.type === 's3' && (
                 <>
                   <div className="space-y-2">
                     <Label htmlFor="s3-bucket">Bucket Name</Label>
-                    <Input 
-                      id="s3-bucket" 
+                    <Input
+                      id="s3-bucket"
                       placeholder="my-document-bucket"
                       defaultValue={editingProvider.config?.bucket}
                     />
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="s3-region">Region</Label>
-                    <Input 
-                      id="s3-region" 
+                    <Input
+                      id="s3-region"
                       placeholder="us-east-1"
                       defaultValue={editingProvider.config?.region}
                     />
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="s3-access-key">Access Key ID</Label>
-                    <Input 
-                      id="s3-access-key" 
+                    <Input
+                      id="s3-access-key"
                       type="password"
                       placeholder="AKIAIOSFODNN7EXAMPLE"
                     />
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="s3-secret-key">Secret Access Key</Label>
-                    <Input 
-                      id="s3-secret-key" 
+                    <Input
+                      id="s3-secret-key"
                       type="password"
                       placeholder="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
                     />
                   </div>
                 </>
               )}
-              
+
               {editingProvider.type === 'azure' && (
                 <>
                   <div className="space-y-2">
                     <Label htmlFor="azure-endpoint">Storage Account Endpoint</Label>
-                    <Input 
-                      id="azure-endpoint" 
+                    <Input
+                      id="azure-endpoint"
                       placeholder="https://myaccount.blob.core.windows.net"
                       defaultValue={editingProvider.config?.endpoint}
                     />
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="azure-container">Container Name</Label>
-                    <Input 
-                      id="azure-container" 
+                    <Input
+                      id="azure-container"
                       placeholder="documents"
                     />
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="azure-key">Access Key</Label>
-                    <Input 
-                      id="azure-key" 
+                    <Input
+                      id="azure-key"
                       type="password"
                       placeholder="Your Azure storage access key"
                     />
                   </div>
                 </>
               )}
-              
+
               {editingProvider.type === 'gcs' && (
                 <>
                   <div className="space-y-2">
                     <Label htmlFor="gcs-project">Project ID</Label>
-                    <Input 
-                      id="gcs-project" 
+                    <Input
+                      id="gcs-project"
                       placeholder="my-gcp-project"
                     />
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="gcs-bucket">Bucket Name</Label>
-                    <Input 
-                      id="gcs-bucket" 
+                    <Input
+                      id="gcs-bucket"
                       placeholder="my-document-bucket"
                     />
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="gcs-credentials">Service Account JSON</Label>
-                    <Input 
-                      id="gcs-credentials" 
+                    <Input
+                      id="gcs-credentials"
                       type="file"
                       accept=".json"
                     />
@@ -433,27 +433,27 @@ const StorageProvidersSettings = () => {
                   </div>
                 </>
               )}
-              
+
               {editingProvider.type === 'custom' && (
                 <>
                   <div className="space-y-2">
                     <Label htmlFor="custom-endpoint">Server Endpoint</Label>
-                    <Input 
-                      id="custom-endpoint" 
+                    <Input
+                      id="custom-endpoint"
                       placeholder="https://storage.example.com/api"
                     />
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="custom-username">Username</Label>
-                    <Input 
-                      id="custom-username" 
+                    <Input
+                      id="custom-username"
                       placeholder="admin"
                     />
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="custom-password">Password / API Key</Label>
-                    <Input 
-                      id="custom-password" 
+                    <Input
+                      id="custom-password"
                       type="password"
                       placeholder="Your API key or password"
                     />
@@ -462,7 +462,7 @@ const StorageProvidersSettings = () => {
               )}
             </div>
           )}
-          
+
           <DialogFooter>
             <Button variant="outline" onClick={() => setIsDialogOpen(false)}>
               Cancel

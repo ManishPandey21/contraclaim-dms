@@ -152,7 +152,7 @@ class LangGraphStrategyPlanResponse(BaseModel):
     letter_id: str
     status: str
     timestamp: datetime
-    
+
     # Structured plan sections
     plan: str  # Full plan as text
     tone_approach: ToneApproachSection
@@ -160,13 +160,13 @@ class LangGraphStrategyPlanResponse(BaseModel):
     specific_responses: List[PointResponse]
     risk_mitigation: RiskMitigationSection
     desired_outcome: DesiredOutcomeSection
-    
+
     # Supporting data
     summary_points: List[str]
     background_summary: List[Dict[str, Any]]
     context_documents: List[Dict[str, Any]]
     context_document_ids: List[str]
-    
+
     # Diagnostics
     trace: List[Dict[str, Any]]
     warnings: List[str]
@@ -181,7 +181,7 @@ async def generate_strategy_plan(
 ):
     """
     Generate a structured strategic plan for letter drafting.
-    
+
     This endpoint:
     1. Collects context from previous similar letters (Qdrant)
     2. Synthesizes background information
@@ -193,13 +193,13 @@ async def generate_strategy_plan(
        - Desired Outcome
     4. Returns fully structured JSON response
     """
-    
+
     try:
         # Validate letter ownership
         letter = await LetterService.get_letter(request.letter_id, current_user)
         if not letter:
             raise HTTPException(status_code=404, detail="Letter not found")
-        
+
         # Run LangGraph strategy plan pipeline
         result = await AIService.generate_strategy_plan(
             letter_id=request.letter_id,
@@ -211,9 +211,9 @@ async def generate_strategy_plan(
             user_id=current_user["id"],
             organization_id=current_user["organization_id"]
         )
-        
+
         return result
-        
+
     except Exception as e:
         logger.error(f"Strategy plan generation failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -235,14 +235,14 @@ from langgraph.graph import StateGraph, END
 
 class StrategyPlanService:
     """Service for generating strategic plans using LangGraph"""
-    
+
     def __init__(self):
         self.llm = ChatOpenAI(
             model="gpt-4",
             temperature=0.1,  # Low temperature for consistency
             max_tokens=3000
         )
-    
+
     async def generate_strategy_plan(
         self,
         letter_id: str,
@@ -255,7 +255,7 @@ class StrategyPlanService:
         organization_id: str = None
     ) -> LangGraphStrategyPlanResponse:
         """Generate structured strategic plan"""
-        
+
         # Build LangGraph state
         state = {
             "letter_id": letter_id,
@@ -271,26 +271,26 @@ class StrategyPlanService:
             "trace": [],
             "warnings": []
         }
-        
+
         # Create and execute workflow
         workflow = self._create_strategy_workflow()
         final_state = await workflow.ainvoke(state)
-        
+
         # Parse and structure response
         return await self._build_response(final_state)
-    
+
     def _create_strategy_workflow(self) -> StateGraph:
         """Create LangGraph workflow for strategy planning"""
-        
+
         workflow = StateGraph(dict)
-        
+
         # Add nodes
         workflow.add_node("retrieve_context", self._retrieve_context)
         workflow.add_node("extract_background", self._extract_background)
         workflow.add_node("generate_plan", self._generate_plan)
         workflow.add_node("structure_output", self._structure_output)
         workflow.add_node("validate_plan", self._validate_plan)
-        
+
         # Define flow
         workflow.set_entry_point("retrieve_context")
         workflow.add_edge("retrieve_context", "extract_background")
@@ -298,113 +298,113 @@ class StrategyPlanService:
         workflow.add_edge("generate_plan", "structure_output")
         workflow.add_edge("structure_output", "validate_plan")
         workflow.add_edge("validate_plan", END)
-        
+
         return workflow.compile()
-    
+
     async def _retrieve_context(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """Node 1: Retrieve similar previous letters"""
-        
+
         # Search Qdrant for similar letters
         similar_letters = await self._search_similar_letters(
             query=state["subject"],
             organization_id=state["organization_id"],
             k=5
         )
-        
+
         state["similar_letters"] = similar_letters
         state["trace"].append({
             "node": "retrieve_context",
             "timestamp": datetime.utcnow().isoformat(),
             "similar_letters_found": len(similar_letters)
         })
-        
+
         return state
-    
+
     async def _extract_background(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """Node 2: Extract and synthesize background from similar letters"""
-        
+
         # Prepare context from similar letters
         context_text = self._format_similar_letters(state["similar_letters"])
-        
+
         # Extract key points
         extraction_prompt = f"""
         Analyze these similar previous letters and extract key strategic insights.
-        
+
         PREVIOUS LETTERS:
         {context_text}
-        
+
         Extract:
         1. Common tone and approach patterns
         2. Recurring contractual references
         3. Typical response strategies
         4. Risk mitigation patterns observed
         5. Relationship management approaches
-        
+
         Format as structured bullet points.
         """
-        
+
         response = self.llm.invoke([
             SystemMessage(content="You are a contract management expert analyzing letter writing patterns."),
             HumanMessage(content=extraction_prompt)
         ])
-        
+
         state["background_summary"] = response.content
         state["trace"].append({
             "node": "extract_background",
             "timestamp": datetime.utcnow().isoformat(),
             "background_extracted": True
         })
-        
+
         return state
-    
+
     async def _generate_plan(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """Node 3: Generate structured strategic plan"""
-        
+
         plan_prompt = f"""
         Based on the previous letters and new requirements, create a STRUCTURED PLAN for drafting the response.
-        
+
         PREVIOUS LETTERS CONTEXT:
         {state.get('background_summary', 'No previous letters found')}
-        
+
         NEW REQUIREMENTS:
         {state['requirements']}
-        
+
         Subject: {state['subject']}
         Recipient: {state['recipient']}
-        
+
         Create a detailed structured plan with EXACT sections below. Use ONLY information from provided context.
         Do not fabricate details or clause numbers not explicitly mentioned.
-        
+
         === STRUCTURED PLAN ===
-        
+
         1. TONE & APPROACH
         - Overall tone (firm/cooperative/neutral with justification):
         - Key messaging strategy (what must be conveyed):
         - Relationship management approach (how to maintain/improve relationship):
-        
+
         2. CONTENT STRUCTURE
         - Opening paragraph strategy (purpose + key reference):
         - Key points to address (numbered list, in order):
         - Contractual references to include (cite exact clauses if known):
         - Closing approach (desired state + next steps):
-        
+
         3. SPECIFIC RESPONSES to contractor's/other party's points:
         List each point and how to respond:
         [POINT]: [RESPONSE STRATEGY] [EVIDENCE REFERENCE] [CONTRACTUAL BASIS]
-        
+
         4. RISK MITIGATION
         - Legal/contractual risks to avoid (specific scenarios):
         - Relationship risks to manage (preservation considerations):
         - Project impact considerations (timeline, budget, resources):
-        
+
         5. DESIRED OUTCOME
         - Immediate action required (specific, measurable):
         - Next steps (sequence of follow-ups):
         - Fallback positions (if primary position not accepted):
-        
+
         === END PLAN ===
         """
-        
+
         response = self.llm.invoke([
             SystemMessage(content="""You are an Expert Contract Manager with 20 years of construction law experience.
             Draft precise, unambiguous strategic plans grounded only in provided information.
@@ -412,25 +412,25 @@ class StrategyPlanService:
             If critical information is missing, explicitly state "Information required: [specific detail]"."""),
             HumanMessage(content=plan_prompt)
         ])
-        
+
         state["full_plan"] = response.content
         state["trace"].append({
             "node": "generate_plan",
             "timestamp": datetime.utcnow().isoformat(),
             "plan_generated": True
         })
-        
+
         return state
-    
+
     async def _structure_output(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """Node 4: Parse plan into structured sections"""
-        
+
         # Parse the full plan into sections
         plan_text = state["full_plan"]
-        
+
         # Extract sections (regex or simple parsing)
         sections = self._parse_plan_sections(plan_text)
-        
+
         state["structured_plan"] = {
             "tone_approach": sections.get("tone_approach", {}),
             "content_structure": sections.get("content_structure", {}),
@@ -438,20 +438,20 @@ class StrategyPlanService:
             "risk_mitigation": sections.get("risk_mitigation", {}),
             "desired_outcome": sections.get("desired_outcome", {})
         }
-        
+
         state["summary_points"] = self._extract_summary_points(plan_text)
-        
+
         state["trace"].append({
             "node": "structure_output",
             "timestamp": datetime.utcnow().isoformat(),
             "sections_parsed": len(sections)
         })
-        
+
         return state
-    
+
     async def _validate_plan(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """Node 5: Validate plan completeness"""
-        
+
         required_sections = [
             "tone_approach",
             "content_structure",
@@ -459,31 +459,31 @@ class StrategyPlanService:
             "risk_mitigation",
             "desired_outcome"
         ]
-        
+
         for section in required_sections:
             if not state["structured_plan"].get(section):
                 state["warnings"].append(f"Missing or incomplete section: {section}")
-        
+
         state["trace"].append({
             "node": "validate_plan",
             "timestamp": datetime.utcnow().isoformat(),
             "validation_warnings": len(state["warnings"])
         })
-        
+
         return state
-    
+
     async def _build_response(
         self,
         state: Dict[str, Any]
     ) -> LangGraphStrategyPlanResponse:
         """Build typed response from final state"""
-        
+
         return LangGraphStrategyPlanResponse(
             run_id=state["run_id"],
             letter_id=state["letter_id"],
             status="success" if not state["warnings"] else "completed_with_warnings",
             timestamp=state["timestamp"],
-            
+
             plan=state["full_plan"],
             tone_approach=ToneApproachSection(
                 overall_tone=state["structured_plan"]["tone_approach"].get("overall_tone", ""),
@@ -515,17 +515,17 @@ class StrategyPlanService:
                 next_steps=state["structured_plan"]["desired_outcome"].get("next_steps", []),
                 fallback_positions=state["structured_plan"]["desired_outcome"].get("fallback_positions", [])
             ),
-            
+
             summary_points=state["summary_points"],
             background_summary=state.get("background_summary", ""),
             context_documents=state.get("similar_letters", []),
             context_document_ids=state.get("document_ids", []),
-            
+
             trace=state["trace"],
             warnings=state["warnings"],
             similar_letters=state.get("similar_letters", [])
         )
-    
+
     def _parse_plan_sections(self, plan_text: str) -> Dict[str, Any]:
         """Parse plan text into structured sections"""
         # This is simplified; in production, use more robust parsing
@@ -536,12 +536,12 @@ class StrategyPlanService:
             "risk_mitigation": {},
             "desired_outcome": {}
         }
-        
+
         # Extract sections using regex or simple string splitting
         # For brevity, simplified logic shown
         lines = plan_text.split("\n")
         current_section = None
-        
+
         for line in lines:
             if "TONE & APPROACH" in line:
                 current_section = "tone_approach"
@@ -556,9 +556,9 @@ class StrategyPlanService:
             elif line.strip() and current_section:
                 # Add to current section
                 pass
-        
+
         return sections
-    
+
     def _extract_summary_points(self, plan_text: str) -> List[str]:
         """Extract key summary points from plan"""
         # Extract bullet points or numbered items
@@ -567,7 +567,7 @@ class StrategyPlanService:
             if line.strip().startswith(("-", "*", "•", "1.", "2.", "3.")):
                 points.append(line.strip().lstrip("-*•0123456789. "))
         return points
-    
+
     def _format_similar_letters(self, similar_letters: List[Dict]) -> str:
         """Format similar letters for prompt context"""
         formatted = []
@@ -579,7 +579,7 @@ class StrategyPlanService:
             Summary: {letter.get('summary', letter.get('content', '')[:500])}
             """)
         return "\n---\n".join(formatted)
-    
+
     async def _search_similar_letters(
         self,
         query: str,
@@ -589,7 +589,7 @@ class StrategyPlanService:
         """Search Qdrant for similar letters"""
         # Use QdrantService to search
         from backend.rbac_backend.services.qdrant_service import QdrantService
-        
+
         qdrant = QdrantService()
         return await qdrant.search_similar_letters(
             query=query,
@@ -615,7 +615,7 @@ export interface StrategyPlanResponse {
   letter_id: string;
   status: string;
   timestamp: string;
-  
+
   plan: string;
   tone_approach: {
     overall_tone: string;
@@ -644,11 +644,11 @@ export interface StrategyPlanResponse {
     next_steps: string[];
     fallback_positions: string[];
   };
-  
+
   summary_points: string[];
   background_summary: string;
   context_document_ids: string[];
-  
+
   trace: Array<any>;
   warnings: string[];
 }
@@ -718,7 +718,7 @@ import StrategyPlanDisplay from '@/components/langgraph/StrategyPlanDisplay';
 
 const LetterStrategicPlanPage = () => {
   // ... existing code ...
-  
+
   const { generateStrategyPlan, loading: planLoading } = useLanggraphStrategyPlan();
   const [strategyPlanData, setStrategyPlanData] = useState(null);
 
@@ -1182,11 +1182,11 @@ export default StrategyPlanDisplay;
 
 This implementation provides:
 
-✅ **Structured AI Planning** - LangGraph orchestrates multi-step planning  
-✅ **Context Retrieval** - Qdrant pulls similar previous letters  
-✅ **Typed Responses** - Strong TypeScript definitions for all sections  
-✅ **User-Friendly UI** - Tabbed display of 5 strategic sections  
-✅ **Copy-Ready Output** - Easy export of plan for editing/sharing  
-✅ **Expert Protocol** - Follows Expert Contract Manager constraints  
+✅ **Structured AI Planning** - LangGraph orchestrates multi-step planning
+✅ **Context Retrieval** - Qdrant pulls similar previous letters
+✅ **Typed Responses** - Strong TypeScript definitions for all sections
+✅ **User-Friendly UI** - Tabbed display of 5 strategic sections
+✅ **Copy-Ready Output** - Easy export of plan for editing/sharing
+✅ **Expert Protocol** - Follows Expert Contract Manager constraints
 
 Ready to deploy on click of "Generate Strategy Plan" button! 🚀

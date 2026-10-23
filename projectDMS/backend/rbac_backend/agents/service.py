@@ -3,14 +3,15 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
+from fastapi import HTTPException, status
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from ..core.security import CurrentUser
 from ..observability.service import ObservabilityService
 from ..retrieval.generator import LLMGenerator
-from ..retrieval.models import Citation, SearchFilters, SearchRequest, SearchStrategy
+from ..retrieval.models import Citation, SearchFilters, SearchRequest
 from ..retrieval.service import RetrievalService
 
 from .models import AgentConversation, AgentMessage, AgentRequest, AgentResponse
@@ -33,15 +34,33 @@ class DraftingAgentService:
         self.llm = llm_generator
         self.observability = observability
 
-    async def run(self, request: AgentRequest, current_user: Optional[CurrentUser]) -> AgentResponse:
+    async def run(
+        self, request: AgentRequest, current_user: Optional[CurrentUser]
+    ) -> AgentResponse:
         start = time.perf_counter()
         conversation_id = request.conversation_id or str(uuid.uuid4())
-        conversation = await self._ensure_conversation(conversation_id, request, current_user)
+        # Called for the insert, not for the value: _ensure_conversation writes
+        # the conversation row when it does not exist yet.
+        await self._ensure_conversation(conversation_id, request, current_user)
 
-        incoming_text = request.incoming_text or await self._load_letter_text(request.incoming_letter_id)
+        incoming_text = request.incoming_text or await self._load_letter_text(
+            request.incoming_letter_id,
+            org_id=request.org_id,
+            project_id=request.project_id,
+        )
         issues, questions = self._analyze_incoming(incoming_text, request.user_goal)
 
-        filters = request.filters or SearchFilters(org_id=request.org_id, project_id=request.project_id)
+        # The route authorised `request.org_id` / `request.project_id`, and
+        # nothing else. `request.filters` is a second, caller-supplied scope that
+        # was searched as-is; keep its narrowing fields, never its authority.
+        if request.filters is not None:
+            filters = request.filters.model_copy(
+                update={"org_id": request.org_id, "project_id": request.project_id}
+            )
+        else:
+            filters = SearchFilters(
+                org_id=request.org_id, project_id=request.project_id
+            )
         retrieval_req = SearchRequest(
             query=request.user_goal or incoming_text or "draft reply",
             strategy=request.strategy,
@@ -49,9 +68,13 @@ class DraftingAgentService:
             filters=filters,
             use_enriched_text=True,
         )
-        search_resp = await self.retrieval.search(retrieval_req, current_user, log_run=False)
+        search_resp = await self.retrieval.search(
+            retrieval_req, current_user, log_run=False
+        )
 
-        draft_prompt = self._build_draft_prompt(incoming_text, request.user_goal, issues, search_resp.results)
+        draft_prompt = self._build_draft_prompt(
+            incoming_text, request.user_goal, issues, search_resp.results
+        )
         draft = await self.llm.generate(draft_prompt, max_tokens=700)
 
         citations = [
@@ -66,7 +89,7 @@ class DraftingAgentService:
         ]
 
         message = AgentMessage(role="assistant", content=draft, citations=citations)
-        await self._persist_message(conversation_id, message)
+        await self._persist_message(conversation_id, message, request)
 
         timings = dict(search_resp.timings)
         timings["draft_ms"] = (time.perf_counter() - start) * 1000
@@ -93,11 +116,26 @@ class DraftingAgentService:
         )
 
     async def _ensure_conversation(
-        self, conversation_id: str, request: AgentRequest, current_user: Optional[CurrentUser]
+        self,
+        conversation_id: str,
+        request: AgentRequest,
+        current_user: Optional[CurrentUser],
     ) -> AgentConversation:
-        existing = await self.db.agent_conversations.find_one({"conversation_id": conversation_id})
+        # `conversation_id` is caller-supplied. Looked up by id alone, a foreign
+        # tenant's conversation was adopted and then appended to.
+        existing = await self.db.agent_conversations.find_one(
+            self._conversation_predicate(conversation_id, request)
+        )
         if existing:
             return AgentConversation(**existing)
+        if await self.db.agent_conversations.find_one(
+            {"conversation_id": conversation_id}, {"_id": 1}
+        ):
+            # Same answer as a conversation that does not exist in this scope:
+            # the id is taken, and whose it is is not the caller's business.
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found"
+            )
         participants = [current_user.id] if current_user else []
         convo = AgentConversation(
             conversation_id=conversation_id,
@@ -105,36 +143,102 @@ class DraftingAgentService:
             project_id=request.project_id,
             participants=participants,
         )
-        await self.db.agent_conversations.insert_one(convo.model_dump(by_alias=True, exclude_none=True))
+        await self.db.agent_conversations.insert_one(
+            convo.model_dump(by_alias=True, exclude_none=True)
+        )
         return convo
 
-    async def _persist_message(self, conversation_id: str, message: AgentMessage) -> None:
+    @staticmethod
+    def _conversation_predicate(conversation_id: str, request: AgentRequest) -> dict:
+        return {
+            "conversation_id": conversation_id,
+            "org_id": request.org_id,
+            "project_id": request.project_id,
+        }
+
+    async def _persist_message(
+        self, conversation_id: str, message: AgentMessage, request: AgentRequest
+    ) -> None:
         payload = message.model_dump(exclude_none=True)
         payload["conversation_id"] = conversation_id
         await self.db.agent_messages.insert_one(payload)
         await self.db.agent_conversations.update_one(
-            {"conversation_id": conversation_id},
-            {"$push": {"messages": payload}, "$set": {"updated_at": payload["created_at"]}},
+            self._conversation_predicate(conversation_id, request),
+            {
+                "$push": {"messages": payload},
+                "$set": {"updated_at": payload["created_at"]},
+            },
         )
 
-    async def _load_letter_text(self, letter_id: Optional[str]) -> str:
+    async def _load_letter_text(
+        self,
+        letter_id: Optional[str],
+        *,
+        org_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> str:
         if not letter_id:
             return ""
-        doc = await self.db.letters.find_one({"_id": letter_id}) or await self.db.documents.find_one({"_id": letter_id})
+        # Both collections are ObjectId-keyed: document_service pops any
+        # supplied _id before insert_one so Mongo generates one. Querying with
+        # the raw string never matched, so this returned "" for every real
+        # document - and the publication guard below never ran on anything.
+        # Try both forms rather than relying on the string happening to work.
+        candidates = [letter_id]
+        try:
+            from bson import ObjectId
+
+            candidates.append(ObjectId(str(letter_id)))
+        except Exception:
+            pass
+
+        # Tenant scope, applied UNCONDITIONALLY. This lookup had no scope at
+        # all: the caller supplies incoming_letter_id and the route authorises
+        # only the caller's own org, never re-checking that the id falls inside
+        # it - so any authenticated user could name another tenant's document
+        # and have its text folded into the draft prompt.
+        #
+        # Worse, the ObjectId fix above is what made that reachable. While the
+        # raw string never matched, this failed closed by accident. Repairing a
+        # lookup can activate code that was never exercised, which is exactly
+        # why scope has to be applied here and not left to the caller.
+        #
+        # Scoping on None matches null/missing, so genuinely unscoped legacy
+        # records keep working without ever crossing a tenant boundary.
+        scope = {"organization_id": org_id, "project_id": project_id}
+
+        doc = None
+        for key in candidates:
+            doc = await self.db.letters.find_one(
+                {"_id": key, **scope}
+            ) or await self.db.documents.find_one({"_id": key, **scope})
+            if doc:
+                break
         if not doc:
             return ""
-        return doc.get("body") or doc.get("full_text") or doc.get("ocrText") or ""
+        # Read through the publication policy, not the raw fields: a document
+        # with unresolved extraction-quality findings must not reach drafting
+        # just because its text is stored. See services/publication_policy.py.
+        from ..services.publication_policy import authoritative_text
 
-    def _analyze_incoming(self, text: str, goal: Optional[str]) -> Tuple[List[str], List[str]]:
+        return authoritative_text(doc)
+
+    def _analyze_incoming(
+        self, text: str, goal: Optional[str]
+    ) -> Tuple[List[str], List[str]]:
         issues: List[str] = []
         questions: List[str] = []
         if goal:
             issues.append(f"User goal: {goal}")
         if text:
             issues.append("Summarize incoming letter obligations and deadlines.")
-            questions.append("Are there missing dates or reference numbers in the incoming letter?")
+            questions.append(
+                "Are there missing dates or reference numbers in the incoming letter?"
+            )
         else:
-            questions.append("Please provide the incoming letter text to ground the draft.")
+            questions.append(
+                "Please provide the incoming letter text to ground the draft."
+            )
         return issues, questions
 
     def _build_draft_prompt(
@@ -146,11 +250,12 @@ class DraftingAgentService:
     ) -> str:
         context_snippets = "\n\n".join([r.snippet for r in results])
         goal_line = f"User goal: {goal}" if goal else "Goal: Provide a formal reply."
-        issues_text = "\n".join(f"- {issue}" for issue in issues) if issues else "None provided."
+        issues_text = (
+            "\n".join(f"- {issue}" for issue in issues) if issues else "None provided."
+        )
         return (
             "You are drafting a formal contract letter reply. Use the retrieved context and keep statements factual.\n"
             f"{goal_line}\n\nIncoming letter:\n{incoming_text or 'Not provided'}\n\n"
             f"Issues to address:\n{issues_text}\n\nRetrieved context:\n{context_snippets}\n\n"
             "Draft a concise reply with clear paragraphs and cite document IDs when relevant."
         )
-

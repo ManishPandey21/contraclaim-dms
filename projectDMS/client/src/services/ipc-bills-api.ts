@@ -110,6 +110,7 @@ export interface IPCBillDTO {
   letter_references: string[];
   linked_document_ids: string[];
   original_contract_value?: number | null;
+  organization_id?: string | null;
   project_id?: string | null;
   current_revision?: number | null;
   revisions?: IPCRevision[];
@@ -189,6 +190,11 @@ export async function getIPCBills(params?: {
 }): Promise<IPCBillDTO[]> {
   const { data } = await api.get("/ipc-bills", { params });
   return Array.isArray(data) ? data.map(norm) : [];
+}
+
+export async function getIPCBill(id: string): Promise<IPCBillDTO> {
+  const { data } = await api.get(`/ipc-bills/${encodeURIComponent(id)}`);
+  return norm(data);
 }
 
 export async function getIPCSummary(params?: { project_id?: string; contract_id?: string }): Promise<IPCBillSummaryDTO> {

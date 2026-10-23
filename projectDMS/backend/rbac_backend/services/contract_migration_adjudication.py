@@ -1,0 +1,327 @@
+"""Candidate claim, lease and operator adjudication.
+
+Two operators cannot adjudicate the same candidate at once, and an abandoned
+claim expires without changing anything legal.
+
+**The claim is a unique insert, not a read-then-write.** A read-then-insert lets
+two operators both observe "free" and both proceed; the unique ``_id`` is what
+actually decides, and it decides in the database rather than in the process that
+happened to check first.
+
+**Lease state is operational and never legal.** It lives in its own collection,
+disjoint from every authoritative one, and expiry has *exactly one* effect:
+another operator may claim. It does not withdraw a decision, does not touch
+applicability, does not touch a lifecycle event and does not touch a
+classification. ``adjudicate`` reads the claim only to verify ownership — the
+lease is never an input to the decision itself.
+
+**Conflicts fail closed, and the loser is told what happened.** A second operator
+disagreeing with a recorded adjudication does not overwrite it and does not
+silently succeed: they are told who decided, and what they decided, so the
+disagreement becomes a conversation rather than a race.
+
+Adjudication is a decision *about a candidate*. It writes nothing authoritative —
+promotion is a separate transaction owned by a later ticket.
+"""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Optional
+
+from pymongo.errors import DuplicateKeyError
+
+from ..models.contract_document import ContractDocumentType
+from .publication_policy import resolve_canonical_document
+from .contract_migration_reconciliation import (
+    RECONCILIATION_COLLECTION,
+    CandidateNotFound,
+    ScopeClassificationState,
+    TypeClassificationState,
+    scoped_candidate_filter,
+)
+
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    "ADJUDICATION_CLAIMS_COLLECTION",
+    "ADJUDICATION_CLAIM_LEASE",
+    "CandidateClaim",
+    "CandidateNotFound",
+    "ClaimUnavailable",
+    "ConflictingAdjudication",
+    "ContractMigrationAdjudication",
+]
+
+#: ``adjudicate(expected_fingerprint=...)`` when the caller echoed nothing.
+NOT_ECHOED: Any = object()
+
+#: Operational only. Deliberately not in LEGAL_COLLECTIONS.
+ADJUDICATION_CLAIMS_COLLECTION = "contract_migration_adjudication_claims"
+
+#: The same lease shape the accepted backfill primitive uses: an abandoned claim
+#: must not lock a candidate out forever.
+ADJUDICATION_CLAIM_LEASE = timedelta(minutes=30)
+
+
+class ClaimUnavailable(Exception):
+    """Somebody else holds this candidate, or this claim is no longer live."""
+
+
+class ConflictingAdjudication(Exception):
+    """A different decision is already recorded for this candidate.
+
+    Raised rather than overwritten. Two operators reaching different conclusions
+    is a disagreement to be resolved by people; last-write-wins would hide it and
+    make the surviving decision look unanimous.
+    """
+
+
+@dataclass(frozen=True)
+class CandidateClaim:
+    candidate_id: str
+    operator_id: str
+    owner_token: str
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class ContractMigrationAdjudication:
+    """Claims a candidate, records a decision, releases."""
+
+    def __init__(self, db: Any) -> None:
+        self._db = db
+
+    async def ensure_indexes(self) -> None:
+        await self._db[ADJUDICATION_CLAIMS_COLLECTION].create_index(
+            "candidate_id", unique=True, background=True
+        )
+
+    # -- claim --------------------------------------------------------------- #
+
+    async def claim(
+        self,
+        candidate_id: str,
+        *,
+        organization_id: str,
+        operator_id: str,
+        organization_wide: bool = False,
+    ) -> CandidateClaim:
+        """Take the candidate, or raise.
+
+        The insert is the primitive. Whoever's insert lands owns the candidate;
+        everybody else is told immediately rather than proceeding on a stale read.
+
+        The candidate must exist inside ``organization_id`` - the organisation
+        the caller was authorised for - *before* the claim row is written, so a
+        candidate of another organisation, or none at all, never acquires one.
+        This read is not the race the unique insert decides: a candidate's
+        organisation is written once: by ``materialise_inventory``'s insert, or by
+        ``ContractUploadScopeService.create_candidate``'s insert-only upsert, whose
+        filter pins the organisation.
+        """
+        candidate = await self._db[RECONCILIATION_COLLECTION].find_one(
+            scoped_candidate_filter(candidate_id, organization_id), {"_id": 1}
+        )
+        if candidate is None:
+            raise CandidateNotFound()
+
+        owner_token = uuid.uuid4().hex
+        now = _now()
+        claim_id = f"contract-migration-claim:{candidate_id}"
+        row = {
+            "_id": claim_id,
+            "candidate_id": candidate_id,
+            "operator_id": operator_id,
+            "owner_token": owner_token,
+            "claimed_at": now,
+            "lease_expires_at": now + ADJUDICATION_CLAIM_LEASE,
+            #: Whether the holder has organisation-wide scope. A project-tier lease
+            #: must never lock the organisation out of its own decision.
+            "organization_wide": bool(organization_wide),
+        }
+        try:
+            await self._db[ADJUDICATION_CLAIMS_COLLECTION].insert_one(row)
+        except DuplicateKeyError as exc:
+            # Held - unless the lease may be taken over: it has run out, it is the
+            # caller's own (a refused attempt must not strand its operator for the
+            # whole lease), or the caller has organisation-wide scope and the
+            # holder does not. One conditional replace, so racing operators still
+            # get one winner. Only the collision means "held": any other failure is
+            # an outage and propagates as one, never as somebody else's claim.
+            takeover: list = [{"lease_expires_at": {"$lte": now}}]
+            if organization_wide:
+                takeover.append({"organization_wide": {"$ne": True}})
+            taken = await self._db[ADJUDICATION_CLAIMS_COLLECTION].find_one_and_replace(
+                {"_id": claim_id, "$or": takeover}, row
+            )
+            if taken is None:
+                # The caller's own live lease: a new token, the SAME expiry - a
+                # refused attempt must not strand its operator, and re-claiming
+                # must not become a way to hold a candidate indefinitely.
+                taken = await self._db[ADJUDICATION_CLAIMS_COLLECTION].find_one_and_update(
+                    {"_id": claim_id, "operator_id": operator_id},
+                    {"$set": {"owner_token": owner_token}},
+                )
+            if taken is None:
+                raise ClaimUnavailable(
+                    f"candidate {candidate_id} is already claimed by another operator"
+                ) from exc
+        return CandidateClaim(
+            candidate_id=candidate_id, operator_id=operator_id, owner_token=owner_token
+        )
+
+    async def release(self, claim: CandidateClaim) -> None:
+        await self._db[ADJUDICATION_CLAIMS_COLLECTION].delete_one(
+            {"candidate_id": claim.candidate_id, "owner_token": claim.owner_token}
+        )
+
+    async def expire_stale_claims(self) -> int:
+        """Remove expired claims. This is the whole effect of expiry.
+
+        Nothing legal is touched here, and nothing legal may ever be added: a
+        lease that could withdraw a decision would make an operator's coffee
+        break a legal event.
+        """
+        result = await self._db[ADJUDICATION_CLAIMS_COLLECTION].delete_many(
+            {"lease_expires_at": {"$lte": _now()}}
+        )
+        return int(getattr(result, "deleted_count", 0) or 0)
+
+    # -- adjudication -------------------------------------------------------- #
+
+    async def adjudicate(
+        self,
+        claim: CandidateClaim,
+        *,
+        organization_id: str,
+        scope_state: ScopeClassificationState,
+        contract_document_type: Optional[ContractDocumentType],
+        reason: str,
+        expected_fingerprint: Any = NOT_ECHOED,
+    ) -> None:
+        """Record one operator's decision about one candidate.
+
+        Two independent proofs, and the order is deliberate. The candidate must
+        exist inside the authorised organisation first: checking the lease first
+        would answer a foreign candidate with "no longer live", which tells the
+        caller it exists. Only then must the claim be live and owned. A valid
+        owner token proves the lease and nothing about tenancy.
+        """
+        candidate_filter = scoped_candidate_filter(claim.candidate_id, organization_id)
+        row = await self._db[RECONCILIATION_COLLECTION].find_one(candidate_filter)
+        if row is None:
+            raise CandidateNotFound()
+
+        live = await self._db[ADJUDICATION_CLAIMS_COLLECTION].find_one(
+            {
+                "candidate_id": claim.candidate_id,
+                "owner_token": claim.owner_token,
+                # The token proves the lease only for the operator it was issued to.
+                "operator_id": claim.operator_id,
+                # An expired lease is not a lease: another operator may hold it now.
+                "lease_expires_at": {"$gt": _now()},
+            }
+        )
+        if live is None:
+            raise ClaimUnavailable(
+                f"claim on {claim.candidate_id} is no longer live; re-claim before "
+                "adjudicating so two operators cannot both believe they hold it"
+            )
+
+        if row.get("promoted"):
+            # The instrument exists. Re-deciding the candidate would leave the
+            # review queue disagreeing with the authority it produced.
+            raise ConflictingAdjudication(
+                f"candidate {claim.candidate_id} is already promoted; its "
+                "adjudication is final"
+            )
+
+        if row.get("scope_state") == ScopeClassificationState.INVALID.value:
+            # INVALID is terminal. Downgrading it to AMBIGUOUS would put a
+            # tenancy violation back into the adjudication queue as an open
+            # question.
+            raise ConflictingAdjudication(
+                f"candidate {claim.candidate_id} is INVALID, which is terminal and "
+                "is never downgraded to an open state"
+            )
+
+        recorded_type = row.get("contract_document_type")
+        proposed_type = (
+            contract_document_type.value if contract_document_type is not None else None
+        )
+        if (
+            row.get("type_state") == TypeClassificationState.TYPE_RESOLVED.value
+            and proposed_type is not None
+            and recorded_type != proposed_type
+        ):
+            # An omitted type is "unchanged" - the update below does not touch it -
+            # so only a different type is a disagreement.
+            raise ConflictingAdjudication(
+                f"candidate {claim.candidate_id} was already adjudicated as "
+                f"{recorded_type} by {row.get('adjudicated_by')}; recording "
+                f"{proposed_type} instead would overwrite that decision rather "
+                "than resolve the disagreement"
+            )
+
+        update = {
+            "scope_state": scope_state.value,
+            "adjudicated_by": claim.operator_id,
+            "adjudication_reason": reason,
+            "adjudicated_at": _now(),
+        }
+        # What the operator reviewed. Promotion revalidates against it; recorded
+        # here because this is the moment of review, and inventory never did.
+        document = await resolve_canonical_document(
+            self._db, str(row.get("canonical_document_id") or "")
+        )
+        fingerprint = (document or {}).get("checksum") or (document or {}).get("sha256")
+        # An explicit None echoes "the review showed no fingerprint"; only an
+        # omitted field skips the check.
+        if expected_fingerprint is not NOT_ECHOED and (
+            None if fingerprint is None else str(fingerprint)
+        ) != (None if expected_fingerprint is None else str(expected_fingerprint)):
+            # The operator reviewed other content than the document now holds.
+            raise ConflictingAdjudication(
+                f"candidate {claim.candidate_id}'s document changed since it was "
+                "reviewed; review it again before deciding"
+            )
+        unset: Dict[str, Any] = {}
+        if fingerprint is not None:
+            update["source_fingerprint"] = str(fingerprint)
+        else:
+            # Nothing to tie the decision to: never keep an older review's print.
+            unset["source_fingerprint"] = ""
+        if contract_document_type is not None:
+            update["type_state"] = TypeClassificationState.TYPE_RESOLVED.value
+            update["contract_document_type"] = contract_document_type.value
+
+        change: Dict[str, Any] = {"$set": update}
+        if unset:
+            change["$unset"] = unset
+        # Compare-and-set on the decision this call read (and was authorised
+        # against): a lease taken over, and a decision recorded, between the read
+        # and this write must not be overwritten by the replaced holder.
+        written = await self._db[RECONCILIATION_COLLECTION].update_one(
+            {
+                **candidate_filter,
+                "promoted": {"$ne": True},
+                "scope_state": row.get("scope_state"),
+                "type_state": row.get("type_state"),
+                "adjudicated_at": row.get("adjudicated_at"),
+            },
+            change,
+        )
+        if getattr(written, "matched_count", 0) != 1:
+            # Promoted between the read and the write (the filter refuses it), or
+            # gone. Never report an adjudication that was not recorded.
+            raise ConflictingAdjudication(
+                f"candidate {claim.candidate_id} changed while it was being adjudicated"
+            )
+        # The decision is recorded; the lease has done its job.
+        await self.release(claim)

@@ -21,6 +21,15 @@ def sniff_mime_from_bytes(data: bytes, filename: Optional[str] = None) -> str:
     if filename and str(filename).lower().endswith(".docx") and data.startswith(b"PK"):
         return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
+    # RAR: v4 signature is "Rar!\x1a\x07\x00", v5 is "Rar!\x1a\x07\x01\x00".
+    if data.startswith(b"Rar!\x1a\x07"):
+        return "application/vnd.rar"
+
+    # ZIP container. Checked after the DOCX branch above, which is also a zip
+    # and is disambiguated by its filename.
+    if data.startswith(b"PK\x03\x04"):
+        return "application/zip"
+
     # PNG
     if len(data) >= 8 and data[:8] == b"\x89PNG\r\n\x1a\n":
         return "image/png"
@@ -28,6 +37,19 @@ def sniff_mime_from_bytes(data: bytes, filename: Optional[str] = None) -> str:
     # JPEG (JFIF/EXIF) - typically starts with 0xFF 0xD8 0xFF
     if len(data) >= 3 and data[0] == 0xFF and data[1] == 0xD8 and data[2] == 0xFF:
         return "image/jpeg"
+
+    # GIF - "GIF87a" or "GIF89a". Added in R-A8T with WebP below, because
+    # `routers/profiles.py` allows both and had no way to check them: it
+    # trusted the client's declared `Content-Type` instead, which is the
+    # extension-trust bypass in a different field. Neither type appears in any
+    # other allowlist in this backend, so recognising them here widens nothing
+    # except the surface that asked for them.
+    if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
+        return "image/gif"
+
+    # WebP - a RIFF container whose form type at offset 8 is "WEBP".
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
 
     # Heuristic text detector: reject if any NUL bytes,
     # then try decode and ensure mostly printable characters.

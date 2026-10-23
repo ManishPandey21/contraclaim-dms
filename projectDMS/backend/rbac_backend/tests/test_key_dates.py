@@ -15,6 +15,7 @@ from rbac_backend.models.key_date import (
     EOTReview,
     KeyDateMilestoneCreate,
 )
+from rbac_backend.core.tenant_context import ActiveScope
 from rbac_backend.routers.key_dates import create_milestone
 from rbac_backend.services.key_date_service import (
     KeyDateError,
@@ -140,11 +141,24 @@ class _Coll:
         d.update(update.get("$set", {}))
         return dict(d)
 
-    async def update_one(self, query, update):
+    async def update_one(self, query, update, upsert=False, **_kwargs):
         d = self.docs.get(query.get("_id"))
+        inserted = False
+        if not d and upsert:
+            d = {"_id": query.get("_id"), **update.get("$setOnInsert", {})}
+            self.docs[d["_id"]] = d
+            inserted = True
         if d:
             d.update(update.get("$set", {}))
-        return SimpleNamespace(modified_count=1 if d else 0)
+            for field in update.get("$unset", {}):
+                d.pop(field, None)
+            for field, amount in update.get("$inc", {}).items():
+                d[field] = int(d.get(field) or 0) + int(amount)
+        return SimpleNamespace(
+            matched_count=0 if inserted else (1 if d else 0),
+            modified_count=1 if d else 0,
+            upserted_id=d.get("_id") if inserted else None,
+        )
 
     async def replace_one(self, query, doc, upsert=False):
         self.docs[query.get("_id")] = dict(doc)
@@ -460,8 +474,15 @@ async def test_create_milestone_denies_cross_tenant():
         title="X", project_id="proj-B", organization_id="org-B",
         contractual_week_number=1, project_start_date=START,
     )
+    # The selection agrees with the body, so the tenant gate is what refuses
+    # (the selection boundary itself: test_cl4a_bg_key_dates_scope.py).
+    db = _DB()
+    user = _user(org="org-A")
     with pytest.raises(HTTPException) as exc:
-        await create_milestone(payload, db=_DB(), current_user=_user(org="org-A"), policy=_policy())
+        await create_milestone(
+            payload, db=db, current_user=user, policy=_policy(),
+            selection=ActiveScope(db, user, "org-B", "proj-B"),
+        )
     assert exc.value.status_code == 403
 
 

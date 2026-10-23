@@ -32,9 +32,9 @@ class MockStreamWriter:
 @pytest.fixture
 def temp_spool_file():
     """Generates a temporary file containing harmless test content.
-    
-    Using a standard string rather than the real EICAR signature to prevent 
-    local host antivirus (e.g. Windows Defender) from quarantining the file 
+
+    Using a standard string rather than the real EICAR signature to prevent
+    local host antivirus (e.g. Windows Defender) from quarantining the file
     during local test execution.
     """
     with tempfile.NamedTemporaryFile(delete=False) as f:

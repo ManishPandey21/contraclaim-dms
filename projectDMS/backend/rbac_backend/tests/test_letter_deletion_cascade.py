@@ -76,6 +76,12 @@ def _matches(doc: Dict[str, Any], query: Dict[str, Any]) -> bool:
         if key == "_id":
             if _norm_id(value) != _norm_id(cond):
                 return False
+        elif isinstance(value, list) and not isinstance(cond, list):
+            # Mongo equality against an array field is membership, not
+            # identity: {"linked_document_ids": "doc-1"} matches a row whose
+            # array contains "doc-1".
+            if not any(_norm_id(entry) == _norm_id(cond) for entry in value):
+                return False
         elif value != cond:
             return False
     return True
@@ -136,11 +142,57 @@ class FakeCollection:
         self.docs = keep
         return SimpleNamespace(deleted_count=removed)
 
+    async def count_documents(self, query: Dict[str, Any], **_kw) -> int:
+        return sum(1 for doc in self.docs if _matches(doc, query))
+
+    def find(self, query: Dict[str, Any], **_kw) -> "FakeCursor":
+        # Motor's Collection.find is synchronous and returns an async-iterable
+        # cursor; the deletion scan consumes it with `async for`.
+        return FakeCursor([doc for doc in self.docs if _matches(doc, query)])
+
     def get(self, doc_id: Any) -> Dict[str, Any]:
         for doc in self.docs:
             if _norm_id(doc.get("_id")) == _norm_id(doc_id):
                 return doc
         raise AssertionError(f"document {doc_id} not found in fake collection")
+
+
+class FakeCursor:
+    """The async-iterable Motor hands back from `find`."""
+
+    def __init__(self, rows: List[Dict[str, Any]]) -> None:
+        self._rows = rows
+
+    def __aiter__(self) -> "FakeCursor":
+        self._iterator = iter(self._rows)
+        return self
+
+    async def __anext__(self) -> Dict[str, Any]:
+        try:
+            return next(self._iterator)
+        except StopIteration as exc:
+            raise StopAsyncIteration from exc
+
+
+class FakeDatabase:
+    """Attribute access yields a collection, as on a real Motor database.
+
+    The deletion scan walks *every* registered entity adapter, so naming
+    collections one at a time turns each newly registered entity type into an
+    AttributeError inside production code. An unseeded collection here answers
+    every query with nothing, which is what an empty Mongo collection does.
+    """
+
+    def __init__(self, **collections: FakeCollection) -> None:
+        for name, collection in collections.items():
+            setattr(self, name, collection)
+
+    def __getattr__(self, name: str) -> FakeCollection:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        collection = FakeCollection()
+        setattr(self, name, collection)
+        return collection
 
 
 class StubGraphIngestion:
@@ -234,10 +286,12 @@ def _build_world():
             {"_id": ObjectId(), "document_id": str(citing_oid), "vector_ref": "v3"},
         ]
     )
-    db = SimpleNamespace(
+    db = FakeDatabase(
         documents=documents,
         reference_sync_queue=queue,
         document_vectors=vectors,
+        entity_document_links=FakeCollection(),
+        claims=FakeCollection(),
         letters=FakeCollection(),
     )
     return db, {
@@ -526,3 +580,73 @@ async def test_langchain_delete_document_disabled_is_noop():
     service = LangChainVectorService(config)
 
     assert await service.delete_document("64b0f0c2a1b2c3d4e5f60718") is False
+
+
+# --------------------------------------------------------------------------- #
+# Fixture fidelity                                                             #
+#                                                                              #
+# The cascade contract above is only worth what the fakes are worth. The       #
+# production deletion path counts *legacy* entity membership through           #
+# EntityAdapterRegistry, which issues `db.<collection>.find({...})` and         #
+# consumes the result with `async for`. A fake that cannot answer that query   #
+# does not weaken the cascade assertions — it stops delete_document from       #
+# reaching them at all.                                                        #
+# --------------------------------------------------------------------------- #
+
+
+def test_fake_collection_find_returns_an_async_cursor():
+    collection = FakeCollection(
+        [
+            {"_id": "row-1", "organization_id": "org-1"},
+            {"_id": "row-2", "organization_id": "org-2"},
+        ]
+    )
+
+    cursor = collection.find({"organization_id": "org-1"})
+
+    assert hasattr(cursor, "__aiter__"), (
+        "Motor's Collection.find is synchronous and returns an async-iterable "
+        "cursor; a coroutine here would break `async for row in cursor`"
+    )
+
+
+async def test_fake_collection_find_matches_a_scalar_against_an_array_field():
+    """Mongo equality against an array field is membership, not identity.
+
+    `legacy_targets_for_document` queries `{"linked_document_ids": <id>}`
+    against a list-valued field. A fake comparing `["a"] != "a"` reports no
+    legacy membership and would let a document with live legacy supporters be
+    deleted in the test world while production refuses.
+    """
+    collection = FakeCollection(
+        [
+            {"_id": "claim-1", "linked_document_ids": ["doc-1", "doc-2"]},
+            {"_id": "claim-2", "linked_document_ids": ["doc-3"]},
+            {"_id": "claim-3"},
+        ]
+    )
+
+    rows = [row async for row in collection.find({"linked_document_ids": "doc-1"})]
+
+    assert [row["_id"] for row in rows] == ["claim-1"]
+
+
+async def test_the_fake_database_answers_every_adapter_the_deletion_scan_walks():
+    """`delete_document` walks *every* registered adapter, not just claims.
+
+    A fake database that names collections one by one silently turns the next
+    registered entity type into an AttributeError, so this asserts the whole
+    registry can be walked against the cascade world.
+    """
+    from rbac_backend.services.entity_adapter_registry import EntityAdapterRegistry
+
+    db, ids = _build_world()
+
+    for adapter in EntityAdapterRegistry().adapters():
+        targets = await adapter.legacy_targets_for_document(
+            db,
+            document_id=ids["deleted_id"],
+            organization_id="org-1",
+            project_id="proj-1",
+        )
+        assert targets == [], f"{type(adapter).__name__} found phantom legacy membership"

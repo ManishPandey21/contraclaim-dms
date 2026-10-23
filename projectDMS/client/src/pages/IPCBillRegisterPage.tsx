@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { Download, Edit, FileText, Loader2, PlusCircle, Search, Tags, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -18,19 +19,22 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import useRBAC from "@/hooks/useRBAC";
+import { useRegisterProjectScope } from "@/hooks/useRegisterProjectScope";
+import { scopeRefusalMessage } from "@/services/active-scope";
 import { enhancedApi } from "@/services/enhanced-api";
 import { getContractMasterForProject } from "@/services/contract-master-api";
 import {
   COMPONENT_FIELDS, ComponentFieldConfig, DEDUCTION_KEYS, DEDUCTION_LABELS, IPCBillDTO,
   IPCBillSummaryDTO, IPCDeductionLine, IPCDeductions, IPCLineItem, IPCPaymentRecord, IPCRevision,
   IPCStatus, PaymentStructure, componentBase, createIPCBill, deductionsColTotal, deleteIPCBill,
-  emptyDeductions, exportIPCBills, getIPCBills, getIPCSummary, lineTotal, updateIPCBill,
+  emptyDeductions, exportIPCBills, getIPCBill, getIPCBills, getIPCSummary, lineTotal, updateIPCBill,
 } from "@/services/ipc-bills-api";
 import {
   IPCCategory, IPCCategoryKind, createIPCCategory, deleteIPCCategory, getIPCCategories,
   getIPCCategoriesManage, updateIPCCategory,
 } from "@/services/ipc-categories-api";
-import LinkedDocumentsPicker from "@/components/documents/LinkedDocumentsPicker";
+import EntityDocumentLinks from "@/components/document-links/EntityDocumentLinks";
+import { IPC_DOCUMENT_RELATIONSHIP_ROLES } from "@/services/document-relationships-api";
 
 const STATUSES: IPCStatus[] = ["draft", "submitted", "under_verification", "verified", "approved", "partially_paid", "paid", "rejected"];
 const PAY_STRUCT: PaymentStructure[] = ["full", "80_20", "20", "partial", "custom"];
@@ -61,10 +65,15 @@ const EMPTY_H: HForm = {
 
 const IPCBillRegisterPage: React.FC = () => {
   const { can } = useRBAC();
+  const canEditIPC = can("dms.ipc.edit");
+  const [searchParams] = useSearchParams();
+  const deepLinkId = searchParams.get("ipc_id");
+  const openedDeepLink = useRef<string | null>(null);
   const [items, setItems] = useState<IPCBillDTO[]>([]);
   const [summary, setSummary] = useState<IPCBillSummaryDTO | null>(null);
   const [projects, setProjects] = useState<{ id: string; name: string }[]>([]);
-  const [projectFilter, setProjectFilter] = useState("all");
+  // CL-4A: the navbar project pins this filter (useRegisterProjectScope).
+  const { projectFilter, setProjectFilter, projectLocked, tenantLoading } = useRegisterProjectScope();
   const [statusFilter, setStatusFilter] = useState("all");
   const [payFilter, setPayFilter] = useState("all");
   const [currencyFilter, setCurrencyFilter] = useState("");
@@ -74,11 +83,12 @@ const IPCBillRegisterPage: React.FC = () => {
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingOrganizationId, setEditingOrganizationId] = useState<string | null>(null);
+  const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
   const [header, setHeader] = useState<HForm>({ ...EMPTY_H });
   const [lineItems, setLineItems] = useState<IPCLineItem[]>([]);
   const [deductions, setDeductions] = useState<IPCDeductions>(emptyDeductions());
   const [payments, setPayments] = useState<IPCPaymentRecord[]>([]);
-  const [linkedDocIds, setLinkedDocIds] = useState<string[]>([]);
   const [revisions, setRevisions] = useState<IPCRevision[]>([]);
   const [saving, setSaving] = useState(false);
   const [contractCurrencies, setContractCurrencies] = useState<{ currency: string; conversion_rate: number }[]>([]);
@@ -98,14 +108,14 @@ const IPCBillRegisterPage: React.FC = () => {
       if (dateTo) p.date_to = new Date(dateTo).toISOString();
       setItems(await getIPCBills(p));
       setSummary(await getIPCSummary(projectFilter !== "all" ? { project_id: projectFilter } : undefined));
-    } catch {
-      toast.error("Failed to load IPC bills");
+    } catch (error) {
+      toast.error(scopeRefusalMessage(error, "IPC") || "Failed to load IPC bills");
     } finally {
       setLoading(false);
     }
   }, [projectFilter, statusFilter, payFilter, currencyFilter, dateFrom, dateTo]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { if (!tenantLoading) void load(); }, [load, tenantLoading]);
   useEffect(() => {
     (async () => {
       try {
@@ -179,16 +189,19 @@ const IPCBillRegisterPage: React.FC = () => {
 
   const openCreate = () => {
     setEditingId(null);
+    setEditingOrganizationId(null);
+    setEditingProjectId(null);
     setHeader({ ...EMPTY_H, project_id: projectFilter !== "all" ? projectFilter : "" });
     setLineItems([]);
     setDeductions(emptyDeductions());
     setPayments([]);
-    setLinkedDocIds([]);
     setRevisions([]);
     setDialogOpen(true);
   };
   const openEdit = (i: IPCBillDTO) => {
     setEditingId(i.id);
+    setEditingOrganizationId(i.organization_id || null);
+    setEditingProjectId(i.project_id || null);
     setHeader({
       project_id: i.project_id || "", ipc_number: i.ipc_number || "", ipc_date: dstr(i.ipc_date),
       period_from: dstr(i.period_from), period_to: dstr(i.period_to), contractor_name: i.contractor_name || "",
@@ -201,10 +214,22 @@ const IPCBillRegisterPage: React.FC = () => {
     setLineItems((i.line_items || []).map((li) => ({ ...li })));
     setDeductions({ ...emptyDeductions(), ...i.deductions });
     setPayments((i.payments || []).map((p) => ({ ...p })));
-    setLinkedDocIds(i.linked_document_ids || []);
     setRevisions(i.revisions || []);
     setDialogOpen(true);
   };
+
+  useEffect(() => {
+    if (!deepLinkId || loading || openedDeepLink.current === deepLinkId) return;
+    openedDeepLink.current = deepLinkId;
+    const local = items.find((item) => item.id === deepLinkId);
+    if (local) {
+      openEdit(local);
+      return;
+    }
+    void getIPCBill(deepLinkId)
+      .then(openEdit)
+      .catch((error) => toast.error(scopeRefusalMessage(error, "IPC") || "Linked IPC could not be opened"));
+  }, [deepLinkId, items, loading]);
 
   const setDedComp = (ck: keyof IPCDeductions, rows: IPCDeductionLine[]) =>
     setDeductions((d) => ({ ...d, [ck]: rows }));
@@ -231,7 +256,6 @@ const IPCBillRegisterPage: React.FC = () => {
         original_contract_value: header.original_contract_value ? Number(header.original_contract_value) : undefined,
         remarks: header.remarks || undefined,
         letter_references: header.letter_references.split(",").map((s) => s.trim()).filter(Boolean),
-        linked_document_ids: linkedDocIds,
         line_items: lineItems,
         deductions,
         payments,
@@ -316,7 +340,7 @@ const IPCBillRegisterPage: React.FC = () => {
         <CardHeader>
           <CardTitle>IPC Register</CardTitle>
           <div className="flex flex-wrap gap-3 pt-3">
-            <Select value={projectFilter} onValueChange={setProjectFilter}>
+            <Select value={projectFilter} onValueChange={setProjectFilter} disabled={projectLocked}>
               <SelectTrigger className="w-52"><SelectValue placeholder="Project" /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All projects</SelectItem>
@@ -397,7 +421,7 @@ const IPCBillRegisterPage: React.FC = () => {
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-[880px]">
           <DialogHeader>
-            <DialogTitle>{editingId ? "Edit IPC" : "Add IPC"}{header.ipc_number ? ` — ${header.ipc_number}` : ""}</DialogTitle>
+            <DialogTitle>{editingId ? (canEditIPC ? "Edit IPC" : "View IPC") : "Add IPC"}{header.ipc_number ? ` — ${header.ipc_number}` : ""}</DialogTitle>
             <DialogDescription>Interim Payment Certificate — claimed, verified, approved &amp; paid amounts.</DialogDescription>
           </DialogHeader>
 
@@ -410,6 +434,7 @@ const IPCBillRegisterPage: React.FC = () => {
               <TabsTrigger value="docs">Docs &amp; history</TabsTrigger>
             </TabsList>
 
+            <fieldset disabled={Boolean(editingId) && !canEditIPC} className="contents">
             <TabsContent value="header" className="space-y-3">
               <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
                 <Field label="IPC number"><Input value={header.ipc_number} onChange={(e) => setHeader((h) => ({ ...h, ipc_number: e.target.value }))} placeholder="IPC-001" /></Field>
@@ -496,7 +521,21 @@ const IPCBillRegisterPage: React.FC = () => {
             </TabsContent>
 
             <TabsContent value="docs" className="space-y-3">
-              <LinkedDocumentsPicker projectId={header.project_id} linkedIds={linkedDocIds} onChange={setLinkedDocIds} emptyHint="Select a project on the Header tab to search its letters." />
+              {editingId ? (
+                <EntityDocumentLinks
+                  targetType="ipc_bill"
+                  targetId={editingId}
+                  organizationId={editingOrganizationId}
+                  projectId={editingProjectId}
+                  roles={IPC_DOCUMENT_RELATIONSHIP_ROLES}
+                  defaultRole="supporting_document"
+                  canManage={can("dms.ipc.edit")}
+                />
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  Create the IPC before linking Documents.
+                </p>
+              )}
               <Card>
                 <CardHeader className="pb-2"><CardTitle className="text-sm">Revision history</CardTitle></CardHeader>
                 <CardContent>
@@ -518,11 +557,14 @@ const IPCBillRegisterPage: React.FC = () => {
                 </CardContent>
               </Card>
             </TabsContent>
+            </fieldset>
           </Tabs>
 
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDialogOpen(false)}>Cancel</Button>
-            <Button onClick={save} disabled={saving}>{saving ? "Saving…" : editingId ? "Save changes" : "Create"}</Button>
+            <Button variant="outline" onClick={() => setDialogOpen(false)}>{editingId && !canEditIPC ? "Close" : "Cancel"}</Button>
+            {(!editingId || canEditIPC) && (
+              <Button onClick={save} disabled={saving}>{saving ? "Saving…" : editingId ? "Save changes" : "Create"}</Button>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -700,8 +742,6 @@ const DeductionLinesEditor: React.FC<{
   );
 };
 
-// Search uploaded letters/documents (scoped to the IPC's project) and link them
-// to the certificate. Linked ids are shown as removable chips.
 // Master management: create / rename / activate / delete advance + deduction
 // types. Scope is org-wide (project = "") or a project override/addition.
 interface CatForm { id: string; kind: IPCCategoryKind; name: string; description: string; scope: string; }

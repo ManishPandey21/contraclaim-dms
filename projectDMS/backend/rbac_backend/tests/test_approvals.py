@@ -12,6 +12,7 @@ from rbac_backend.models.approval import DecisionBody
 from rbac_backend.services.approval_service import ApprovalError, ApprovalService
 from rbac_backend.services.policy_service import PolicyService
 from rbac_backend.services.scope_service import ScopeService
+from rbac_backend.tests.selection_fixtures import selection
 
 
 # --- fakes ----------------------------------------------------------------
@@ -190,5 +191,6 @@ async def test_approve_endpoint_blocks_self_approval():
         await approve_claim(
             "c5", DecisionBody(comment="self"), db=db,
             current_user=_user(uid="drafter"), policy=_policy(),
+            selection=selection(db, "org-A", "proj-A"),
         )
     assert exc.value.status_code == 409

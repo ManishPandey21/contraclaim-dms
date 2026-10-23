@@ -16,6 +16,7 @@ from fastapi.responses import Response
 from ..core.database import get_db
 from ..core.permissions import Permissions
 from ..core.security import CurrentUser, build_scope_query, get_current_user
+from ..core.tenant_context import ActiveScope, active_scope
 from ..models.approval import ApprovalRecord, AssignBody, DecisionBody
 from ..models.claim import Claim, ClaimAssessment, ClaimCreate, ClaimStatusUpdate, ClaimUpdate
 from ..services.approval_service import ApprovalError, ApprovalService
@@ -23,9 +24,42 @@ from ..services.audit_event_service import AuditEventService
 from ..services.claim_assessment_service import ClaimAssessmentService
 from ..services.claim_service import ClaimService
 from ..services.evidence_bundle_service import EvidenceBundleService
+from ..services.document_relationship_service import (
+    DocumentRelationshipError,
+    DocumentRelationshipService,
+)
 from ..services.policy_service import PolicyService
+from ..utils.error_handler import handle_exceptions
 
 router = APIRouter()
+
+
+async def _present_claim(claim: dict, db, current_user: CurrentUser) -> Claim:
+    presented = dict(claim)
+    presented["linked_document_ids"] = await DocumentRelationshipService(
+        db
+    ).authorized_document_ids(
+        current_user,
+        "claim",
+        str(claim.get("_id") or ""),
+        legacy_document_ids=claim.get("linked_document_ids") or [],
+    )
+    return Claim(**presented)
+
+
+async def _present_claims(claims: list[dict], db, current_user: CurrentUser) -> list[Claim]:
+    ids_by_claim = await DocumentRelationshipService(
+        db
+    ).authorized_document_ids_for_claims(current_user, claims)
+    return [
+        Claim(
+            **{
+                **claim,
+                "linked_document_ids": ids_by_claim.get(str(claim.get("_id") or ""), []),
+            }
+        )
+        for claim in claims
+    ]
 
 
 async def get_policy(db=Depends(get_db)) -> PolicyService:
@@ -33,6 +67,7 @@ async def get_policy(db=Depends(get_db)) -> PolicyService:
 
 
 @router.get("/claims", response_model=List[Claim])
+@handle_exceptions
 async def list_claims(
     organization_id: Optional[str] = Query(None),
     project_id: Optional[str] = Query(None),
@@ -44,12 +79,14 @@ async def list_claims(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    organization_id, project_id = await selection.list_filters(organization_id, project_id)
     await policy.authorize(
         current_user,
         Permissions.CLAIM_VIEW,
         resource_type="claims",
-        organization_id=organization_id,
+        organization_id=organization_id or getattr(current_user, "organization_id", None),
         project_id=project_id,
         audit=False,
     )
@@ -62,16 +99,21 @@ async def list_claims(
         skip=skip,
         limit=limit,
     )
-    return [Claim(**c) for c in claims]
+    return await _present_claims(claims, db, current_user)
 
 
 @router.post("/claims", response_model=Claim, status_code=status.HTTP_201_CREATED)
+@handle_exceptions
 async def create_claim(
     payload: ClaimCreate,
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    # The body's project must BE the selection: refused, never rewritten. A claim
+    # without a project cannot be created while the selection is a project.
+    await selection.require_project(payload.project_id, payload.organization_id)
     org = payload.organization_id or getattr(current_user, "organization_id", None)
     await policy.authorize(
         current_user,
@@ -80,42 +122,73 @@ async def create_claim(
         organization_id=org,
         project_id=payload.project_id,
     )
-    created = await ClaimService(db).create(payload, current_user)
-    return Claim(**created)
+    legacy_ids = list(payload.linked_document_ids)
+    claim_service = ClaimService(db)
+    created = await claim_service.create(payload, current_user)
+    if legacy_ids:
+        try:
+            await DocumentRelationshipService(db).replace_legacy_document_ids(
+                current_user, "claim", str(created.get("_id") or ""), legacy_ids
+            )
+        except DocumentRelationshipError:
+            await claim_service.delete(
+                str(created.get("_id") or ""), current_user, before=created
+            )
+            raise
+    return await _present_claim(created, db, current_user)
 
 
-async def _load_authorized(claim_id: str, permission: str, db, current_user, policy) -> dict:
+async def _load_authorized(
+    claim_id: str, permission: str, db, current_user, policy, selection: ActiveScope
+) -> dict:
+    selection.require_selection()
     claim = await ClaimService(db).get(claim_id)
     if not claim:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Claim not found")
+    # Project-less legacy claims are held to the selected organisation.
+    await selection.require_record(claim, allow_unscoped=True)
     await policy.authorize_document(current_user, permission, claim, resource_type="claim")
     return claim
 
 
 @router.get("/claims/{claim_id}", response_model=Claim)
+@handle_exceptions
 async def get_claim(
     claim_id: str,
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    claim = await _load_authorized(claim_id, Permissions.CLAIM_VIEW, db, current_user, policy)
-    return Claim(**claim)
+    claim = await _load_authorized(claim_id, Permissions.CLAIM_VIEW, db, current_user, policy, selection)
+    return await _present_claim(claim, db, current_user)
 
 
 @router.put("/claims/{claim_id}", response_model=Claim)
+@handle_exceptions
 async def update_claim(
     claim_id: str,
     payload: ClaimUpdate,
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    claim = await _load_authorized(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy)
-    updated = await ClaimService(db).update(
-        claim_id, payload.model_dump(exclude_unset=True), current_user, before=claim
-    )
-    return Claim(**(updated or claim))
+    claim = await _load_authorized(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection)
+    changes = payload.model_dump(exclude_unset=True)
+    legacy_ids = changes.pop("linked_document_ids", None)
+    claim_service = ClaimService(db)
+    updated = await claim_service.update(claim_id, changes, current_user, before=claim)
+    if legacy_ids is not None:
+        try:
+            await DocumentRelationshipService(db).replace_legacy_document_ids(
+                current_user, "claim", claim_id, legacy_ids
+            )
+        except DocumentRelationshipError:
+            raise
+        await claim_service.clear_legacy_document_ids(claim_id)
+        updated = await claim_service.get(claim_id)
+    return await _present_claim(updated or claim, db, current_user)
 
 
 @router.post("/claims/{claim_id}/status", response_model=Claim)
@@ -125,8 +198,9 @@ async def set_claim_status(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    claim = await _load_authorized(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy)
+    claim = await _load_authorized(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection)
     updated = await ClaimService(db).update(
         claim_id, {"status": body.status.value}, current_user, before=claim
     )
@@ -134,14 +208,24 @@ async def set_claim_status(
 
 
 @router.delete("/claims/{claim_id}", status_code=status.HTTP_204_NO_CONTENT)
+@handle_exceptions
 async def delete_claim(
     claim_id: str,
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    claim = await _load_authorized(claim_id, Permissions.CLAIM_DELETE, db, current_user, policy)
-    await ClaimService(db).delete(claim_id, current_user, before=claim)
+    await _load_authorized(claim_id, Permissions.CLAIM_DELETE, db, current_user, policy, selection)
+    try:
+        await DocumentRelationshipService(db, policy=policy).delete_target(
+            current_user,
+            "claim",
+            claim_id,
+            reason="Claim deleted",
+        )
+    except DocumentRelationshipError:
+        raise
     return None
 
 
@@ -168,11 +252,12 @@ async def assess_claim(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Run a clause-grounded AI assessment of the claim against the project's
     contract (reuses the citation-enforced contract-QA engine). Gated by
     claims.assess; the assessment + its citations + trace are persisted."""
-    claim = await _load_authorized(claim_id, Permissions.CLAIM_ASSESS, db, current_user, policy)
+    claim = await _load_authorized(claim_id, Permissions.CLAIM_ASSESS, db, current_user, policy, selection)
     # Imported lazily — keeps the retrieval stack out of this router's import path.
     from .retrieval_engine import get_observability, get_retrieval_service
 
@@ -188,23 +273,26 @@ async def list_claim_assessments(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    claim = await _load_authorized(claim_id, Permissions.CLAIM_VIEW, db, current_user, policy)
+    claim = await _load_authorized(claim_id, Permissions.CLAIM_VIEW, db, current_user, policy, selection)
     records = await ClaimAssessmentService(db).list(str(claim["_id"]))
     return [ClaimAssessment(**r) for r in records]
 
 
 @router.get("/claims/{claim_id}/evidence-bundle")
+@handle_exceptions
 async def export_evidence_bundle(
     claim_id: str,
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Stream a ZIP evidence bundle: claim record + in-scope linked correspondence
     + the claim's audit trail (CSV) + a manifest. Requires claim-view to read the
     claim and audit-view for the export; the export action is itself audited."""
-    claim = await _load_authorized(claim_id, Permissions.CLAIM_VIEW, db, current_user, policy)
+    claim = await _load_authorized(claim_id, Permissions.CLAIM_VIEW, db, current_user, policy, selection)
     await policy.authorize(
         current_user,
         Permissions.AUDIT_VIEW,
@@ -219,8 +307,22 @@ async def export_evidence_bundle(
         limit=50000,
     )
     events = [e for e in events if str(e.get("resource_id")) == str(claim_id)]
+    try:
+        document_sources = await DocumentRelationshipService(db).authorized_document_sources(
+            current_user,
+            "claim",
+            claim_id,
+            legacy_document_ids=claim.get("linked_document_ids") or [],
+        )
+    except DocumentRelationshipError:
+        raise
+    document_ids = [source["document_id"] for source in document_sources]
+    export_claim = {**claim, "linked_document_ids": document_ids}
     content = await EvidenceBundleService(db).build(
-        claim, events, generated_by=getattr(current_user, "id", None)
+        export_claim,
+        events,
+        document_sources=document_sources,
+        generated_by=getattr(current_user, "id", None),
     )
     await audit.emit(
         action="claim.evidence_exported",
@@ -246,8 +348,9 @@ async def get_claim_approval(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    claim = await _load_authorized(claim_id, Permissions.CLAIM_VIEW, db, current_user, policy)
+    claim = await _load_authorized(claim_id, Permissions.CLAIM_VIEW, db, current_user, policy, selection)
     return ApprovalRecord(**await _approval_for(claim, db))
 
 
@@ -258,8 +361,9 @@ async def assign_claim_reviewer(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    claim = await _load_authorized(claim_id, Permissions.CLAIM_MANAGE, db, current_user, policy)
+    claim = await _load_authorized(claim_id, Permissions.CLAIM_MANAGE, db, current_user, policy, selection)
     record = await _approval_for(claim, db)
     try:
         updated = await ApprovalService(db).assign(
@@ -277,8 +381,9 @@ async def submit_claim_for_review(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    claim = await _load_authorized(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy)
+    claim = await _load_authorized(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection)
     record = await _approval_for(claim, db)
     try:
         updated = await ApprovalService(db).submit_for_review(record, getattr(current_user, "id", None))
@@ -294,8 +399,9 @@ async def approve_claim(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    claim = await _load_authorized(claim_id, Permissions.CLAIM_MANAGE, db, current_user, policy)
+    claim = await _load_authorized(claim_id, Permissions.CLAIM_MANAGE, db, current_user, policy, selection)
     record = await _approval_for(claim, db)
     try:
         updated = await ApprovalService(db).approve(record, getattr(current_user, "id", None), comment=body.comment)
@@ -311,8 +417,9 @@ async def return_claim(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    claim = await _load_authorized(claim_id, Permissions.CLAIM_MANAGE, db, current_user, policy)
+    claim = await _load_authorized(claim_id, Permissions.CLAIM_MANAGE, db, current_user, policy, selection)
     record = await _approval_for(claim, db)
     try:
         updated = await ApprovalService(db).return_for_changes(record, getattr(current_user, "id", None), comment=body.comment)

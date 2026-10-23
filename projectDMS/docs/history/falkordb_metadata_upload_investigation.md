@@ -2,21 +2,21 @@
 
 ### 1. End-to-End Flow
 
-1. **Upload & stub creation**  
+1. **Upload & stub creation**
    `backend/rbac_backend/routers/documents.py` → `DocumentController.create_document` stores the file and calls `DocumentService.create_document`.
-2. **Background processing**  
-   `DocumentService.queue_document_processing` enqueues OCR/metadata work.  
+2. **Background processing**
+   `DocumentService.queue_document_processing` enqueues OCR/metadata work.
    `DocumentService.process_document_async` (same file, ~line 600) runs OCR, metadata extraction, and builds `update_fields` for Mongo.
-3. **Mongo update**  
+3. **Mongo update**
    The processed metadata is written back to the `documents` collection (`update_fields`).
-4. **Graph ingestion**  
-   Immediately after the Mongo update, `DocumentService.process_document_async` calls  
+4. **Graph ingestion**
+   Immediately after the Mongo update, `DocumentService.process_document_async` calls
    `self.graph_ingestion.ingest_document(...)`.
-5. **GraphIngestionService**  
+5. **GraphIngestionService**
    `backend/rbac_backend/graph/graph_ingestion_service.py` orchestrates:
    - Upserting document nodes/edges via `GraphAdapter` (Graphiti/Neo4j integration).
    - Upserting Falkor graph nodes and references with `sync_document_to_falkor`.
-6. **Falkor upsert**  
+6. **Falkor upsert**
    `backend/rbac_backend/services/falkor_graph_service.py` (`FalkorGraphService.upsert_letter_with_refs`) executes RedisGraph commands to create/update the `Letter` node and `CITES` / `REPLIES_TO` relationships.
 
 ### 2. Relevant Files
@@ -51,7 +51,7 @@ This explains why:
 
 ### 4. Suggested Remediation
 
-1. **Decouple Falkor ingestion from GraphAdapter state**  
+1. **Decouple Falkor ingestion from GraphAdapter state**
    Remove or refactor the early return so Falkor sync still runs when Graphiti is disabled, e.g.:
    ```python
    if not self.adapter.config.enabled:
@@ -60,18 +60,18 @@ This explains why:
        # perform GraphAdapter upserts
    # Always execute sync_document_to_falkor(...)
    ```
-2. **Alternatively configure Graphiti**  
+2. **Alternatively configure Graphiti**
    Provide `GRAPHITI_BASE_URL` and `GRAPHITI_API_KEY` so `GraphAdapter` remains enabled. This may be overkill if Falkor is the only required graph target.
-3. **Add observability**  
+3. **Add observability**
    Log a warning when Falkor sync is skipped because the adapter is disabled; currently only a debug message is emitted.
 
 ### 5. Validation Steps
 
 1. Apply the code change above (or configure Graphiti).
-2. Restart the backend and reprocess a document:  
+2. Restart the backend and reprocess a document:
    `POST /documents/{id}/process`.
-3. Run  
-   `python backend/scripts/check_qdrant_falkor.py --document-id <id>`  
+3. Run
+   `python backend/scripts/check_qdrant_falkor.py --document-id <id>`
    and confirm:
    - `Qdrant chunks` > 0 (if embeddings enabled).
    - `Falkor letter` exists for the normalized code.
@@ -80,4 +80,3 @@ This explains why:
 ### 6. Current Status
 
 Without the refactor, FalkorDB receives no metadata even though uploads succeed and Mongo is populated. Implementing the remediation will allow metadata to flow into FalkorDB independent of Graphiti configuration.
-

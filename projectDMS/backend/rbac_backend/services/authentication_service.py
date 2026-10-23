@@ -15,7 +15,12 @@ from typing import Optional, Dict, Any
 
 from ..core.database import get_database
 from ..core.security import verify_password
+from .credential_fields import credential_version, stored_password_hash
 from .runtime_state import get_runtime_state
+
+
+class SessionRevocationUnavailableError(Exception):
+    """The session store could not confirm that a user's sessions were ended."""
 
 
 class AuthenticationService:
@@ -38,7 +43,7 @@ class AuthenticationService:
 
     def _to_light_user(self, doc: Dict[str, Any]):
         class _User:
-            pass
+            credential_version: int
 
         user = _User()
         user.id = str(doc.get("_id") or doc.get("id") or "")
@@ -52,7 +57,10 @@ class AuthenticationService:
         user.created_at = doc.get("created_at")
         user.last_login = doc.get("last_login")
         # Preserve hashed password for subsequent checks if needed
-        user.hashed_password = doc.get("hashed_password") or doc.get("passwordHash") or ""
+        user.hashed_password = stored_password_hash(doc) or ""
+        # Read from the SAME document the password was verified against, so a
+        # token minted from it names the generation that password belonged to.
+        user.credential_version = credential_version(doc)
         return user
 
     # ------------------------------------------------------------------
@@ -67,7 +75,7 @@ class AuthenticationService:
         if not doc:
             return None
 
-        hashed = doc.get("hashed_password") or doc.get("passwordHash")
+        hashed = stored_password_hash(doc)
         if not hashed or not verify_password(password, hashed):
             return None
 
@@ -214,19 +222,51 @@ class AuthenticationService:
             return
         self._sessions.pop(session_token, None)
 
+    async def _delete_user_session_keys(self, redis: Any, uid: str) -> None:
+        tokens = await redis.smembers(self._user_sessions_key(uid))
+        keys = [self._session_key(token.decode("utf-8") if isinstance(token, bytes) else str(token)) for token in tokens]
+        if keys:
+            await redis.delete(*keys)
+        await redis.delete(self._user_sessions_key(uid))
+
     async def invalidate_user_sessions(self, user_id: str) -> None:
         uid = str(user_id)
         redis = await self._runtime_state.get_redis()
         if redis is not None:
-            tokens = await redis.smembers(self._user_sessions_key(uid))
-            keys = [self._session_key(token.decode("utf-8") if isinstance(token, bytes) else str(token)) for token in tokens]
-            if keys:
-                await redis.delete(*keys)
-            await redis.delete(self._user_sessions_key(uid))
+            await self._delete_user_session_keys(redis, uid)
             return
         to_remove = [token for token, data in self._sessions.items() if data.get("user_id") == uid]
         for token in to_remove:
             self._sessions.pop(token, None)
+
+    async def revoke_all_sessions(self, user_id: str) -> None:
+        """End every session and access token issued to this user so far, or raise.
+
+        Session-store cleanup after a credential change. The security boundary is
+        the credential generation advanced in the same write as the new hash
+        (services/credential_fields.py); this is defence in depth. It sets the
+        existing ``user_jwt_min_iat`` revocation floor and deletes the user's
+        session keys. Unlike ``invalidate_user_sessions`` it never reports success
+        it cannot prove: a runtime Redis that is configured but unreachable or
+        failing raises ``SessionRevocationUnavailableError``.
+        """
+        uid = str(user_id)
+        try:
+            redis = await self._runtime_state.get_redis()
+        except Exception as exc:
+            raise SessionRevocationUnavailableError("session store unavailable") from exc
+        if redis is None:
+            if self._runtime_state.redis_url:
+                raise SessionRevocationUnavailableError("runtime Redis is configured but unreachable")
+            # No runtime Redis: sessions exist only in this process.
+            for token in [t for t, data in self._sessions.items() if data.get("user_id") == uid]:
+                self._sessions.pop(token, None)
+            return
+        try:
+            await redis.set(f"user_jwt_min_iat:{uid}", int(time.time()))
+            await self._delete_user_session_keys(redis, uid)
+        except Exception as exc:
+            raise SessionRevocationUnavailableError("session store write failed") from exc
 
     @staticmethod
     def _session_key(token: str) -> str:

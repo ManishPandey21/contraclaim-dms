@@ -611,26 +611,26 @@ async def test_repository_tracks_governance_assignments_and_comments() -> None:
 async def test_prompt_registry_updates() -> None:
     db = _FakeDB()
     registry = PromptRegistry(db)
-    
+
     # 1. Update strategic plan prompt and verify it saves and gets enabled
     template_str = "Strategy plan: {active_workspace}, {role}, {recipient}, {subject}, {recipient_focus}, {current_materials}, {sources}"
     record = await registry.update_prompt("letter_drafting.v2.strategy", template_str, "admin-1")
-    
+
     assert record.prompt_key == "letter_drafting.v2.strategy"
     assert record.version == 1
     assert record.enabled is True
     # Verify ensure_strategy_roadmap was automatically applied
     assert "Required strategic-plan roadmap" in record.template
-    
+
     # 2. Add second version and confirm incremental versioning and legacy disablement
     new_template = template_str + "\nAdded custom rules."
     record2 = await registry.update_prompt("letter_drafting.v2.strategy", new_template, "admin-1")
-    
+
     assert record2.version == 2
     assert record2.enabled is True
     assert db.prompt_templates.docs[0]["enabled"] is False
     assert db.prompt_templates.docs[1]["enabled"] is True
-    
+
     # 3. Retrieve enabled and verify version 2 is loaded
     active = await registry.get_enabled("letter_drafting.v2.strategy")
     assert active.version == 2
@@ -640,22 +640,22 @@ async def test_prompt_registry_updates() -> None:
 async def test_context_pack_gzip_compression() -> None:
     db = _FakeDB()
     repo = DraftRunRepository(db)
-    
+
     pack = DraftContextPack(
         context_pack_id="pack-1",
         letter_id="letter-1",
         run_id="run-1",
         facts=["Fact 1", "Fact 2"],
     )
-    
+
     saved = await repo.create_context_pack(pack)
     assert saved.context_pack_id == "pack-1"
-    
+
     # Assert that stored in fake DB is compressed (contains compressed_data)
     stored_doc = db.draft_context_packs.docs[0]
     assert "compressed_data" in stored_doc
     assert "facts" not in stored_doc
-    
+
     # Fetch and verify it is decompressed successfully
     fetched = await repo.get_context_pack("letter-1", "run-1")
     assert fetched is not None
@@ -665,11 +665,11 @@ async def test_context_pack_gzip_compression() -> None:
 
 async def test_scan_and_alert_assignments_logic() -> None:
     db = _FakeDB()
-    
+
     # Setup mock users
     await db.users.insert_one({"_id": "user-drafter", "email": "drafter@example.com", "first_name": "Drafter"})
     await db.users.insert_one({"_id": "user-reviewer", "email": "reviewer@example.com", "first_name": "Reviewer"})
-    
+
     # Setup mock letter with a drafter who has not been notified yet
     await db.letters.insert_one({
         "_id": ObjectId(),
@@ -677,7 +677,7 @@ async def test_scan_and_alert_assignments_logic() -> None:
         "last_notified_drafter": None,
         "subject": "Delay Notice",
     })
-    
+
     # Setup mock reviewer assignment that has not been notified yet
     from datetime import datetime, timedelta, timezone
     due_at = datetime.now(timezone.utc) - timedelta(hours=1)
@@ -691,29 +691,29 @@ async def test_scan_and_alert_assignments_logic() -> None:
         "notified": False,
         "overdue_notified": False,
     })
-    
+
     # Mock EmailService._send and SMTP configuration
     from rbac_backend.services.background_jobs import scan_and_alert_assignments
     from rbac_backend.services.email_service import EmailService
-    
+
     dispatched_emails = []
-    
+
     async def mock_send(self, msg, config=None):
         dispatched_emails.append(msg)
         return True
-        
+
     EmailService._send = mock_send
     EmailService._smtp_enabled = property(lambda self: True)
-    
+
     await scan_and_alert_assignments(db)
-    
+
     # Check that drafter and reviewer alert emails were sent
     assert len(dispatched_emails) >= 2
-    
+
     # Check that flags are updated
     updated_letter = db.letters.docs[0]
     assert updated_letter["last_notified_drafter"] == "user-drafter"
-    
+
     updated_assignment = db.letter_draft_assignments.docs[0]
     assert updated_assignment["notified"] is True
     assert updated_assignment["overdue_notified"] is True

@@ -1,7 +1,7 @@
 # Final Improvement Plan - FalkorDB Evidence Graph and Contract Timeline
 
-> Validation date: 2026-06-28  
-> Repository: `projectDMS`  
+> Validation date: 2026-06-28
+> Repository: `projectDMS`
 > Source reports reviewed:
 > - `docs/architecture/end_to_end_audit.md`
 > - `docs/architecture/falkordb_link_improvement.md`

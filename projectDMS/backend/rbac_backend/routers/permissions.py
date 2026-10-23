@@ -16,6 +16,7 @@ from ..services.policy_service import PolicyService
 from ..services.step_up_service import require_step_up
 from ..models.permission import Permission, PermissionCreate, PermissionUpdate
 from ..models.role import Role, RoleCreate, RoleUpdate
+from ..utils.error_handler import BaseDomainError
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -63,19 +64,19 @@ async def get_permissions(
     try:
         filters = {'search': search}
         pagination = {'skip': skip, 'limit': limit}
-        
+
         permissions, total_count = await permission_service.get_permissions_paginated(
             filters, pagination
         )
-        
+
         return {
             "permissions": permissions,
             "total": total_count,
             "page": pagination["skip"] // pagination["limit"] + 1,
             "limit": pagination["limit"]
         }
-        
-    except HTTPException:
+
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error(f"Failed to get permissions: {str(e)}")
@@ -100,8 +101,8 @@ async def get_permission(
                 detail="Permission not found"
             )
         return permission
-        
-    except HTTPException:
+
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error(f"Failed to get permission {permission_id}: {str(e)}")
@@ -132,8 +133,8 @@ async def create_permission(
             after=permission.model_dump(mode="json") if hasattr(permission, "model_dump") else None,
         )
         return permission
-        
-    except HTTPException:
+
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error(f"Failed to create permission: {str(e)}")
@@ -167,8 +168,8 @@ async def update_permission(
             after=permission.model_dump(mode="json") if hasattr(permission, "model_dump") else None,
         )
         return permission
-        
-    except HTTPException:
+
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error(f"Failed to update permission {permission_id}: {str(e)}")
@@ -205,8 +206,8 @@ async def delete_permission(
             before=before.model_dump(mode="json") if hasattr(before, "model_dump") else None,
         )
         return {"message": "Permission deleted successfully"}
-        
-    except HTTPException:
+
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error(f"Failed to delete permission {permission_id}: {str(e)}")
@@ -214,4 +215,3 @@ async def delete_permission(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Permission deletion error: {str(e)}"
         )
-

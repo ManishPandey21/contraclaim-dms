@@ -146,4 +146,3 @@ Support Parent-Child Retrieval:
 - Update `LetterDraftEditor` to pull real reference letters (via `/letters` query) and show which sources were used; when submitting for review, include the agent’s validation report.
 
 **Final desired flow**: User provides a prompt → system expands needs → dual retrieval (contract clauses + recent correspondence) → Pydantic AI builds a context packet → drafting agent writes a citation-backed letter → reviewer agent checks against clauses → user sees the draft with sources and can accept/submit. This preserves the current workflow scaffolding while adding reliable, source-grounded drafting.
-

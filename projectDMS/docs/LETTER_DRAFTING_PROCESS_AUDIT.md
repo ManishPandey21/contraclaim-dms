@@ -1,6 +1,6 @@
 # Contraclaim DMS Letter Drafting Process Audit
 
-Date: 2026-07-04  
+Date: 2026-07-04
 Scope: Backend v2 letter drafting flow, prompt registry, frontend entry points, validation/review controls, and the optional LangGraph drafting path.
 
 ## Executive Summary

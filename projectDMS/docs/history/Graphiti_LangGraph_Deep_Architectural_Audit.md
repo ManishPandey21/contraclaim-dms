@@ -92,17 +92,17 @@ The simulated graph pipeline drives the core AI capabilities of the ContraClaim 
 ## 3. Comprehensive Strengths & Weaknesses Assessment
 
 ### A. Graph Schema & Designing
-* **Strengths**: 
+* **Strengths**:
   - Standardized normalization logic (`normalize_letter_code`) ensures consistent node matching across different naming structures (e.g., "KNPCC-11-2026" vs "knpcc/11/2026").
   - The schema elegantly captures chronological and citation-based relations (`CITES`, `REPLIES_TO`, `SUPERSEDES`).
-* **Weaknesses**: 
+* **Weaknesses**:
   - Schema constraints are created on-the-fly (`ensure_schema` during upserts) rather than using a dedicated database migration or startup command.
   - No database indexes exist on critical relationship properties (e.g., `source` or `updatedAt`), which will degrade path query performance as the transaction volume grows.
 
 ### B. Vector vs. Graph Hybrid Query Patterns
-* **Strengths**: 
+* **Strengths**:
   - The system combines semantic retrieval (LlamaIndex/Mongo) with relational path traversal (FalkorDB). It retrieves contract clauses via vector search and pulls preceding/succeeding correspondence via the graph.
-* **Weaknesses**: 
+* **Weaknesses**:
   - **Severe Stack Fragmentation**: The system runs three distinct, disjointed database technologies simultaneously:
     1. **MongoDB Atlas Vector Search** (or local MongoDB 8) for document vectors.
     2. **Qdrant Vector DB** for SentencesTransformer chunks pushed by Docling.
@@ -110,28 +110,28 @@ The simulated graph pipeline drives the core AI capabilities of the ContraClaim 
   - This stack fragmentation leads to redundant embeddings (OpenAI text-embedding-3-small vs. SentenceTransformers), high synchronization overhead, and fragmented indices.
 
 ### C. State Management & Memory Persistence
-* **Strengths**: 
+* **Strengths**:
   - Every graph run yields a complete, immutable snapshot (`LetterGraphResult`) containing the exact plan, draft, trace timings, context documents, and warnings. This is persisted to MongoDB on the parent Letter document.
-* **Weaknesses**: 
+* **Weaknesses**:
   - The simulated pipeline lacks native execution resumption or pausing. If a node fails (e.g., LLM timeout), the entire execution chain must be restarted from the beginning, wasting tokens and API runtime.
 
 ### D. LLM Interactions & Prompts
-* **Strengths**: 
+* **Strengths**:
   - Prompts are externalized and manageable via `LLMConfigService` and stored in MongoDB database templates, permitting updates without code deployment.
-* **Weaknesses**: 
+* **Weaknesses**:
   - No structured output schemas (e.g., Pydantic parsing / JSON mode) are enforced on LLM generators. The system relies on string parsing and regular expressions (e.g., parsing the reviewer's output with `parts = line.split("|")`), which is highly vulnerable to format breakage when changing LLM models.
 
 ### E. Scalability & Concurrency
-* **Strengths**: 
+* **Strengths**:
   - Node executions are isolated and async, avoiding thread-blocking bottlenecks during LLM calls.
-* **Weaknesses**: 
+* **Weaknesses**:
   - Multi-tenancy boundaries are enforced programmatically in python (`collect_context` manually filters by `organization_id` and `project_id`) rather than at the database connection or graph-namespace level. A bug in Python filtering could leak graph context across tenants.
 
 ### F. Security Analysis
-* **Strengths**: 
+* **Strengths**:
   - The Graphiti `raw_query` endpoint has regex protection (`_DANGEROUS_CYPHER_RE`) to block destructive operations (`DROP`, `DELETE`, `REMOVE`).
   - Graphiti is hardened with CORS controls and API key authentication.
-* **Weaknesses**: 
+* **Weaknesses**:
   - **Raw Cypher Concatenation Vulnerability**: `FalkorGraphService.get_thread` concatenates raw integers into Cypher statements:
     ```python
     f"MATCH (root:Letter {{normCode:$norm}}) OPTIONAL MATCH (root)-[:CITES|REPLIES_TO*1..{depth}]-(neighbor:Letter)"
@@ -157,9 +157,9 @@ FalkorDB (built on Redis) supports native **Vector Search indices**. By storing 
 2. Eliminate MongoDB Atlas Vector Search indexing overhead.
 3. Perform hybrid Vector + Graph queries in a single Cypher command, such as:
    ```cypher
-   CALL db.idx.vector.queryNodes('Letter', 'vector_index', 5, $query_vector) 
-   YIELD node, similarity 
-   MATCH (node)-[:REFERENCES]->(clause:Clause) 
+   CALL db.idx.vector.queryNodes('Letter', 'vector_index', 5, $query_vector)
+   YIELD node, similarity
+   MATCH (node)-[:REFERENCES]->(clause:Clause)
    RETURN node, clause, similarity
    ```
 

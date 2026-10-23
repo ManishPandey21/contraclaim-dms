@@ -32,6 +32,8 @@ import { api } from "@/services/api";
 import { listOrganizations } from "@/services/organizations-api";
 import { listProjects } from "@/services/projects-api";
 import type { DocumentBulkDownloadType } from "@/types/api";
+import { joinApiUrl } from "@/config/api";
+import { fetchApiFileBlob } from "@/services/http";
 
 type UploadType = "incoming" | "outgoing" | "contract";
 
@@ -415,14 +417,11 @@ const FolderStructurePage: React.FC = () => {
 
     setDownloadingId(node.id);
     try {
-      const response = await api.get(`/documents/${id}/download`, {
-        responseType: "blob",
-      });
-      const filename =
-        extractFilenameFromDisposition(response.headers["content-disposition"]) ||
-        doc.filename ||
-        "document";
-      triggerBlobDownload(response.data as Blob, filename);
+      // Not through axios: a stored file answers with a redirect to storage, and the
+      // redirected request would carry the navbar selection (see fetchApiFileBlob).
+      const blob = await fetchApiFileBlob(joinApiUrl(`/documents/${id}/download`));
+      const filename = doc.filename || "document";
+      triggerBlobDownload(blob, filename);
       toast({
         title: "Download ready",
         description: `${filename} downloaded successfully.`,
