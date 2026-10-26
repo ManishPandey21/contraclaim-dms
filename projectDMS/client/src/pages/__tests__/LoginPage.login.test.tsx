@@ -47,6 +47,26 @@ describe("LoginPage login process", () => {
     window.localStorage.removeItem("proj_id");
   });
 
+  it("shows the schema's messages for an invalid email and short password and does not submit", async () => {
+    vi.mocked(getCurrentUserProfile).mockRejectedValue(new Error("No active session"));
+
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/login"]}>
+        <LoginPage />
+      </MemoryRouter>
+    );
+
+    // "a@b" passes the browser's type="email" check but not the schema's.
+    await user.type(screen.getByLabelText(/^work email$/i), "a@b");
+    await user.type(screen.getByLabelText(/^password$/i), "12345");
+    await user.click(screen.getByRole("button", { name: /^sign in$/i }));
+
+    expect(await screen.findByText("Invalid email address")).toBeInTheDocument();
+    expect(screen.getByText("Password must be at least 6 characters")).toBeInTheDocument();
+    expect(loginWithPassword).not.toHaveBeenCalled();
+  });
+
   it("logs in superadmin, verifies /me roles, clears legacy auth storage, and navigates to overview", async () => {
     vi.mocked(getCurrentUserProfile)
       .mockRejectedValueOnce(new Error("No active session"))
