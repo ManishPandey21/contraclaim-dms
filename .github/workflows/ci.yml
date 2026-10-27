@@ -101,6 +101,15 @@ jobs:
       - name: Run backend test suite
         working-directory: projectDMS
         run: python -m pytest backend/rbac_backend/tests -q
+      # The exhibit path-confinement suite includes a symlink-escape test that can
+      # only run where symlinks can be created. It skips on Windows by design; on
+      # this runner it must execute, and a skip would read as green in the step
+      # above, so the module is re-run here and fails unless every test ran.
+      - name: Run the exhibit path-confinement suite (must run, not skip)
+        working-directory: projectDMS
+        run: |
+          python -m pytest -q -rs --junitxml=exhibit-confinement.xml             backend/rbac_backend/tests/test_arbitration_exhibit_source_resolution.py
+          python scripts/assert_suites_ran.py exhibit-confinement.xml             backend/rbac_backend/tests/test_arbitration_exhibit_source_resolution.py
       # The canonical-relationship suites need transactions, which the `mongo`
       # service above (a standalone mongod) cannot give, so in the step above they
       # skip. CL-2: a disposable single-node replica set, used by these suites
