@@ -11,6 +11,7 @@ real server file is ever read.
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -208,12 +209,12 @@ async def test_a_recorded_traversal_path_is_refused(db: _Database) -> None:
     assert entry["content"] is None
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="creating symlinks needs a Windows privilege; Linux CI must run this")
 async def test_a_recorded_symlink_escaping_the_storage_roots_is_refused(db: _Database, storage: dict[str, Path]) -> None:
+    # No skip on other platforms: if the symlink cannot be made, the test fails
+    # rather than reporting a silent pass for the escape it exists to cover.
     link = storage["uploads"] / "escape.pdf"
-    try:
-        os.symlink(storage["outside"] / "canary.txt", link)
-    except (OSError, NotImplementedError) as exc:
-        pytest.skip(f"symlinks are not available here: {exc}")
+    os.symlink(storage["outside"] / "canary.txt", link)
     db.documents.docs.append(_document(DOC_A1_SYMLINK, ORG_A, A1, filepath_local=str(link)))
     row = await _exhibit(db, source_id=str(DOC_A1_SYMLINK))
     entry = await _collect(db, row)
