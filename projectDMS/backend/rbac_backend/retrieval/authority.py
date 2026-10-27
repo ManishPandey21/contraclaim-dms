@@ -45,26 +45,41 @@ def is_authority_key(key: Any) -> bool:
     return normalised.rsplit(".", 1)[-1] in AUTHORITY_FILTER_KEYS
 
 
+def _is_operator_value(value: Any) -> bool:
+    """True for a value that is not a scalar or a list of scalars.
+
+    A metadata entry is an equality condition on one field. A mapping value is a
+    Mongo operator expression (`{"$regex": ...}`, `{"$ne": None}`) or a
+    sub-document match, which the Mongo fallbacks would evaluate as given.
+    """
+    if isinstance(value, Mapping):
+        return True
+    if isinstance(value, (list, tuple, set)):
+        return any(isinstance(item, (Mapping, list, tuple, set)) for item in value)
+    return False
+
+
 def user_metadata_filters(metadata: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     """The caller's metadata with every authority-owned key removed.
 
     Dropped rather than rejected: a client that echoes its own org id in
     metadata keeps working, and a foreign one has no effect because the
-    authority filter is applied separately. The drop is logged (keys only, never
-    values) so a client probing for other tenants is visible.
+    authority filter is applied separately. Entries whose value is an operator
+    expression rather than a scalar (or list of scalars) are dropped too. The
+    drop is logged (keys only, never values) so a client probing is visible.
     """
     if not metadata:
         return {}
     kept: Dict[str, Any] = {}
     dropped = []
     for key, value in metadata.items():
-        if is_authority_key(key):
+        if is_authority_key(key) or _is_operator_value(value):
             dropped.append(str(key))
             continue
         kept[key] = value
     if dropped:
         logger.warning(
-            "Dropped authority-owned keys from caller retrieval metadata: %s",
+            "Dropped authority-owned or operator entries from caller retrieval metadata: %s",
             sorted(dropped),
         )
     return kept

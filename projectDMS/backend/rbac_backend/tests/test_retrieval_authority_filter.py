@@ -523,6 +523,51 @@ def test_user_metadata_filters_drops_authority_and_operator_keys(key):
     assert user_metadata_filters({key: "org-B", "section": "delay"}) == {"section": "delay"}
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param({"$regex": "(a+)+$"}, id="regex"),
+        pytest.param({"$ne": None}, id="ne"),
+        pytest.param({"$exists": True}, id="exists"),
+        pytest.param({"nested": {"$gt": ""}}, id="nested-operator"),
+        pytest.param([{"$ne": None}], id="operator-in-list"),
+    ],
+)
+def test_user_metadata_filters_drops_operator_values(value):
+    # A metadata entry is an equality condition on one field. A mapping value
+    # is a Mongo operator expression (or a sub-document match) the caller
+    # never needs: the client sends scalars only (ContractQAPage).
+    from rbac_backend.retrieval.authority import user_metadata_filters
+
+    assert user_metadata_filters({"clause_no": value, "section": "delay"}) == {"section": "delay"}
+
+
+def test_user_metadata_filters_keeps_scalar_and_scalar_list_values():
+    from rbac_backend.retrieval.authority import user_metadata_filters
+
+    metadata = {"section": "delay", "clause_no": ["8.4", "13.3"], "page": 3, "draft": False}
+    assert user_metadata_filters(metadata) == metadata
+
+
+@pytest.mark.asyncio
+async def test_contract_mongo_fallback_never_receives_operator_values():
+    db = _DB(document_vectors=_contract_rows())
+    svc = _service(db, _memory_vector_client())
+    request = SearchRequest(
+        query="alpha",
+        backend=SearchBackend.MONGO,
+        filters=SearchFilters(
+            org_id="org-A",
+            project_id="proj-A",
+            metadata={"uploadType": "contract", "text": {"$regex": "(a+)+$"}},
+        ),
+    )
+    rows = await svc._search_contract_mongo(request)
+    assert {r["payload"]["chunk_id"] for r in rows} == {"dv-org-A-proj-A"}
+    for query in db.document_vectors.queries:
+        assert "text" not in query, query
+
+
 def test_user_metadata_filters_tolerates_empty_input():
     from rbac_backend.retrieval.authority import user_metadata_filters
 
