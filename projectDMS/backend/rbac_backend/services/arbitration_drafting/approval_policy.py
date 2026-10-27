@@ -15,6 +15,16 @@ def _actor_id(user: Any) -> Any:
     return getattr(user, "id", None) or getattr(user, "email", None)
 
 
+#: A rejoinder permission covers the content it was granted on; any change to
+#: that content withdraws it.
+REVOKED_REJOINDER_PERMISSION: Dict[str, Any] = {
+    "permission_obtained": False,
+    "permission_approved_by": None,
+    "permission_approved_at": None,
+    "permission_approval_receipt_id": None,
+}
+
+
 def material_contributors(existing: Mapping[str, Any], actor: Optional[str]) -> List[str]:
     """Everyone who changed a row's reviewed content since its last full approval.
 
@@ -70,14 +80,7 @@ def material_change_review_reset(
         ],
     }
     if existing.get("permission_obtained"):
-        reset.update(
-            {
-                "permission_obtained": False,
-                "permission_approved_by": None,
-                "permission_approved_at": None,
-                "permission_approval_receipt_id": None,
-            }
-        )
+        reset.update(REVOKED_REJOINDER_PERMISSION)
     return reset
 
 

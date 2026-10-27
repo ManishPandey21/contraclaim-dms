@@ -452,3 +452,66 @@ def test_an_edit_cannot_write_rejoinder_permission_records(field: str, value: st
         ArbitrationMatrixRowUpdate(**{field: value})
     with pytest.raises(ValidationError):
         ArbitrationMatrixRowCreate(**{field: value})
+
+
+# ---------------------------------------------------------------------------
+# Editing a paragraph response revokes a rejoinder permission granted on it
+# ---------------------------------------------------------------------------
+
+
+def _rejoinder_with_permission(db: _FakeDb) -> None:
+    from backend.rbac_backend.services.arbitration_drafting.paragraph_positions import sync_paragraph_position_projection
+
+    draft = db.arbitration_drafts.rows[0]
+    draft["draft_type"] = "rejoinder"
+    response = {
+        "_id": "para-sod-20",
+        "draft_id": "draft-1",
+        "source_pleading_type": "statement_of_defence",
+        "source_paragraph_number": "20",
+        "source_paragraph_text": "The delay was caused by the Claimant.",
+        "response_type": "admit",
+        "response_text": "New matter: the access log shows late handover.",
+        "supporting_source_ids": [],
+        "missing_evidence": [],
+        "new_matter": True,
+        "permission_required": True,
+        "permission_obtained": True,
+        "permission_source_id": "doc-1",
+        "permission_approved_by": "legal-1",
+        "permission_approval_receipt_id": "receipt-1",
+    }
+    db.arbitration_paragraph_responses.rows.append(response)
+    asyncio.run(sync_paragraph_position_projection(db, draft, response, actor_id="drafter-1"))
+    db.arbitration_rejoinder_matrix.rows[0].update({"approval_status": "approved", "review_status": "approved"})
+
+
+def _update_response(db: _FakeDb, text: str) -> dict:
+    from backend.rbac_backend.models.arbitration_drafting import ArbitrationParagraphResponseUpdate
+    from backend.rbac_backend.services.arbitration_drafting.service import ArbitrationDraftingService
+
+    payload = ArbitrationParagraphResponseUpdate(response_type="admit", response_text=text)
+    return asyncio.run(ArbitrationDraftingService(db).update_paragraph_response("draft-1", "para-sod-20", payload, _FakeUser("legal-1")))
+
+
+def test_rewriting_permitted_new_matter_revokes_the_permission() -> None:
+    db = _FakeDb()  # an unlocked draft; the module fixture approves and locks it
+    _rejoinder_with_permission(db)
+
+    updated = _update_response(db, "New matter: an entirely different contention.")
+
+    projection = db.arbitration_rejoinder_matrix.rows[0]
+    assert updated["permission_obtained"] is False
+    assert updated["permission_approval_receipt_id"] is None
+    assert projection["permission_obtained"] is False
+    assert projection["approval_status"] == "needs_review"
+
+
+def test_saving_an_unchanged_paragraph_response_keeps_the_permission() -> None:
+    db = _FakeDb()  # an unlocked draft; the module fixture approves and locks it
+    _rejoinder_with_permission(db)
+
+    updated = _update_response(db, "New matter: the access log shows late handover.")
+
+    assert updated["permission_obtained"] is True
+    assert db.arbitration_rejoinder_matrix.rows[0]["permission_obtained"] is True

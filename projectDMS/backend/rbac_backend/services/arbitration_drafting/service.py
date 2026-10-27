@@ -40,7 +40,7 @@ from .llm_generator import LLMDraftGenerator
 from .case_workspace import ArbitrationCaseWorkspaceService
 from .repository import ArbitrationDraftingRepository, _jsonable
 from .validator import ArbitrationDraftValidator
-from .approval_policy import enforce_author_approver_separation, resolve_gate_role
+from .approval_policy import REVOKED_REJOINDER_PERMISSION, enforce_author_approver_separation, resolve_gate_role
 from .workflow_governance import (
     require_approved_plan_for_generation,
     require_governed_workflow_chain,
@@ -391,18 +391,25 @@ class ArbitrationDraftingService:
             raise HTTPException(status_code=422, detail="A denial requires a reason")
         if not supporting_ids and payload.response_type in {ParagraphResponseType.DENY, ParagraphResponseType.REQUIRE_PROOF}:
             missing = missing or ["Supporting response evidence not selected."]
-        updated = await self.repo.update_paragraph_response(
-            draft_id,
-            response_id,
-            {
-                **payload.model_dump(mode="json"),
-                "supporting_source_ids": supporting_ids,
-                "missing_evidence": missing,
-                "last_material_editor_id": _actor_id(current_user),
-                "updated_by": _actor_id(current_user),
-                "updated_at": datetime.utcnow(),
-            },
+        content = {
+            **payload.model_dump(mode="json"),
+            "supporting_source_ids": supporting_ids,
+            "missing_evidence": missing,
+        }
+        existing = next(
+            (row for row in await self.repo.list_paragraph_responses(draft_id) if str(row.get("_id")) == str(response_id)),
+            None,
         )
+        changes = {
+            **content,
+            "last_material_editor_id": _actor_id(current_user),
+            "updated_by": _actor_id(current_user),
+            "updated_at": datetime.utcnow(),
+        }
+        if existing and existing.get("permission_obtained") and any(existing.get(key) != value for key, value in content.items()):
+            # The permission covered the old content; the projection inherits the revocation.
+            changes.update(REVOKED_REJOINDER_PERMISSION)
+        updated = await self.repo.update_paragraph_response(draft_id, response_id, changes)
         if not updated:
             raise HTTPException(status_code=404, detail="Paragraph response not found")
         await sync_paragraph_position_projection(
