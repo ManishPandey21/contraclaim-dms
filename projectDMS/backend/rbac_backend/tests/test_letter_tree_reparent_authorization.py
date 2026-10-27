@@ -602,3 +602,28 @@ async def test_an_unreadable_descendant_row_blocks_the_move_visibly(db: _Databas
         response = await client.post(f"/api/letters/{CHILD_A1}/reparent", json={"new_parent_id": BRANCH_A1})
     assert response.status_code == 409, response.text
     assert _snapshot(db) == before
+
+
+# ---------------------------------------------------------------------------
+# The authorised chain itself applies the drafter rule (drafting, LangGraph and
+# strategy consumers call it directly, not through the route)
+# ---------------------------------------------------------------------------
+
+
+async def test_the_authorised_chain_gives_a_drafter_only_assigned_letters(db: _Database) -> None:
+    _assign(db, GRAND_A1, DRAFTER_A1)
+    service = ConversationService(LetterService(db))
+    service._db = db
+
+    chain = await service.get_authorized_conversation_chain(GRAND_A1, DRAFTER_A1)
+
+    assert [str(letter.id) for letter in chain] == [GRAND_A1]
+
+
+async def test_the_authorised_chain_is_unchanged_for_other_readers(db: _Database) -> None:
+    service = ConversationService(LetterService(db))
+    service._db = db
+
+    chain = await service.get_authorized_conversation_chain(GRAND_A1, PROJECT_A1_READER)
+
+    assert {str(letter.id) for letter in chain} == {ROOT_A1, CHILD_A1, GRAND_A1}

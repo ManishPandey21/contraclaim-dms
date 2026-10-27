@@ -66,11 +66,12 @@ class ConversationService:
         pipeline and the drafting context builder) whose semantics must not
         change implicitly.
 
-        The boundary is the canonical `build_scope_query`, asked of Mongo so the
+        The boundary is the canonical letter-listing query (`build_scope_query`
+        plus the drafter-assignment rule), asked of Mongo so the
         one row-visibility primitive decides. The ANCHOR letter's own
         organisation and project narrow INSIDE that entitlement - a value
-        outside it denies every row - and are never the authority source. No
-        role name is read here.
+        outside it denies every row - and are never the authority source. Role
+        names are read only by that builder, for the drafter rule.
         """
         ordered = await self.get_conversation_chain(letter_id, current_user)
         if not ordered or current_user is None:
@@ -79,7 +80,7 @@ class ConversationService:
         # Private to `core.security` by name only; it is the canonical id
         # expansion that `build_scope_query` itself uses, and reimplementing it
         # here would let the two drift.
-        from ..core.security import build_scope_query, _expand_object_ids
+        from ..core.security import _expand_object_ids
 
         anchor = next(
             (letter for letter in ordered if str(letter.id) == str(letter_id)), None
@@ -95,10 +96,14 @@ class ConversationService:
             else None
         )
 
-        scope = build_scope_query(
+        # The letter-listing query: `build_scope_query` plus the per-letter rules
+        # it cannot express (a contract drafter sees only assigned letters).
+        # Drafting, LangGraph and strategy consumers read the thread through here.
+        from .authorization_service import AuthorizationService
+
+        scope = await AuthorizationService().build_letter_query(
             current_user,
-            organization_id=organization_id,
-            project_id=project_id,
+            {"organization_id": organization_id, "project_id": project_id},
         )
 
         identifiers = [str(letter.id) for letter in ordered if letter.id]
