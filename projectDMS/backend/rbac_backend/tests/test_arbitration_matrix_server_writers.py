@@ -388,3 +388,24 @@ def test_a_rollup_never_overwrites_an_edit_that_landed_between_its_read_and_writ
     assert [entry.get("actor_id") for entry in summary["approval_log"]] == ["editor-7", AGENT_USER["id"]]
     assert summary["edit_revision"] == 3
     assert summary["principal_total"] == 105.0
+
+
+def test_a_rollup_does_not_write_a_summary_deleted_between_its_read_and_write(db: _WorkspaceDatabase) -> None:
+    db.arbitration_quantum_annexures.docs.append(_annexure("P-1", 100.0, **APPROVED))
+    _rollup(db)
+    _summary(db).update({**APPROVED, "edit_revision": 1})
+    db.arbitration_quantum_annexures.docs.append(_annexure("P-2", 5.0))
+    collection = db.arbitration_quantum_annexures
+    original = collection.update_one
+    fired = []
+
+    async def _deleted_first(query, update, *args, **kwargs):
+        if not fired:
+            fired.append(True)
+            _summary(db)["deleted_at"] = "2026-10-27T00:00:00"
+        return await original(query, update, *args, **kwargs)
+
+    collection.update_one = _deleted_first
+    _rollup(db)
+
+    assert _summary(db)["principal_total"] == 100.0

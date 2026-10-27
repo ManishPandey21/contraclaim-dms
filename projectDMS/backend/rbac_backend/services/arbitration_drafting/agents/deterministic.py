@@ -565,7 +565,12 @@ class DeterministicArbitrationAgent:
                 # entries are carried forward; written only at that revision.
                 reset = material_change_review_reset(self._status_defaults("quantum-annexures"), existing, changed, actor, now)
                 result = await collection.update_one(
-                    {"_id": existing["_id"], "case_id": self.case_id, "edit_revision": existing.get("edit_revision")},
+                    {
+                        "_id": existing["_id"],
+                        "case_id": self.case_id,
+                        "deleted_at": {"$exists": False},
+                        "edit_revision": existing.get("edit_revision"),
+                    },
                     {"$set": _jsonable({**summary_fields, **reset, "updated_by": actor, "updated_at": now}), "$inc": {"edit_revision": 1}},
                 )
                 if getattr(result, "matched_count", 0):
