@@ -803,7 +803,15 @@ class UserController:
                 status.HTTP_403_FORBIDDEN,
             )
 
-        requested_projects = [str(project) for project in (getattr(update_data, "projects", None) or []) if project]
+        await self._refuse_projects_outside_organization(
+            getattr(update_data, "projects", None), existing_org
+        )
+
+    async def _refuse_projects_outside_organization(
+        self, projects: Optional[List[Any]], organization_id: Optional[str]
+    ) -> None:
+        """403 unless every project belongs to ``organization_id``."""
+        requested_projects = [str(project) for project in (projects or []) if project]
         if not requested_projects:
             return
         from bson import ObjectId
@@ -814,7 +822,7 @@ class UserController:
             {"organization_id": 1},
         )
         found = {str(row["_id"]): str(row.get("organization_id") or "") for row in await cursor.to_list(length=None)}
-        outside = [project for project in requested_projects if found.get(project) != str(existing_org or "")]
+        outside = [project for project in requested_projects if found.get(project) != str(organization_id or "")]
         if outside:
             raise UserError(
                 "Not authorized to assign projects outside the user's organization",
@@ -855,6 +863,15 @@ class UserController:
                 )
             # Set user's organization to current user's organization
             user_data.organization_id = str(current_org)
+            # `organizations` is membership to ScopeService/AuthorizationService, so
+            # a foreign entry would grant the new user that tenant (AUDIT-005).
+            if any(str(org) != str(current_org) for org in (user_data.organizations or [])):
+                raise UserError(
+                    "Not authorized to grant a user another organization",
+                    status.HTTP_403_FORBIDDEN,
+                )
+            user_data.organizations = [str(current_org)]
+            await self._refuse_projects_outside_organization(user_data.projects, current_org)
 
         # Project-scoped roles must include project assignments; project-scoped actors cannot assign outside their projects
         target_roles = set(user_data.roles or [])
