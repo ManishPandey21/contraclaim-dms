@@ -167,6 +167,24 @@ SERVER_CONTROLLED_MATRIX_FIELDS = {
 }
 
 
+# A row belongs to the case it was created in: these are copied from that case,
+# never taken from a client body. A body may echo them unchanged.
+MATRIX_ROW_OWNERSHIP_FIELDS = ("case_id", "organization_id", "project_id", "contract_id")
+
+
+def _strip_row_ownership(body: Dict[str, Any], owner: Dict[str, Any]) -> None:
+    changed = sorted(
+        key
+        for key in MATRIX_ROW_OWNERSHIP_FIELDS
+        if key in body and str(body.pop(key)) != str(owner.get(key) or "")
+    )
+    if changed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Matrix row ownership is server-controlled: " + ", ".join(changed),
+        )
+
+
 def _matrix_review_defaults(matrix_slug: str) -> Dict[str, Any]:
     defaults: Dict[str, Any] = {
         "approval_status": "needs_review",
@@ -362,6 +380,7 @@ class ArbitrationCaseWorkspaceService:
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Draft-bound defence/rejoinder positions are server-owned projections; update the paragraph response instead",
             )
+        _strip_row_ownership(body, {**case, "case_id": case_id})
         for key in SERVER_CONTROLLED_MATRIX_FIELDS:
             body.pop(key, None)
         if str(body.get("status") or "").lower() in {"approved", "ready", "verified"}:
@@ -397,13 +416,16 @@ class ArbitrationCaseWorkspaceService:
         existing = await collection.find_one(
             {"_id": row_id, "case_id": case_id, "deleted_at": {"$exists": False}}
         )
-        if existing and is_paragraph_position_projection(existing):
+        if not existing:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Arbitration matrix row not found")
+        if is_paragraph_position_projection(existing):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="This row is a read-only paragraph-response projection; update the authoritative paragraph response instead",
             )
         update = _clean_payload(payload.model_dump(exclude_unset=True, by_alias=True))
         update.pop("_id", None)
+        _strip_row_ownership(update, existing)
         for key in SERVER_CONTROLLED_MATRIX_FIELDS:
             update.pop(key, None)
         if str(update.get("status") or "").lower() in {"approved", "ready", "verified"}:
