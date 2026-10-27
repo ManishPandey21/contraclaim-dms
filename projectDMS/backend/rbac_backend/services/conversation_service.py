@@ -173,6 +173,7 @@ class ConversationService:
         seed = await letter_service.get_letter(letter_id)
         if not seed or not seed.id:
             return None
+        seed_id = str(seed.id)
 
         from ..core.security import build_scope_query, _expand_object_ids
 
@@ -197,13 +198,14 @@ class ConversationService:
         queue: deque[str] = deque()
 
         def enqueue(letter: Letter) -> None:
-            if letter.id and letter.id not in family:
-                family[letter.id] = letter
-                queue.append(letter.id)
+            letter_id = str(letter.id) if letter.id else ""
+            if letter_id and letter_id not in family:
+                family[letter_id] = letter
+                queue.append(letter_id)
 
-        for letter in await visible({"_id": {"$in": _expand_object_ids([seed.id])}}):
+        for letter in await visible({"_id": {"$in": _expand_object_ids([seed_id])}}):
             enqueue(letter)
-        if seed.id not in family:
+        if seed_id not in family:
             return None
         if seed.conversation_id:
             for letter in await visible({"conversation_id": seed.conversation_id}):
@@ -215,14 +217,14 @@ class ConversationService:
             if related:
                 for letter in await visible({"_id": {"$in": _expand_object_ids(related)}}):
                     enqueue(letter)
-            for letter in await visible({"previous_letter_id": current.id}):
+            for letter in await visible({"previous_letter_id": str(current.id)}):
                 enqueue(letter)
 
         if include is not None:
             # Per-letter rules beyond row scope (for example drafter assignment).
-            family = {key: member for key, member in family.items() if key == seed.id or await include(member)}
+            family = {key: member for key, member in family.items() if key == seed_id or await include(member)}
         family = await self.with_visible_threading(family)
-        return self._pruned_tree(family[seed.id], family)
+        return self._pruned_tree(family[seed_id], family)
 
     async def with_visible_threading(self, letters: Dict[str, Letter]) -> Dict[str, Letter]:
         """Copies of ``letters`` whose threading fields name only letters in ``letters``.
@@ -273,10 +275,13 @@ class ConversationService:
 
         parent_of = {letter_id: visible_parent(letter) for letter_id, letter in family.items()}
 
-        root_id = seed.id
+        root_id = str(seed.id)
         seen: Set[str] = {root_id}
-        while parent_of.get(root_id) and parent_of[root_id] not in seen:
-            root_id = parent_of[root_id]
+        while True:
+            parent = parent_of.get(root_id)
+            if not parent or parent in seen:
+                break
+            root_id = parent
             seen.add(root_id)
 
         children_map: Dict[str, List[Letter]] = defaultdict(list)
@@ -287,9 +292,9 @@ class ConversationService:
         built: Set[str] = set()
 
         def build_node(node: Letter) -> ConversationTree:
-            built.add(node.id)
+            built.add(str(node.id))
             ordered_children = sorted(
-                (child for child in children_map.get(node.id, []) if child.id not in built),
+                (child for child in children_map.get(str(node.id), []) if str(child.id) not in built),
                 key=lambda item: (
                     getattr(item, "depth", 0) if getattr(item, "depth", None) is not None else 0,
                     getattr(item, "created_at", None) or getattr(item, "createdAt", None) or datetime.min,
