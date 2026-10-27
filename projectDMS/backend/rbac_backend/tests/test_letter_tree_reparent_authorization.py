@@ -14,6 +14,7 @@ checks run for real.
 
 from __future__ import annotations
 
+import logging
 import sys
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -644,22 +645,27 @@ def _corrupt(db: _Database, letter_id: str) -> None:
 
 @pytest.mark.parametrize("route", ["tree", "chain"])
 async def test_a_corrupt_seed_letter_is_not_found(db: _Database, route: str, caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG)
     _corrupt(db, GRAND_A1)
     async with _as(db, PROJECT_A1_EDITOR) as client:
         response = await client.get(f"/api/letters/{GRAND_A1}/{route}")
     assert response.status_code == 404, response.text
     assert MARKER[GRAND_A1] not in response.text
-    # A validation message echoes the failing fields' stored values; none may be logged.
+    # A validation message echoes the failing fields' stored values; none may be
+    # logged at any level - but the failure itself is (positive control).
+    assert "failed validation" in caplog.text
     assert "not-a-date" not in caplog.text and "not-a-number" not in caplog.text
 
 
 async def test_a_corrupt_parent_is_not_found_and_nothing_moves(db: _Database, caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG)
     _corrupt(db, ROOT_A1)
     before = _snapshot(db)
     async with _as(db, PROJECT_A1_EDITOR) as client:
         response = await client.post(f"/api/letters/{GRAND_A1}/reparent", json={"new_parent_id": ROOT_A1})
     assert response.status_code == 404, response.text
     assert _snapshot(db) == before
+    assert "failed validation" in caplog.text
     assert "not-a-date" not in caplog.text and "not-a-number" not in caplog.text
 
 
