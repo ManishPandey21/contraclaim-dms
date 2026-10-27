@@ -1044,7 +1044,7 @@ class LetterController:
 
 
 
-            letter = await self._readable_letter_or_404(letter_id, current_user)
+            await self._readable_letter_or_404(letter_id, current_user)
 
 
 
