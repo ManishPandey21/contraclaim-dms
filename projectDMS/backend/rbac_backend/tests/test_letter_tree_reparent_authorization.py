@@ -67,6 +67,7 @@ PROJECT_A1_EDITOR = _principal("u-editor-a1", ["projectuser"], ORG_A, [A1])
 PROJECT_A1_READER = _principal("u-reader-a1", ["projectuser"], ORG_A, [A1])
 ORG_B_ADMIN = _principal("u-orgadmin-b", ["orgadmin"], ORG_B)
 ORG_A_ADMIN = _principal("u-orgadmin-a", ["orgadmin"], ORG_A)
+DRAFTER_A1 = _principal("u-drafter-a1", ["projectuser", "contract_letter_drafter"], ORG_A, [A1])
 SUPERADMIN = _principal("u-root", ["superadmin"], None)
 
 GRANTS: dict[str, set[str]] = {
@@ -74,6 +75,7 @@ GRANTS: dict[str, set[str]] = {
     PROJECT_A1_READER.id: {"dms.document.view"},
     ORG_B_ADMIN.id: VIEW_EDIT,
     ORG_A_ADMIN.id: VIEW_EDIT,
+    DRAFTER_A1.id: {"dms.document.view"},
 }
 
 
@@ -425,3 +427,38 @@ async def test_descendants_whose_ancestry_is_stored_as_object_ids_are_rewritten(
         response = await client.post(f"/api/letters/{CHILD_A1}/reparent", json={"new_parent_id": BRANCH_A1})
     assert response.status_code == 200, response.text
     assert _snapshot(db)[GRAND_A1] == (CHILD_A1, [ROOT_A1, BRANCH_A1, CHILD_A1], 3)
+
+
+# ---------------------------------------------------------------------------
+# Tree and chain: every member passes the same per-letter rule as the seed
+# ---------------------------------------------------------------------------
+
+
+def _assign(db: _Database, letter_id: str, user: Any) -> None:
+    for row in db.letters.docs:
+        if str(row["_id"]) == letter_id:
+            row["assigned_to"] = user.id
+
+
+@pytest.mark.parametrize("route", ["tree", "chain"])
+async def test_a_drafter_sees_only_assigned_letters_of_the_thread(db: _Database, route: str) -> None:
+    # The drafter may read GRAND_A1 (assigned to them); ROOT_A1 and CHILD_A1
+    # are in the same project but assigned to someone else.
+    _assign(db, GRAND_A1, DRAFTER_A1)
+    async with _as(db, DRAFTER_A1) as client:
+        response = await client.get(f"/api/letters/{GRAND_A1}/{route}")
+    assert response.status_code == 200, response.text
+    ids = _tree_ids(response.json()) if route == "tree" else _chain_ids(response.json())
+    assert ids == {GRAND_A1}
+    assert not _leaks(response.text, ROOT_A1, CHILD_A1, SIBLING_A2, FOREIGN_B1)
+
+
+@pytest.mark.parametrize("route", ["tree", "chain"])
+async def test_a_drafter_sees_every_assigned_letter_of_the_thread(db: _Database, route: str) -> None:
+    for letter_id in (ROOT_A1, CHILD_A1, GRAND_A1):
+        _assign(db, letter_id, DRAFTER_A1)
+    async with _as(db, DRAFTER_A1) as client:
+        response = await client.get(f"/api/letters/{GRAND_A1}/{route}")
+    assert response.status_code == 200, response.text
+    ids = _tree_ids(response.json()) if route == "tree" else _chain_ids(response.json())
+    assert ids == {ROOT_A1, CHILD_A1, GRAND_A1}

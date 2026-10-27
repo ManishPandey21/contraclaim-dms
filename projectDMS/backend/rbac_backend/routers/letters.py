@@ -772,6 +772,66 @@ class LetterController:
 
 
 
+    async def _member_readable(self, current_user: CurrentUser, member: Letter) -> bool:
+
+
+
+        """Apply the seed's per-letter read rule (scope, drafter assignment, permission) to a thread member."""
+
+
+
+        try:
+
+
+
+            await self.auth_service.check_letter_access(current_user, member, "read")
+
+
+
+        except BaseDomainError as exc:
+
+
+
+            if exc.http_status in (status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND):
+
+
+
+                return False
+
+
+
+            raise
+
+
+
+        except HTTPException as exc:
+
+
+
+            if exc.status_code in (status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND):
+
+
+
+                return False
+
+
+
+            raise
+
+
+
+        return True
+
+
+
+
+
+
+
+
+
+
+
     async def get_conversation_chain(
 
 
@@ -845,6 +905,22 @@ class LetterController:
 
 
             )
+
+
+
+            chain = [
+
+
+
+                member for member in chain
+
+
+
+                if str(member.id) == str(letter.id) or await self._member_readable(current_user, member)
+
+
+
+            ]
 
 
 
@@ -964,7 +1040,15 @@ class LetterController:
 
 
 
-                letter_id, current_user
+                letter_id,
+
+
+
+                current_user,
+
+
+
+                include=lambda member: self._member_readable(current_user, member),
 
 
 

@@ -2,7 +2,7 @@
 
 from collections import defaultdict, deque
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional, Set
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Set
 
 from bson import ObjectId
 
@@ -143,7 +143,10 @@ class ConversationService:
         return build_node(root)
 
     async def build_authorized_conversation_tree(
-        self, letter_id: str, current_user: Any
+        self,
+        letter_id: str,
+        current_user: Any,
+        include: Optional[Callable[[Letter], Awaitable[bool]]] = None,
     ) -> Optional[ConversationTree]:
         """The conversation tree, bounded by the ACTOR's canonical row visibility.
 
@@ -156,6 +159,8 @@ class ConversationService:
 
         Returns None when the anchor itself is not visible to the actor. The
         caller authorises the anchor separately (`check_letter_access`).
+        `include`, when given, applies the per-letter rules row scope cannot
+        express (drafter assignment) to every other member.
         """
         if current_user is None:
             return None
@@ -208,6 +213,9 @@ class ConversationService:
             for letter in await visible({"previous_letter_id": current.id}):
                 enqueue(letter)
 
+        if include is not None:
+            # Per-letter rules beyond row scope (for example drafter assignment).
+            family = {key: member for key, member in family.items() if key == seed.id or await include(member)}
         return self._pruned_tree(family[seed.id], family)
 
     @staticmethod
