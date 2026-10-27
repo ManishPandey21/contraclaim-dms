@@ -462,3 +462,61 @@ async def test_a_drafter_sees_every_assigned_letter_of_the_thread(db: _Database,
     assert response.status_code == 200, response.text
     ids = _tree_ids(response.json()) if route == "tree" else _chain_ids(response.json())
     assert ids == {ROOT_A1, CHILD_A1, GRAND_A1}
+
+
+# ---------------------------------------------------------------------------
+# Tree and chain: no identifier of an unreturned letter appears in the response
+# ---------------------------------------------------------------------------
+
+
+def _letters(payload: Any, route: str) -> list[dict[str, Any]]:
+    if route == "chain":
+        return list(payload)
+    out = [payload["letter"]]
+    for child in payload.get("children") or []:
+        out.extend(_letters(child, "tree"))
+    return out
+
+
+@pytest.mark.parametrize("route", ["tree", "chain"])
+async def test_a_foreign_member_does_not_reveal_the_hidden_thread_ids(db: _Database, route: str) -> None:
+    async with _as(db, ORG_B_ADMIN) as client:
+        response = await client.get(f"/api/letters/{FOREIGN_B1}/{route}")
+    assert response.status_code == 200, response.text
+    for hidden in (ROOT_A1, CHILD_A1, GRAND_A1, SIBLING_A2):
+        assert hidden not in response.text
+    (letter,) = _letters(response.json(), route)
+    assert letter.get("previous_letter_id") is None
+    assert letter.get("ancestors") == []
+
+
+async def test_a_reattached_member_reports_its_visible_parent_and_ancestry(db: _Database) -> None:
+    for row in db.letters.docs:
+        if str(row["_id"]) == CHILD_A1:
+            row["project_id"] = A2
+    async with _as(db, PROJECT_A1_READER) as client:
+        response = await client.get(f"/api/letters/{GRAND_A1}/tree")
+    assert response.status_code == 200, response.text
+    assert CHILD_A1 not in response.text
+    grand = next(item for item in _letters(response.json(), "tree") if str(item.get("_id") or item.get("id")) == GRAND_A1)
+    assert grand["previous_letter_id"] == ROOT_A1
+    assert grand["ancestors"] == [ROOT_A1]
+
+
+async def test_visible_ancestry_is_returned_unchanged(db: _Database) -> None:
+    async with _as(db, PROJECT_A1_EDITOR) as client:
+        response = await client.get(f"/api/letters/{GRAND_A1}/tree")
+    grand = next(item for item in _letters(response.json(), "tree") if str(item.get("_id") or item.get("id")) == GRAND_A1)
+    assert grand["previous_letter_id"] == CHILD_A1
+    assert grand["ancestors"] == [ROOT_A1, CHILD_A1]
+    assert grand["conversation_id"] == ROOT_A1
+
+
+async def test_an_opaque_conversation_key_that_names_no_letter_is_kept(db: _Database) -> None:
+    for row in db.letters.docs:
+        if row.get("conversation_id") == ROOT_A1:
+            row["conversation_id"] = "conversation-key-1"
+    async with _as(db, ORG_B_ADMIN) as client:
+        response = await client.get(f"/api/letters/{FOREIGN_B1}/chain")
+    assert response.status_code == 200, response.text
+    assert response.json()[0]["conversation_id"] == "conversation-key-1"

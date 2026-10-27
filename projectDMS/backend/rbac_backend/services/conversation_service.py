@@ -216,7 +216,46 @@ class ConversationService:
         if include is not None:
             # Per-letter rules beyond row scope (for example drafter assignment).
             family = {key: member for key, member in family.items() if key == seed.id or await include(member)}
+        family = await self.with_visible_threading(family)
         return self._pruned_tree(family[seed.id], family)
+
+    async def with_visible_threading(self, letters: Dict[str, Letter]) -> Dict[str, Letter]:
+        """Copies of ``letters`` whose threading fields name only letters in ``letters``.
+
+        `previous_letter_id` becomes the nearest returned ancestor (or None),
+        `ancestors` keeps only returned letters, and a `conversation_id` that is
+        the id of a letter not returned is cleared. An opaque conversation key
+        that names no letter is kept.
+        """
+        from ..core.security import _expand_object_ids
+
+        visible = set(letters)
+        unseen = {
+            str(letter.conversation_id)
+            for letter in letters.values()
+            if letter.conversation_id and str(letter.conversation_id) not in visible
+        }
+        hidden_conversations: Set[str] = set()
+        if unseen:
+            db = await self._get_db()
+            rows = await db.letters.find({"_id": {"$in": _expand_object_ids(sorted(unseen))}}, {"_id": 1}).to_list(length=None)
+            hidden_conversations = {str(row.get("_id")) for row in rows}
+
+        redacted: Dict[str, Letter] = {}
+        for key, letter in letters.items():
+            candidates = [letter.previous_letter_id, *reversed(letter.ancestors or [])]
+            parent = next(
+                (str(candidate) for candidate in candidates if candidate and str(candidate) in visible and str(candidate) != key),
+                None,
+            )
+            update: Dict[str, Any] = {
+                "previous_letter_id": parent,
+                "ancestors": [str(ancestor) for ancestor in (letter.ancestors or []) if str(ancestor) in visible],
+            }
+            if letter.conversation_id and str(letter.conversation_id) in hidden_conversations:
+                update["conversation_id"] = None
+            redacted[key] = letter.model_copy(update=update)
+        return redacted
 
     @staticmethod
     def _pruned_tree(seed: Letter, family: Dict[str, Letter]) -> ConversationTree:

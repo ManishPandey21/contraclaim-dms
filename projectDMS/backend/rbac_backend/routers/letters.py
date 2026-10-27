@@ -924,6 +924,14 @@ class LetterController:
 
 
 
+            visible = await self.conversation_service.with_visible_threading({str(member.id): member for member in chain})
+
+
+
+            chain = list(visible.values())
+
+
+
 
 
 
