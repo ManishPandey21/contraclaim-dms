@@ -58,6 +58,7 @@ from .workflow_governance import require_governed_workflow_chain
 from .paragraph_positions import PARAGRAPH_POSITION_MATRICES, is_paragraph_position_projection
 from .permission_receipts import (
     STATE_MESSAGES,
+    commit_permission_receipt,
     permission_receipt_binding,
     reconcile_stale_permission_receipts,
     unverified_new_matter,
@@ -750,11 +751,18 @@ class ArbitrationCaseWorkspaceService:
             permission_source = await self.db[collection_name].find_one(scope)
             if permission_source:
                 break
-        if not permission_source:
+        if permission_source and collection_name == "documents":
+            authoritative = (await resolve_document_authority(self.db, str(permission_source.get("_id")))).consumable
+        else:
+            authoritative = bool(permission_source) and is_consumable(permission_source)
+        if not authoritative:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Permission source must be an authoritative document in the same organization and project",
             )
+        # Interrupted decisions on this case are cleaned up here, on a write path,
+        # never by a reader.
+        await reconcile_stale_permission_receipts(self.db, case_id=case_id)
         actor = _actor_id(current_user)
         enforce_author_approver_separation(current_user, approval_barred_actors(row), gate="rejoinder permission")
         approver_role = resolve_gate_role("legal_review", current_user)
@@ -783,7 +791,7 @@ class ArbitrationCaseWorkspaceService:
             "approved_at": now,
             # Readers accept the permission only for this case, row, draft,
             # response revision and content (permission_receipts).
-            **permission_receipt_binding(row),
+            **permission_receipt_binding(row, permission_source),
         }
         await self.db.arbitration_workflow_approvals.insert_one(_jsonable(receipt))
         granted = {
@@ -842,15 +850,12 @@ class ArbitrationCaseWorkspaceService:
                 detail="Rejoinder matrix row changed during the permission decision; review the current content",
             )
         try:
-            committed = await self.db.arbitration_workflow_approvals.update_one(
-                {"_id": receipt["_id"], "receipt_status": "pending"},
-                {"$set": {"receipt_status": "committed", "committed_at": datetime.utcnow()}},
-            )
+            committed = await commit_permission_receipt(self.db, receipt["_id"])
         except BaseException:
             # No committed receipt, so no permission.
             await self._withdraw_permission_grant(collection, row_id, response_id, response_scope, receipt["_id"])
             raise
-        if not getattr(committed, "modified_count", 0):
+        if not committed:
             # The reconciler aborted this receipt as stale before it committed.
             await self._withdraw_permission_grant(collection, row_id, response_id, response_scope, receipt["_id"])
             raise HTTPException(
@@ -953,8 +958,6 @@ class ArbitrationCaseWorkspaceService:
         if draft_id and not draft_type:
             draft = await self.draft_repo.get_draft(draft_id)
             draft_type = (draft or {}).get("draft_type")
-        if persist:
-            await reconcile_stale_permission_receipts(self.db, case_id=case_id)
         rows = {slug: await self.list_matrix_rows(case_id, slug) for slug in MATRIX_COLLECTIONS}
         checks = await self._compute_readiness_checks(case, rows, draft_id=draft_id, draft_type=draft_type)
         evidence_manifest = await self._authoritative_evidence_manifest(case, rows)

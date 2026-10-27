@@ -4,11 +4,14 @@ A permission decision writes its grant before it commits its receipt, so a
 process that dies in between leaves `permission_obtained=True` behind a
 `pending` receipt. These tests drive the real `record_rejoinder_permission`
 over the rejoinder fixture from `test_arbitration_matrix_approval_invalidation`
-and check every reader: readiness, the drafting context and validator, and the
-readiness approval that drafting approval and export reuse.
+and check every reader: readiness, the drafting context and validator, the
+readiness approval that drafting approval and (queued) export reuse, and the
+matrix listing.
 
-Process death is simulated by stopping the decision at a write step with the
-in-process undo disabled, because a killed process runs no handler.
+Process death is simulated by stopping the decision at a persistence step with
+the in-process undo disabled, because a killed process runs no handler. The
+atomic conditional writes are also exercised against real MongoDB in
+`integration/test_arbitration_permission_receipts_mongo.py`.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ import asyncio
 from datetime import datetime, timedelta
 
 import pytest
+from bson import ObjectId
 from fastapi import HTTPException
 
 from backend.rbac_backend.services.arbitration_drafting import permission_receipts
@@ -29,13 +33,16 @@ from backend.rbac_backend.services.arbitration_drafting.permission_receipts impo
     RECEIPT_MISMATCH,
     RECEIPT_MISSING,
     RECEIPT_NOT_COMMITTED,
+    SOURCE_UNAVAILABLE,
     STALE_PENDING_RECEIPT_AGE,
     VERIFIED,
+    annotate_permission_states,
+    permission_content_hash,
     reconcile_stale_permission_receipts,
     rejoinder_permission_states,
 )
 from backend.rbac_backend.services.arbitration_drafting.validator import ArbitrationDraftValidator
-from backend.rbac_backend.tests.test_arbitration_drafting import _FakeDb
+from backend.rbac_backend.tests.test_arbitration_drafting import _FakeCollection, _FakeDb
 from backend.rbac_backend.tests.test_arbitration_matrix_approval_invalidation import (
     CASE,
     _grant,
@@ -50,6 +57,7 @@ class _Killed(BaseException):
 @pytest.fixture
 def db() -> _FakeDb:
     database = _FakeDb()
+    database.letters = _FakeCollection()
     _rejoinder_awaiting_permission(database)
     return database
 
@@ -62,6 +70,10 @@ def _response(db: _FakeDb) -> dict:
     return db.arbitration_paragraph_responses.rows[0]
 
 
+def _source(db: _FakeDb) -> dict:
+    return next(row for row in db.documents.rows if row.get("_id") == "doc-1")
+
+
 def _receipts(db: _FakeDb) -> list[dict]:
     return [r for r in db.arbitration_workflow_approvals.rows if r.get("gate") == "rejoinder_permission"]
 
@@ -70,10 +82,16 @@ def _state(db: _FakeDb) -> str:
     return asyncio.run(rejoinder_permission_states(db, [_row(db)]))[str(_row(db)["_id"])]
 
 
+def _later() -> datetime:
+    return datetime.utcnow() + STALE_PENDING_RECEIPT_AGE + timedelta(seconds=1)
+
+
+def _reconcile(db: _FakeDb, now: datetime | None = None) -> dict:
+    return asyncio.run(reconcile_stale_permission_receipts(db, case_id=CASE, now=now or _later()))
+
+
 def _readiness_blocks_new_matter(db: _FakeDb) -> bool:
-    readiness = asyncio.run(
-        ArbitrationCaseWorkspaceService(db).readiness(CASE, draft_type="rejoinder", persist=False)
-    )
+    readiness = asyncio.run(ArbitrationCaseWorkspaceService(db).readiness(CASE, draft_type="rejoinder"))
     return any(check["check_key"] == "rejoinder_new_matter" for check in readiness["blockers"])
 
 
@@ -84,7 +102,7 @@ def _validator_blocks_new_matter(db: _FakeDb) -> bool:
         "draft": {"draft_type": "rejoinder", "case_id": CASE},
         "source_ledger": ledger,
         "matrix_context": builder._matrix_context(ledger),
-        "paragraph_responses": [_response(db)],
+        "paragraph_responses": db.arbitration_paragraph_responses.rows[:1],
     }
     report = ArbitrationDraftValidator().validation_report(context, "Reply. [S1]")
     return any("introduces new matter" in blocker for blocker in report["approval_blockers"])
@@ -103,6 +121,8 @@ def _assert_every_reader_refuses(db: _FakeDb) -> None:
     assert _readiness_blocks_new_matter(db)
     assert _validator_blocks_new_matter(db)
     assert _readiness_approval_refuses_unverified_permission(db)
+    [listed] = asyncio.run(annotate_permission_states(db, [_row(db)]))
+    assert listed["permission_effective"] is False
 
 
 # A completed decision
@@ -117,10 +137,12 @@ def test_a_completed_decision_is_verified_by_every_reader(db: _FakeDb) -> None:
     assert receipt["receipt_version"] == permission_receipts.PERMISSION_RECEIPT_VERSION
     assert receipt["matrix_row_id"] == _row(db)["_id"]
     assert receipt["source_paragraph_response_id"] == _response(db)["_id"]
-    assert receipt["matrix_row_content_hash"] == permission_receipts.permission_content_hash(_row(db))
+    assert receipt["matrix_row_content_hash"] == permission_content_hash(_row(db))
     assert _state(db) == VERIFIED
     assert not _readiness_blocks_new_matter(db)
     assert not _validator_blocks_new_matter(db)
+    [listed] = asyncio.run(annotate_permission_states(db, [_row(db)]))
+    assert listed["permission_effective"] is True and listed["permission_receipt_message"] is None
 
 
 def test_a_later_review_or_unchanged_projection_sync_keeps_the_permission(db: _FakeDb) -> None:
@@ -141,7 +163,15 @@ def test_a_later_review_or_unchanged_projection_sync_keeps_the_permission(db: _F
     assert _state(db) == VERIFIED
 
 
-# Process death between the grant writes and the receipt commit
+def test_a_decision_on_a_source_that_is_not_authoritative_is_refused(db: _FakeDb) -> None:
+    _source(db)["lifecycle_state"] = "deleted"
+    with pytest.raises(HTTPException) as refused:
+        asyncio.run(_grant(db))
+    assert refused.value.status_code == 400
+    assert _receipts(db) == []
+
+
+# Process death at each persistence step
 # ---------------------------------------------------------------------------
 
 
@@ -150,64 +180,73 @@ def _die_at(db: _FakeDb, monkeypatch: pytest.MonkeyPatch, step: str) -> None:
         raise _Killed
 
     monkeypatch.setattr(ArbitrationCaseWorkspaceService, "_withdraw_permission_grant", _no_undo)
-    if step == "after_response_grant":
-        target, method = db.arbitration_rejoinder_matrix, "find_one_and_update"
-    else:  # after the row write, before the commit
-        target, method = db.arbitration_workflow_approvals, "update_one"
+    targets = {
+        "after_receipt_insert": (db.arbitration_paragraph_responses, "update_one", None),
+        "after_response_grant": (db.arbitration_rejoinder_matrix, "find_one_and_update", None),
+        "after_row_write": (db.arbitration_workflow_approvals, "update_one", "committed"),
+    }
+    if step == "after_commit":
+        monkeypatch.setattr(ArbitrationCaseWorkspaceService, "invalidate_readiness_approvals", _no_undo)
+        return
+    target, method, only_status = targets[step]
     original = getattr(target, method)
 
     async def _dies(query=None, update=None, *args, **kwargs):
-        if method == "update_one" and (update or {}).get("$set", {}).get("receipt_status") != "committed":
+        if only_status and (update or {}).get("$set", {}).get("receipt_status") != only_status:
             return await original(query, update, *args, **kwargs)
         raise _Killed
 
-    setattr(target, method, _dies)
+    monkeypatch.setattr(target, method, _dies)
 
 
-@pytest.mark.parametrize("step", ["after_response_grant", "after_row_write"])
-def test_a_decision_killed_before_its_commit_grants_nothing(
-    db: _FakeDb, monkeypatch: pytest.MonkeyPatch, step: str
-) -> None:
+def _killed(db: _FakeDb, monkeypatch: pytest.MonkeyPatch, step: str) -> None:
     _die_at(db, monkeypatch, step)
     with pytest.raises(_Killed):
         asyncio.run(_grant(db))
     monkeypatch.undo()
 
-    # What the dead process left behind: a grant and a pending receipt.
-    assert _response(db)["permission_obtained"] is True
-    if step == "after_row_write":
-        assert _row(db)["permission_obtained"] is True
-    assert [r["receipt_status"] for r in _receipts(db)] == ["pending"]
 
+@pytest.mark.parametrize("step", ["after_receipt_insert", "after_response_grant", "after_row_write"])
+def test_a_decision_killed_before_its_commit_grants_nothing(
+    db: _FakeDb, monkeypatch: pytest.MonkeyPatch, step: str
+) -> None:
+    _killed(db, monkeypatch, step)
+
+    assert [r["receipt_status"] for r in _receipts(db)] == ["pending"]
+    assert _response(db)["permission_obtained"] is (step != "after_receipt_insert")
+    assert _row(db)["permission_obtained"] is (step == "after_row_write")
     _assert_every_reader_refuses(db)
 
 
-def test_the_reconciler_aborts_a_stale_receipt_and_withdraws_its_grant(db: _FakeDb, monkeypatch: pytest.MonkeyPatch) -> None:
-    _die_at(db, monkeypatch, "after_row_write")
-    with pytest.raises(_Killed):
-        asyncio.run(_grant(db))
-    monkeypatch.undo()
+def test_a_decision_killed_after_its_commit_is_complete(db: _FakeDb, monkeypatch: pytest.MonkeyPatch) -> None:
+    _killed(db, monkeypatch, "after_commit")
 
-    later = datetime.utcnow() + STALE_PENDING_RECEIPT_AGE + timedelta(seconds=1)
-    aborted = asyncio.run(reconcile_stale_permission_receipts(db, case_id=CASE, now=later))
+    assert [r["receipt_status"] for r in _receipts(db)] == ["committed"]
+    assert _state(db) == VERIFIED
+
+
+@pytest.mark.parametrize("step", ["after_receipt_insert", "after_response_grant", "after_row_write"])
+def test_the_reconciler_aborts_a_stale_receipt_and_withdraws_its_grant(
+    db: _FakeDb, monkeypatch: pytest.MonkeyPatch, step: str
+) -> None:
+    _killed(db, monkeypatch, step)
+
+    report = _reconcile(db)
 
     [receipt] = _receipts(db)
-    assert aborted == [receipt["_id"]]
+    assert report["aborted"] == [receipt["_id"]]
     assert receipt["receipt_status"] == "aborted"
-    assert _response(db)["permission_obtained"] is False
-    assert _row(db)["permission_obtained"] is False
-    assert _response(db)["permission_approval_receipt_id"] is None
-    assert _row(db)["permission_approval_receipt_id"] is None
+    assert receipt["approver_id"] == "legal-9"  # the receipt is kept as the record of the attempt
+    for record in (_response(db), _row(db)):
+        assert record["permission_obtained"] is False
+        assert record["permission_approval_receipt_id"] is None
     _assert_every_reader_refuses(db)
 
 
 def test_the_reconciler_leaves_a_fresh_pending_receipt_alone(db: _FakeDb, monkeypatch: pytest.MonkeyPatch) -> None:
-    _die_at(db, monkeypatch, "after_row_write")
-    with pytest.raises(_Killed):
-        asyncio.run(_grant(db))
-    monkeypatch.undo()
+    _killed(db, monkeypatch, "after_row_write")
 
-    assert asyncio.run(reconcile_stale_permission_receipts(db, case_id=CASE)) == []
+    assert _reconcile(db, now=datetime.utcnow())["aborted"] == []
     assert [r["receipt_status"] for r in _receipts(db)] == ["pending"]
     assert _row(db)["permission_obtained"] is True  # untouched, and still refused by every reader
     _assert_every_reader_refuses(db)
@@ -215,22 +254,85 @@ def test_the_reconciler_leaves_a_fresh_pending_receipt_alone(db: _FakeDb, monkey
 
 def test_the_reconciler_never_touches_a_committed_receipt(db: _FakeDb) -> None:
     asyncio.run(_grant(db))
-    later = datetime.utcnow() + STALE_PENDING_RECEIPT_AGE + timedelta(hours=1)
 
-    assert asyncio.run(reconcile_stale_permission_receipts(db, case_id=CASE, now=later)) == []
+    assert _reconcile(db, now=_later() + timedelta(hours=1)) == {"aborted": [], "withdrawn_from": [], "errors": []}
+    assert _state(db) == VERIFIED
+
+
+def test_a_dry_run_reports_and_writes_nothing(db: _FakeDb, monkeypatch: pytest.MonkeyPatch) -> None:
+    _killed(db, monkeypatch, "after_row_write")
+    [receipt] = _receipts(db)
+
+    report = asyncio.run(reconcile_stale_permission_receipts(db, case_id=CASE, now=_later(), dry_run=True))
+
+    assert report["aborted"] == [receipt["_id"]]
+    assert receipt["receipt_status"] == "pending"
+    assert _row(db)["permission_obtained"] is True
+
+
+def test_validation_is_read_only(db: _FakeDb, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Readiness, listing and context building never clean up, however stale.
+    _killed(db, monkeypatch, "after_row_write")
+    for receipt in _receipts(db):
+        receipt["approved_at"] = datetime.utcnow() - STALE_PENDING_RECEIPT_AGE - timedelta(hours=1)
+
+    _assert_every_reader_refuses(db)
+
+    assert [r["receipt_status"] for r in _receipts(db)] == ["pending"]
+    assert _row(db)["permission_obtained"] is True
+
+
+def test_a_failed_withdrawal_is_retried_by_the_next_run(db: _FakeDb, monkeypatch: pytest.MonkeyPatch) -> None:
+    _killed(db, monkeypatch, "after_row_write")
+    rows = db.arbitration_rejoinder_matrix
+    original = rows.update_many
+
+    async def _fails(*args, **kwargs):
+        raise RuntimeError("primary stepped down")
+
+    rows.update_many = _fails
+    with pytest.raises(RuntimeError):
+        _reconcile(db)
+    rows.update_many = original
+
+    # The receipt is aborted; the row still carries the grant, refused by every reader.
+    assert [r["receipt_status"] for r in _receipts(db)] == ["aborted"]
+    assert _row(db)["permission_obtained"] is True
+    _assert_every_reader_refuses(db)
+
+    report = _reconcile(db)
+    assert report["withdrawn_from"] == [_receipts(db)[0]["_id"]]
+    assert _row(db)["permission_obtained"] is False
+
+
+def test_a_reconciler_that_loses_to_the_commit_changes_nothing(db: _FakeDb, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The reconciler reads a stale pending snapshot; the decision commits before its abort.
+    _killed(db, monkeypatch, "after_row_write")
+    [receipt] = _receipts(db)
+    approvals = db.arbitration_workflow_approvals
+    original = approvals.update_one
+
+    async def _commit_lands_first(query=None, update=None, *args, **kwargs):
+        if (update or {}).get("$set", {}).get("receipt_status") == "aborted":
+            receipt["receipt_status"] = "committed"
+        return await original(query, update, *args, **kwargs)
+
+    approvals.update_one = _commit_lands_first
+    report = _reconcile(db)
+
+    assert report["aborted"] == []
+    assert receipt["receipt_status"] == "committed"
     assert _state(db) == VERIFIED
 
 
 def test_a_decision_whose_receipt_was_reconciled_before_commit_is_refused(db: _FakeDb) -> None:
-    # The reconciler judges the receipt stale between the row write and the commit.
     approvals = db.arbitration_workflow_approvals
     original = approvals.update_one
 
     async def _reconciled_first(query=None, update=None, *args, **kwargs):
         if (update or {}).get("$set", {}).get("receipt_status") == "committed":
-            later = datetime.utcnow() + STALE_PENDING_RECEIPT_AGE + timedelta(seconds=1)
             approvals.update_one = original
-            await reconcile_stale_permission_receipts(db, case_id=CASE, now=later)
+            await reconcile_stale_permission_receipts(db, case_id=CASE, now=_later())
         return await original(query, update, *args, **kwargs)
 
     approvals.update_one = _reconciled_first
@@ -243,18 +345,36 @@ def test_a_decision_whose_receipt_was_reconciled_before_commit_is_refused(db: _F
     assert _response(db)["permission_obtained"] is False
 
 
-def test_readiness_reconciles_stale_receipts_when_it_persists(db: _FakeDb, monkeypatch: pytest.MonkeyPatch) -> None:
-    _die_at(db, monkeypatch, "after_row_write")
-    with pytest.raises(_Killed):
-        asyncio.run(_grant(db))
-    monkeypatch.undo()
-    for receipt in _receipts(db):
-        receipt["approved_at"] = datetime.utcnow() - STALE_PENDING_RECEIPT_AGE - timedelta(seconds=1)
+def test_a_fresh_grant_replacing_an_interrupted_one_survives_its_cleanup(
+    db: _FakeDb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _killed(db, monkeypatch, "after_row_write")
+    [old] = _receipts(db)
+    old["approved_at"] = datetime.utcnow() - STALE_PENDING_RECEIPT_AGE - timedelta(seconds=1)
 
-    asyncio.run(ArbitrationCaseWorkspaceService(db).readiness(CASE, draft_type="rejoinder"))
+    # Recording again first cleans up the interrupted decision, then grants anew.
+    asyncio.run(_grant(db))
 
-    assert [r["receipt_status"] for r in _receipts(db)] == ["aborted"]
-    assert _row(db)["permission_obtained"] is False
+    new = next(r for r in _receipts(db) if r["_id"] != old["_id"])
+    assert old["receipt_status"] == "aborted"
+    assert new["receipt_status"] == "committed"
+    assert _row(db)["permission_approval_receipt_id"] == new["_id"]
+    _reconcile(db, now=_later() + timedelta(hours=1))
+    assert _row(db)["permission_approval_receipt_id"] == new["_id"]
+    assert _state(db) == VERIFIED
+
+
+def test_a_fresh_grant_survives_a_late_cleanup_of_the_old_receipt(db: _FakeDb, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The old receipt is still fresh when the new grant lands, and goes stale later.
+    _killed(db, monkeypatch, "after_row_write")
+    [old] = _receipts(db)
+    asyncio.run(_grant(db))
+
+    _reconcile(db)
+
+    assert old["receipt_status"] == "aborted"
+    assert _row(db)["permission_approval_receipt_id"] != old["_id"]
+    assert _state(db) == VERIFIED
 
 
 # Every way a receipt can fail to back a permission
@@ -282,6 +402,17 @@ def _committed(db: _FakeDb) -> dict:
         (lambda db, r: r.update({"permission_source_id": "doc-other"}), RECEIPT_MISMATCH),
         (lambda db, r: r.update({"source_response_revision": 99}), RECEIPT_MISMATCH),
         (lambda db, r: _row(db).update({"claimant_reply": "Content no one decided on."}), RECEIPT_MISMATCH),
+        # The response was rewritten (revision bumped, grant revoked) and the
+        # process died before the projection was synced: the row looks unchanged.
+        (lambda db, r: _response(db).update({"response_revision": 1, "permission_obtained": False}), RECEIPT_MISMATCH),
+        # An agent revoked the response's grant without bumping its revision.
+        (lambda db, r: _response(db).update({"permission_obtained": False}), RECEIPT_MISMATCH),
+        (lambda db, r: db.arbitration_paragraph_responses.rows.clear(), RECEIPT_MISMATCH),
+        (lambda db, r: db.documents.rows.remove(_source(db)), SOURCE_UNAVAILABLE),
+        (lambda db, r: _source(db).update({"lifecycle_state": "deleted"}), SOURCE_UNAVAILABLE),
+        (lambda db, r: _source(db).update({"sha256": "different-bytes"}), SOURCE_UNAVAILABLE),
+        (lambda db, r: _source(db).update({"current_version_id": "version-2"}), SOURCE_UNAVAILABLE),
+        (lambda db, r: r.pop("permission_source_content_hash"), SOURCE_UNAVAILABLE),
         (lambda db, r: r.pop("receipt_version"), LEGACY_UNBOUND),
         (lambda db, r: _row(db).update({"permission_approval_receipt_id": None}), LEGACY_UNBOUND),
     ],
@@ -297,7 +428,15 @@ def _committed(db: _FakeDb) -> dict:
         "not-an-approval",
         "other-permission-source",
         "earlier-response-revision",
-        "content-changed",
+        "row-content-changed",
+        "response-rewritten-projection-not-synced",
+        "response-grant-revoked-same-revision",
+        "response-deleted",
+        "source-deleted",
+        "source-no-longer-authoritative",
+        "source-bytes-changed",
+        "source-version-changed",
+        "receipt-without-source-binding",
         "receipt-without-binding",
         "grant-without-receipt",
     ],
@@ -314,19 +453,77 @@ def test_a_row_without_a_grant_is_not_granted(db: _FakeDb) -> None:
     _assert_every_reader_refuses(db)
 
 
-# Legacy grants: refused, surfaced, and re-recordable
+# Hash stability
 # ---------------------------------------------------------------------------
 
 
-def test_a_legacy_grant_is_named_in_readiness_and_can_be_recorded_again(db: _FakeDb) -> None:
+def test_the_content_hash_ignores_id_form_and_key_order() -> None:
+    oid = ObjectId()
+    as_object = {"case_id": "case-1", "draft_id": oid, "nested": {"b": 1, "a": [oid]}}
+    as_string = {"nested": {"a": [str(oid)], "b": 1}, "draft_id": str(oid), "case_id": "case-1"}
+    assert permission_content_hash(as_object) == permission_content_hash(as_string)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("updated_at", datetime(2030, 1, 1)),
+        ("updated_by", "someone-else"),
+        ("edit_revision", 42),
+        ("review_status", "approved"),
+        ("approval_log", [{"action": "approve"}]),
+        ("material_contributor_ids", ["x"]),
+        ("status", "approved"),
+        ("permission_notes", "Granted at hearing"),
+    ],
+)
+def test_bookkeeping_changes_keep_the_permission(db: _FakeDb, field: str, value) -> None:
+    asyncio.run(_grant(db))
+    _row(db)[field] = value
+    assert _state(db) == VERIFIED
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("claimant_reply", "A different reply."),
+        ("nature_of_defence", "A different defence."),
+        ("reply_to_counterclaim", "A new counterclaim reply."),
+        ("source_sod_para", "21"),
+        ("supporting_source_ids", ["doc-2"]),
+        ("missing_evidence", ["Something else."]),
+        ("new_matter", False),
+        ("source_pleading_version_hash", "another-version"),
+    ],
+)
+def test_material_changes_drop_the_permission(db: _FakeDb, field: str, value) -> None:
+    asyncio.run(_grant(db))
+    _row(db)[field] = value
+    assert _state(db) != VERIFIED
+
+
+# Legacy grants: refused, kept, explained, re-recordable
+# ---------------------------------------------------------------------------
+
+
+def test_a_legacy_grant_is_kept_explained_and_can_be_recorded_again(db: _FakeDb) -> None:
     # A grant from before receipts carried a content binding: committed, unbound.
     receipt = _committed(db)
     for key in ("receipt_version", "matrix_row_content_hash", "source_response_revision", "source_paragraph_response_id"):
         receipt.pop(key, None)
+    legacy = dict(receipt)
 
-    readiness = asyncio.run(ArbitrationCaseWorkspaceService(db).readiness(CASE, draft_type="rejoinder", persist=False))
+    readiness = asyncio.run(ArbitrationCaseWorkspaceService(db).readiness(CASE, draft_type="rejoinder"))
     [check] = [c for c in readiness["blockers"] if c["check_key"] == "rejoinder_new_matter"]
-    assert "record the permission again" in check["message"]
+    assert "a qualified legal reviewer must record the permission again" in check["message"]
+    [listed] = asyncio.run(annotate_permission_states(db, [_row(db)]))
+    assert listed["permission_obtained"] is True  # the stored grant is kept as the record
+    assert listed["permission_effective"] is False
+    assert listed["permission_receipt_state"] == LEGACY_UNBOUND
+    assert "record the permission again" in listed["permission_receipt_message"]
+    _reconcile(db, now=_later() + timedelta(days=30))
+    assert receipt == legacy  # never migrated, aborted or approved automatically
 
     asyncio.run(_grant(db))
     assert _state(db) == VERIFIED
+    assert receipt == legacy
