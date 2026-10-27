@@ -444,3 +444,11 @@ def test_an_assignment_made_by_another_user_still_qualifies_the_assignee(db: _Fa
     _review(db, ASSIGNER, action="assign", reviewer_role="contracts", reviewer_user_id=UNQUALIFIED.id)
     approved = _review(db, UNQUALIFIED, action="approve", reviewer_role="contracts")
     assert approved["approval_status"] == "approved"
+
+
+@pytest.mark.parametrize("field,value", [("permission_notes", "Granted at hearing"), ("permission_approval_receipt_id", "receipt-x")])
+def test_an_edit_cannot_write_rejoinder_permission_records(field: str, value: str) -> None:
+    with pytest.raises(ValidationError):
+        ArbitrationMatrixRowUpdate(**{field: value})
+    with pytest.raises(ValidationError):
+        ArbitrationMatrixRowCreate(**{field: value})
