@@ -649,7 +649,8 @@ async def test_a_corrupt_seed_letter_is_not_found(db: _Database, route: str, cap
         response = await client.get(f"/api/letters/{GRAND_A1}/{route}")
     assert response.status_code == 404, response.text
     assert MARKER[GRAND_A1] not in response.text
-    assert MARKER[GRAND_A1] not in caplog.text
+    # A validation message echoes the failing fields' stored values; none may be logged.
+    assert "not-a-date" not in caplog.text and "not-a-number" not in caplog.text
 
 
 async def test_a_corrupt_parent_is_not_found_and_nothing_moves(db: _Database, caplog: pytest.LogCaptureFixture) -> None:
@@ -659,7 +660,7 @@ async def test_a_corrupt_parent_is_not_found_and_nothing_moves(db: _Database, ca
         response = await client.post(f"/api/letters/{GRAND_A1}/reparent", json={"new_parent_id": ROOT_A1})
     assert response.status_code == 404, response.text
     assert _snapshot(db) == before
-    assert MARKER[ROOT_A1] not in caplog.text
+    assert "not-a-date" not in caplog.text and "not-a-number" not in caplog.text
 
 
 # ---------------------------------------------------------------------------
