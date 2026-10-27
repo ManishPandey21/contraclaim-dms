@@ -1272,7 +1272,15 @@ class LetterController:
 
 
 
-            # Perform reparenting with transaction
+            # Write the move: the letter, then each authorised descendant, as
+
+
+
+            # separate writes. This is NOT transactional - concurrent reparents
+
+
+
+            # can race, and a failure part-way leaves mixed ancestry (open defect).
 
 
 
