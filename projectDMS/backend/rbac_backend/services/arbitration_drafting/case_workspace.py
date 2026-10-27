@@ -56,6 +56,12 @@ from .approval_policy import (
 )
 from .workflow_governance import require_governed_workflow_chain
 from .paragraph_positions import PARAGRAPH_POSITION_MATRICES, is_paragraph_position_projection
+from .permission_receipts import (
+    STATE_MESSAGES,
+    permission_receipt_binding,
+    reconcile_stale_permission_receipts,
+    unverified_new_matter,
+)
 from .workflow_repository import ArbitrationWorkflowRepository
 from .filing_export_queue import get_filing_export_queue
 
@@ -775,6 +781,9 @@ class ArbitrationCaseWorkspaceService:
             "approver_role": approver_role,
             "comment": payload.permission_notes,
             "approved_at": now,
+            # Readers accept the permission only for this case, row, draft,
+            # response revision and content (permission_receipts).
+            **permission_receipt_binding(row),
         }
         await self.db.arbitration_workflow_approvals.insert_one(_jsonable(receipt))
         granted = {
@@ -833,7 +842,7 @@ class ArbitrationCaseWorkspaceService:
                 detail="Rejoinder matrix row changed during the permission decision; review the current content",
             )
         try:
-            await self.db.arbitration_workflow_approvals.update_one(
+            committed = await self.db.arbitration_workflow_approvals.update_one(
                 {"_id": receipt["_id"], "receipt_status": "pending"},
                 {"$set": {"receipt_status": "committed", "committed_at": datetime.utcnow()}},
             )
@@ -841,6 +850,13 @@ class ArbitrationCaseWorkspaceService:
             # No committed receipt, so no permission.
             await self._withdraw_permission_grant(collection, row_id, response_id, response_scope, receipt["_id"])
             raise
+        if not getattr(committed, "modified_count", 0):
+            # The reconciler aborted this receipt as stale before it committed.
+            await self._withdraw_permission_grant(collection, row_id, response_id, response_scope, receipt["_id"])
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="The permission decision did not complete in time; record it again",
+            )
         receipt["receipt_status"] = "committed"
         await self.invalidate_readiness_approvals(case_id, "rejoinder_permission_changed", current_user)
         await self.readiness(case_id)
@@ -937,6 +953,8 @@ class ArbitrationCaseWorkspaceService:
         if draft_id and not draft_type:
             draft = await self.draft_repo.get_draft(draft_id)
             draft_type = (draft or {}).get("draft_type")
+        if persist:
+            await reconcile_stale_permission_receipts(self.db, case_id=case_id)
         rows = {slug: await self.list_matrix_rows(case_id, slug) for slug in MATRIX_COLLECTIONS}
         checks = await self._compute_readiness_checks(case, rows, draft_id=draft_id, draft_type=draft_type)
         evidence_manifest = await self._authoritative_evidence_manifest(case, rows)
@@ -1099,6 +1117,18 @@ class ArbitrationCaseWorkspaceService:
     ) -> Dict[str, Any]:
         case_id = str(case.get("_id") or "")
         draft_type = str(draft.get("draft_type") or self._default_draft_type(case))
+        if draft_type == "rejoinder":
+            unverified = await unverified_new_matter(self.db, await self.list_matrix_rows(case_id, "rejoinder-matrix"))
+            if unverified:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "message": "Rejoinder new matter has no committed permission receipt",
+                        "case_id": case_id,
+                        "matrix_row_id": str(unverified[0]["row"].get("_id")),
+                        "permission_state": unverified[0]["state"],
+                    },
+                )
         artifact = await self._readiness_artifact_state(case, draft_type)
         cursor = self.db.arbitration_workflow_approvals.find({"case_id": case_id, "gate": "readiness"}).sort(
             "approved_at", -1
@@ -2619,7 +2649,7 @@ class ArbitrationCaseWorkspaceService:
         elif normalized_type == "counterclaim":
             self._counterclaim_readiness(add, counterclaim_rows)
         elif normalized_type == "rejoinder":
-            self._rejoinder_readiness(add, rejoinder_rows)
+            self._rejoinder_readiness(add, rejoinder_rows, await unverified_new_matter(self.db, rejoinder_rows))
 
         quantum_rows = rows.get("quantum-annexures") or []
         amount_claim_rows = [row for row in claim_rows + counterclaim_rows if row.get("amount_or_days") or row.get("amount")]
@@ -2862,7 +2892,12 @@ class ArbitrationCaseWorkspaceService:
             "Counterclaim matrix has approved jurisdiction, limitation, breach, causation, and relief rows." if ready_counterclaims else "Counterclaim requires approved counterclaim matrix rows.",
         )
 
-    def _rejoinder_readiness(self, add: Any, rejoinder_rows: List[Dict[str, Any]]) -> None:
+    def _rejoinder_readiness(
+        self,
+        add: Any,
+        rejoinder_rows: List[Dict[str, Any]],
+        unverified: List[Dict[str, Any]],
+    ) -> None:
         ready_replies = [row for row in rejoinder_rows if (row.get("claimant_reply") or row.get("reply_to_counterclaim")) and _is_ready_row(row)]
         add(
             "rejoinder_matrix",
@@ -2870,20 +2905,17 @@ class ArbitrationCaseWorkspaceService:
             ReadinessCheckStatus.READY if ready_replies else ReadinessCheckStatus.BLOCKED,
             "Rejoinder matrix has approved paragraph-wise replies." if ready_replies else "Rejoinder requires approved reply matrix rows.",
         )
-        new_matter = [
-            row
-            for row in rejoinder_rows
-            if _is_positive(row.get("new_matter"))
-            and _is_positive(row.get("permission_required"))
-            and not _is_positive(row.get("permission_obtained"))
-        ]
-        if new_matter:
+        # `unverified`: new-matter rows whose permission no committed receipt backs.
+        if unverified:
+            first = unverified[0]
+            reason = STATE_MESSAGES.get(first["state"])
             add(
                 "rejoinder_new_matter",
                 "rejoinder",
                 ReadinessCheckStatus.NEEDS_LEGAL_REVIEW,
-                "Rejoinder row introduces new matter but required permission has not been obtained.",
-                str(new_matter[0].get("_id")),
+                "Rejoinder row introduces new matter but required permission has not been obtained"
+                + (f": {reason}." if reason else "."),
+                str(first["row"].get("_id")),
             )
 
     async def _persist_readiness(
