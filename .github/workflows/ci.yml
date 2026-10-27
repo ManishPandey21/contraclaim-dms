@@ -110,6 +110,11 @@ jobs:
         run: |
           python -m pytest -q -rs --junitxml=exhibit-confinement.xml             backend/rbac_backend/tests/test_arbitration_exhibit_source_resolution.py
           python scripts/assert_suites_ran.py exhibit-confinement.xml             backend/rbac_backend/tests/test_arbitration_exhibit_source_resolution.py
+          # The module check passes as long as some test in it ran; the symlink
+          # test itself must also be in the report (a rename, removal or
+          # deselection would otherwise go unnoticed). With no skips allowed
+          # above, being in the report means it executed.
+          grep -q 'name="test_a_recorded_symlink_escaping_the_storage_roots_is_refused"' exhibit-confinement.xml             || { echo "symlink-escape test did not run" >&2; exit 1; }
       # The canonical-relationship suites need transactions, which the `mongo`
       # service above (a standalone mongod) cannot give, so in the step above they
       # skip. CL-2: a disposable single-node replica set, used by these suites
