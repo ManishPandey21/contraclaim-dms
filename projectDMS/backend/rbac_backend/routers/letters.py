@@ -832,11 +832,11 @@ class LetterController:
 
 
 
-            # Get chain efficiently
+            # Every member, not only the seed, is bounded by the caller's scope
 
 
 
-            chain = await self.conversation_service.get_conversation_chain(
+            chain = await self.conversation_service.get_authorized_conversation_chain(
 
 
 
@@ -956,19 +956,27 @@ class LetterController:
 
 
 
-            # Build tree efficiently
+            # Build the tree from the letters the caller may see
 
 
 
-            tree = await self.conversation_service.build_conversation_tree(
+            tree = await self.conversation_service.build_authorized_conversation_tree(
 
 
 
-                letter.conversation_id, current_user
+                letter_id, current_user
 
 
 
             )
+
+
+
+            if tree is None:
+
+
+
+                raise LetterError("Letter not found", status.HTTP_404_NOT_FOUND)
 
 
 
@@ -1120,6 +1128,22 @@ class LetterController:
 
 
 
+            # Every descendant's ancestry is rewritten, so each must be editable too.
+
+
+
+            for descendant in await self.conversation_service.get_descendants(letter_id):
+
+
+
+                await self.auth_service.check_letter_access(current_user, descendant, "update")
+
+
+
+
+
+
+
             # Perform reparenting with transaction
 
 
@@ -1128,7 +1152,11 @@ class LetterController:
 
 
 
-                letter_id, new_parent_id, current_user
+                letter_id, new_parent_id, current_user,
+
+
+
+                scope={"organization_id": letter.organization_id, "project_id": letter.project_id},
 
 
 
@@ -1828,6 +1856,42 @@ class LetterController:
 
 
 
+        # A reparent never links letters across organisations or projects
+
+
+
+        if (str(letter.organization_id or ""), str(letter.project_id or "")) != (
+
+
+
+            str(new_parent.organization_id or ""), str(new_parent.project_id or "")
+
+
+
+        ):
+
+
+
+            raise LetterError(
+
+
+
+                "Letters must belong to the same project",
+
+
+
+                status.HTTP_400_BAD_REQUEST
+
+
+
+            )
+
+
+
+
+
+
+
         # Prevent self-parenting
 
 
@@ -1860,7 +1924,7 @@ class LetterController:
 
 
 
-        if str(new_parent.id) in (letter.ancestors or []):
+        if str(letter.id) in [str(ancestor) for ancestor in (new_parent.ancestors or [])]:
 
 
 
@@ -2318,7 +2382,7 @@ async def get_conversation_tree(
 
 
 
-    return await controller.conversation_service.build_conversation_tree(letter_id, current_user)
+    return await controller.get_conversation_tree(letter_id, current_user)
 
 
 
@@ -2394,7 +2458,7 @@ async def reparent_letter(
 
 
 
-    await controller.conversation_service.reparent_letter_atomic(letter_id, new_parent_id, current_user)
+    await controller.reparent_letter(letter_id, new_parent_id, current_user)
 
 
 

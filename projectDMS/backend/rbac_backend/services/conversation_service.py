@@ -142,7 +142,130 @@ class ConversationService:
 
         return build_node(root)
 
-    async def reparent_letter_atomic(self, letter_id: str, new_parent_id: str, current_user: Any) -> None:
+    async def build_authorized_conversation_tree(
+        self, letter_id: str, current_user: Any
+    ) -> Optional[ConversationTree]:
+        """The conversation tree, bounded by the ACTOR's canonical row visibility.
+
+        Same boundary as `get_authorized_conversation_chain`: every letter is read
+        through `build_scope_query`, narrowed to the ANCHOR letter's organisation
+        and project. Association (`conversation_id`, `previous_letter_id`,
+        `ancestors`) only nominates candidates; a letter outside that scope is
+        never loaded. A hidden letter is pruned and its visible descendants are
+        re-attached to their nearest visible ancestor.
+
+        Returns None when the anchor itself is not visible to the actor. The
+        caller authorises the anchor separately (`check_letter_access`).
+        """
+        if current_user is None:
+            return None
+        letter_service = await self._get_letter_service()
+        seed = await letter_service.get_letter(letter_id)
+        if not seed or not seed.id:
+            return None
+
+        from ..core.security import build_scope_query, _expand_object_ids
+
+        scope = build_scope_query(
+            current_user,
+            organization_id=str(seed.organization_id) if seed.organization_id else None,
+            project_id=str(seed.project_id) if seed.project_id else None,
+        )
+        db = await self._get_db()
+
+        async def visible(query: Dict[str, Any]) -> List[Letter]:
+            bounded = {"$and": [query, scope]} if scope else query
+            letters: List[Letter] = []
+            for row in await db.letters.find(bounded).to_list(length=None):
+                try:
+                    letters.append(Letter(**letter_service._augment_letter_document(row)))
+                except Exception:
+                    continue
+            return letters
+
+        family: Dict[str, Letter] = {}
+        queue: deque[str] = deque()
+
+        def enqueue(letter: Letter) -> None:
+            if letter.id and letter.id not in family:
+                family[letter.id] = letter
+                queue.append(letter.id)
+
+        for letter in await visible({"_id": {"$in": _expand_object_ids([seed.id])}}):
+            enqueue(letter)
+        if seed.id not in family:
+            return None
+        if seed.conversation_id:
+            for letter in await visible({"conversation_id": seed.conversation_id}):
+                enqueue(letter)
+
+        while queue:
+            current = family[queue.popleft()]
+            related = [str(value) for value in [current.previous_letter_id, *(current.ancestors or [])] if value]
+            if related:
+                for letter in await visible({"_id": {"$in": _expand_object_ids(related)}}):
+                    enqueue(letter)
+            for letter in await visible({"previous_letter_id": current.id}):
+                enqueue(letter)
+
+        return self._pruned_tree(family[seed.id], family)
+
+    @staticmethod
+    def _pruned_tree(seed: Letter, family: Dict[str, Letter]) -> ConversationTree:
+        def visible_parent(letter: Letter) -> Optional[str]:
+            candidates = [letter.previous_letter_id, *reversed(letter.ancestors or [])]
+            for candidate in candidates:
+                if candidate and str(candidate) in family and str(candidate) != letter.id:
+                    return str(candidate)
+            return None
+
+        parent_of = {letter_id: visible_parent(letter) for letter_id, letter in family.items()}
+
+        root_id = seed.id
+        seen: Set[str] = {root_id}
+        while parent_of.get(root_id) and parent_of[root_id] not in seen:
+            root_id = parent_of[root_id]
+            seen.add(root_id)
+
+        children_map: Dict[str, List[Letter]] = defaultdict(list)
+        for letter_id, parent_id in parent_of.items():
+            if parent_id:
+                children_map[parent_id].append(family[letter_id])
+
+        built: Set[str] = set()
+
+        def build_node(node: Letter) -> ConversationTree:
+            built.add(node.id)
+            ordered_children = sorted(
+                (child for child in children_map.get(node.id, []) if child.id not in built),
+                key=lambda item: (
+                    getattr(item, "depth", 0) if getattr(item, "depth", None) is not None else 0,
+                    getattr(item, "created_at", None) or getattr(item, "createdAt", None) or datetime.min,
+                ),
+            )
+            return ConversationTree(letter=node, children=[build_node(child) for child in ordered_children])
+
+        return build_node(family[root_id])
+
+    async def get_descendants(self, letter_id: str) -> List[Letter]:
+        """Every letter whose stored ancestry includes ``letter_id`` (what a reparent rewrites)."""
+        letter_service = await self._get_letter_service()
+        db = await self._get_db()
+        descendants: List[Letter] = []
+        for row in await db.letters.find({"ancestors": str(letter_id)}).to_list(length=None):
+            try:
+                descendants.append(Letter(**letter_service._augment_letter_document(row)))
+            except Exception:
+                continue
+        return descendants
+
+    async def reparent_letter_atomic(
+        self,
+        letter_id: str,
+        new_parent_id: str,
+        current_user: Any,
+        scope: Optional[Dict[str, Any]] = None,
+    ) -> None:
         letter_service = await self._get_letter_service()
         db = await self._get_db()
 
@@ -173,7 +296,7 @@ class ConversationService:
             },
         )
 
-        await self._recompute_descendants(letter.id, new_ancestors)
+        await self._recompute_descendants(letter.id, new_ancestors, scope=scope)
 
     async def _load_conversation_family(self, seed: Letter) -> Dict[str, Letter]:
         letter_service = await self._get_letter_service()
@@ -233,18 +356,20 @@ class ConversationService:
                 return candidate
         return seed
 
-    async def _recompute_descendants(self, root_id: str, base_ancestors: List[str]) -> None:
+    async def _recompute_descendants(
+        self, root_id: str, base_ancestors: List[str], scope: Optional[Dict[str, Any]] = None
+    ) -> None:
         db = await self._get_db()
-        cursor = db.letters.find({"ancestors": root_id})
+        # Never rewrite a letter outside the moved letter's own organisation/project.
+        query: Dict[str, Any] = {"ancestors": root_id}
+        query.update({key: value for key, value in (scope or {}).items() if value})
+        cursor = db.letters.find(query)
         descendants = await cursor.to_list(length=None)
 
         for doc in descendants:
-            try:
-                letter = Letter(**doc)
-            except Exception:
-                continue
-
-            ancestors = [str(a) for a in (letter.ancestors or [])]
+            # Read the stored ancestry directly: parsing the raw row as `Letter`
+            # fails on its ObjectId `_id`, which silently skipped every descendant.
+            ancestors = [str(a) for a in (doc.get("ancestors") or [])]
             if root_id in ancestors:
                 tail = ancestors[ancestors.index(root_id) + 1 :]
             else:
