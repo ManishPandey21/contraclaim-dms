@@ -246,3 +246,91 @@ async def test_a_case_scoped_document_exports_even_if_its_display_link_is_a_path
     row = await _exhibit(db, source_id=str(DOC_A1), source_file_link=str(storage["outside"] / "canary.txt"))
     entry = await _collect(db, row)
     assert entry["content"] == A1_BYTES
+
+
+# ---------------------------------------------------------------------------
+# The exact record whose bytes are exported must still be authoritative
+# ---------------------------------------------------------------------------
+
+
+def _blocked_document(db: _Database, storage: dict[str, Path], **verdict: Any) -> ObjectId:
+    document_id = ObjectId()
+    db.documents.docs.append(
+        _document(document_id, ORG_A, A1, filepath_local=str(storage["uploads"] / "a1.pdf"), **verdict)
+    )
+    return document_id
+
+
+@pytest.mark.parametrize(
+    "verdict",
+    [
+        pytest.param({"processing_status": "human_review_required"}, id="quality-gate-review"),
+        pytest.param({"duplicate_status": "duplicate"}, id="confirmed-duplicate"),
+        pytest.param({"lifecycle_state": "deleted"}, id="deleted"),
+    ],
+)
+async def test_a_document_the_quality_gate_blocked_is_not_exported(db: _Database, storage: dict[str, Path], verdict: dict) -> None:
+    row = await _exhibit(db, source_id=str(_blocked_document(db, storage, **verdict)))
+    entry = await _collect(db, row)
+    assert entry["content"] is None
+    assert entry["error"]
+
+
+async def test_a_row_cannot_dodge_the_authority_check_by_its_source_type(db: _Database, storage: dict[str, Path]) -> None:
+    # `source_type` is client-writable; authority is decided on the record actually read.
+    blocked = _blocked_document(db, storage, processing_status="human_review_required")
+    row = await _exhibit(db, source_id=str(blocked), source_type="manual_fact")
+    entry = await _collect(db, row)
+    assert entry["content"] is None
+
+
+async def test_a_deleted_letter_is_not_exported(db: _Database, storage: dict[str, Path]) -> None:
+    letter_id = ObjectId()
+    db.letters.docs.append(
+        {"_id": letter_id, "organization_id": ORG_A, "project_id": A1, "lifecycle_state": "deleted", "filepath_local": str(storage["uploads"] / "a1.pdf")}
+    )
+    row = await _exhibit(db, source_id=str(letter_id))
+    entry = await _collect(db, row)
+    assert entry["content"] is None
+
+
+# ---------------------------------------------------------------------------
+# Authorised legacy id representations still resolve; scope is not broadened
+# ---------------------------------------------------------------------------
+
+LEGACY_ORG, LEGACY_PROJECT = ObjectId(), ObjectId()
+LEGACY_CASE = "case-legacy"
+
+
+async def test_a_document_whose_scope_is_stored_as_object_ids_is_exported(db: _Database, storage: dict[str, Path]) -> None:
+    db.arbitration_cases.docs.append(
+        {"_id": LEGACY_CASE, "organization_id": str(LEGACY_ORG), "project_id": str(LEGACY_PROJECT), "title": "Legacy"}
+    )
+    document_id = ObjectId()
+    db.documents.docs.append(
+        {"_id": document_id, "organization_id": LEGACY_ORG, "project_id": LEGACY_PROJECT, "filename": "l.pdf", "filepath_local": str(storage["uploads"] / "a1.pdf")}
+    )
+    row = {"_id": "row-legacy", "case_id": LEGACY_CASE, "source_id": str(document_id), "exhibit_id": "C-9"}
+    entry = await _collect(db, row)
+    assert entry["content"] == A1_BYTES
+
+
+async def test_the_readiness_evidence_manifest_resolves_the_same_legacy_record(db: _Database, storage: dict[str, Path]) -> None:
+    case = {"_id": LEGACY_CASE, "organization_id": str(LEGACY_ORG), "project_id": str(LEGACY_PROJECT)}
+    document_id = ObjectId()
+    db.documents.docs.append(
+        {"_id": document_id, "organization_id": LEGACY_ORG, "project_id": LEGACY_PROJECT, "filename": "l.pdf"}
+    )
+    row = {"_id": "row-legacy", "case_id": LEGACY_CASE, "source_id": str(document_id), "approval_status": "approved", "verification_status": "verified"}
+    manifest = await ArbitrationCaseWorkspaceService(db)._authoritative_evidence_manifest(case, {"document-index": [row]})
+    assert [item["resolution_status"] for item in manifest] == ["resolved"]
+
+
+async def test_an_organisation_level_document_is_not_an_exhibit_of_a_project_case(db: _Database, storage: dict[str, Path]) -> None:
+    # Arbitration evidence is bound to the case's project (the readiness
+    # manifest applies the same rule); widening it is out of scope.
+    document_id = ObjectId()
+    db.documents.docs.append(_document(document_id, ORG_A, None, filepath_local=str(storage["uploads"] / "a1.pdf")))
+    row = await _exhibit(db, source_id=str(document_id))
+    entry = await _collect(db, row)
+    assert entry["content"] is None

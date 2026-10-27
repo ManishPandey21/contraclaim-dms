@@ -10,7 +10,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from bson import ObjectId
 from fastapi import HTTPException, status
 from pymongo.errors import DuplicateKeyError
 
@@ -233,7 +232,12 @@ def _date_sort_value(row: Dict[str, Any]) -> str:
     return str(value)
 
 
-from ..publication_policy import consumable_derived_text, resolve_derived_authority
+from ..publication_policy import (
+    consumable_derived_text,
+    is_consumable,
+    resolve_derived_authority,
+    resolve_document_authority,
+)
 
 
 class ArbitrationCaseWorkspaceService:
@@ -1026,20 +1030,12 @@ class ArbitrationCaseWorkspaceService:
         rows: Dict[str, List[Dict[str, Any]]],
     ) -> List[Dict[str, Any]]:
         manifest: List[Dict[str, Any]] = []
-        scope = {"organization_id": case.get("organization_id"), "project_id": case.get("project_id")}
         for row in rows.get("document-index") or []:
             if not _is_ready_row(row) or not row.get("source_id"):
                 continue
             source_id = str(row.get("source_id"))
-            authoritative = None
-            for collection_name in ("documents", "letters"):
-                collection = getattr(self.db, collection_name, None)
-                if collection is None:
-                    continue
-                query = {"_id": source_id, **{key: value for key, value in scope.items() if value}}
-                authoritative = await collection.find_one(query)
-                if authoritative:
-                    break
+            found = await self._case_scoped_source(case, source_id)
+            authoritative = found[1] if found else None
             recorded_revision = str(row.get("source_revision_id") or row.get("current_version_id") or "")
             authoritative_revision = str((authoritative or {}).get("current_version_id") or "")
             recorded_sha = str(row.get("source_sha256") or "")
@@ -1307,41 +1303,59 @@ class ArbitrationCaseWorkspaceService:
         rows = [row for row in await self.list_matrix_rows(case_id, "document-index") if row.get("exhibit_id")]
         return sorted(rows, key=lambda row: (str(row.get("exhibit_prefix") or ""), int(row.get("exhibit_number") or 0)))
 
-    async def _find_exhibit_source_record(self, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """The exhibit's source document or letter, inside the row's case scope.
+    async def _case_scoped_source(
+        self, case: Dict[str, Any], source_id: Any
+    ) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """(collection, record) for a document or letter inside the case's scope.
 
         `source_id` is client-writable, so the record must belong to the case's
-        organisation (and project, when the case has one). Without that, a row
-        could name another tenant's document and export its bytes. Documents and
-        letters are keyed by ObjectId, so the lookup tries both spellings.
+        organisation, and to its project when the case has one; an
+        organisation-level record is not evidence of a project case. Ids and
+        scope fields are matched as string or ObjectId, the forms they are
+        stored in. The exporter and the readiness evidence manifest share this
+        lookup so they cannot disagree about which record a row names.
         """
-        source_id = str(row.get("source_id") or "")
-        case_id = row.get("case_id")
-        if not source_id or not case_id:
-            return None
-        case = await self.db.arbitration_cases.find_one({"_id": case_id, "deleted_at": {"$exists": False}})
+        from ...core.security import _expand_object_ids
+
         organization_id = (case or {}).get("organization_id")
-        if not organization_id:
+        if not source_id or not organization_id:
             return None
-        scope: Dict[str, Any] = {"organization_id": str(organization_id)}
+        scope: Dict[str, Any] = {"organization_id": {"$in": _expand_object_ids([str(organization_id)])}}
         if case.get("project_id"):
-            scope["project_id"] = str(case["project_id"])
-        identifiers: List[Any] = [source_id]
-        try:
-            identifiers.append(ObjectId(source_id))
-        except Exception:
-            pass
+            scope["project_id"] = {"$in": _expand_object_ids([str(case["project_id"])])}
         for collection_name in ("documents", "letters"):
             collection = getattr(self.db, collection_name, None)
             if collection is None:
                 continue
             try:
-                record = await collection.find_one({"_id": {"$in": identifiers}, **scope})
+                record = await collection.find_one({"_id": {"$in": _expand_object_ids([str(source_id)])}, **scope})
             except Exception:
                 record = None
             if record:
-                return dict(record)
+                return collection_name, dict(record)
         return None
+
+    async def _find_exhibit_source_record(self, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """The authoritative record whose bytes the exhibit exports, or None.
+
+        Scope comes from the row's case. Authority is decided on the record
+        actually found, never on the row's client-writable `source_type`:
+        documents through `resolve_document_authority` (the quality gate),
+        letters through `is_consumable` (quarantine and deletion).
+        """
+        case_id = row.get("case_id")
+        if not row.get("source_id") or not case_id:
+            return None
+        case = await self.db.arbitration_cases.find_one({"_id": case_id, "deleted_at": {"$exists": False}})
+        found = await self._case_scoped_source(case or {}, row.get("source_id"))
+        if not found:
+            return None
+        collection_name, record = found
+        if collection_name == "documents":
+            consumable = (await resolve_document_authority(self.db, str(record.get("_id")))).consumable
+        else:
+            consumable = is_consumable(record)
+        return record if consumable else None
 
     def _confined_local_path(self, value: Any) -> Optional[Path]:
         """A server-recorded local path, only if it resolves inside a storage root.
@@ -1367,7 +1381,7 @@ class ArbitrationCaseWorkspaceService:
         """Cheap resolvability check for the citation audit (no byte fetch)."""
         record = await self._find_exhibit_source_record(row)
         if record is None:
-            return False, "no source record in this case's scope"
+            return False, "no authoritative source record in this case's scope"
         if self._confined_local_path(record.get("filepath_local")) or record.get("filepath_s3"):
             return True, None
         return False, "source record has no usable local file or storage key"
@@ -1376,7 +1390,7 @@ class ArbitrationCaseWorkspaceService:
         """Resolve exhibit bytes from the case-scoped source record: local file, then S3."""
         record = await self._find_exhibit_source_record(row)
         if record is None:
-            return {"content": None, "filename": None, "error": "No source record in this case's scope."}
+            return {"content": None, "filename": None, "error": "No authoritative source record in this case's scope."}
         local = self._confined_local_path(record.get("filepath_local"))
         if local:
             try:
