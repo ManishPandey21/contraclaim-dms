@@ -249,10 +249,13 @@ class ConversationService:
 
     async def get_descendants(self, letter_id: str) -> List[Letter]:
         """Every letter whose stored ancestry includes ``letter_id`` (what a reparent rewrites)."""
+        from ..core.security import _expand_object_ids
+
         letter_service = await self._get_letter_service()
         db = await self._get_db()
         descendants: List[Letter] = []
-        for row in await db.letters.find({"ancestors": str(letter_id)}).to_list(length=None):
+        query = {"ancestors": {"$in": _expand_object_ids([str(letter_id)])}}
+        for row in await db.letters.find(query).to_list(length=None):
             try:
                 descendants.append(Letter(**letter_service._augment_letter_document(row)))
             except Exception:
@@ -264,7 +267,7 @@ class ConversationService:
         letter_id: str,
         new_parent_id: str,
         current_user: Any,
-        scope: Optional[Dict[str, Any]] = None,
+        descendant_ids: Optional[List[str]] = None,
     ) -> None:
         letter_service = await self._get_letter_service()
         db = await self._get_db()
@@ -296,7 +299,7 @@ class ConversationService:
             },
         )
 
-        await self._recompute_descendants(letter.id, new_ancestors, scope=scope)
+        await self._recompute_descendants(letter.id, new_ancestors, descendant_ids=descendant_ids)
 
     async def _load_conversation_family(self, seed: Letter) -> Dict[str, Letter]:
         letter_service = await self._get_letter_service()
@@ -357,12 +360,16 @@ class ConversationService:
         return seed
 
     async def _recompute_descendants(
-        self, root_id: str, base_ancestors: List[str], scope: Optional[Dict[str, Any]] = None
+        self, root_id: str, base_ancestors: List[str], descendant_ids: Optional[List[str]] = None
     ) -> None:
+        from ..core.security import _expand_object_ids
+
         db = await self._get_db()
-        # Never rewrite a letter outside the moved letter's own organisation/project.
-        query: Dict[str, Any] = {"ancestors": root_id}
-        query.update({key: value for key, value in (scope or {}).items() if value})
+        # Ancestry may be stored as strings or ObjectIds. When the caller
+        # authorised a descendant set, rewrite exactly that set.
+        query: Dict[str, Any] = {"ancestors": {"$in": _expand_object_ids([root_id])}}
+        if descendant_ids is not None:
+            query["_id"] = {"$in": _expand_object_ids(descendant_ids)}
         cursor = db.letters.find(query)
         descendants = await cursor.to_list(length=None)
 

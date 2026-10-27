@@ -1132,11 +1132,59 @@ class LetterController:
 
 
 
-            for descendant in await self.conversation_service.get_descendants(letter_id):
+            descendants = await self.conversation_service.get_descendants(letter_id)
+
+
+
+            for descendant in descendants:
 
 
 
                 await self.auth_service.check_letter_access(current_user, descendant, "update")
+
+
+
+            # A reply filed in another organisation or project cannot follow the
+
+
+
+            # move, so refuse it whole rather than leave its threading stale.
+
+
+
+            moved_scope = (str(letter.organization_id or ""), str(letter.project_id or ""))
+
+
+
+            if any(
+
+
+
+                (str(descendant.organization_id or ""), str(descendant.project_id or "")) != moved_scope
+
+
+
+                for descendant in descendants
+
+
+
+            ):
+
+
+
+                raise LetterError(
+
+
+
+                    "A reply in another project depends on this letter; it cannot be moved",
+
+
+
+                    status.HTTP_409_CONFLICT
+
+
+
+                )
 
 
 
@@ -1156,7 +1204,7 @@ class LetterController:
 
 
 
-                scope={"organization_id": letter.organization_id, "project_id": letter.project_id},
+                descendant_ids=[descendant.id for descendant in descendants],
 
 
 

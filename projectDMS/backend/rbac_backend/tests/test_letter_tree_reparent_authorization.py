@@ -48,9 +48,11 @@ SIBLING_A2 = str(ObjectId())  # same conversation, sibling project
 FOREIGN_B1 = str(ObjectId())  # same conversation, foreign organisation
 ROOT_B1 = str(ObjectId())  # an unrelated thread in organisation B
 BRANCH_A1 = str(ObjectId())  # added by one test only
+REPLY_A2 = str(ObjectId())  # added by one test only: a reply filed in the sibling project
 
 MARKER = {
     BRANCH_A1: "BRANCH-A1-MARKER",
+    REPLY_A2: "REPLY-A2-MARKER",
     ROOT_A1: "ROOT-A1-MARKER",
     CHILD_A1: "CHILD-A1-MARKER",
     GRAND_A1: "GRAND-A1-MARKER",
@@ -64,12 +66,14 @@ VIEW_EDIT = {"dms.document.view", "dms.document.edit_metadata"}
 PROJECT_A1_EDITOR = _principal("u-editor-a1", ["projectuser"], ORG_A, [A1])
 PROJECT_A1_READER = _principal("u-reader-a1", ["projectuser"], ORG_A, [A1])
 ORG_B_ADMIN = _principal("u-orgadmin-b", ["orgadmin"], ORG_B)
+ORG_A_ADMIN = _principal("u-orgadmin-a", ["orgadmin"], ORG_A)
 SUPERADMIN = _principal("u-root", ["superadmin"], None)
 
 GRANTS: dict[str, set[str]] = {
     PROJECT_A1_EDITOR.id: VIEW_EDIT,
     PROJECT_A1_READER.id: {"dms.document.view"},
     ORG_B_ADMIN.id: VIEW_EDIT,
+    ORG_A_ADMIN.id: VIEW_EDIT,
 }
 
 
@@ -387,3 +391,37 @@ async def test_an_authorised_move_rewrites_same_scope_descendants(db: _Database)
     after = _snapshot(db)
     assert after[CHILD_A1] == (BRANCH_A1, [ROOT_A1, BRANCH_A1], 2)
     assert after[GRAND_A1] == (CHILD_A1, [ROOT_A1, BRANCH_A1, CHILD_A1], 3)
+
+
+# ---------------------------------------------------------------------------
+# Reparent: the rewrite covers exactly the descendants that were authorised
+# ---------------------------------------------------------------------------
+
+
+def _without_foreign(db: _Database) -> None:
+    db.letters.docs[:] = [row for row in db.letters.docs if str(row["_id"]) != FOREIGN_B1]
+    db.letters.docs.append(_letter(BRANCH_A1, ORG_A, A1, previous=ROOT_A1, ancestors=[ROOT_A1]))
+
+
+async def test_a_move_whose_descendant_sits_in_another_project_is_refused_before_any_write(db: _Database) -> None:
+    # An org-wide editor may update every letter involved, but the move would
+    # leave the A2 reply's threading half-rewritten. Refuse it whole.
+    _without_foreign(db)
+    db.letters.docs.append(_letter(REPLY_A2, ORG_A, A2, previous=CHILD_A1, ancestors=[ROOT_A1, CHILD_A1]))
+    before = _snapshot(db)
+    async with _as(db, ORG_A_ADMIN) as client:
+        response = await client.post(f"/api/letters/{CHILD_A1}/reparent", json={"new_parent_id": BRANCH_A1})
+    assert response.status_code == 409, response.text
+    assert _snapshot(db) == before
+    assert not _leaks(response.text, REPLY_A2)
+
+
+async def test_descendants_whose_ancestry_is_stored_as_object_ids_are_rewritten(db: _Database) -> None:
+    _without_foreign(db)
+    for row in db.letters.docs:
+        if str(row["_id"]) == GRAND_A1:
+            row["ancestors"] = [ObjectId(ROOT_A1), ObjectId(CHILD_A1)]
+    async with _as(db, PROJECT_A1_EDITOR) as client:
+        response = await client.post(f"/api/letters/{CHILD_A1}/reparent", json={"new_parent_id": BRANCH_A1})
+    assert response.status_code == 200, response.text
+    assert _snapshot(db)[GRAND_A1] == (CHILD_A1, [ROOT_A1, BRANCH_A1, CHILD_A1], 3)
