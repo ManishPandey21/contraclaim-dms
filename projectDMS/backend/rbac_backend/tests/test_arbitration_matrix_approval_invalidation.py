@@ -412,7 +412,8 @@ def test_a_contributor_cannot_be_restored_or_cleared_by_an_edit() -> None:
 # ---------------------------------------------------------------------------
 
 UNQUALIFIED = _FakeUser("approver-6", roles=["projectuser"])
-ASSIGNER = _FakeUser("lead-7", roles=["projectuser"])
+ASSIGNER = _FakeUser("lead-7", roles=["contract_reviewer"])  # holds the specialty it assigns
+COLLEAGUE = _FakeUser("colleague-8", roles=["projectuser"])
 
 
 def _review(db: _FakeDb, user, **fields) -> dict:
@@ -515,3 +516,12 @@ def test_saving_an_unchanged_paragraph_response_keeps_the_permission() -> None:
 
     assert updated["permission_obtained"] is True
     assert db.arbitration_rejoinder_matrix.rows[0]["permission_obtained"] is True
+
+
+def test_a_colleague_without_the_specialty_cannot_confer_it(db: _FakeDb) -> None:
+    # Otherwise two unqualified users could assign each other and approve.
+    _edit(db, source_id="doc-2")
+    with pytest.raises(HTTPException) as refused:
+        _review(db, COLLEAGUE, action="assign", reviewer_role="contracts", reviewer_user_id=UNQUALIFIED.id)
+    assert refused.value.status_code == 403
+    assert not _row(db).get("review_assignments")

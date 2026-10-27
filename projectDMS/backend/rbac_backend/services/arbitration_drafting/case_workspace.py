@@ -545,11 +545,9 @@ class ArbitrationCaseWorkspaceService:
         assignments = list(row.get("review_assignments") or [])
         if claimed_role not in required_roles:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Reviewer role is not required for this matrix row")
-        role = (
-            claimed_role
-            if action == "assign"
-            else enforce_matrix_reviewer_role(claimed_role, current_user, assignments)
-        )
+        # Assigning confers the specialty, so only a holder of its role claim may
+        # assign it (no assignment counts here); reviewing accepts either.
+        role = enforce_matrix_reviewer_role(claimed_role, current_user, [] if action == "assign" else assignments)
         comments = list(row.get("review_comments") or [])
         approval_log = list(row.get("approval_log") or [])
 
