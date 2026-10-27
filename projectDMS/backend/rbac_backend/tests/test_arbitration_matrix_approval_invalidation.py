@@ -638,3 +638,35 @@ def test_a_permission_decided_on_text_rewritten_meanwhile_is_refused() -> None:
     assert db.arbitration_rejoinder_matrix.rows[0]["permission_obtained"] is False
     receipts = [r for r in db.arbitration_workflow_approvals.rows if r.get("gate") == "rejoinder_permission"]
     assert [r["receipt_status"] for r in receipts] == ["aborted"]
+
+
+def test_a_permission_decision_whose_row_write_fails_leaves_no_permission() -> None:
+    db = _FakeDb()
+    _rejoinder_awaiting_permission(db)
+
+    async def _row_write_fails(*args, **kwargs):
+        raise RuntimeError("primary stepped down")
+
+    db.arbitration_rejoinder_matrix.find_one_and_update = _row_write_fails
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(_grant(db))
+
+    assert db.arbitration_paragraph_responses.rows[0]["permission_obtained"] is False
+    receipts = [r for r in db.arbitration_workflow_approvals.rows if r.get("gate") == "rejoinder_permission"]
+    assert [r["receipt_status"] for r in receipts] == ["aborted"]
+
+
+def test_two_rewrites_from_the_same_read_get_distinct_revisions() -> None:
+    db = _FakeDb()
+    _rejoinder_awaiting_permission(db)
+
+    async def _second_rewrite() -> None:
+        await _update_response_async(db, "New matter: a second, different contention.")
+
+    # The second rewrite reads, writes and syncs between the first one's read and write.
+    _first_call_runs(db.arbitration_paragraph_responses, "find_one_and_update", _second_rewrite)
+
+    _update_response(db, "New matter: an entirely different contention.")
+
+    assert db.arbitration_paragraph_responses.rows[0]["response_revision"] == 2

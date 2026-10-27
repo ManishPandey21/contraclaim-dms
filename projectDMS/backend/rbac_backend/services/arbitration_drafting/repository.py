@@ -93,9 +93,18 @@ class ArbitrationDraftingRepository:
         cursor = self.db.arbitration_paragraph_responses.find({"draft_id": draft_id}).sort("source_paragraph_number", 1)
         return await _collect(cursor)
 
-    async def update_paragraph_response(self, draft_id: str, response_id: str, update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    async def update_paragraph_response(
+        self,
+        draft_id: str,
+        response_id: str,
+        update: Dict[str, Any],
+        increment: Optional[Dict[str, int]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        operations: Dict[str, Any] = {"$set": _jsonable(update)}
+        if increment:
+            operations["$inc"] = increment
         return await self.db.arbitration_paragraph_responses.find_one_and_update(
-            {"_id": response_id, "draft_id": draft_id}, {"$set": _jsonable(update)}, return_document=True
+            {"_id": response_id, "draft_id": draft_id}, operations, return_document=True
         )
 
     async def create_generation_run(self, doc: Dict[str, Any]) -> Dict[str, Any]:

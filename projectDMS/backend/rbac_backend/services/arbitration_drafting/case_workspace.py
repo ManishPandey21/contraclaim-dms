@@ -803,31 +803,30 @@ class ArbitrationCaseWorkspaceService:
                     detail="The paragraph response changed during the permission decision; review the current content",
                 )
         # The permission covers only the content that was read above.
-        updated = await collection.find_one_and_update(
-            {"_id": row_id, "case_id": case_id, "edit_revision": row.get("edit_revision")},
-            {
-                "$set": {
-                    "edit_revision": int(row.get("edit_revision") or 0) + 1,
-                    "permission_obtained": True,
-                    "permission_source_id": payload.permission_source_id,
-                    "permission_approved_by": actor,
-                    "permission_approved_at": now,
-                    "permission_notes": payload.permission_notes,
-                    "permission_approval_receipt_id": receipt["_id"],
-                    "updated_by": actor,
-                    "updated_at": now,
-                }
-            },
-            return_document=True,
-        )
+        try:
+            updated = await collection.find_one_and_update(
+                {"_id": row_id, "case_id": case_id, "edit_revision": row.get("edit_revision")},
+                {
+                    "$set": {
+                        "edit_revision": int(row.get("edit_revision") or 0) + 1,
+                        "permission_obtained": True,
+                        "permission_source_id": payload.permission_source_id,
+                        "permission_approved_by": actor,
+                        "permission_approved_at": now,
+                        "permission_notes": payload.permission_notes,
+                        "permission_approval_receipt_id": receipt["_id"],
+                        "updated_by": actor,
+                        "updated_at": now,
+                    }
+                },
+                return_document=True,
+            )
+        except BaseException:
+            # A failed row write must not leave the grant on the response.
+            await self._withdraw_permission_grant(response_id, response_scope, receipt["_id"])
+            raise
         if not updated:
-            if response_id:
-                # Undo the grant written above, unless the response moved on since.
-                await self.db.arbitration_paragraph_responses.update_one(
-                    {**response_scope, "permission_approval_receipt_id": receipt["_id"]},
-                    {"$set": {**REVOKED_REJOINDER_PERMISSION, "updated_at": datetime.utcnow()}},
-                )
-            await self._abort_permission_receipt(receipt["_id"])
+            await self._withdraw_permission_grant(response_id, response_scope, receipt["_id"])
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Rejoinder matrix row changed during the permission decision; review the current content",
@@ -860,6 +859,17 @@ class ArbitrationCaseWorkspaceService:
         )
         if not qualified:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="The assignee does not hold this reviewer role")
+
+    async def _withdraw_permission_grant(
+        self, response_id: Any, response_scope: Dict[str, Any], receipt_id: str
+    ) -> None:
+        """Undo a response grant this decision wrote, unless the response moved on, and abort the receipt."""
+        if response_id:
+            await self.db.arbitration_paragraph_responses.update_one(
+                {**response_scope, "permission_approval_receipt_id": receipt_id},
+                {"$set": {**REVOKED_REJOINDER_PERMISSION, "updated_at": datetime.utcnow()}},
+            )
+        await self._abort_permission_receipt(receipt_id)
 
     async def _abort_permission_receipt(self, receipt_id: str) -> None:
         await self.db.arbitration_workflow_approvals.update_one(

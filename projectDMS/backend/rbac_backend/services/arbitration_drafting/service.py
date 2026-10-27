@@ -406,13 +406,15 @@ class ArbitrationDraftingService:
             "updated_by": _actor_id(current_user),
             "updated_at": datetime.utcnow(),
         }
+        increment: Optional[Dict[str, int]] = None
         if existing and any(existing.get(key) != value for key, value in content.items()):
             # New content: whatever permission the old content held - including one
             # granted after the read above - does not cover it. The revision lets a
-            # permission decision on the old content detect the rewrite.
+            # permission decision on the old content detect the rewrite; it is
+            # incremented in the same write, so concurrent rewrites never share one.
             changes.update(REVOKED_REJOINDER_PERMISSION)
-            changes["response_revision"] = int(existing.get("response_revision") or 0) + 1
-        updated = await self.repo.update_paragraph_response(draft_id, response_id, changes)
+            increment = {"response_revision": 1}
+        updated = await self.repo.update_paragraph_response(draft_id, response_id, changes, increment=increment)
         if not updated:
             raise HTTPException(status_code=404, detail="Paragraph response not found")
         await sync_paragraph_position_projection(
