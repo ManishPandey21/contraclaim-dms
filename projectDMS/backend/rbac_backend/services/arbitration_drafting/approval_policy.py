@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, Mapping, Sequence
+import uuid
+from datetime import datetime
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from fastapi import HTTPException, status
 
@@ -11,6 +13,50 @@ def _actor_id(user: Any) -> Any:
     if isinstance(user, dict):
         return user.get("id") or user.get("_id") or user.get("email")
     return getattr(user, "id", None) or getattr(user, "email", None)
+
+
+def material_change_review_reset(
+    review_defaults: Mapping[str, Any],
+    existing: Mapping[str, Any],
+    changed: List[str],
+    actor: Optional[str],
+    now: datetime,
+) -> Dict[str, Any]:
+    """Fields that return a matrix row to review after its reviewed content changed.
+
+    Shared by the user edit path and every server-side writer that rewrites a
+    row's content. It discards the prior approval, every completed reviewer
+    role and any rejoinder permission granted for the old content, and records
+    the actor as material editor so approver separation bars them from
+    approving it. The caller also increments `edit_revision` in the same write.
+    """
+    reset: Dict[str, Any] = {
+        **review_defaults,
+        "approved_by": None,
+        "approved_at": None,
+        "last_material_editor_id": actor,
+        "approval_log": [
+            *(existing.get("approval_log") or []),
+            {
+                "_id": str(uuid.uuid4()),
+                "action": "material_edit",
+                "changed_fields": changed,
+                "previous_review_status": existing.get("review_status"),
+                "actor_id": actor,
+                "created_at": now,
+            },
+        ],
+    }
+    if existing.get("permission_obtained"):
+        reset.update(
+            {
+                "permission_obtained": False,
+                "permission_approved_by": None,
+                "permission_approved_at": None,
+                "permission_approval_receipt_id": None,
+            }
+        )
+    return reset
 
 
 DEFAULT_GATE_ROLES: Dict[str, frozenset[str]] = {

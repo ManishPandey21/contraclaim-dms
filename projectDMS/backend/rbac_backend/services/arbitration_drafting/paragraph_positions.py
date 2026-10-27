@@ -143,13 +143,19 @@ async def sync_paragraph_position_projection(
         "updated_by": actor_id,
         "updated_at": now,
     }
-    if not existing or existing.get("projection_hash") != content_hash:
+    changed = not existing or existing.get("projection_hash") != content_hash
+    if changed:
         update.update(_review_defaults())
 
     if existing:
+        # A content change invalidates any review computed before it (see
+        # `edit_revision` in case_workspace).
+        operations: Dict[str, Any] = {"$set": update}
+        if changed:
+            operations["$inc"] = {"edit_revision": 1}
         return await collection.find_one_and_update(
             {"_id": existing["_id"], "case_id": str(draft["case_id"])},
-            {"$set": update},
+            operations,
             return_document=True,
         )
 

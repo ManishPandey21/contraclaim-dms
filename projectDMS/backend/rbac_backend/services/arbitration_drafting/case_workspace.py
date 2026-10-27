@@ -14,6 +14,7 @@ from fastapi import HTTPException, status
 from pymongo.errors import DuplicateKeyError
 
 from ...models.arbitration_drafting import (
+    APPROVAL_STATUS_VALUES,
     ArbitrationAgentRun,
     ArbitrationAgentRunRequest,
     ArbitrationApprovalReceipt,
@@ -43,6 +44,7 @@ from .matrix_evidence_authority import matrix_clause_fence
 from .matrix_registry import MATRIX_COLLECTIONS
 from .repository import ArbitrationDraftingRepository, _collect, _jsonable
 from .approval_policy import (
+    material_change_review_reset,
     enforce_author_approver_separation,
     enforce_matrix_reviewer_role,
     resolve_gate_role,
@@ -147,7 +149,10 @@ SERVER_CONTROLLED_MATRIX_FIELDS = {
     "approved_by",
     "approval_log",
     "approval_status",
+    "assigned_reviewer_id",
+    "edit_revision",
     "human_approval_status",
+    "last_material_editor_id",
     "last_review_action",
     "last_reviewed_at",
     "last_reviewed_by",
@@ -161,12 +166,19 @@ SERVER_CONTROLLED_MATRIX_FIELDS = {
     "readiness_status",
     "rejected_at",
     "rejected_by",
+    "review_assignments",
+    "review_comments",
     "review_completed_roles",
+    "review_required_roles",
     "review_status",
     "source_paragraph_response_id",
     "verified",
     "verification_status",
 }
+
+# Authorship bookkeeping the server writes itself. A client that echoes a row
+# back may send it, so it is dropped rather than refused.
+SERVER_BOOKKEEPING_MATRIX_FIELDS = {"created_at", "created_by", "updated_at", "updated_by"}
 
 
 # A row belongs to the case it was created in: these are copied from that case,
@@ -199,6 +211,25 @@ def _matrix_review_defaults(matrix_slug: str) -> Dict[str, Any]:
     if matrix_slug == "issue-matrix":
         defaults["status"] = "needs_review"
     return defaults
+
+
+def _material_edit_review_reset(
+    matrix_slug: str,
+    existing: Dict[str, Any],
+    update: Dict[str, Any],
+    changed: List[str],
+    actor: Optional[str],
+    now: datetime,
+) -> Dict[str, Any]:
+    """Return a row to review after a user edit changed its reviewed content.
+
+    Every client-editable field is reviewed content (exhibit source, title,
+    pages, dates, citations, ordering), so any change is material.
+    """
+    defaults = _matrix_review_defaults(matrix_slug)
+    if "status" in update:
+        defaults.pop("status", None)
+    return material_change_review_reset(defaults, existing, changed, actor, now)
 
 
 def _canonical_hash(value: Any) -> str:
@@ -383,9 +414,9 @@ class ArbitrationCaseWorkspaceService:
                 detail="Draft-bound defence/rejoinder positions are server-owned projections; update the paragraph response instead",
             )
         _strip_row_ownership(body, {**case, "case_id": case_id})
-        for key in SERVER_CONTROLLED_MATRIX_FIELDS:
+        for key in SERVER_CONTROLLED_MATRIX_FIELDS | SERVER_BOOKKEEPING_MATRIX_FIELDS:
             body.pop(key, None)
-        if str(body.get("status") or "").lower() in {"approved", "ready", "verified"}:
+        if str(body.get("status") or "").strip().lower() in APPROVAL_STATUS_VALUES:
             body.pop("status", None)
         body.update(_matrix_review_defaults(matrix_slug))
         now = datetime.utcnow()
@@ -428,21 +459,44 @@ class ArbitrationCaseWorkspaceService:
         update = _clean_payload(payload.model_dump(exclude_unset=True, by_alias=True))
         update.pop("_id", None)
         _strip_row_ownership(update, existing)
-        for key in SERVER_CONTROLLED_MATRIX_FIELDS:
+        for key in SERVER_CONTROLLED_MATRIX_FIELDS | SERVER_BOOKKEEPING_MATRIX_FIELDS:
             update.pop(key, None)
-        if str(update.get("status") or "").lower() in {"approved", "ready", "verified"}:
+        if str(update.get("status") or "").strip().lower() in APPROVAL_STATUS_VALUES:
             update.pop("status", None)
-        update["updated_by"] = _actor_id(current_user)
-        update["updated_at"] = datetime.utcnow()
+        prior = existing or {}
+        changed = sorted(key for key, value in _jsonable(update).items() if prior.get(key) != value)
+        if existing and not changed:
+            return existing
+        now = datetime.utcnow()
+        actor = _actor_id(current_user)
+        update.update(_material_edit_review_reset(matrix_slug, prior, update, changed, actor, now))
+        update["updated_by"] = actor
+        update["updated_at"] = now
+        update["edit_revision"] = int(prior.get("edit_revision") or 0) + 1
+        if matrix_slug == "document-index" and not {**prior, **update}.get("exhibit_id"):
+            # Number the exhibit in this same write, so no approval can land
+            # between the edit and the numbering.
+            numbered = await self._assign_exhibit_if_needed(case_id, matrix_slug, {**prior, **update})
+            update.update({key: numbered.get(key) for key in ("exhibit_prefix", "exhibit_number", "exhibit_id")})
+        # Compare-and-set on the revision this edit was computed from, so an edit
+        # and a review can never both apply to the same content.
         updated = await collection.find_one_and_update(
-            {"_id": row_id, "case_id": case_id, "deleted_at": {"$exists": False}},
+            {
+                "_id": row_id,
+                "case_id": case_id,
+                "deleted_at": {"$exists": False},
+                "edit_revision": prior.get("edit_revision"),
+            },
             {"$set": _jsonable(update)},
             return_document=True,
         )
         if not updated:
+            if existing:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Arbitration matrix row changed concurrently; reload it and retry",
+                )
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Arbitration matrix row not found")
-        if matrix_slug == "document-index" and not updated.get("exhibit_id"):
-            updated = await self._assign_and_update_exhibit(case_id, updated)
         await self._touch_case(case_id, current_user)
         return updated
 
@@ -540,6 +594,7 @@ class ArbitrationCaseWorkspaceService:
             "last_reviewed_at": now,
             "updated_by": actor,
             "updated_at": now,
+            "edit_revision": int(row.get("edit_revision") or 0) + 1,
         }
 
         if action == "assign":
@@ -622,13 +677,22 @@ class ArbitrationCaseWorkspaceService:
         else:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unsupported review action: {action}")
 
+        # The decision applies only to the content that was reviewed.
         updated = await collection.find_one_and_update(
-            {"_id": row_id, "case_id": case_id, "deleted_at": {"$exists": False}},
+            {
+                "_id": row_id,
+                "case_id": case_id,
+                "deleted_at": {"$exists": False},
+                "edit_revision": row.get("edit_revision"),
+            },
             {"$set": _jsonable(update)},
             return_document=True,
         )
         if not updated:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Arbitration matrix row not found")
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Arbitration matrix row changed during review; review the current content",
+            )
 
         task_sync = TaskSyncService(self.db)
         if action == "assign":
@@ -702,10 +766,12 @@ class ArbitrationCaseWorkspaceService:
             "approved_at": now,
         }
         await self.db.arbitration_workflow_approvals.insert_one(_jsonable(receipt))
+        # The permission covers only the content that was read above.
         updated = await collection.find_one_and_update(
-            {"_id": row_id, "case_id": case_id},
+            {"_id": row_id, "case_id": case_id, "edit_revision": row.get("edit_revision")},
             {
                 "$set": {
+                    "edit_revision": int(row.get("edit_revision") or 0) + 1,
                     "permission_obtained": True,
                     "permission_source_id": payload.permission_source_id,
                     "permission_approved_by": actor,
@@ -718,7 +784,12 @@ class ArbitrationCaseWorkspaceService:
             },
             return_document=True,
         )
-        if updated and updated.get("source_paragraph_response_id"):
+        if not updated:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Rejoinder matrix row changed during the permission decision; review the current content",
+            )
+        if updated.get("source_paragraph_response_id"):
             await self.db.arbitration_paragraph_responses.update_one(
                 {"_id": updated["source_paragraph_response_id"], "draft_id": updated.get("draft_id")},
                 {
@@ -740,7 +811,7 @@ class ArbitrationCaseWorkspaceService:
         receipt["receipt_status"] = "committed"
         await self.invalidate_readiness_approvals(case_id, "rejoinder_permission_changed", current_user)
         await self.readiness(case_id)
-        return updated or row
+        return updated
 
     async def dashboard(self, case_id: str) -> Dict[str, Any]:
         case = await self.get_case(case_id)
@@ -2285,14 +2356,6 @@ class ArbitrationCaseWorkspaceService:
         row["exhibit_prefix"] = prefix
         row["exhibit_id"] = f"{prefix}-{row['exhibit_number']}"
         return row
-
-    async def _assign_and_update_exhibit(self, case_id: str, row: Dict[str, Any]) -> Dict[str, Any]:
-        updated = await self._assign_exhibit_if_needed(case_id, "document-index", row)
-        await self.db.arbitration_document_index.update_one(
-            {"_id": updated["_id"], "case_id": case_id},
-            {"$set": {"exhibit_prefix": updated.get("exhibit_prefix"), "exhibit_number": updated.get("exhibit_number"), "exhibit_id": updated.get("exhibit_id")}},
-        )
-        return updated
 
     @staticmethod
     def _review_roles(values: Any) -> List[str]:
