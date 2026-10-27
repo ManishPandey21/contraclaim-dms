@@ -414,8 +414,18 @@ class ArbitrationDraftingService:
             # incremented in the same write, so concurrent rewrites never share one.
             changes.update(REVOKED_REJOINDER_PERMISSION)
             increment = {"response_revision": 1}
-        updated = await self.repo.update_paragraph_response(draft_id, response_id, changes, increment=increment)
+        # Compare-and-set on the revision read above: the change and the revocation
+        # were judged against that content, so a rewrite in between refuses this one.
+        updated = await self.repo.update_paragraph_response(
+            draft_id,
+            response_id,
+            changes,
+            increment=increment,
+            expected_revision=(existing or {}).get("response_revision"),
+        )
         if not updated:
+            if existing:
+                raise HTTPException(status_code=409, detail="Paragraph response changed concurrently; reload it and retry")
             raise HTTPException(status_code=404, detail="Paragraph response not found")
         await sync_paragraph_position_projection(
             self.db,

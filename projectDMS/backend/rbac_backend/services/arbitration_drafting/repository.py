@@ -22,6 +22,9 @@ async def _collect(cursor: Any) -> List[Dict[str, Any]]:
     return [dict(item) async for item in cursor]
 
 
+_ANY_REVISION = object()
+
+
 class ArbitrationDraftingRepository:
     def __init__(self, db: Any) -> None:
         self.db = db
@@ -99,12 +102,17 @@ class ArbitrationDraftingRepository:
         response_id: str,
         update: Dict[str, Any],
         increment: Optional[Dict[str, int]] = None,
+        expected_revision: Any = _ANY_REVISION,
     ) -> Optional[Dict[str, Any]]:
+        """Update one response; with ``expected_revision``, only while it is still at that revision."""
         operations: Dict[str, Any] = {"$set": _jsonable(update)}
         if increment:
             operations["$inc"] = increment
+        query: Dict[str, Any] = {"_id": response_id, "draft_id": draft_id}
+        if expected_revision is not _ANY_REVISION:
+            query["response_revision"] = expected_revision
         return await self.db.arbitration_paragraph_responses.find_one_and_update(
-            {"_id": response_id, "draft_id": draft_id}, operations, return_document=True
+            query, operations, return_document=True
         )
 
     async def create_generation_run(self, doc: Dict[str, Any]) -> Dict[str, Any]:

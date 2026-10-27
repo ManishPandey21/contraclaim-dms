@@ -657,7 +657,7 @@ def test_a_permission_decision_whose_row_write_fails_leaves_no_permission() -> N
     assert [r["receipt_status"] for r in receipts] == ["aborted"]
 
 
-def test_two_rewrites_from_the_same_read_get_distinct_revisions() -> None:
+def test_of_two_rewrites_from_the_same_read_the_later_is_refused() -> None:
     db = _FakeDb()
     _rejoinder_awaiting_permission(db)
 
@@ -667,6 +667,101 @@ def test_two_rewrites_from_the_same_read_get_distinct_revisions() -> None:
     # The second rewrite reads, writes and syncs between the first one's read and write.
     _first_call_runs(db.arbitration_paragraph_responses, "find_one_and_update", _second_rewrite)
 
-    _update_response(db, "New matter: an entirely different contention.")
+    with pytest.raises(HTTPException) as refused:
+        _update_response(db, "New matter: an entirely different contention.")
 
-    assert db.arbitration_paragraph_responses.rows[0]["response_revision"] == 2
+    assert refused.value.status_code == 409
+    response = db.arbitration_paragraph_responses.rows[0]
+    assert response["response_text"] == "New matter: a second, different contention."
+    assert response["response_revision"] == 1
+
+
+def test_a_rewrite_judged_against_a_stale_read_is_refused() -> None:
+    # X reads text A. Meanwhile Y rewrites to B and a permission is granted on B.
+    # X must not then write A back under B's permission.
+    db = _FakeDb()
+    _rejoinder_awaiting_permission(db)
+
+    async def _rewrite_then_grant() -> None:
+        await _update_response_async(db, "New matter: B.")
+        from backend.rbac_backend.services.arbitration_drafting.paragraph_positions import sync_paragraph_position_projection
+
+        await _grant(db)
+
+    _first_call_runs(db.arbitration_paragraph_responses, "find_one_and_update", _rewrite_then_grant)
+
+    with pytest.raises(HTTPException) as refused:
+        _update_response(db, "New matter: the access log shows late handover.")
+
+    assert refused.value.status_code == 409
+    response = db.arbitration_paragraph_responses.rows[0]
+    assert response["response_text"] == "New matter: B."
+    assert response["permission_obtained"] is True
+
+
+def _grant_with_row_write(db: _FakeDb, row_write) -> None:
+    db.arbitration_rejoinder_matrix.find_one_and_update = row_write
+
+
+def test_a_row_write_that_applied_but_reported_failure_is_fully_undone() -> None:
+    db = _FakeDb()
+    _rejoinder_awaiting_permission(db)
+    original = db.arbitration_rejoinder_matrix.find_one_and_update
+
+    async def _applied_then_failed(*args, **kwargs):
+        await original(*args, **kwargs)
+        raise RuntimeError("connection reset after write")
+
+    _grant_with_row_write(db, _applied_then_failed)
+    with pytest.raises(RuntimeError):
+        asyncio.run(_grant(db))
+
+    assert db.arbitration_rejoinder_matrix.rows[0]["permission_obtained"] is False
+    assert db.arbitration_paragraph_responses.rows[0]["permission_obtained"] is False
+    receipts = [r for r in db.arbitration_workflow_approvals.rows if r.get("gate") == "rejoinder_permission"]
+    assert [r["receipt_status"] for r in receipts] == ["aborted"]
+
+
+def test_the_receipt_is_aborted_even_if_the_undo_itself_fails() -> None:
+    db = _FakeDb()
+    _rejoinder_awaiting_permission(db)
+
+    async def _row_write_fails(*args, **kwargs):
+        raise RuntimeError("primary stepped down")
+
+    _grant_with_row_write(db, _row_write_fails)
+    responses = db.arbitration_paragraph_responses
+    original_update = responses.update_one
+    calls = []
+
+    async def _second_write_fails(*args, **kwargs):
+        calls.append(True)
+        if len(calls) == 2:  # the first is the grant, the second the undo
+            raise RuntimeError("still stepping down")
+        return await original_update(*args, **kwargs)
+
+    responses.update_one = _second_write_fails
+    with pytest.raises(RuntimeError):
+        asyncio.run(_grant(db))
+
+    receipts = [r for r in db.arbitration_workflow_approvals.rows if r.get("gate") == "rejoinder_permission"]
+    assert [r["receipt_status"] for r in receipts] == ["aborted"]
+
+
+def test_a_failed_receipt_commit_undoes_the_grant() -> None:
+    db = _FakeDb()
+    _rejoinder_awaiting_permission(db)
+    approvals = db.arbitration_workflow_approvals
+    original = approvals.update_one
+
+    async def _commit_fails(query, update, *args, **kwargs):
+        if (update.get("$set") or {}).get("receipt_status") == "committed":
+            raise RuntimeError("commit lost")
+        return await original(query, update, *args, **kwargs)
+
+    approvals.update_one = _commit_fails
+    with pytest.raises(RuntimeError):
+        asyncio.run(_grant(db))
+
+    assert db.arbitration_rejoinder_matrix.rows[0]["permission_obtained"] is False
+    assert db.arbitration_paragraph_responses.rows[0]["permission_obtained"] is False

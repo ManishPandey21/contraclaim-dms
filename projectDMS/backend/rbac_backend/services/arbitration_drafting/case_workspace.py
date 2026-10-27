@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
@@ -822,19 +823,24 @@ class ArbitrationCaseWorkspaceService:
                 return_document=True,
             )
         except BaseException:
-            # A failed row write must not leave the grant on the response.
-            await self._withdraw_permission_grant(response_id, response_scope, receipt["_id"])
+            # A failed (or ambiguous) row write must leave no grant anywhere.
+            await self._withdraw_permission_grant(collection, row_id, response_id, response_scope, receipt["_id"])
             raise
         if not updated:
-            await self._withdraw_permission_grant(response_id, response_scope, receipt["_id"])
+            await self._withdraw_permission_grant(collection, row_id, response_id, response_scope, receipt["_id"])
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Rejoinder matrix row changed during the permission decision; review the current content",
             )
-        await self.db.arbitration_workflow_approvals.update_one(
-            {"_id": receipt["_id"], "receipt_status": "pending"},
-            {"$set": {"receipt_status": "committed", "committed_at": datetime.utcnow()}},
-        )
+        try:
+            await self.db.arbitration_workflow_approvals.update_one(
+                {"_id": receipt["_id"], "receipt_status": "pending"},
+                {"$set": {"receipt_status": "committed", "committed_at": datetime.utcnow()}},
+            )
+        except BaseException:
+            # No committed receipt, so no permission.
+            await self._withdraw_permission_grant(collection, row_id, response_id, response_scope, receipt["_id"])
+            raise
         receipt["receipt_status"] = "committed"
         await self.invalidate_readiness_approvals(case_id, "rejoinder_permission_changed", current_user)
         await self.readiness(case_id)
@@ -861,15 +867,36 @@ class ArbitrationCaseWorkspaceService:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="The assignee does not hold this reviewer role")
 
     async def _withdraw_permission_grant(
-        self, response_id: Any, response_scope: Dict[str, Any], receipt_id: str
+        self,
+        collection: Any,
+        row_id: str,
+        response_id: Any,
+        response_scope: Dict[str, Any],
+        receipt_id: str,
     ) -> None:
-        """Undo a response grant this decision wrote, unless the response moved on, and abort the receipt."""
-        if response_id:
-            await self.db.arbitration_paragraph_responses.update_one(
-                {**response_scope, "permission_approval_receipt_id": receipt_id},
-                {"$set": {**REVOKED_REJOINDER_PERMISSION, "updated_at": datetime.utcnow()}},
-            )
-        await self._abort_permission_receipt(receipt_id)
+        """Undo every grant this decision may have written, and abort its receipt.
+
+        Each revert matches only this decision's receipt, so a newer grant or a
+        rewrite is never touched. It runs shielded, so a cancelled request still
+        finishes it, and the receipt is aborted even if a revert fails.
+        """
+
+        async def _undo() -> None:
+            try:
+                if response_id:
+                    await self.db.arbitration_paragraph_responses.update_one(
+                        {**response_scope, "permission_approval_receipt_id": receipt_id},
+                        {"$set": {**REVOKED_REJOINDER_PERMISSION, "updated_at": datetime.utcnow()}},
+                    )
+                # The row write may have applied before reporting an error.
+                await collection.update_one(
+                    {"_id": row_id, "permission_approval_receipt_id": receipt_id},
+                    {"$set": {**REVOKED_REJOINDER_PERMISSION, "updated_at": datetime.utcnow()}},
+                )
+            finally:
+                await self._abort_permission_receipt(receipt_id)
+
+        await asyncio.shield(_undo())
 
     async def _abort_permission_receipt(self, receipt_id: str) -> None:
         await self.db.arbitration_workflow_approvals.update_one(
