@@ -376,39 +376,15 @@ class LetterController:
 
 
 
-            # Get letter
+            # A letter the caller may not read is reported exactly like a missing
 
 
 
-            letter = await self.letter_service.get_letter_by_id(letter_id)
+            # one (docs/AUTHZ.md: another organisation's record is 404, not 403).
 
 
 
-            if not letter:
-
-
-
-                raise LetterError("Letter not found", status.HTTP_404_NOT_FOUND)
-
-
-
-
-
-
-
-            # Authorization check
-
-
-
-            await self.auth_service.check_letter_access(
-
-
-
-                current_user, letter, "read"
-
-
-
-            )
+            letter = await self._readable_letter_or_404(letter_id, current_user)
 
 
 

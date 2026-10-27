@@ -660,3 +660,24 @@ async def test_a_corrupt_parent_is_not_found_and_nothing_moves(db: _Database, ca
     assert response.status_code == 404, response.text
     assert _snapshot(db) == before
     assert MARKER[ROOT_A1] not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Single-letter GET follows the same rule: unreadable is indistinguishable from missing
+# ---------------------------------------------------------------------------
+
+
+async def test_a_foreign_letter_and_a_missing_letter_get_the_same_answer_on_get(db: _Database) -> None:
+    async with _as(db, ORG_B_ADMIN) as client:
+        foreign = await client.get(f"/api/letters/{ROOT_A1}")
+        missing = await client.get(f"/api/letters/{ObjectId()}")
+    assert (foreign.status_code, foreign.json()) == (missing.status_code, missing.json())
+    assert foreign.status_code == 404
+    assert not _leaks(foreign.text, ROOT_A1)
+
+
+async def test_a_readable_letter_is_still_returned_on_get(db: _Database) -> None:
+    async with _as(db, PROJECT_A1_READER) as client:
+        response = await client.get(f"/api/letters/{GRAND_A1}")
+    assert response.status_code == 200, response.text
+    assert MARKER[GRAND_A1] in response.text
