@@ -248,7 +248,8 @@ def test_a_permission_decided_on_content_that_changed_meanwhile_is_refused(db: _
     assert refused.value.status_code == 409
     assert not _row(db, "arbitration_rejoinder_matrix", "rejoinder-1").get("permission_obtained")
     receipts = [receipt for receipt in db.arbitration_workflow_approvals.docs if receipt.get("gate") == "rejoinder_permission"]
-    assert [receipt["receipt_status"] for receipt in receipts] == ["pending"]
+    # The refused decision is closed out, not left pending.
+    assert [receipt["receipt_status"] for receipt in receipts] == ["aborted"]
 
 
 def test_editing_the_new_matter_revokes_a_granted_permission(db: _WorkspaceDatabase) -> None:

@@ -790,6 +790,10 @@ class ArbitrationCaseWorkspaceService:
             return_document=True,
         )
         if not updated:
+            await self.db.arbitration_workflow_approvals.update_one(
+                {"_id": receipt["_id"], "receipt_status": "pending"},
+                {"$set": {"receipt_status": "aborted", "aborted_at": datetime.utcnow()}},
+            )
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Rejoinder matrix row changed during the permission decision; review the current content",
