@@ -525,3 +525,12 @@ def test_a_colleague_without_the_specialty_cannot_confer_it(db: _FakeDb) -> None
         _review(db, COLLEAGUE, action="assign", reviewer_role="contracts", reviewer_user_id=UNQUALIFIED.id)
     assert refused.value.status_code == 403
     assert not _row(db).get("review_assignments")
+
+
+@pytest.mark.parametrize("field,value", [("deleted_at", "2026-10-27T00:00:00"), ("deleted_by", "editor-1")])
+def test_an_edit_cannot_delete_a_row(field: str, value: str) -> None:
+    # Deletion is a lifecycle action, not row content.
+    with pytest.raises(ValidationError):
+        ArbitrationMatrixRowUpdate(**{field: value})
+    with pytest.raises(ValidationError):
+        ArbitrationMatrixRowCreate(**{field: value})

@@ -18,6 +18,8 @@ PRIVILEGED_MATRIX_FIELDS = {
     "approval_log",
     "approval_status",
     "assigned_reviewer_id",
+    "deleted_at",
+    "deleted_by",
     "edit_revision",
     "human_approval_status",
     "last_material_editor_id",
