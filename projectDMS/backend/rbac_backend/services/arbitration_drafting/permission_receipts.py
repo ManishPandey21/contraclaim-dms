@@ -69,6 +69,10 @@ STATE_MESSAGES = {
     SOURCE_UNAVAILABLE: f"its permission source is missing, changed or no longer authoritative; {_RECOVERY}",
 }
 
+#: Computed on read by `annotate_permission_states`; never stored, and dropped
+#: when a client echoes a listed row back.
+PERMISSION_DISPLAY_FIELDS = frozenset({"permission_effective", "permission_receipt_state", "permission_receipt_message"})
+
 # Fields that change without the reviewed content changing: identity, review
 # and approval state, the permission itself, and write bookkeeping. Everything
 # else on the row is the content a permission covers.
@@ -106,6 +110,7 @@ _UNBOUND_FIELDS = frozenset(
         *REVOKED_REJOINDER_PERMISSION,
         "permission_notes",
         "permission_source_id",
+        *PERMISSION_DISPLAY_FIELDS,
     }
 )
 
@@ -345,6 +350,7 @@ async def reconcile_stale_permission_receipts(
                         "aborted_at": datetime.utcnow(),
                         "aborted_by": RECONCILER_ACTOR,
                         "abort_reason": "stale_pending_receipt",
+                        "grants_withdrawn": False,
                     }
                 },
             )
@@ -353,10 +359,10 @@ async def reconcile_stale_permission_receipts(
         except Exception as exc:  # keep going; surfaced below
             report["errors"].append(f"{receipt['_id']}: {exc}")
             first_error = first_error or exc
-    # Every aborted receipt in scope, including ones aborted earlier whose
-    # withdrawal did not finish.
-    aborted = await _collect(db.arbitration_workflow_approvals.find({**scope, "receipt_status": "aborted"}))
-    for receipt in aborted:
+    # Every receipt this cleanup aborted whose withdrawal has not finished,
+    # including ones from an earlier run that failed part-way.
+    unfinished = {**scope, "receipt_status": "aborted", "grants_withdrawn": False}
+    for receipt in await _collect(db.arbitration_workflow_approvals.find(unfinished)):
         cited = {"permission_approval_receipt_id": receipt["_id"], "permission_obtained": True}
         revoked = {"$set": {**REVOKED_REJOINDER_PERMISSION, "updated_at": datetime.utcnow(), "updated_by": RECONCILER_ACTOR}}
         try:
@@ -364,6 +370,9 @@ async def reconcile_stale_permission_receipts(
             rows = await db.arbitration_rejoinder_matrix.update_many(cited, revoked)
             if getattr(responses, "modified_count", 0) or getattr(rows, "modified_count", 0):
                 report["withdrawn_from"].append(str(receipt["_id"]))
+            await db.arbitration_workflow_approvals.update_one(
+                {"_id": receipt["_id"]}, {"$set": {"grants_withdrawn": True, "grants_withdrawn_at": datetime.utcnow()}}
+            )
         except Exception as exc:
             report["errors"].append(f"{receipt['_id']}: {exc}")
             first_error = first_error or exc

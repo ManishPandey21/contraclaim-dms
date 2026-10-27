@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import io
 import json
+import logging
 import re
 import uuid
 import zipfile
@@ -57,6 +58,7 @@ from .approval_policy import (
 from .workflow_governance import require_governed_workflow_chain
 from .paragraph_positions import PARAGRAPH_POSITION_MATRICES, is_paragraph_position_projection
 from .permission_receipts import (
+    PERMISSION_DISPLAY_FIELDS,
     STATE_MESSAGES,
     commit_permission_receipt,
     permission_receipt_binding,
@@ -155,6 +157,8 @@ def _clean_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {key: value for key, value in payload.items() if value is not None and key not in {"id", "_id"}}
 
 
+logger = logging.getLogger(__name__)
+
 SERVER_CONTROLLED_MATRIX_FIELDS = {
     "approved",
     "approved_at",
@@ -195,7 +199,7 @@ SERVER_CONTROLLED_MATRIX_FIELDS = {
 
 # Authorship bookkeeping the server writes itself. A client that echoes a row
 # back may send it, so it is dropped rather than refused.
-SERVER_BOOKKEEPING_MATRIX_FIELDS = {"created_at", "created_by", "updated_at", "updated_by"}
+SERVER_BOOKKEEPING_MATRIX_FIELDS = {"created_at", "created_by", "updated_at", "updated_by", *PERMISSION_DISPLAY_FIELDS}
 
 
 # A row belongs to the case it was created in: these are copied from that case,
@@ -741,7 +745,10 @@ class ArbitrationCaseWorkspaceService:
                 status_code=status.HTTP_409_CONFLICT,
                 detail="A permission receipt is only applicable to rejoinder rows with permission-required new matter",
             )
-        scope = {"_id": payload.permission_source_id}
+        from ...core.security import _expand_object_ids
+
+        # Document ids are stored as ObjectIds; the payload carries the string form.
+        scope: Dict[str, Any] = {"_id": {"$in": _expand_object_ids([str(payload.permission_source_id)])}}
         if case.get("organization_id"):
             scope["organization_id"] = case.get("organization_id")
         if case.get("project_id"):
@@ -760,12 +767,16 @@ class ArbitrationCaseWorkspaceService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Permission source must be an authoritative document in the same organization and project",
             )
-        # Interrupted decisions on this case are cleaned up here, on a write path,
-        # never by a reader.
-        await reconcile_stale_permission_receipts(self.db, case_id=case_id)
         actor = _actor_id(current_user)
         enforce_author_approver_separation(current_user, approval_barred_actors(row), gate="rejoinder permission")
         approver_role = resolve_gate_role("legal_review", current_user)
+        # Interrupted decisions on this case are cleaned up here, on a write path,
+        # never by a reader. Readers refuse those grants regardless, so a cleanup
+        # failure is logged and does not block this decision.
+        try:
+            await reconcile_stale_permission_receipts(self.db, case_id=case_id)
+        except Exception:
+            logger.exception("Rejoinder permission receipt cleanup failed for case %s", case_id)
         now = datetime.utcnow()
         receipt = {
             "_id": str(uuid.uuid4()),

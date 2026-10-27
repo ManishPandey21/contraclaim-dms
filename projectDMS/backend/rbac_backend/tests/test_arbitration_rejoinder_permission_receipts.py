@@ -527,3 +527,104 @@ def test_a_legacy_grant_is_kept_explained_and_can_be_recorded_again(db: _FakeDb)
     asyncio.run(_grant(db))
     assert _state(db) == VERIFIED
     assert receipt == legacy
+
+
+# The display fields are computed on read and never stored
+# ---------------------------------------------------------------------------
+
+
+def test_echoed_display_fields_are_dropped_and_never_stored(db: _FakeDb) -> None:
+    from backend.rbac_backend.models.arbitration_drafting import ArbitrationMatrixRowCreate
+    from backend.rbac_backend.tests.test_arbitration_matrix_approval_invalidation import EDITOR
+
+    payload = ArbitrationMatrixRowCreate(
+        source_sod_para="30",
+        claimant_reply="A reply.",
+        permission_effective=True,
+        permission_receipt_state="verified",
+        permission_receipt_message="forged",
+    )
+    created = asyncio.run(ArbitrationCaseWorkspaceService(db).create_matrix_row(CASE, "rejoinder-matrix", payload, EDITOR))
+
+    stored = next(row for row in db.arbitration_rejoinder_matrix.rows if row["_id"] == created["_id"])
+    assert not set(permission_receipts.PERMISSION_DISPLAY_FIELDS) & set(stored)
+
+
+def test_display_fields_do_not_change_the_content_hash(db: _FakeDb) -> None:
+    asyncio.run(_grant(db))
+    [listed] = asyncio.run(annotate_permission_states(db, [_row(db)]))
+    assert permission_content_hash(listed) == permission_content_hash(_row(db))
+
+
+# The decision path
+# ---------------------------------------------------------------------------
+
+
+def test_a_source_stored_under_an_object_id_supports_a_permission(db: _FakeDb) -> None:
+    from backend.rbac_backend.models.arbitration_drafting import ArbitrationRejoinderPermissionRequest
+    from backend.rbac_backend.tests.test_arbitration_matrix_approval_invalidation import PERMISSION_GRANTER
+
+    oid = ObjectId()
+    _source(db)["_id"] = oid
+    payload = ArbitrationRejoinderPermissionRequest(permission_source_id=str(oid))
+    service = ArbitrationCaseWorkspaceService(db)
+    asyncio.run(service.record_rejoinder_permission(CASE, _row(db)["_id"], payload, PERMISSION_GRANTER))
+
+    assert _state(db) == VERIFIED
+
+
+def test_a_cleanup_failure_does_not_block_a_decision(db: _FakeDb, monkeypatch: pytest.MonkeyPatch) -> None:
+    from backend.rbac_backend.services.arbitration_drafting import case_workspace
+
+    async def _fails(*args, **kwargs):
+        raise RuntimeError("cleanup unavailable")
+
+    monkeypatch.setattr(case_workspace, "reconcile_stale_permission_receipts", _fails)
+    asyncio.run(_grant(db))
+
+    assert _state(db) == VERIFIED
+
+
+def test_a_refused_caller_triggers_no_cleanup(db: _FakeDb, monkeypatch: pytest.MonkeyPatch) -> None:
+    from backend.rbac_backend.models.arbitration_drafting import ArbitrationRejoinderPermissionRequest
+    from backend.rbac_backend.tests.test_arbitration_drafting import _FakeUser
+
+    _killed(db, monkeypatch, "after_row_write")
+    [stale] = _receipts(db)
+    stale["approved_at"] = datetime.utcnow() - STALE_PENDING_RECEIPT_AGE - timedelta(hours=1)
+    author = _FakeUser("drafter-1", roles=["legal_reviewer"])  # wrote the content; may not grant on it
+    payload = ArbitrationRejoinderPermissionRequest(permission_source_id="doc-1")
+
+    with pytest.raises(HTTPException) as refused:
+        asyncio.run(ArbitrationCaseWorkspaceService(db).record_rejoinder_permission(CASE, _row(db)["_id"], payload, author))
+
+    assert refused.value.status_code == 409  # author-approver separation
+    assert stale["receipt_status"] == "pending"
+
+
+def test_receipts_aborted_by_the_decision_itself_are_not_rescanned(db: _FakeDb) -> None:
+    # The decision's own undo already withdrew its grants; only the cleanup's
+    # own unfinished aborts are revisited, so the sweep stays bounded.
+    rows = db.arbitration_rejoinder_matrix
+    original = rows.find_one_and_update
+
+    async def _row_write_fails(*args, **kwargs):
+        raise RuntimeError("primary stepped down")
+
+    rows.find_one_and_update = _row_write_fails
+    with pytest.raises(RuntimeError):
+        asyncio.run(_grant(db))
+    rows.find_one_and_update = original
+    [receipt] = _receipts(db)
+    assert receipt["receipt_status"] == "aborted" and "grants_withdrawn" not in receipt
+
+    calls = []
+    original_many = rows.update_many
+
+    async def _counted(*args, **kwargs):
+        calls.append(args)
+        return await original_many(*args, **kwargs)
+
+    rows.update_many = _counted
+    _reconcile(db)
+    assert calls == []

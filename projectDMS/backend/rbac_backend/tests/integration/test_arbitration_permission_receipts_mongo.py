@@ -12,7 +12,8 @@ What this pins, against a disposable replica set:
 * a stale `pending` receipt is aborted and its grants withdrawn; a fresh one and
   a committed one are left alone; `approved_at` compares as a BSON date;
 * commit and abort raced on the same receipt: exactly one wins, every time, and
-  the readers agree with the winner;
+  the readers agree with the winner; both orders are also forced deterministically
+  (abort before commit; cleanup reads `pending`, the commit lands, then its abort);
 * a newer grant under another receipt is never withdrawn;
 * a withdrawal that failed after the abort is finished by the next run;
 * ids stored as ObjectId and as strings hash and verify the same.
@@ -202,7 +203,9 @@ def test_a_withdrawal_that_failed_after_the_abort_is_finished_by_the_next_run() 
     async def body(db: Any) -> None:
         receipt = await _seed(db, receipt_status="pending", age=STALE)
         # The abort landed; the withdrawal never ran.
-        await db.arbitration_workflow_approvals.update_one({"_id": receipt["_id"]}, {"$set": {"receipt_status": "aborted"}})
+        await db.arbitration_workflow_approvals.update_one(
+            {"_id": receipt["_id"]}, {"$set": {"receipt_status": "aborted", "grants_withdrawn": False}}
+        )
         assert (await _row(db))["permission_obtained"] is True
 
         report = await reconcile_stale_permission_receipts(db, case_id=CASE)
@@ -219,6 +222,70 @@ def test_object_id_and_string_ids_verify_the_same() -> None:
         receipt = await _seed(db, receipt_status="committed", age=timedelta(0), source_id=source_id)
         assert receipt["permission_source_id"] == str(source_id)
 
+        assert await _state(db) == VERIFIED
+
+    _with_db(body)
+
+
+def test_a_commit_after_the_abort_is_refused() -> None:
+    async def body(db: Any) -> None:
+        receipt = await _seed(db, receipt_status="pending", age=STALE)
+
+        report = await reconcile_stale_permission_receipts(db, case_id=CASE)
+        committed = await commit_permission_receipt(db, receipt["_id"])
+
+        assert report["aborted"] == [receipt["_id"]]
+        assert committed is False
+        stored = await db.arbitration_workflow_approvals.find_one({"_id": receipt["_id"]})
+        assert stored["receipt_status"] == "aborted"
+        assert (await _row(db))["permission_obtained"] is False
+
+    _with_db(body)
+
+
+class _CommitAfterCleanupReads:
+    """The cleanup reads its `pending` candidates; the decision commits before
+    the cleanup's conditional abort reaches the server."""
+
+    def __init__(self, db: Any, receipt_id: str) -> None:
+        self._db, self._receipt_id, self.committed = db, receipt_id, None
+
+    def __getattr__(self, name: str) -> Any:
+        if name != "arbitration_workflow_approvals":
+            return getattr(self._db, name)
+        outer = self
+        approvals = self._db.arbitration_workflow_approvals
+
+        class _Approvals:
+            def __getattr__(self, attr: str) -> Any:
+                return getattr(approvals, attr)
+
+            def find(self, *args: Any, **kwargs: Any) -> Any:
+                cursor = approvals.find(*args, **kwargs)
+
+                class _Cursor:
+                    async def to_list(self, length: Any = None) -> Any:
+                        found = await cursor.to_list(length=length)
+                        if outer.committed is None and found:
+                            outer.committed = await commit_permission_receipt(outer._db, outer._receipt_id)
+                        return found
+
+                return _Cursor()
+
+        return _Approvals()
+
+
+def test_a_cleanup_that_read_pending_loses_to_a_commit_that_lands_first() -> None:
+    async def body(db: Any) -> None:
+        receipt = await _seed(db, receipt_status="pending", age=STALE)
+        racing = _CommitAfterCleanupReads(db, receipt["_id"])
+
+        report = await reconcile_stale_permission_receipts(racing, case_id=CASE)
+
+        assert racing.committed is True
+        assert report["aborted"] == [] and report["withdrawn_from"] == []
+        stored = await db.arbitration_workflow_approvals.find_one({"_id": receipt["_id"]})
+        assert stored["receipt_status"] == "committed"
         assert await _state(db) == VERIFIED
 
     _with_db(body)
