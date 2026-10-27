@@ -63,7 +63,7 @@ from ..dependencies import get_notification_service
 
 
 
-from ..services.conversation_service import ConversationService
+from ..services.conversation_service import DEPENDENT_LETTER_BLOCKS_MOVE, ConversationService
 from ..services.strategy_context_service import StrategyContextService
 
 
@@ -816,7 +816,7 @@ class LetterController:
 
 
 
-    async def _member_readable(self, current_user: CurrentUser, member: Letter) -> bool:
+    async def _member_readable(self, current_user: CurrentUser, member: Letter, action: str = "read") -> bool:
 
 
 
@@ -828,7 +828,7 @@ class LetterController:
 
 
 
-            await self.auth_service.check_letter_access(current_user, member, "read")
+            await self.auth_service.check_letter_access(current_user, member, action)
 
 
 
@@ -1212,7 +1212,15 @@ class LetterController:
 
 
 
-            # Every descendant's ancestry is rewritten, so each must be editable too.
+            # Every descendant's ancestry is rewritten. A descendant the caller may
+
+
+
+            # not edit, or one filed in another organisation or project, blocks the
+
+
+
+            # move; all of them get the same answer, so a hidden reply is not revealed.
 
 
 
@@ -1220,55 +1228,23 @@ class LetterController:
 
 
 
-            for descendant in descendants:
-
-
-
-                await self.auth_service.check_letter_access(current_user, descendant, "update")
-
-
-
-            # A reply filed in another organisation or project cannot follow the
-
-
-
-            # move, so refuse it whole rather than leave its threading stale.
-
-
-
             moved_scope = (str(letter.organization_id or ""), str(letter.project_id or ""))
 
 
 
-            if any(
+            for descendant in descendants:
 
 
 
-                (str(descendant.organization_id or ""), str(descendant.project_id or "")) != moved_scope
+                in_scope = (str(descendant.organization_id or ""), str(descendant.project_id or "")) == moved_scope
 
 
 
-                for descendant in descendants
+                if not in_scope or not await self._member_readable(current_user, descendant, action="update"):
 
 
 
-            ):
-
-
-
-                raise LetterError(
-
-
-
-                    "A reply in another project depends on this letter; it cannot be moved",
-
-
-
-                    status.HTTP_409_CONFLICT
-
-
-
-                )
+                    raise LetterError(DEPENDENT_LETTER_BLOCKS_MOVE, status.HTTP_409_CONFLICT)
 
 
 

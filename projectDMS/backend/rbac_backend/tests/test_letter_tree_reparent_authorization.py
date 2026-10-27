@@ -340,7 +340,7 @@ async def test_a_reparent_that_would_rewrite_an_inaccessible_descendant_is_refus
     before = _snapshot(db)
     async with _as(db, PROJECT_A1_EDITOR) as client:
         response = await client.post(f"/api/letters/{CHILD_A1}/reparent", json={"new_parent_id": ROOT_A1})
-    assert response.status_code in (403, 404, 409), response.text
+    assert response.status_code == 409, response.text
     assert _snapshot(db) == before
     assert not _leaks(response.text, FOREIGN_B1)
 
@@ -572,3 +572,33 @@ async def test_a_malformed_seed_id_is_not_a_server_error(db: _Database, route: s
     async with _as(db, PROJECT_A1_EDITOR) as client:
         response = await client.get(f"/api/letters/not-an-id/{route}")
     assert response.status_code == 404, response.text
+
+
+
+# ---------------------------------------------------------------------------
+# Reparent: every blocking dependent letter gets the same answer
+# ---------------------------------------------------------------------------
+
+
+async def test_a_hidden_and_a_visible_blocking_reply_are_indistinguishable(db: _Database) -> None:
+    _without_foreign(db)
+    db.letters.docs.append(_letter(REPLY_A2, ORG_A, A2, previous=CHILD_A1, ancestors=[ROOT_A1, CHILD_A1]))
+    async with _as(db, ORG_A_ADMIN) as client:
+        visible = await client.post(f"/api/letters/{CHILD_A1}/reparent", json={"new_parent_id": BRANCH_A1})
+    async with _as(db, PROJECT_A1_EDITOR) as client:
+        hidden = await client.post(f"/api/letters/{CHILD_A1}/reparent", json={"new_parent_id": BRANCH_A1})
+    assert (hidden.status_code, hidden.json()) == (visible.status_code, visible.json())
+    assert hidden.status_code == 409
+
+
+async def test_an_unreadable_descendant_row_blocks_the_move_visibly(db: _Database) -> None:
+    _without_foreign(db)
+    broken = _letter(REPLY_A2, ORG_A, A1, previous=CHILD_A1, ancestors=[ROOT_A1, CHILD_A1])
+    broken["created_at"] = "not-a-date"
+    broken["depth"] = "not-a-number"
+    db.letters.docs.append(broken)
+    before = _snapshot(db)
+    async with _as(db, PROJECT_A1_EDITOR) as client:
+        response = await client.post(f"/api/letters/{CHILD_A1}/reparent", json={"new_parent_id": BRANCH_A1})
+    assert response.status_code == 409, response.text
+    assert _snapshot(db) == before

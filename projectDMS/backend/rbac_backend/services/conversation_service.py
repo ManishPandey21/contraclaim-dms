@@ -9,6 +9,11 @@ from bson import ObjectId
 from ..core.database import get_database
 from ..models.letter import Letter, ConversationTree
 from .letter_service import LetterService, LetterServiceError
+from ..utils.error_handler import LetterError
+
+#: One answer for every reason a reparent's dependent letters block it, so the
+#: response never reveals whether a letter the caller cannot see exists.
+DEPENDENT_LETTER_BLOCKS_MOVE = "A dependent letter blocks this move"
 
 
 class ConversationService:
@@ -305,8 +310,10 @@ class ConversationService:
         for row in await db.letters.find(query).to_list(length=None):
             try:
                 descendants.append(Letter(**letter_service._augment_letter_document(row)))
-            except Exception:
-                continue
+            except Exception as exc:
+                # A descendant that cannot be read can be neither authorised nor
+                # rewritten; skipping it would leave its threading stale.
+                raise LetterError(DEPENDENT_LETTER_BLOCKS_MOVE, 409) from exc
         return descendants
 
     async def reparent_letter_atomic(
