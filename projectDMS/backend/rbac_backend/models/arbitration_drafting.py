@@ -22,6 +22,7 @@ PRIVILEGED_MATRIX_FIELDS = {
     "human_approval_status",
     "last_material_editor_id",
     "last_review_action",
+    "material_contributor_ids",
     "last_reviewed_at",
     "last_reviewed_by",
     "permission_approved_at",

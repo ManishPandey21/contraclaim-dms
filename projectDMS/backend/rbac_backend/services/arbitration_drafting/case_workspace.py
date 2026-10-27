@@ -44,6 +44,7 @@ from .matrix_evidence_authority import matrix_clause_fence
 from .matrix_registry import MATRIX_COLLECTIONS
 from .repository import ArbitrationDraftingRepository, _collect, _jsonable
 from .approval_policy import (
+    approval_barred_actors,
     material_change_review_reset,
     enforce_author_approver_separation,
     enforce_matrix_reviewer_role,
@@ -154,6 +155,7 @@ SERVER_CONTROLLED_MATRIX_FIELDS = {
     "human_approval_status",
     "last_material_editor_id",
     "last_review_action",
+    "material_contributor_ids",
     "last_reviewed_at",
     "last_reviewed_by",
     "permission_approved_at",
@@ -554,9 +556,7 @@ class ArbitrationCaseWorkspaceService:
         if action == "assign" and not payload.reviewer_user_id:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="reviewer_user_id is required when assigning review")
         if action == "approve":
-            enforce_author_approver_separation(
-                current_user, [row.get("created_by"), row.get("last_material_editor_id")], gate=f"{matrix_slug} matrix review"
-            )
+            enforce_author_approver_separation(current_user, approval_barred_actors(row), gate=f"{matrix_slug} matrix review")
             prior_actors = {
                 str(item.get("actor_id") or "")
                 for item in approval_log
@@ -649,6 +649,8 @@ class ArbitrationCaseWorkspaceService:
                         "readiness_status": "ready",
                         "approved_by": actor,
                         "approved_at": now,
+                        # The approved content has no outstanding contributors.
+                        "material_contributor_ids": [],
                     }
                 )
             else:
@@ -737,9 +739,7 @@ class ArbitrationCaseWorkspaceService:
                 detail="Permission source must be an authoritative document in the same organization and project",
             )
         actor = _actor_id(current_user)
-        enforce_author_approver_separation(
-            current_user, [row.get("created_by"), row.get("last_material_editor_id")], gate="rejoinder permission"
-        )
+        enforce_author_approver_separation(current_user, approval_barred_actors(row), gate="rejoinder permission")
         approver_role = resolve_gate_role("legal_review", current_user)
         now = datetime.utcnow()
         receipt = {

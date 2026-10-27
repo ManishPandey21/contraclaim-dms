@@ -15,6 +15,27 @@ def _actor_id(user: Any) -> Any:
     return getattr(user, "id", None) or getattr(user, "email", None)
 
 
+def material_contributors(existing: Mapping[str, Any], actor: Optional[str]) -> List[str]:
+    """Everyone who changed a row's reviewed content since its last full approval.
+
+    A full approval empties the list; partial approvals, rejections and change
+    requests keep it, because the content is still unapproved. A row written
+    before the list existed falls back to its single recorded material editor.
+    """
+    if "material_contributor_ids" in existing:
+        contributors = {str(value) for value in existing.get("material_contributor_ids") or [] if value}
+    else:
+        contributors = {str(existing["last_material_editor_id"])} if existing.get("last_material_editor_id") else set()
+    if actor:
+        contributors.add(str(actor))
+    return sorted(contributors)
+
+
+def approval_barred_actors(row: Mapping[str, Any]) -> List[Any]:
+    """Who may not approve this row's current content, or grant permission on it."""
+    return [row.get("created_by"), *material_contributors(row, row.get("last_material_editor_id"))]
+
+
 def material_change_review_reset(
     review_defaults: Mapping[str, Any],
     existing: Mapping[str, Any],
@@ -35,6 +56,7 @@ def material_change_review_reset(
         "approved_by": None,
         "approved_at": None,
         "last_material_editor_id": actor,
+        "material_contributor_ids": material_contributors(existing, actor),
         "approval_log": [
             *(existing.get("approval_log") or []),
             {

@@ -304,3 +304,52 @@ def test_exhibit_numbering_is_part_of_the_edit_write(db: _WorkspaceDatabase) -> 
     assert row["exhibit_id"] == "C-1"
     assert row["edit_revision"] == 6
     assert row["approval_status"] == "needs_review"
+
+
+# ---------------------------------------------------------------------------
+# Server writers add their actor to the material contributors
+# ---------------------------------------------------------------------------
+
+
+def test_a_recomputed_claim_summary_records_its_actor_as_a_contributor(db: _WorkspaceDatabase) -> None:
+    db.arbitration_quantum_annexures.docs.append(_annexure("P-1", 100.0, **APPROVED))
+    _rollup(db)
+    _summary(db).update({**APPROVED, "edit_revision": 1, "material_contributor_ids": ["drafter-1"]})
+    db.arbitration_quantum_annexures.docs.append(_annexure("P-2", 5.0))
+
+    _rollup(db)
+
+    assert set(_summary(db)["material_contributor_ids"]) == {"drafter-1", AGENT_USER["id"]}
+
+
+def test_an_llm_refresh_records_its_actor_as_a_contributor(db: _WorkspaceDatabase) -> None:
+    db.arbitration_document_index.docs.append(_index_row(material_contributor_ids=["editor-1"]))
+    _refresh(db)
+    assert set(_row(db, "arbitration_document_index", "index-1")["material_contributor_ids"]) == {"editor-1", AGENT_USER["id"]}
+
+
+def test_a_changed_projection_records_its_actor_and_a_no_op_sync_preserves_contributors(db: _WorkspaceDatabase) -> None:
+    asyncio.run(sync_paragraph_position_projection(db, DRAFT, _response("Denied."), actor_id="drafter-1"))
+    projection = db.arbitration_defence_matrix.docs[0]
+    assert projection["material_contributor_ids"] == ["drafter-1"]
+
+    asyncio.run(sync_paragraph_position_projection(db, DRAFT, _response("Denied."), actor_id="someone-else"))
+    assert projection["material_contributor_ids"] == ["drafter-1"]
+    assert projection["last_material_editor_id"] == "drafter-1"
+
+    asyncio.run(sync_paragraph_position_projection(db, DRAFT, _response("Denied; see the log."), actor_id="drafter-2"))
+    assert set(projection["material_contributor_ids"]) == {"drafter-1", "drafter-2"}
+
+
+def test_a_rejoinder_contributor_cannot_grant_the_permission(db: _WorkspaceDatabase) -> None:
+    _rejoinder_row(db)
+    _row(db, "arbitration_rejoinder_matrix", "rejoinder-1")["material_contributor_ids"] = ["drafter-1", _LegalReviewer.id]
+    service = ArbitrationCaseWorkspaceService(db)
+    with pytest.raises(HTTPException) as refused:
+        asyncio.run(
+            service.record_rejoinder_permission(
+                CASE["_id"], "rejoinder-1", ArbitrationRejoinderPermissionRequest(permission_source_id="order-1"), _LegalReviewer()
+            )
+        )
+    assert refused.value.status_code == 409
+    assert not _row(db, "arbitration_rejoinder_matrix", "rejoinder-1").get("permission_obtained")

@@ -44,6 +44,7 @@ from .deterministic import (
     _string_list,
     _verified,
 )
+from ..approval_policy import material_contributors
 from ..paragraph_positions import sync_paragraph_position_projection
 
 logger = logging.getLogger(__name__)
@@ -593,6 +594,7 @@ class LLMArbitrationAgent(DeterministicArbitrationAgent):
                             **self._status_defaults("document-index"),
                             "generated_by_agent": agent_type,
                             "last_material_editor_id": _actor_id(self.current_user),
+                            "material_contributor_ids": material_contributors(existing, _actor_id(self.current_user)),
                         },
                         "$inc": {"edit_revision": 1},
                     },

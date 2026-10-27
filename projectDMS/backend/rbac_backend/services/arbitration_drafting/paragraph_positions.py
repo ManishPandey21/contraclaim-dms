@@ -13,6 +13,8 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, Iterable, Optional
 
+from .approval_policy import material_contributors
+
 
 PARAGRAPH_POSITION_MATRICES = {"defence-matrix", "rejoinder-matrix"}
 
@@ -139,13 +141,16 @@ async def sync_paragraph_position_projection(
     update = {
         **content,
         "projection_hash": content_hash,
-        "last_material_editor_id": actor_id,
         "updated_by": actor_id,
         "updated_at": now,
     }
     changed = not existing or existing.get("projection_hash") != content_hash
     if changed:
+        # Only a content change makes the actor a material contributor; a
+        # no-op sync must not displace the people who actually wrote it.
         update.update(_review_defaults())
+        update["last_material_editor_id"] = actor_id
+        update["material_contributor_ids"] = material_contributors(existing or {}, actor_id)
 
     if existing:
         # A content change invalidates any review computed before it (see

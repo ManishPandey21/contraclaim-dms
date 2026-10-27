@@ -358,3 +358,50 @@ def test_an_edit_computed_from_a_stale_row_is_refused(db: _FakeDb) -> None:
 
     assert refused.value.status_code == 409
     assert _row(db)["title"] == "Delay notice"
+
+
+# ---------------------------------------------------------------------------
+# Every material contributor since the last full approval is barred from approving
+# ---------------------------------------------------------------------------
+
+TYPO_FIXER = _FakeUser("typo-fixer-3", roles=["contract_reviewer"])
+LEGAL_CONTRIBUTOR = _FakeUser("legal-editor-4", roles=["legal_reviewer"])
+LEGAL_REVIEWER = _FakeUser("legal-reviewer-5", roles=["legal_reviewer"])
+
+
+def _approve_as(db: _FakeDb, user, role: str) -> dict:
+    payload = ArbitrationMatrixReviewRequest(action="approve", reviewer_role=role)
+    return asyncio.run(ArbitrationCaseWorkspaceService(db).review_matrix_row(CASE, INDEX, ROW, payload, user))
+
+
+def test_an_earlier_editor_cannot_approve_after_someone_else_edits(db: _FakeDb) -> None:
+    _edit(db, source_id="doc-2")
+    _edit(db, user=TYPO_FIXER, title="Delay notice (typo fixed)")
+
+    with pytest.raises(HTTPException) as refused:
+        _approve(db, user=EDITOR)
+
+    assert refused.value.status_code in (403, 409)
+    assert _row(db)["approval_status"] == "needs_review"
+    assert set(_row(db)["material_contributor_ids"]) == {EDITOR.id, TYPO_FIXER.id}
+
+
+def test_a_partial_approval_keeps_the_contributors_and_a_full_approval_clears_them(db: _FakeDb) -> None:
+    _row(db)["review_required_roles"] = ["contracts", "legal"]
+    _edit(db, source_id="doc-2")
+    _edit(db, user=LEGAL_CONTRIBUTOR, title="Delay notice (revised)")
+
+    partial = _approve(db)
+    assert partial["review_status"] == "partially_approved"
+    assert set(partial["material_contributor_ids"]) == {EDITOR.id, LEGAL_CONTRIBUTOR.id}
+    with pytest.raises(HTTPException):
+        _approve_as(db, LEGAL_CONTRIBUTOR, "legal")
+
+    approved = _approve_as(db, LEGAL_REVIEWER, "legal")
+    assert approved["approval_status"] == "approved"
+    assert approved["material_contributor_ids"] == []
+
+
+def test_a_contributor_cannot_be_restored_or_cleared_by_an_edit() -> None:
+    with pytest.raises(ValidationError):
+        ArbitrationMatrixRowUpdate(material_contributor_ids=[])
