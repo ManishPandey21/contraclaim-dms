@@ -912,23 +912,7 @@ class LetterController:
 
 
 
-            letter = await self.letter_service.get_letter_by_id(letter_id)
-
-
-
-            if not letter:
-
-
-
-                raise LetterError("Letter not found", status.HTTP_404_NOT_FOUND)
-
-
-
-
-
-
-
-            await self.auth_service.check_letter_access(current_user, letter, "read")
+            letter = await self._readable_letter_or_404(letter_id, current_user)
 
 
 
@@ -1060,23 +1044,7 @@ class LetterController:
 
 
 
-            letter = await self.letter_service.get_letter_by_id(letter_id)
-
-
-
-            if not letter:
-
-
-
-                raise LetterError("Letter not found", status.HTTP_404_NOT_FOUND)
-
-
-
-
-
-
-
-            await self.auth_service.check_letter_access(current_user, letter, "read")
+            letter = await self._readable_letter_or_404(letter_id, current_user)
 
 
 

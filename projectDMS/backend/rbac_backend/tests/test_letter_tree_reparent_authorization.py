@@ -551,3 +551,24 @@ async def test_a_malformed_id_is_not_a_server_error(db: _Database, which: str) -
         response = await client.post(f"/api/letters/{letter_id}/reparent", json={"new_parent_id": parent_id})
     assert response.status_code == 404, response.text
     assert _snapshot(db) == before
+
+
+# ---------------------------------------------------------------------------
+# Tree and chain: an unreadable seed is indistinguishable from a missing one
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("route", ["tree", "chain"])
+async def test_a_foreign_seed_and_a_missing_seed_get_the_same_answer(db: _Database, route: str) -> None:
+    async with _as(db, ORG_B_ADMIN) as client:
+        foreign = await client.get(f"/api/letters/{ROOT_A1}/{route}")
+        missing = await client.get(f"/api/letters/{ObjectId()}/{route}")
+    assert (foreign.status_code, foreign.json()) == (missing.status_code, missing.json())
+    assert foreign.status_code == 404
+
+
+@pytest.mark.parametrize("route", ["tree", "chain"])
+async def test_a_malformed_seed_id_is_not_a_server_error(db: _Database, route: str) -> None:
+    async with _as(db, PROJECT_A1_EDITOR) as client:
+        response = await client.get(f"/api/letters/not-an-id/{route}")
+    assert response.status_code == 404, response.text
