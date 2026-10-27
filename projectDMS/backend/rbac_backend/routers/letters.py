@@ -54,7 +54,7 @@ from ..core.database import get_db
 
 
 
-from ..services.letter_service import InvalidLetterIdError, LetterService
+from ..services.letter_service import CorruptLetterError, InvalidLetterIdError, LetterService
 from ..services.letter_drafting.service import DraftRunService
 
 
@@ -776,7 +776,7 @@ class LetterController:
 
 
 
-        """The letter, or 404 when it is missing, malformed or not readable by the caller."""
+        """The letter, or 404 when it is missing, malformed, corrupt or not readable by the caller."""
 
 
 
@@ -789,6 +789,26 @@ class LetterController:
 
 
         except InvalidLetterIdError:
+
+
+
+            letter = None
+
+
+
+        except CorruptLetterError:
+
+
+
+            # A row that does not validate cannot be authorised or shown; it is
+
+
+
+            # answered like a missing letter and logged by id only.
+
+
+
+            logger.warning("Letter %s is unreadable (stored row failed validation)", letter_id)
 
 
 

@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import logging
 from collections import defaultdict, deque
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Set
@@ -10,6 +11,8 @@ from ..core.database import get_database
 from ..models.letter import Letter, ConversationTree
 from .letter_service import LetterService, LetterServiceError
 from ..utils.error_handler import LetterError
+
+logger = logging.getLogger(__name__)
 
 #: One answer for every reason a reparent's dependent letters block it, so the
 #: response never reveals whether a letter the caller cannot see exists.
@@ -196,6 +199,8 @@ class ConversationService:
                 try:
                     letters.append(Letter(**letter_service._augment_letter_document(row)))
                 except Exception:
+                    # Left out of the tree, like a letter the caller cannot read.
+                    logger.warning("Letter %s is unreadable (stored row failed validation)", row.get("_id"))
                     continue
             return letters
 

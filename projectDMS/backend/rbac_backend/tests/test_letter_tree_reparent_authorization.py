@@ -627,3 +627,36 @@ async def test_the_authorised_chain_is_unchanged_for_other_readers(db: _Database
     chain = await service.get_authorized_conversation_chain(GRAND_A1, PROJECT_A1_READER)
 
     assert {str(letter.id) for letter in chain} == {ROOT_A1, CHILD_A1, GRAND_A1}
+
+
+# ---------------------------------------------------------------------------
+# A stored letter row that fails validation is unreadable, not a server error,
+# and its contents never reach the response or the logs
+# ---------------------------------------------------------------------------
+
+
+def _corrupt(db: _Database, letter_id: str) -> None:
+    for row in db.letters.docs:
+        if str(row["_id"]) == letter_id:
+            row["created_at"] = "not-a-date"
+            row["depth"] = "not-a-number"
+
+
+@pytest.mark.parametrize("route", ["tree", "chain"])
+async def test_a_corrupt_seed_letter_is_not_found(db: _Database, route: str, caplog: pytest.LogCaptureFixture) -> None:
+    _corrupt(db, GRAND_A1)
+    async with _as(db, PROJECT_A1_EDITOR) as client:
+        response = await client.get(f"/api/letters/{GRAND_A1}/{route}")
+    assert response.status_code == 404, response.text
+    assert MARKER[GRAND_A1] not in response.text
+    assert MARKER[GRAND_A1] not in caplog.text
+
+
+async def test_a_corrupt_parent_is_not_found_and_nothing_moves(db: _Database, caplog: pytest.LogCaptureFixture) -> None:
+    _corrupt(db, ROOT_A1)
+    before = _snapshot(db)
+    async with _as(db, PROJECT_A1_EDITOR) as client:
+        response = await client.post(f"/api/letters/{GRAND_A1}/reparent", json={"new_parent_id": ROOT_A1})
+    assert response.status_code == 404, response.text
+    assert _snapshot(db) == before
+    assert MARKER[ROOT_A1] not in caplog.text
