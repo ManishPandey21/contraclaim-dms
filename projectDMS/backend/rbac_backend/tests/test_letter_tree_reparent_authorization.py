@@ -14,6 +14,7 @@ checks run for real.
 
 from __future__ import annotations
 
+import copy
 import logging
 import sys
 from contextlib import asynccontextmanager
@@ -32,7 +33,8 @@ from rbac_backend.core.security import get_current_user
 from rbac_backend.routers.letters import LetterController, get_letter_controller
 from rbac_backend.routers.letters import router as letters_router
 from rbac_backend.services.authorization_service import AuthorizationService
-from rbac_backend.services.conversation_service import ConversationService
+from rbac_backend.utils.error_handler import AuthorizationError
+from rbac_backend.services.conversation_service import DEPENDENT_LETTER_BLOCKS_MOVE, ConversationService
 from rbac_backend.services.entitlement_service import EntitlementService
 from rbac_backend.services.letter_service import LetterService
 from rbac_backend.services.permission_service import PermissionService
@@ -688,3 +690,85 @@ async def test_a_readable_letter_is_still_returned_on_get(db: _Database) -> None
         response = await client.get(f"/api/letters/{GRAND_A1}")
     assert response.status_code == 200, response.text
     assert MARKER[GRAND_A1] in response.text
+
+
+# ---------------------------------------------------------------------------
+# Reparent: a same-project descendant the caller may not update blocks the move
+#
+# Read and update share one scope check and one per-letter rule (drafter
+# assignment); only the permission differs, and permissions and entitlements are
+# per user and per organisation/project, never per letter. So, for a caller who
+# may update the moved letter, no same-project descendant is readable yet not
+# updatable under today's model. The first test drives the reachable case through
+# the real authorization path; the second pins the read-yes/update-no branch with
+# a seam on the update decision alone, for any future per-letter update rule.
+# ---------------------------------------------------------------------------
+
+DRAFTER_EDITOR_A1 = _principal("u-drafter-editor-a1", ["projectuser", "contract_letter_drafter"], ORG_A, [A1])
+GRANTS[DRAFTER_EDITOR_A1.id] = VIEW_EDIT
+
+
+def _rows(db: _Database) -> dict[str, dict[str, Any]]:
+    return {str(row["_id"]): copy.deepcopy(row) for row in db.letters.docs}
+
+
+async def _move_child_under_branch(db: _Database, user: Any) -> httpx.Response:
+    async with _as(db, user) as client:
+        return await client.post(f"/api/letters/{CHILD_A1}/reparent", json={"new_parent_id": BRANCH_A1})
+
+
+async def test_a_same_project_descendant_the_caller_may_not_update_blocks_the_move(db: _Database) -> None:
+    # Real authorization path: the drafter may update CHILD_A1 and read BRANCH_A1
+    # (both assigned to them); GRAND_A1 is in the same organisation and project but
+    # assigned to someone else, so only the per-descendant update check refuses it.
+    _without_foreign(db)
+    for letter_id in (CHILD_A1, BRANCH_A1):
+        _assign(db, letter_id, DRAFTER_EDITOR_A1)
+    before = _rows(db)
+
+    response = await _move_child_under_branch(db, DRAFTER_EDITOR_A1)
+
+    assert response.status_code == 409, response.text
+    assert DEPENDENT_LETTER_BLOCKS_MOVE in response.text
+    assert _rows(db) == before  # moved letter, parent and every descendant untouched
+    assert not _leaks(response.text, GRAND_A1)
+
+
+async def test_a_descendant_readable_but_not_updatable_blocks_the_move(
+    db: _Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Seam on the update decision for GRAND_A1 only; every other check - scope,
+    # drafter rule, permissions, the read of GRAND_A1 - runs for real.
+    _without_foreign(db)
+    real_check = AuthorizationService.check_letter_access
+
+    async def _update_denied_for_grand(self, current_user, letter, action):
+        if str(getattr(letter, "id", "")) == GRAND_A1 and str(action).lower() in {"update", "edit"}:
+            raise AuthorizationError("Not authorized to update this letter", 403)
+        return await real_check(self, current_user, letter, action)
+
+    monkeypatch.setattr(AuthorizationService, "check_letter_access", _update_denied_for_grand)
+    async with _as(db, PROJECT_A1_EDITOR) as client:
+        readable = await client.get(f"/api/letters/{GRAND_A1}")
+    assert readable.status_code == 200, readable.text
+    before = _rows(db)
+
+    response = await _move_child_under_branch(db, PROJECT_A1_EDITOR)
+
+    assert response.status_code == 409, response.text
+    assert DEPENDENT_LETTER_BLOCKS_MOVE in response.text
+    assert _rows(db) == before
+
+
+async def test_the_same_move_succeeds_when_every_descendant_is_the_callers(db: _Database) -> None:
+    # Authorized control: assigning the reply as well lets the identical move through.
+    _without_foreign(db)
+    for letter_id in (CHILD_A1, BRANCH_A1, GRAND_A1):
+        _assign(db, letter_id, DRAFTER_EDITOR_A1)
+
+    response = await _move_child_under_branch(db, DRAFTER_EDITOR_A1)
+
+    assert response.status_code == 200, response.text
+    after = _snapshot(db)
+    assert after[CHILD_A1] == (BRANCH_A1, [ROOT_A1, BRANCH_A1], 2)
+    assert after[GRAND_A1] == (CHILD_A1, [ROOT_A1, BRANCH_A1, CHILD_A1], 3)
