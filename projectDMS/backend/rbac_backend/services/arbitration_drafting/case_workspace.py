@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from bson import ObjectId
 from fastapi import HTTPException, status
 from pymongo.errors import DuplicateKeyError
 
@@ -1307,49 +1308,76 @@ class ArbitrationCaseWorkspaceService:
         return sorted(rows, key=lambda row: (str(row.get("exhibit_prefix") or ""), int(row.get("exhibit_number") or 0)))
 
     async def _find_exhibit_source_record(self, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """The exhibit's source document or letter, inside the row's case scope.
+
+        `source_id` is client-writable, so the record must belong to the case's
+        organisation (and project, when the case has one). Without that, a row
+        could name another tenant's document and export its bytes. Documents and
+        letters are keyed by ObjectId, so the lookup tries both spellings.
+        """
         source_id = str(row.get("source_id") or "")
-        if not source_id:
+        case_id = row.get("case_id")
+        if not source_id or not case_id:
             return None
+        case = await self.db.arbitration_cases.find_one({"_id": case_id, "deleted_at": {"$exists": False}})
+        organization_id = (case or {}).get("organization_id")
+        if not organization_id:
+            return None
+        scope: Dict[str, Any] = {"organization_id": str(organization_id)}
+        if case.get("project_id"):
+            scope["project_id"] = str(case["project_id"])
+        identifiers: List[Any] = [source_id]
+        try:
+            identifiers.append(ObjectId(source_id))
+        except Exception:
+            pass
         for collection_name in ("documents", "letters"):
             collection = getattr(self.db, collection_name, None)
             if collection is None:
                 continue
             try:
-                record = await collection.find_one({"_id": source_id})
+                record = await collection.find_one({"_id": {"$in": identifiers}, **scope})
             except Exception:
                 record = None
             if record:
                 return dict(record)
         return None
 
-    @staticmethod
-    def _existing_local_path(*candidates: Any) -> Optional[Path]:
-        for candidate in candidates:
-            if not candidate:
-                continue
-            try:
-                path = Path(str(candidate))
-                if path.is_file():
-                    return path
-            except OSError:
-                continue
-        return None
+    def _confined_local_path(self, value: Any) -> Optional[Path]:
+        """A server-recorded local path, only if it resolves inside a storage root.
+
+        Resolution follows symlinks and `..`, then applies the same check the
+        document download route uses (`FileObjectService.assert_local_path_allowed`).
+        A row's `source_file_link` is display metadata and never reaches here.
+        """
+        if not value:
+            return None
+        from ..file_object_service import FileObjectService
+
+        try:
+            path = Path(str(value)).resolve(strict=True)
+            if not path.is_file():
+                return None
+            FileObjectService(self.db).assert_local_path_allowed(str(path))
+        except (OSError, RuntimeError, PermissionError):
+            return None
+        return path
 
     async def _exhibit_file_status(self, row: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
         """Cheap resolvability check for the citation audit (no byte fetch)."""
         record = await self._find_exhibit_source_record(row)
-        if self._existing_local_path((record or {}).get("filepath_local"), row.get("source_file_link")):
-            return True, None
-        if (record or {}).get("filepath_s3"):
-            return True, None
         if record is None:
-            return False, "source record not found and source_file_link is not an existing file"
-        return False, "source record has no local file or storage key"
+            return False, "no source record in this case's scope"
+        if self._confined_local_path(record.get("filepath_local")) or record.get("filepath_s3"):
+            return True, None
+        return False, "source record has no usable local file or storage key"
 
     async def _load_exhibit_file(self, row: Dict[str, Any]) -> Dict[str, Any]:
-        """Resolve exhibit bytes: local path first, then S3 (mirrors document download)."""
+        """Resolve exhibit bytes from the case-scoped source record: local file, then S3."""
         record = await self._find_exhibit_source_record(row)
-        local = self._existing_local_path((record or {}).get("filepath_local"), row.get("source_file_link"))
+        if record is None:
+            return {"content": None, "filename": None, "error": "No source record in this case's scope."}
+        local = self._confined_local_path(record.get("filepath_local"))
         if local:
             try:
                 return {"content": local.read_bytes(), "filename": (record or {}).get("filename") or local.name, "error": None}
