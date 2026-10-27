@@ -27,7 +27,7 @@ from backend.rbac_backend.models.arbitration_drafting import (
 from backend.rbac_backend.services.arbitration_drafting import case_workspace as case_workspace_module
 from backend.rbac_backend.services.arbitration_drafting.case_workspace import ArbitrationCaseWorkspaceService
 from backend.rbac_backend.services.arbitration_drafting.workflow_repository import DOWNSTREAM_APPROVAL_GATES
-from backend.rbac_backend.tests.test_arbitration_drafting import _FakeDb, _FakeUser, _authorize_filing_fixture
+from backend.rbac_backend.tests.test_arbitration_drafting import _FakeCollection, _FakeDb, _FakeUser, _authorize_filing_fixture
 
 SOURCE_A = b"EXHIBIT-SOURCE-A"
 SOURCE_B = b"EXHIBIT-SOURCE-B"
@@ -440,11 +440,42 @@ def test_a_self_made_assignment_on_record_does_not_qualify_its_holder(db: _FakeD
     assert _row(db)["approval_status"] == "needs_review"
 
 
-def test_an_assignment_made_by_another_user_still_qualifies_the_assignee(db: _FakeDb) -> None:
+def test_a_qualified_assignee_approves_on_their_own_claim(db: _FakeDb) -> None:
+    db.users = _FakeCollection([{"_id": REVIEWER.id, "roles": ["contract_reviewer"], "is_active": True}])
     _edit(db, source_id="doc-2")
-    _review(db, ASSIGNER, action="assign", reviewer_role="contracts", reviewer_user_id=UNQUALIFIED.id)
-    approved = _review(db, UNQUALIFIED, action="approve", reviewer_role="contracts")
+    _review(db, ASSIGNER, action="assign", reviewer_role="contracts", reviewer_user_id=REVIEWER.id)
+    approved = _review(db, REVIEWER, action="approve", reviewer_role="contracts")
     assert approved["approval_status"] == "approved"
+
+
+def test_an_unqualified_assignee_cannot_be_assigned_a_specialty(db: _FakeDb) -> None:
+    db.users = _FakeCollection([{"_id": UNQUALIFIED.id, "roles": ["projectuser"], "is_active": True}])
+    _edit(db, source_id="doc-2")
+    with pytest.raises(HTTPException) as refused:
+        _review(db, ASSIGNER, action="assign", reviewer_role="contracts", reviewer_user_id=UNQUALIFIED.id)
+    assert refused.value.status_code == 403
+    assert not _row(db).get("review_assignments")
+
+
+def test_an_assignee_who_cannot_be_found_cannot_be_assigned(db: _FakeDb) -> None:
+    db.users = _FakeCollection([])
+    _edit(db, source_id="doc-2")
+    with pytest.raises(HTTPException) as refused:
+        _review(db, ASSIGNER, action="assign", reviewer_role="contracts", reviewer_user_id="ghost-9")
+    assert refused.value.status_code == 403
+
+
+def test_an_assignment_on_record_never_confers_approval_authority(db: _FakeDb) -> None:
+    # A legacy assignment by a qualified assigner to an unqualified user: the
+    # approver's own role claim is the only source of the specialty.
+    _edit(db, source_id="doc-2")
+    _row(db)["review_assignments"] = [
+        {"reviewer_role": "contracts", "reviewer_user_id": UNQUALIFIED.id, "assigned_by": ASSIGNER.id, "status": "assigned"}
+    ]
+    with pytest.raises(HTTPException) as refused:
+        _review(db, UNQUALIFIED, action="approve", reviewer_role="contracts")
+    assert refused.value.status_code == 403
+    assert _row(db)["approval_status"] == "needs_review"
 
 
 @pytest.mark.parametrize("field,value", [("permission_notes", "Granted at hearing"), ("permission_approval_receipt_id", "receipt-x")])

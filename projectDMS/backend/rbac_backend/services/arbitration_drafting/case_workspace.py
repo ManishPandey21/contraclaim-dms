@@ -44,7 +44,9 @@ from .matrix_evidence_authority import matrix_clause_fence
 from .matrix_registry import MATRIX_COLLECTIONS
 from .repository import ArbitrationDraftingRepository, _collect, _jsonable
 from .approval_policy import (
+    MATRIX_ROLE_CLAIMS,
     REVOKED_REJOINDER_PERMISSION,
+    actor_roles,
     approval_barred_actors,
     material_change_review_reset,
     enforce_author_approver_separation,
@@ -548,9 +550,11 @@ class ArbitrationCaseWorkspaceService:
         assignments = list(row.get("review_assignments") or [])
         if claimed_role not in required_roles:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Reviewer role is not required for this matrix row")
-        # Assigning confers the specialty, so only a holder of its role claim may
-        # assign it (no assignment counts here); reviewing accepts either.
-        role = enforce_matrix_reviewer_role(claimed_role, current_user, [] if action == "assign" else assignments)
+        # A reviewer specialty comes only from the actor's own signed role claim.
+        # Assignments route work; none - new or already on record - confers it.
+        role = enforce_matrix_reviewer_role(claimed_role, current_user, [])
+        if action == "assign":
+            await self._require_qualified_assignee(payload.reviewer_user_id, role)
         comments = list(row.get("review_comments") or [])
         approval_log = list(row.get("approval_log") or [])
 
@@ -836,6 +840,26 @@ class ArbitrationCaseWorkspaceService:
         await self.invalidate_readiness_approvals(case_id, "rejoinder_permission_changed", current_user)
         await self.readiness(case_id)
         return updated
+
+    async def _require_qualified_assignee(self, user_id: Any, role: str) -> None:
+        """403 unless the assignee is an active user holding this reviewer role's claim.
+
+        Fails closed when the user record cannot be found or read.
+        """
+        from ...core.security import _expand_object_ids
+
+        users = getattr(self.db, "users", None)
+        assignee = None
+        if users is not None and user_id:
+            try:
+                assignee = await users.find_one({"_id": {"$in": _expand_object_ids([str(user_id)])}})
+            except Exception:
+                assignee = None
+        qualified = bool(assignee) and assignee.get("is_active", True) is not False and bool(
+            actor_roles(assignee) & MATRIX_ROLE_CLAIMS.get(role, frozenset())
+        )
+        if not qualified:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="The assignee does not hold this reviewer role")
 
     async def _abort_permission_receipt(self, receipt_id: str) -> None:
         await self.db.arbitration_workflow_approvals.update_one(

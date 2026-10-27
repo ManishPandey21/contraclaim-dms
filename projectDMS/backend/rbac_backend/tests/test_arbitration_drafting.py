@@ -1254,6 +1254,8 @@ def test_execute_queued_agent_run_updates_existing_run(monkeypatch):
 
 def test_matrix_review_assignment_creates_task_and_blocks_readiness():
     db = _FakeDb()
+    # The assignee must be an active user who holds the legal reviewer role.
+    db.users = _FakeCollection([{"_id": "reviewer-1", "roles": ["legal_reviewer"], "is_active": True}])
     db.arbitration_claim_matrix.rows.append(
         {
             "_id": "claim-row-review",
