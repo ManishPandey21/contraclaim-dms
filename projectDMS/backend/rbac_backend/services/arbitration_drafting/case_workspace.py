@@ -555,6 +555,9 @@ class ArbitrationCaseWorkspaceService:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Review comment is required for this action")
         if action == "assign" and not payload.reviewer_user_id:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="reviewer_user_id is required when assigning review")
+        if action == "assign" and str(payload.reviewer_user_id) == str(actor or ""):
+            # An assignment confers a reviewer specialty, so it must come from someone else.
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="A reviewer cannot assign themselves a review role")
         if action == "approve":
             enforce_author_approver_separation(current_user, approval_barred_actors(row), gate=f"{matrix_slug} matrix review")
             prior_actors = {

@@ -405,3 +405,42 @@ def test_a_partial_approval_keeps_the_contributors_and_a_full_approval_clears_th
 def test_a_contributor_cannot_be_restored_or_cleared_by_an_edit() -> None:
     with pytest.raises(ValidationError):
         ArbitrationMatrixRowUpdate(material_contributor_ids=[])
+
+
+# ---------------------------------------------------------------------------
+# A reviewer specialty comes from a role claim or another user's assignment
+# ---------------------------------------------------------------------------
+
+UNQUALIFIED = _FakeUser("approver-6", roles=["projectuser"])
+ASSIGNER = _FakeUser("lead-7", roles=["projectuser"])
+
+
+def _review(db: _FakeDb, user, **fields) -> dict:
+    payload = ArbitrationMatrixReviewRequest(**fields)
+    return asyncio.run(ArbitrationCaseWorkspaceService(db).review_matrix_row(CASE, INDEX, ROW, payload, user))
+
+
+def test_a_user_cannot_assign_themselves_a_reviewer_specialty(db: _FakeDb) -> None:
+    _edit(db, source_id="doc-2")
+    with pytest.raises(HTTPException) as refused:
+        _review(db, UNQUALIFIED, action="assign", reviewer_role="contracts", reviewer_user_id=UNQUALIFIED.id)
+    assert refused.value.status_code == 403
+    assert not _row(db).get("review_assignments")
+
+
+def test_a_self_made_assignment_on_record_does_not_qualify_its_holder(db: _FakeDb) -> None:
+    _edit(db, source_id="doc-2")
+    _row(db)["review_assignments"] = [
+        {"reviewer_role": "contracts", "reviewer_user_id": UNQUALIFIED.id, "assigned_by": UNQUALIFIED.id, "status": "assigned"}
+    ]
+    with pytest.raises(HTTPException) as refused:
+        _review(db, UNQUALIFIED, action="approve", reviewer_role="contracts")
+    assert refused.value.status_code == 403
+    assert _row(db)["approval_status"] == "needs_review"
+
+
+def test_an_assignment_made_by_another_user_still_qualifies_the_assignee(db: _FakeDb) -> None:
+    _edit(db, source_id="doc-2")
+    _review(db, ASSIGNER, action="assign", reviewer_role="contracts", reviewer_user_id=UNQUALIFIED.id)
+    approved = _review(db, UNQUALIFIED, action="approve", reviewer_role="contracts")
+    assert approved["approval_status"] == "approved"

@@ -168,6 +168,7 @@ def enforce_matrix_reviewer_role(
         str(item.get("reviewer_role") or "").strip().lower()
         for item in assignments or []
         if str(item.get("reviewer_user_id") or "") == actor
+        and str(item.get("assigned_by") or "") != actor
         and str(item.get("status") or "assigned") in {"assigned", "in_review"}
     }
     if actor and claimed in assigned_roles:
