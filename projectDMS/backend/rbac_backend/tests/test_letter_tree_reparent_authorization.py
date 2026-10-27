@@ -520,3 +520,34 @@ async def test_an_opaque_conversation_key_that_names_no_letter_is_kept(db: _Data
         response = await client.get(f"/api/letters/{FOREIGN_B1}/chain")
     assert response.status_code == 200, response.text
     assert response.json()[0]["conversation_id"] == "conversation-key-1"
+
+
+# ---------------------------------------------------------------------------
+# Reparent: a denied or missing parent is indistinguishable; bad ids are not 500s
+# ---------------------------------------------------------------------------
+
+
+async def test_a_foreign_parent_and_a_missing_parent_get_the_same_answer(db: _Database) -> None:
+    async with _as(db, PROJECT_A1_EDITOR) as client:
+        foreign = await client.post(f"/api/letters/{GRAND_A1}/reparent", json={"new_parent_id": ROOT_B1})
+        missing = await client.post(f"/api/letters/{GRAND_A1}/reparent", json={"new_parent_id": str(ObjectId())})
+    assert (foreign.status_code, foreign.json()) == (missing.status_code, missing.json())
+    assert foreign.status_code == 404
+
+
+async def test_a_caller_who_cannot_edit_the_letter_learns_nothing_about_the_parent(db: _Database) -> None:
+    async with _as(db, ORG_B_ADMIN) as client:
+        existing = await client.post(f"/api/letters/{GRAND_A1}/reparent", json={"new_parent_id": ROOT_A1})
+        missing = await client.post(f"/api/letters/{GRAND_A1}/reparent", json={"new_parent_id": str(ObjectId())})
+    assert existing.status_code == missing.status_code
+    assert existing.status_code in (403, 404)
+
+
+@pytest.mark.parametrize("which", ["letter", "parent"])
+async def test_a_malformed_id_is_not_a_server_error(db: _Database, which: str) -> None:
+    before = _snapshot(db)
+    letter_id, parent_id = (("not-an-id", ROOT_A1) if which == "letter" else (GRAND_A1, "not-an-id"))
+    async with _as(db, PROJECT_A1_EDITOR) as client:
+        response = await client.post(f"/api/letters/{letter_id}/reparent", json={"new_parent_id": parent_id})
+    assert response.status_code == 404, response.text
+    assert _snapshot(db) == before

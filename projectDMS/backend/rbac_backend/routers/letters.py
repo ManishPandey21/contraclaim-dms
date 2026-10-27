@@ -54,7 +54,7 @@ from ..core.database import get_db
 
 
 
-from ..services.letter_service import LetterService
+from ..services.letter_service import InvalidLetterIdError, LetterService
 from ..services.letter_drafting.service import DraftRunService
 
 
@@ -772,6 +772,50 @@ class LetterController:
 
 
 
+    async def _readable_letter_or_404(self, letter_id: str, current_user: CurrentUser) -> Letter:
+
+
+
+        """The letter, or 404 when it is missing, malformed or not readable by the caller."""
+
+
+
+        try:
+
+
+
+            letter = await self.letter_service.get_letter(letter_id)
+
+
+
+        except InvalidLetterIdError:
+
+
+
+            letter = None
+
+
+
+        if not letter or not await self._member_readable(current_user, letter):
+
+
+
+            raise LetterError("Letter not found", status.HTTP_404_NOT_FOUND)
+
+
+
+        return letter
+
+
+
+
+
+
+
+
+
+
+
     async def _member_readable(self, current_user: CurrentUser, member: Letter) -> bool:
 
 
@@ -1164,35 +1208,15 @@ class LetterController:
 
 
 
-            # Validate both letters exist and user has access
+            # A letter the caller may not read is reported exactly like a missing
 
 
 
-            letter = await self.letter_service.get_letter(letter_id)
+            # one, so neither id can be probed for existence.
 
 
 
-            new_parent = await self.letter_service.get_letter(new_parent_id)
-
-
-
-
-
-
-
-            if not letter or not new_parent:
-
-
-
-                raise LetterError("Letter not found", status.HTTP_404_NOT_FOUND)
-
-
-
-
-
-
-
-            # Authorization checks
+            letter = await self._readable_letter_or_404(letter_id, current_user)
 
 
 
@@ -1200,7 +1224,7 @@ class LetterController:
 
 
 
-            await self.auth_service.check_letter_access(current_user, new_parent, "read")
+            new_parent = await self._readable_letter_or_404(new_parent_id, current_user)
 
 
 
