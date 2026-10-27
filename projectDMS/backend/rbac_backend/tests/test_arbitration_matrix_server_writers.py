@@ -354,3 +354,37 @@ def test_a_rejoinder_contributor_cannot_grant_the_permission(db: _WorkspaceDatab
         )
     assert refused.value.status_code == 409
     assert not _row(db, "arbitration_rejoinder_matrix", "rejoinder-1").get("permission_obtained")
+
+
+def test_a_rollup_never_overwrites_an_edit_that_landed_between_its_read_and_write(db: _WorkspaceDatabase) -> None:
+    db.arbitration_quantum_annexures.docs.append(_annexure("P-1", 100.0, **APPROVED))
+    _rollup(db)
+    _summary(db).update({**APPROVED, "edit_revision": 1, "material_contributor_ids": [], "approval_log": []})
+    db.arbitration_quantum_annexures.docs.append(_annexure("P-2", 5.0))
+    collection = db.arbitration_quantum_annexures
+    original = collection.update_one
+    fired = []
+
+    async def _edit_lands_first(query, update, *args, **kwargs):
+        if not fired:
+            fired.append(True)
+            # A user edit commits under the compare-and-set rules in the window.
+            _summary(db).update(
+                {
+                    "notes": "user note",
+                    "edit_revision": 2,
+                    "material_contributor_ids": ["editor-7"],
+                    "approval_log": [{"_id": "edit-1", "action": "material_edit", "actor_id": "editor-7"}],
+                }
+            )
+        return await original(query, update, *args, **kwargs)
+
+    collection.update_one = _edit_lands_first
+    _rollup(db)
+
+    summary = _summary(db)
+    assert summary["notes"] == "user note"
+    assert set(summary["material_contributor_ids"]) == {"editor-7", AGENT_USER["id"]}
+    assert [entry.get("actor_id") for entry in summary["approval_log"]] == ["editor-7", AGENT_USER["id"]]
+    assert summary["edit_revision"] == 3
+    assert summary["principal_total"] == 105.0
