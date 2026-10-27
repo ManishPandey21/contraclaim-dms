@@ -262,3 +262,17 @@ async def test_a_foreign_tenant_cannot_update_the_row_at_all(db: _Database) -> N
         response = await client.patch(f"/api/arbitration/cases/{CASE_A1}/{INDEX}/{row['_id']}", json={"title": "x"})
     assert response.status_code == 404, response.text
     assert _snapshot(db) == before
+
+
+async def test_a_create_cannot_choose_the_row_id(db: _Database) -> None:
+    # Reusing another case's row id must neither collide (a 500 that reveals the
+    # id exists) nor be honoured; the server assigns the id.
+    foreign_row_id = "row-in-case-b1"
+    db.arbitration_document_index.docs.append({"_id": foreign_row_id, "case_id": CASE_B1, "title": "B1 row"})
+    async with _as(db, EDITOR_A1) as client:
+        response = await client.post(
+            f"/api/arbitration/cases/{CASE_A1}/{INDEX}", json={"title": "Exhibit", "_id": foreign_row_id}
+        )
+    assert response.status_code == 201, response.text
+    assert response.json()["_id"] != foreign_row_id
+    assert [row["case_id"] for row in _rows(db) if row["_id"] == foreign_row_id] == [CASE_B1]

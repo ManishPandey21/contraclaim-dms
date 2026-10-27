@@ -136,7 +136,9 @@ def _actor_snapshot(user: Any) -> Dict[str, Any]:
 
 
 def _clean_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-    return {key: value for key, value in payload.items() if value is not None and key != "id"}
+    # Record ids are server-assigned; a client-chosen `_id` could collide with
+    # another case's row and reveal that it exists.
+    return {key: value for key, value in payload.items() if value is not None and key not in {"id", "_id"}}
 
 
 SERVER_CONTROLLED_MATRIX_FIELDS = {
