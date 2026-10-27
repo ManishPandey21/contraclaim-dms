@@ -491,8 +491,15 @@ def _update_response(db: _FakeDb, text: str) -> dict:
     from backend.rbac_backend.models.arbitration_drafting import ArbitrationParagraphResponseUpdate
     from backend.rbac_backend.services.arbitration_drafting.service import ArbitrationDraftingService
 
+    return asyncio.run(_update_response_async(db, text))
+
+
+async def _update_response_async(db: _FakeDb, text: str) -> dict:
+    from backend.rbac_backend.models.arbitration_drafting import ArbitrationParagraphResponseUpdate
+    from backend.rbac_backend.services.arbitration_drafting.service import ArbitrationDraftingService
+
     payload = ArbitrationParagraphResponseUpdate(response_type="admit", response_text=text)
-    return asyncio.run(ArbitrationDraftingService(db).update_paragraph_response("draft-1", "para-sod-20", payload, _FakeUser("legal-1")))
+    return await ArbitrationDraftingService(db).update_paragraph_response("draft-1", "para-sod-20", payload, _FakeUser("legal-1"))
 
 
 def test_rewriting_permitted_new_matter_revokes_the_permission() -> None:
@@ -534,3 +541,69 @@ def test_an_edit_cannot_delete_a_row(field: str, value: str) -> None:
         ArbitrationMatrixRowUpdate(**{field: value})
     with pytest.raises(ValidationError):
         ArbitrationMatrixRowCreate(**{field: value})
+
+
+# ---------------------------------------------------------------------------
+# A rejoinder permission and a paragraph-response rewrite cannot interleave
+# ---------------------------------------------------------------------------
+
+PERMISSION_GRANTER = _FakeUser("legal-9", roles=["legal_reviewer"])
+
+
+def _rejoinder_awaiting_permission(db: _FakeDb) -> None:
+    _rejoinder_with_permission(db)
+    for row in (db.arbitration_paragraph_responses.rows[0], db.arbitration_rejoinder_matrix.rows[0]):
+        row.update({"permission_obtained": False, "permission_approved_by": None, "permission_approval_receipt_id": None})
+
+
+def _grant(db: _FakeDb) -> dict:
+    from backend.rbac_backend.models.arbitration_drafting import ArbitrationRejoinderPermissionRequest
+
+    row = db.arbitration_rejoinder_matrix.rows[0]
+    payload = ArbitrationRejoinderPermissionRequest(permission_source_id="doc-1")
+    return ArbitrationCaseWorkspaceService(db).record_rejoinder_permission(CASE, row["_id"], payload, PERMISSION_GRANTER)
+
+
+def _first_call_runs(collection, method: str, before) -> None:
+    original = getattr(collection, method)
+    fired = []
+
+    async def _wrapped(*args, **kwargs):
+        if not fired:
+            fired.append(True)
+            await before()
+        return await original(*args, **kwargs)
+
+    setattr(collection, method, _wrapped)
+
+
+def test_a_permission_granted_while_the_new_matter_is_being_rewritten_does_not_survive() -> None:
+    db = _FakeDb()
+    _rejoinder_awaiting_permission(db)
+    # The grant lands after the editor read the response and before its write.
+    _first_call_runs(db.arbitration_paragraph_responses, "find_one_and_update", lambda: _grant(db))
+
+    _update_response(db, "New matter: an entirely different contention.")
+
+    assert db.arbitration_paragraph_responses.rows[0]["permission_obtained"] is False
+    assert db.arbitration_rejoinder_matrix.rows[0]["permission_obtained"] is False
+
+
+def test_a_permission_decided_on_text_rewritten_meanwhile_is_refused() -> None:
+    db = _FakeDb()
+    _rejoinder_awaiting_permission(db)
+
+    async def _rewrite() -> None:
+        await _update_response_async(db, "New matter: an entirely different contention.")
+
+    # The rewrite lands after the decision read the row and before it writes the response.
+    _first_call_runs(db.arbitration_paragraph_responses, "update_one", _rewrite)
+
+    with pytest.raises(HTTPException) as refused:
+        asyncio.run(_grant(db))
+
+    assert refused.value.status_code == 409
+    assert db.arbitration_paragraph_responses.rows[0]["permission_obtained"] is False
+    assert db.arbitration_rejoinder_matrix.rows[0]["permission_obtained"] is False
+    receipts = [r for r in db.arbitration_workflow_approvals.rows if r.get("gate") == "rejoinder_permission"]
+    assert [r["receipt_status"] for r in receipts] == ["aborted"]

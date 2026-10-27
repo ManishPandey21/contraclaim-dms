@@ -406,9 +406,12 @@ class ArbitrationDraftingService:
             "updated_by": _actor_id(current_user),
             "updated_at": datetime.utcnow(),
         }
-        if existing and existing.get("permission_obtained") and any(existing.get(key) != value for key, value in content.items()):
-            # The permission covered the old content; the projection inherits the revocation.
+        if existing and any(existing.get(key) != value for key, value in content.items()):
+            # New content: whatever permission the old content held - including one
+            # granted after the read above - does not cover it. The revision lets a
+            # permission decision on the old content detect the rewrite.
             changes.update(REVOKED_REJOINDER_PERMISSION)
+            changes["response_revision"] = int(existing.get("response_revision") or 0) + 1
         updated = await self.repo.update_paragraph_response(draft_id, response_id, changes)
         if not updated:
             raise HTTPException(status_code=404, detail="Paragraph response not found")

@@ -44,6 +44,7 @@ from .matrix_evidence_authority import matrix_clause_fence
 from .matrix_registry import MATRIX_COLLECTIONS
 from .repository import ArbitrationDraftingRepository, _collect, _jsonable
 from .approval_policy import (
+    REVOKED_REJOINDER_PERMISSION,
     approval_barred_actors,
     material_change_review_reset,
     enforce_author_approver_separation,
@@ -771,6 +772,32 @@ class ArbitrationCaseWorkspaceService:
             "approved_at": now,
         }
         await self.db.arbitration_workflow_approvals.insert_one(_jsonable(receipt))
+        granted = {
+            "permission_obtained": True,
+            "permission_source_id": payload.permission_source_id,
+            "permission_approved_by": actor,
+            "permission_approved_at": now,
+            "permission_notes": payload.permission_notes,
+            "permission_approval_receipt_id": receipt["_id"],
+        }
+        response_id = row.get("source_paragraph_response_id")
+        response_scope = {
+            "_id": response_id,
+            "draft_id": row.get("draft_id"),
+            "response_revision": row.get("source_response_revision"),
+        }
+        if response_id:
+            # The authoritative response first, and only while it still holds the
+            # text this projection showed: a rewrite in between refuses the grant.
+            written = await self.db.arbitration_paragraph_responses.update_one(
+                response_scope, {"$set": {**granted, "updated_at": now}}
+            )
+            if not getattr(written, "matched_count", 0):
+                await self._abort_permission_receipt(receipt["_id"])
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="The paragraph response changed during the permission decision; review the current content",
+                )
         # The permission covers only the content that was read above.
         updated = await collection.find_one_and_update(
             {"_id": row_id, "case_id": case_id, "edit_revision": row.get("edit_revision")},
@@ -790,28 +817,16 @@ class ArbitrationCaseWorkspaceService:
             return_document=True,
         )
         if not updated:
-            await self.db.arbitration_workflow_approvals.update_one(
-                {"_id": receipt["_id"], "receipt_status": "pending"},
-                {"$set": {"receipt_status": "aborted", "aborted_at": datetime.utcnow()}},
-            )
+            if response_id:
+                # Undo the grant written above, unless the response moved on since.
+                await self.db.arbitration_paragraph_responses.update_one(
+                    {**response_scope, "permission_approval_receipt_id": receipt["_id"]},
+                    {"$set": {**REVOKED_REJOINDER_PERMISSION, "updated_at": datetime.utcnow()}},
+                )
+            await self._abort_permission_receipt(receipt["_id"])
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Rejoinder matrix row changed during the permission decision; review the current content",
-            )
-        if updated.get("source_paragraph_response_id"):
-            await self.db.arbitration_paragraph_responses.update_one(
-                {"_id": updated["source_paragraph_response_id"], "draft_id": updated.get("draft_id")},
-                {
-                    "$set": {
-                        "permission_obtained": True,
-                        "permission_source_id": payload.permission_source_id,
-                        "permission_approved_by": actor,
-                        "permission_approved_at": now,
-                        "permission_notes": payload.permission_notes,
-                        "permission_approval_receipt_id": receipt["_id"],
-                        "updated_at": now,
-                    }
-                },
             )
         await self.db.arbitration_workflow_approvals.update_one(
             {"_id": receipt["_id"], "receipt_status": "pending"},
@@ -821,6 +836,12 @@ class ArbitrationCaseWorkspaceService:
         await self.invalidate_readiness_approvals(case_id, "rejoinder_permission_changed", current_user)
         await self.readiness(case_id)
         return updated
+
+    async def _abort_permission_receipt(self, receipt_id: str) -> None:
+        await self.db.arbitration_workflow_approvals.update_one(
+            {"_id": receipt_id, "receipt_status": "pending"},
+            {"$set": {"receipt_status": "aborted", "aborted_at": datetime.utcnow()}},
+        )
 
     async def dashboard(self, case_id: str) -> Dict[str, Any]:
         case = await self.get_case(case_id)

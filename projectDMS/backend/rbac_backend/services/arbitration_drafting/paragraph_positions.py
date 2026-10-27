@@ -141,6 +141,9 @@ async def sync_paragraph_position_projection(
     update = {
         **content,
         "projection_hash": content_hash,
+        # The response revision this projection shows; a permission decision on
+        # it writes the response only while the response is still at it.
+        "source_response_revision": response.get("response_revision"),
         "updated_by": actor_id,
         "updated_at": now,
     }
