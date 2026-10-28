@@ -266,6 +266,12 @@ Why 2026-11-05: a short, 29-day window, aligned with R4, so both no-fix exceptio
 > gate were removed in the same change. `test_ci_static_gates.py` now fails if any
 > of these ids is ignored again or the exception files reappear.
 >
+> **Update 2026-10-28.** Two further advisories, published 2026-10-27, were fixed by upgrading,
+> not accepted: GHSA-98qm-wvgf-w4cf / CVE-2026-106435 (pymongo `>=3.9.0,<=4.18.2`, fixed in 4.18.3) and
+> GHSA-45c3-73f7-pv4m / CVE-2026-114605 (dnspython `<2.9.0`, fixed in 2.9.0). The manifests above now pin
+> `pymongo==4.18.3`; `dnspython==2.9.0` is pinned in the backend manifests and, newly, in
+> `services/langgraph/requirements.txt`. `PYMONGO_FIXED_VERSION` in `test_ci_static_gates.py` is 4.18.3.
+>
 > 0.5.1 also validates checkpoint identifiers (`thread_id`, `checkpoint_ns`,
 > `checkpoint_id`, `task_id`, `task_path`) as strings and raises `ValueError`
 > otherwise. Every call site passes strings (f-strings, `str(...)`, `str(uuid4())`).
