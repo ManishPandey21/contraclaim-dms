@@ -870,7 +870,9 @@ def _legacy_and_migration_fields() -> set[str]:
     legacy = {"paragraph_response_id", "source_paragraph_number", "paragraph_number"}
     historical = (service_dir / "historical_paragraph_review.py").read_text(encoding="utf-8")
     assert all(f'"{key}"' in historical for key in legacy), "historical review no longer reads these fields"
-    return set(re.findall(r'"(migration_[a-z_]+)":', migration.read_text(encoding="utf-8"))) | legacy
+    migration_fields = set(re.findall(r'"(migration_[a-z_]+)":', migration.read_text(encoding="utf-8")))
+    assert migration_fields, "found no migration_* fields; the inventory would pass vacuously"
+    return migration_fields | legacy
 
 
 def test_every_written_rejoinder_field_is_classified() -> None:
@@ -915,3 +917,28 @@ def test_a_response_grant_the_grant_scan_cannot_reach_is_still_withdrawn(db: _Fa
     assert report["withdrawn_from"] == [receipt["_id"]]
     assert _response(db)["permission_obtained"] is False
     assert receipt["grants_withdrawn"] is True
+
+
+
+def test_a_dry_run_reports_what_the_live_run_withdraws(db: _FakeDb, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A grant only the unfinished-receipt path reaches: the decision died after
+    # its response grant and the response's draft is gone.
+    _killed(db, monkeypatch, "after_response_grant")
+    db.arbitration_drafts.rows.clear()
+    [receipt] = _receipts(db)
+
+    dry = asyncio.run(reconcile_stale_permission_receipts(db, case_id=CASE, now=_later(), dry_run=True))
+    live = _reconcile(db)
+
+    assert dry["withdrawn_from"] == live["withdrawn_from"] == [receipt["_id"]]
+
+
+def test_a_dry_run_omits_unfinished_receipts_no_grant_cites(db: _FakeDb) -> None:
+    _undo_revert_fails(db)
+    [receipt] = _receipts(db)
+    _response(db).update({"permission_obtained": False, "permission_approval_receipt_id": None})
+
+    dry = asyncio.run(reconcile_stale_permission_receipts(db, case_id=CASE, dry_run=True))
+
+    assert receipt["grants_withdrawn"] is False
+    assert dry == {"aborted": [], "withdrawn_from": [], "errors": []}

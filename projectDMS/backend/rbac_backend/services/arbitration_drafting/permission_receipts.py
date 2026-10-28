@@ -422,6 +422,18 @@ async def _granted_receipt_ids(db: Any, case_id: Optional[str]) -> List[Any]:
     return list(cited.values())
 
 
+async def _still_cited(db: Any, receipt_ids: List[Any]) -> set:
+    """Which of these receipts a live grant still cites, by exact receipt id -
+    the same match `withdraw_grants_citing` writes with."""
+    if not receipt_ids:
+        return set()
+    query = {"permission_approval_receipt_id": {"$in": receipt_ids}, "permission_obtained": True}
+    cited: set = set()
+    for collection in (db.arbitration_paragraph_responses, db.arbitration_rejoinder_matrix):
+        cited |= {str(record.get("permission_approval_receipt_id")) for record in await _collect(collection.find(query))}
+    return cited
+
+
 async def withdraw_grants_citing(db: Any, receipt_id: Any) -> bool:
     """Withdraw every grant that still cites this receipt. Idempotent.
 
@@ -508,12 +520,16 @@ async def reconcile_stale_permission_receipts(
         return report
     to_withdraw = {str(receipt["_id"]): receipt["_id"] for receipt in [*aborted, *unfinished]}
     if dry_run:
-        # The stale receipts would be aborted first, so their grants count too.
-        cited_keys = {str(receipt_id) for receipt_id in cited}
+        # Report what the live run would withdraw: the stale receipts would be
+        # aborted first, and a receipt counts only while a grant still cites it.
         for receipt in candidates:
-            if str(receipt["_id"]) in cited_keys:
-                to_withdraw[str(receipt["_id"])] = receipt["_id"]
-        report["withdrawn_from"] = sorted(to_withdraw)
+            to_withdraw[str(receipt["_id"])] = receipt["_id"]
+        try:
+            still_cited = await _still_cited(db, list(to_withdraw.values()))
+        except Exception as exc:
+            report["errors"].append(f"reading grants: {exc}")
+            return report
+        report["withdrawn_from"] = sorted(key for key in to_withdraw if key in still_cited)
         return report
     for key, receipt_id in to_withdraw.items():
         try:
