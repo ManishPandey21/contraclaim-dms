@@ -145,6 +145,9 @@ REJOINDER_CONTENT_FIELDS = frozenset(
         "project_id",
         "contract_id",
         "source_sod_para",
+        "source_paragraph_number",
+        "paragraph_number",
+        "paragraph_response_id",
         "nature_of_defence",
         "claimant_reply",
         "reply_to_counterclaim",
@@ -176,7 +179,15 @@ REJOINDER_CONTENT_FIELDS = frozenset(
 #: and approval state, the permission itself, write bookkeeping, display fields
 #: and historical-review labels.
 NON_CONTENT_FIELDS = frozenset(
-    {*_V1_UNBOUND_FIELDS, *HISTORICAL_REVIEW_FIELDS, "deleted_at", "deleted_by"}
+    {
+        *_V1_UNBOUND_FIELDS,
+        *HISTORICAL_REVIEW_FIELDS,
+        "deleted_at",
+        "deleted_by",
+        # Phase 0 containment migration notes (v20260721_0001).
+        "migration_review_reason",
+        "migration_reviewed_at",
+    }
 )
 
 #: Version 2: the hash covers every field that is not classified as non-content.
@@ -195,6 +206,8 @@ def permission_content_hash(row: Mapping[str, Any], version: int = CONTENT_HASH_
     Ids hash by their string form, so an ObjectId and its hex string agree.
     Raises KeyError for an unknown version; readers treat that as a mismatch.
     """
+    if isinstance(version, bool):
+        raise TypeError("a hash version is an int, not a bool")
     excluded = _NON_CONTENT_BY_VERSION[version]
     return _hash({key: value for key, value in row.items() if key not in excluded})
 
@@ -487,10 +500,13 @@ async def reconcile_stale_permission_receipts(
             if cited
             else []
         )
+        unfinished = await _collect(
+            db.arbitration_workflow_approvals.find({**scope, "receipt_status": "aborted", "grants_withdrawn": False})
+        )
     except Exception as exc:
         report["errors"].append(f"reading grants: {exc}")
         return report
-    to_withdraw = {str(receipt["_id"]): receipt["_id"] for receipt in aborted}
+    to_withdraw = {str(receipt["_id"]): receipt["_id"] for receipt in [*aborted, *unfinished]}
     if dry_run:
         # The stale receipts would be aborted first, so their grants count too.
         cited_keys = {str(receipt_id) for receipt_id in cited}

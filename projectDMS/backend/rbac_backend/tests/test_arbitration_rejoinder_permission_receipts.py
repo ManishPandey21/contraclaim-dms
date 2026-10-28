@@ -816,7 +816,7 @@ def test_a_receipt_written_before_hash_versioning_is_checked_with_version_1(db: 
     assert _state(db) == RECEIPT_MISMATCH
 
 
-@pytest.mark.parametrize("version", [3, "2", None])
+@pytest.mark.parametrize("version", [3, "2", None, True])
 def test_an_unknown_hash_version_fails_closed(db: _FakeDb, version) -> None:
     receipt = _committed(db)
     receipt["matrix_row_content_hash_version"] = version
@@ -853,7 +853,24 @@ def _written_rejoinder_fields() -> set[str]:
         historical | projection | sync | reviews | decision | _client_rejoinder_columns()
         | set(case_workspace.SERVER_CONTROLLED_MATRIX_FIELDS) | set(case_workspace.SERVER_BOOKKEEPING_MATRIX_FIELDS)
         | set(case_workspace.MATRIX_ROW_OWNERSHIP_FIELDS) | {"tribunal_permission_required"}
+        | _legacy_and_migration_fields()
     )
+
+
+def _legacy_and_migration_fields() -> set[str]:
+    """Fields historical rows and the phase-0 migration carry."""
+    import re
+    from pathlib import Path as _Path
+
+    from backend.rbac_backend.services.arbitration_drafting import case_workspace
+
+    service_dir = _Path(case_workspace.__file__).parent
+    migration = service_dir.parents[1] / "migrations" / "v20260721_0001_arbitration_phase0_containment.py"
+    # The legacy paragraph identifiers historical_paragraph_review reads from rejoinder rows.
+    legacy = {"paragraph_response_id", "source_paragraph_number", "paragraph_number"}
+    historical = (service_dir / "historical_paragraph_review.py").read_text(encoding="utf-8")
+    assert all(f'"{key}"' in historical for key in legacy), "historical review no longer reads these fields"
+    return set(re.findall(r'"(migration_[a-z_]+)":', migration.read_text(encoding="utf-8"))) | legacy
 
 
 def test_every_written_rejoinder_field_is_classified() -> None:
@@ -882,3 +899,19 @@ def test_withdrawing_an_old_receipt_never_touches_a_newer_grant(db: _FakeDb) -> 
     assert withdrawn is False
     assert _row(db)["permission_obtained"] is True and _response(db)["permission_obtained"] is True
     assert _state(db) == VERIFIED
+
+
+def test_a_response_grant_the_grant_scan_cannot_reach_is_still_withdrawn(db: _FakeDb, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The decision died after its response grant; the response's draft is gone,
+    # so the grant scan cannot find it. The aborted receipt records the
+    # withdrawal as unfinished, and cleanup withdraws it by receipt id.
+    _killed(db, monkeypatch, "after_response_grant")
+    db.arbitration_drafts.rows.clear()
+    [receipt] = _receipts(db)
+
+    report = _reconcile(db)
+
+    assert report["aborted"] == [receipt["_id"]]
+    assert report["withdrawn_from"] == [receipt["_id"]]
+    assert _response(db)["permission_obtained"] is False
+    assert receipt["grants_withdrawn"] is True
