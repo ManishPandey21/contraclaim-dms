@@ -282,7 +282,9 @@ def test_validation_is_read_only(db: _FakeDb, monkeypatch: pytest.MonkeyPatch) -
     assert _row(db)["permission_obtained"] is True
 
 
-def test_a_failed_withdrawal_is_retried_by_the_next_run(db: _FakeDb, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_failed_withdrawal_is_reported_and_retried_by_the_next_run(
+    db: _FakeDb, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _killed(db, monkeypatch, "after_row_write")
     rows = db.arbitration_rejoinder_matrix
     original = rows.update_many
@@ -291,18 +293,30 @@ def test_a_failed_withdrawal_is_retried_by_the_next_run(db: _FakeDb, monkeypatch
         raise RuntimeError("primary stepped down")
 
     rows.update_many = _fails
-    with pytest.raises(RuntimeError):
-        _reconcile(db)
+    report = _reconcile(db)
     rows.update_many = original
 
     # The receipt is aborted; the row still carries the grant, refused by every reader.
-    assert [r["receipt_status"] for r in _receipts(db)] == ["aborted"]
+    [receipt] = _receipts(db)
+    assert report["aborted"] == [receipt["_id"]]
+    assert report["errors"] and "primary stepped down" in report["errors"][0]
+    assert receipt["receipt_status"] == "aborted" and receipt["grants_withdrawn"] is False
     assert _row(db)["permission_obtained"] is True
     _assert_every_reader_refuses(db)
 
     report = _reconcile(db)
-    assert report["withdrawn_from"] == [_receipts(db)[0]["_id"]]
+    assert report == {"aborted": [], "withdrawn_from": [receipt["_id"]], "errors": []}
     assert _row(db)["permission_obtained"] is False
+    assert receipt["grants_withdrawn"] is True
+
+
+def test_repeated_cleanup_is_idempotent(db: _FakeDb, monkeypatch: pytest.MonkeyPatch) -> None:
+    _killed(db, monkeypatch, "after_row_write")
+    _reconcile(db)
+    snapshot = [dict(r) for r in db.arbitration_rejoinder_matrix.rows], [dict(r) for r in _receipts(db)]
+
+    assert _reconcile(db) == {"aborted": [], "withdrawn_from": [], "errors": []}
+    assert ([dict(r) for r in db.arbitration_rejoinder_matrix.rows], [dict(r) for r in _receipts(db)]) == snapshot
 
 
 def test_a_reconciler_that_loses_to_the_commit_changes_nothing(db: _FakeDb, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -602,11 +616,47 @@ def test_a_refused_caller_triggers_no_cleanup(db: _FakeDb, monkeypatch: pytest.M
     assert stale["receipt_status"] == "pending"
 
 
-def test_receipts_aborted_by_the_decision_itself_are_not_rescanned(db: _FakeDb) -> None:
-    # The decision's own undo already withdrew its grants; only the cleanup's
-    # own unfinished aborts are revisited, so the sweep stays bounded.
+def _undo_revert_fails(db: _FakeDb) -> None:
+    """The row write fails, and the undo's revert of the response grant fails too."""
     rows = db.arbitration_rejoinder_matrix
-    original = rows.find_one_and_update
+    responses = db.arbitration_paragraph_responses
+    original_response_write = responses.update_one
+    writes = []
+
+    async def _row_write_fails(*args, **kwargs):
+        raise RuntimeError("primary stepped down")
+
+    async def _second_response_write_fails(*args, **kwargs):
+        writes.append(True)
+        if len(writes) == 2:  # the first is the grant, the second the undo's revert
+            raise RuntimeError("still stepping down")
+        return await original_response_write(*args, **kwargs)
+
+    rows.find_one_and_update = _row_write_fails
+    responses.update_one = _second_response_write_fails
+    with pytest.raises(RuntimeError):
+        asyncio.run(_grant(db))
+    del rows.find_one_and_update, responses.update_one  # back to the class methods
+
+
+def test_a_failed_undo_records_an_unfinished_withdrawal_that_cleanup_finishes(db: _FakeDb) -> None:
+    _undo_revert_fails(db)
+
+    [receipt] = _receipts(db)
+    assert receipt["receipt_status"] == "aborted"
+    assert receipt["grants_withdrawn"] is False  # the revert did not happen
+    assert _response(db)["permission_obtained"] is True  # left behind, refused by every reader
+    _assert_every_reader_refuses(db)
+
+    # The receipt was aborted by the decision itself, not by cleanup, and is not stale.
+    report = _reconcile(db, now=datetime.utcnow())
+    assert report == {"aborted": [], "withdrawn_from": [receipt["_id"]], "errors": []}
+    assert _response(db)["permission_obtained"] is False
+    assert receipt["grants_withdrawn"] is True
+
+
+def test_a_successful_undo_records_its_withdrawal(db: _FakeDb) -> None:
+    rows = db.arbitration_rejoinder_matrix
 
     async def _row_write_fails(*args, **kwargs):
         raise RuntimeError("primary stepped down")
@@ -614,17 +664,221 @@ def test_receipts_aborted_by_the_decision_itself_are_not_rescanned(db: _FakeDb) 
     rows.find_one_and_update = _row_write_fails
     with pytest.raises(RuntimeError):
         asyncio.run(_grant(db))
-    rows.find_one_and_update = original
+    del rows.find_one_and_update
+
     [receipt] = _receipts(db)
-    assert receipt["receipt_status"] == "aborted" and "grants_withdrawn" not in receipt
+    assert receipt["receipt_status"] == "aborted" and receipt["grants_withdrawn"] is True
+    assert _reconcile(db) == {"aborted": [], "withdrawn_from": [], "errors": []}
 
-    calls = []
-    original_many = rows.update_many
 
-    async def _counted(*args, **kwargs):
-        calls.append(args)
-        return await original_many(*args, **kwargs)
-
-    rows.update_many = _counted
+def test_a_grant_written_after_cleanup_ran_is_withdrawn_by_the_next_run(
+    db: _FakeDb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The decision stalls past the cutoff after its response grant. Cleanup aborts
+    # its receipt (and withdraws the response grant); the stalled decision then
+    # writes the row grant and dies before its commit.
+    _killed(db, monkeypatch, "after_response_grant")
+    [receipt] = _receipts(db)
     _reconcile(db)
-    assert calls == []
+    assert receipt["receipt_status"] == "aborted" and receipt["grants_withdrawn"] is True
+    _row(db).update({"permission_obtained": True, "permission_approval_receipt_id": receipt["_id"]})
+    _assert_every_reader_refuses(db)
+
+    report = _reconcile(db)
+
+    assert report["withdrawn_from"] == [receipt["_id"]]
+    assert _row(db)["permission_obtained"] is False
+
+
+def test_a_decision_that_continues_after_the_cutoff_is_refused_and_leaves_nothing(db: _FakeDb) -> None:
+    # Cleanup aborts the receipt while the decision is between its row write and commit.
+    approvals = db.arbitration_workflow_approvals
+    original = approvals.update_one
+
+    async def _stalls_past_the_cutoff(query=None, update=None, *args, **kwargs):
+        if (update or {}).get("$set", {}).get("receipt_status") == "committed":
+            approvals.update_one = original
+            await reconcile_stale_permission_receipts(db, case_id=CASE, now=_later())
+        return await original(query, update, *args, **kwargs)
+
+    approvals.update_one = _stalls_past_the_cutoff
+    with pytest.raises(HTTPException) as refused:
+        asyncio.run(_grant(db))
+
+    assert refused.value.status_code == 409
+    [receipt] = _receipts(db)
+    assert receipt["receipt_status"] == "aborted"
+    assert _row(db)["permission_obtained"] is False and _response(db)["permission_obtained"] is False
+    assert _reconcile(db, now=_later()) == {"aborted": [], "withdrawn_from": [], "errors": []}
+
+
+def test_a_replacement_grant_survives_cleanup_of_a_failed_undo(db: _FakeDb) -> None:
+    _undo_revert_fails(db)
+    [old] = _receipts(db)
+
+    asyncio.run(_grant(db))  # a legal reviewer records the permission again
+    new = next(r for r in _receipts(db) if r["_id"] != old["_id"])
+    _reconcile(db, now=_later() + timedelta(hours=1))
+
+    assert _row(db)["permission_approval_receipt_id"] == new["_id"]
+    assert _response(db)["permission_approval_receipt_id"] == new["_id"]
+    assert _state(db) == VERIFIED
+
+
+def test_a_response_resave_never_creates_a_grant_without_its_receipt(db: _FakeDb) -> None:
+    # A response grant left behind by a failed undo, then the response is resaved
+    # unchanged, which re-syncs its projection row.
+    _undo_revert_fails(db)
+    [receipt] = _receipts(db)
+    asyncio.run(
+        sync_paragraph_position_projection(db, db.arbitration_drafts.rows[0], _response(db), actor_id="drafter-1")
+    )
+
+    # The row now carries the grant together with the receipt behind it, so it
+    # reads as an incomplete decision, not as a legacy grant with no receipt.
+    assert _row(db)["permission_approval_receipt_id"] == receipt["_id"]
+    assert _state(db) == RECEIPT_NOT_COMMITTED
+    _reconcile(db, now=datetime.utcnow())
+    assert _row(db)["permission_obtained"] is False and _response(db)["permission_obtained"] is False
+
+
+def test_a_dry_run_lists_unfinished_withdrawals(db: _FakeDb) -> None:
+    _undo_revert_fails(db)
+    [receipt] = _receipts(db)
+
+    report = asyncio.run(reconcile_stale_permission_receipts(db, case_id=CASE, dry_run=True))
+
+    assert report == {"aborted": [], "withdrawn_from": [receipt["_id"]], "errors": []}
+    assert _response(db)["permission_obtained"] is True  # nothing written
+
+
+def test_the_script_prints_its_report_and_fails_on_errors(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    from backend.rbac_backend.core import database
+    from backend.rbac_backend.scripts import reconcile_rejoinder_permission_receipts as script
+
+    async def _noop() -> None:
+        return None
+
+    async def _database():
+        return object()
+
+    async def _partial(db, **kwargs):
+        return {"aborted": ["r-1"], "withdrawn_from": [], "errors": ["r-2: withdrawing: lost"]}
+
+    monkeypatch.setattr(database, "connect", _noop)
+    monkeypatch.setattr(database, "disconnect", _noop)
+    monkeypatch.setattr(database, "get_database", _database)
+    monkeypatch.setattr(permission_receipts, "reconcile_stale_permission_receipts", _partial)
+
+    assert asyncio.run(script._main(None, apply=True)) == 1
+    out, err = capsys.readouterr()
+    assert '"aborted": ["r-1"]' in out
+    assert "r-2: withdrawing: lost" in err
+
+
+# The content hash: versioned, and every written field classified
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("field", sorted(permission_receipts.HISTORICAL_REVIEW_FIELDS))
+def test_historical_review_labels_keep_the_permission(db: _FakeDb, field: str) -> None:
+    asyncio.run(_grant(db))
+    _row(db)[field] = "labelled"
+    assert _state(db) == VERIFIED
+
+
+_CONTENT_FIELDS_WITHOUT_A_SEPARATE_CHECK = sorted(
+    permission_receipts.REJOINDER_CONTENT_FIELDS - {"case_id", "draft_id", "source_paragraph_response_id", "source_response_revision"}
+)
+
+
+@pytest.mark.parametrize("field", _CONTENT_FIELDS_WITHOUT_A_SEPARATE_CHECK)
+def test_each_material_field_change_drops_the_permission(db: _FakeDb, field: str) -> None:
+    asyncio.run(_grant(db))
+    _row(db)[field] = f"changed {field}"
+    assert _state(db) == RECEIPT_MISMATCH
+
+
+def test_an_unclassified_field_counts_as_content(db: _FakeDb) -> None:
+    # A field no one has classified yet is hashed, so it fails closed.
+    asyncio.run(_grant(db))
+    _row(db)["a_future_field"] = "anything"
+    assert _state(db) == RECEIPT_MISMATCH
+
+
+def test_a_receipt_written_before_hash_versioning_is_checked_with_version_1(db: _FakeDb) -> None:
+    receipt = _committed(db)
+    receipt.pop("matrix_row_content_hash_version")
+    receipt["matrix_row_content_hash"] = permission_content_hash(_row(db), 1)
+    assert _state(db) == VERIFIED
+    # Version 1 counted the historical labels as content; it stays that strict.
+    _row(db)["historical_review_status"] = "needs_legal_review"
+    assert _state(db) == RECEIPT_MISMATCH
+
+
+@pytest.mark.parametrize("version", [3, "2", None])
+def test_an_unknown_hash_version_fails_closed(db: _FakeDb, version) -> None:
+    receipt = _committed(db)
+    receipt["matrix_row_content_hash_version"] = version
+    assert _state(db) == RECEIPT_MISMATCH
+
+
+def _client_rejoinder_columns() -> set[str]:
+    import re
+    from pathlib import Path as _Path
+
+    page = _Path(__file__).resolve().parents[3] / "client" / "src" / "pages" / "ArbitrationCaseWorkspacePage.tsx"
+    block = re.search(r'"rejoinder-matrix": \[(.*?)\]', page.read_text(encoding="utf-8"), re.S)
+    assert block, "the client's rejoinder-matrix column list moved"
+    return set(re.findall(r'key: "([a-z_]+)"', block.group(1)))
+
+
+def _written_rejoinder_fields() -> set[str]:
+    """Every field a known writer puts on a rejoinder row."""
+    import re
+    from pathlib import Path as _Path
+
+    from backend.rbac_backend.services.arbitration_drafting import case_workspace, paragraph_positions
+    from backend.rbac_backend.services.arbitration_drafting.approval_policy import REVOKED_REJOINDER_PERMISSION
+
+    service_dir = _Path(case_workspace.__file__).parent
+    historical = set(re.findall(r'"(historical_[a-z_]+)"', (service_dir / "historical_paragraph_review.py").read_text(encoding="utf-8")))
+    projection = set(paragraph_positions._projection_content("rejoinder-matrix", {}))
+    sync = {"projection_hash", "source_response_revision", "updated_by", "updated_at", "edit_revision",
+            "last_material_editor_id", "material_contributor_ids", "_id", "case_id", "draft_id",
+            "organization_id", "project_id", "contract_id", "created_by", "created_at"}
+    reviews = set(paragraph_positions._review_defaults()) | set(case_workspace._matrix_review_defaults("rejoinder-matrix"))
+    decision = {*REVOKED_REJOINDER_PERMISSION, "permission_source_id", "permission_notes"}
+    return (
+        historical | projection | sync | reviews | decision | _client_rejoinder_columns()
+        | set(case_workspace.SERVER_CONTROLLED_MATRIX_FIELDS) | set(case_workspace.SERVER_BOOKKEEPING_MATRIX_FIELDS)
+        | set(case_workspace.MATRIX_ROW_OWNERSHIP_FIELDS) | {"tribunal_permission_required"}
+    )
+
+
+def test_every_written_rejoinder_field_is_classified() -> None:
+    """A new field must be declared content or non-content, never left to chance.
+
+    Unclassified fields are hashed (fail closed), so this guard is what stops a
+    new bookkeeping field from silently revoking every permission.
+    """
+    content, non_content = permission_receipts.REJOINDER_CONTENT_FIELDS, permission_receipts.NON_CONTENT_FIELDS
+    assert not content & non_content, f"classified both ways: {sorted(content & non_content)}"
+    unclassified = sorted(_written_rejoinder_fields() - content - non_content)
+    assert unclassified == [], (
+        f"rejoinder row fields with no classification: {unclassified}. Add each to "
+        "REJOINDER_CONTENT_FIELDS (a change needs a new permission) or NON_CONTENT_FIELDS."
+    )
+
+
+def test_withdrawing_an_old_receipt_never_touches_a_newer_grant(db: _FakeDb) -> None:
+    _undo_revert_fails(db)
+    [old] = _receipts(db)
+    asyncio.run(_grant(db))
+
+    # Called directly, as cleanup would for any receipt it finds aborted.
+    withdrawn = asyncio.run(permission_receipts.withdraw_grants_citing(db, old["_id"]))
+
+    assert withdrawn is False
+    assert _row(db)["permission_obtained"] is True and _response(db)["permission_obtained"] is True
+    assert _state(db) == VERIFIED

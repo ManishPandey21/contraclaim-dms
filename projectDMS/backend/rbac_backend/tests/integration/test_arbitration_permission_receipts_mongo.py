@@ -33,6 +33,7 @@ import pytest
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorClient
 
+from rbac_backend.services.arbitration_drafting.historical_paragraph_review import audit_historical_paragraph_positions
 from rbac_backend.services.arbitration_drafting.permission_receipts import (
     PERMISSION_RECEIPT_GATE,
     RECEIPT_NOT_COMMITTED,
@@ -42,6 +43,7 @@ from rbac_backend.services.arbitration_drafting.permission_receipts import (
     permission_receipt_binding,
     reconcile_stale_permission_receipts,
     rejoinder_permission_states,
+    withdraw_grants_citing,
 )
 
 MONGODB_URI_ENV = "ARBITRATION_PERMISSION_RECEIPTS_MONGODB_URI"
@@ -71,11 +73,20 @@ def _with_db(body: Callable[[Any], Awaitable[None]]) -> None:
     asyncio.run(_run())
 
 
-async def _seed(db: Any, *, receipt_status: str, age: timedelta, row_id: Any = "row-1", source_id: Any = "doc-1") -> dict:
+async def _seed(
+    db: Any,
+    *,
+    receipt_status: str,
+    age: timedelta,
+    row_id: Any = "row-1",
+    source_id: Any = "doc-1",
+    projection: bool = True,
+) -> dict:
     """One rejoinder row and its paragraph response granted under one receipt."""
     source = {"_id": source_id, "organization_id": ORG, "project_id": PROJECT, "sha256": "abc", "current_version_id": "v1"}
     await db.documents.insert_one(source)
-    response = {"_id": "resp-1", "draft_id": "draft-1", "response_revision": 0}
+    await db.arbitration_drafts.update_one({"_id": "draft-1"}, {"$set": {"case_id": CASE}}, upsert=True)
+    response = {"_id": "resp-1", "draft_id": "draft-1", "response_revision": 0, "source_paragraph_number": "20"}
     row = {
         "_id": row_id,
         "case_id": CASE,
@@ -90,6 +101,8 @@ async def _seed(db: Any, *, receipt_status: str, age: timedelta, row_id: Any = "
         "permission_required": True,
         "edit_revision": 1,
     }
+    if not projection:  # a historical row, written before projections existed
+        del row["source_paragraph_response_id"], row["source_response_revision"]
     receipt = {
         "_id": str(uuid.uuid4()),
         "gate": PERMISSION_RECEIPT_GATE,
@@ -286,6 +299,74 @@ def test_a_cleanup_that_read_pending_loses_to_a_commit_that_lands_first() -> Non
         assert report["aborted"] == [] and report["withdrawn_from"] == []
         stored = await db.arbitration_workflow_approvals.find_one({"_id": receipt["_id"]})
         assert stored["receipt_status"] == "committed"
+        assert await _state(db) == VERIFIED
+
+    _with_db(body)
+
+
+def test_historical_review_labels_keep_a_verified_permission() -> None:
+    async def body(db: Any) -> None:
+        await _seed(db, receipt_status="committed", age=timedelta(0), projection=False)
+        assert await _state(db) == VERIFIED
+
+        report = await audit_historical_paragraph_positions(db, case_id=CASE, apply_review_labels=True)
+
+        assert report["total"] == 1
+        assert (await _row(db)).get("historical_review_status")  # the label landed
+        assert await _state(db) == VERIFIED
+
+    _with_db(body)
+
+
+def test_a_failed_undo_is_finished_by_cleanup_and_cleanup_is_idempotent() -> None:
+    async def body(db: Any) -> None:
+        # The decision's own undo aborted the receipt but its revert failed.
+        receipt = await _seed(db, receipt_status="pending", age=timedelta(0))
+        await db.arbitration_workflow_approvals.update_one(
+            {"_id": receipt["_id"]}, {"$set": {"receipt_status": "aborted", "grants_withdrawn": False}}
+        )
+
+        first = await reconcile_stale_permission_receipts(db, case_id=CASE)
+        after_first = [await _row(db), await db.arbitration_workflow_approvals.find_one({"_id": receipt["_id"]})]
+        second = await reconcile_stale_permission_receipts(db, case_id=CASE)
+        after_second = [await _row(db), await db.arbitration_workflow_approvals.find_one({"_id": receipt["_id"]})]
+
+        assert first == {"aborted": [], "withdrawn_from": [receipt["_id"]], "errors": []}
+        assert after_first[0]["permission_obtained"] is False
+        assert after_first[1]["grants_withdrawn"] is True
+        assert second == {"aborted": [], "withdrawn_from": [], "errors": []}
+        assert after_second == after_first
+
+    _with_db(body)
+
+
+def test_a_grant_written_after_cleanup_is_withdrawn_by_the_next_run() -> None:
+    async def body(db: Any) -> None:
+        receipt = await _seed(db, receipt_status="pending", age=STALE)
+        await reconcile_stale_permission_receipts(db, case_id=CASE)
+        # A stalled decision writes its row grant after cleanup ran.
+        await db.arbitration_rejoinder_matrix.update_one(
+            {"_id": "row-1"}, {"$set": {"permission_obtained": True, "permission_approval_receipt_id": receipt["_id"]}}
+        )
+
+        report = await reconcile_stale_permission_receipts(db, case_id=CASE)
+
+        assert report["withdrawn_from"] == [receipt["_id"]]
+        assert (await _row(db))["permission_obtained"] is False
+
+    _with_db(body)
+
+
+def test_withdrawing_an_old_receipt_leaves_a_replacement_grant() -> None:
+    async def body(db: Any) -> None:
+        old = await _seed(db, receipt_status="aborted", age=STALE)
+        new = {**old, "_id": str(uuid.uuid4()), "receipt_status": "committed", "approved_at": datetime.utcnow()}
+        await db.arbitration_workflow_approvals.insert_one(new)
+        for collection in (db.arbitration_rejoinder_matrix, db.arbitration_paragraph_responses):
+            await collection.update_many({}, {"$set": {"permission_approval_receipt_id": new["_id"]}})
+
+        assert await withdraw_grants_citing(db, old["_id"]) is False
+        assert await reconcile_stale_permission_receipts(db, case_id=CASE) == {"aborted": [], "withdrawn_from": [], "errors": []}
         assert await _state(db) == VERIFIED
 
     _with_db(body)

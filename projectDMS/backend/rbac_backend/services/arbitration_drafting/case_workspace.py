@@ -774,7 +774,9 @@ class ArbitrationCaseWorkspaceService:
         # never by a reader. Readers refuse those grants regardless, so a cleanup
         # failure is logged and does not block this decision.
         try:
-            await reconcile_stale_permission_receipts(self.db, case_id=case_id)
+            cleanup = await reconcile_stale_permission_receipts(self.db, case_id=case_id)
+            if cleanup["errors"]:
+                logger.warning("Rejoinder permission receipt cleanup for case %s: %s", case_id, cleanup["errors"])
         except Exception:
             logger.exception("Rejoinder permission receipt cleanup failed for case %s", case_id)
         now = datetime.utcnow()
@@ -914,6 +916,7 @@ class ArbitrationCaseWorkspaceService:
         """
 
         async def _undo() -> None:
+            reverted = False
             try:
                 if response_id:
                     await self.db.arbitration_paragraph_responses.update_one(
@@ -925,15 +928,19 @@ class ArbitrationCaseWorkspaceService:
                     {"_id": row_id, "permission_approval_receipt_id": receipt_id},
                     {"$set": {**REVOKED_REJOINDER_PERMISSION, "updated_at": datetime.utcnow()}},
                 )
+                reverted = True
             finally:
-                await self._abort_permission_receipt(receipt_id)
+                # A revert that failed leaves a grant citing this receipt; the
+                # flag records that, and cleanup withdraws it (it starts from the
+                # grants, so it finds it either way).
+                await self._abort_permission_receipt(receipt_id, grants_withdrawn=reverted)
 
         await asyncio.shield(_undo())
 
-    async def _abort_permission_receipt(self, receipt_id: str) -> None:
+    async def _abort_permission_receipt(self, receipt_id: str, *, grants_withdrawn: bool = True) -> None:
         await self.db.arbitration_workflow_approvals.update_one(
             {"_id": receipt_id, "receipt_status": "pending"},
-            {"$set": {"receipt_status": "aborted", "aborted_at": datetime.utcnow()}},
+            {"$set": {"receipt_status": "aborted", "aborted_at": datetime.utcnow(), "grants_withdrawn": grants_withdrawn}},
         )
 
     async def dashboard(self, case_id: str) -> Dict[str, Any]:

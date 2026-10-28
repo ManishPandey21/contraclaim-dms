@@ -73,10 +73,10 @@ STATE_MESSAGES = {
 #: when a client echoes a listed row back.
 PERMISSION_DISPLAY_FIELDS = frozenset({"permission_effective", "permission_receipt_state", "permission_receipt_message"})
 
-# Fields that change without the reviewed content changing: identity, review
-# and approval state, the permission itself, and write bookkeeping. Everything
-# else on the row is the content a permission covers.
-_UNBOUND_FIELDS = frozenset(
+# Version 1 of the content hash (receipts written before
+# `matrix_row_content_hash_version` existed): every field except these. Frozen;
+# it is only used to check those receipts.
+_V1_UNBOUND_FIELDS = frozenset(
     {
         "_id",
         "status",
@@ -121,12 +121,82 @@ def _hash(value: Any) -> str:
     ).hexdigest()
 
 
-def permission_content_hash(row: Mapping[str, Any]) -> str:
+#: Labels written by the historical paragraph review
+#: (`historical_paragraph_review.py`). Bookkeeping about the row, not its content.
+HISTORICAL_REVIEW_FIELDS = frozenset(
+    {
+        "historical_review_status",
+        "historical_review_classification",
+        "historical_candidate_response_ids",
+        "historical_reviewed_at",
+        "historical_resolution_requires_legal_review",
+        "historical_resolved_by",
+        "historical_resolved_at",
+    }
+)
+
+#: The reviewed content of a rejoinder row: what the reply says, what it answers,
+#: what it relies on, and which response and pleading version it projects.
+REJOINDER_CONTENT_FIELDS = frozenset(
+    {
+        "case_id",
+        "draft_id",
+        "organization_id",
+        "project_id",
+        "contract_id",
+        "source_sod_para",
+        "nature_of_defence",
+        "claimant_reply",
+        "reply_to_counterclaim",
+        "new_matter",
+        "permission_required",
+        "tribunal_permission_required",
+        "response_type",
+        "supporting_source_ids",
+        "missing_evidence",
+        "evidence_ids",
+        "notice_ids",
+        "clause_ids",
+        "calculation_id",
+        "amount_or_days",
+        "amount",
+        "source_paragraph_response_id",
+        "source_response_revision",
+        "source_pleading_document_id",
+        "source_pleading_version_id",
+        "source_pleading_version_hash",
+        "source_paragraph_text",
+        "projection_hash",
+        "projection_read_only",
+        "projection_source",
+    }
+)
+
+#: Fields that change without the reviewed content changing: identity, review
+#: and approval state, the permission itself, write bookkeeping, display fields
+#: and historical-review labels.
+NON_CONTENT_FIELDS = frozenset(
+    {*_V1_UNBOUND_FIELDS, *HISTORICAL_REVIEW_FIELDS, "deleted_at", "deleted_by"}
+)
+
+#: Version 2: the hash covers every field that is not classified as non-content.
+#: `REJOINDER_CONTENT_FIELDS` names the known material fields; a field in
+#: neither set is hashed too, so a new material field is never silently left
+#: out (it fails closed). `test_every_written_rejoinder_field_is_classified`
+#: requires every field a writer produces to be in one of the two sets.
+CONTENT_HASH_VERSION = 2
+
+_NON_CONTENT_BY_VERSION = {1: _V1_UNBOUND_FIELDS, 2: NON_CONTENT_FIELDS}
+
+
+def permission_content_hash(row: Mapping[str, Any], version: int = CONTENT_HASH_VERSION) -> str:
     """Hash of the rejoinder row content a permission decision covers.
 
     Ids hash by their string form, so an ObjectId and its hex string agree.
+    Raises KeyError for an unknown version; readers treat that as a mismatch.
     """
-    return _hash({key: value for key, value in row.items() if key not in _UNBOUND_FIELDS})
+    excluded = _NON_CONTENT_BY_VERSION[version]
+    return _hash({key: value for key, value in row.items() if key not in excluded})
 
 
 def permission_source_content_hash(source: Mapping[str, Any]) -> str:
@@ -144,6 +214,7 @@ def permission_receipt_binding(row: Mapping[str, Any], source: Mapping[str, Any]
         "source_paragraph_response_id": row.get("source_paragraph_response_id"),
         "source_response_revision": row.get("source_response_revision"),
         "matrix_row_content_hash": permission_content_hash(row),
+        "matrix_row_content_hash_version": CONTENT_HASH_VERSION,
         "matrix_row_revision": int(row.get("edit_revision") or 0) + 1,
         "permission_source_content_hash": permission_source_content_hash(source),
     }
@@ -189,6 +260,15 @@ def permission_state(
     expected = permission_receipt_binding(row, {})
     expected.pop("matrix_row_revision")  # a later review advances it; content does not change
     expected.pop("permission_source_content_hash")  # checked against the source itself
+    # The receipt's own hash format decides how the row is hashed: a receipt
+    # written before versioning is checked with the frozen version 1.
+    expected.pop("matrix_row_content_hash_version")
+    try:
+        expected["matrix_row_content_hash"] = permission_content_hash(
+            row, receipt.get("matrix_row_content_hash_version", 1)
+        )
+    except (KeyError, TypeError):
+        return RECEIPT_MISMATCH  # an unknown format proves nothing
     bound = (
         receipt.get("gate") == PERMISSION_RECEIPT_GATE
         and receipt.get("decision") == "approved"
@@ -312,6 +392,37 @@ async def commit_permission_receipt(db: Any, receipt_id: Any) -> bool:
     return bool(getattr(result, "modified_count", 0))
 
 
+async def _granted_receipt_ids(db: Any, case_id: Optional[str]) -> List[Any]:
+    """Receipt ids cited by every recorded grant in scope, on rows and responses."""
+    granted = {"permission_obtained": True, "permission_approval_receipt_id": {"$ne": None}}
+    rows = {**granted, **({"case_id": case_id} if case_id else {})}
+    responses = dict(granted)
+    if case_id:
+        drafts = await _collect(db.arbitration_drafts.find({"case_id": case_id}))
+        responses["draft_id"] = {"$in": [draft.get("_id") for draft in drafts]}
+    cited: Dict[str, Any] = {}
+    for collection, query in ((db.arbitration_rejoinder_matrix, rows), (db.arbitration_paragraph_responses, responses)):
+        for record in await _collect(collection.find(query)):
+            receipt_id = record.get("permission_approval_receipt_id")
+            if receipt_id:
+                cited[str(receipt_id)] = receipt_id
+    return list(cited.values())
+
+
+async def withdraw_grants_citing(db: Any, receipt_id: Any) -> bool:
+    """Withdraw every grant that still cites this receipt. Idempotent.
+
+    Each write matches only records still citing `receipt_id` with a live grant,
+    so a newer grant under another receipt, or one already withdrawn, is never
+    touched. Returns whether anything was withdrawn.
+    """
+    cited = {"permission_approval_receipt_id": receipt_id, "permission_obtained": True}
+    revoked = {"$set": {**REVOKED_REJOINDER_PERMISSION, "updated_at": datetime.utcnow(), "updated_by": RECONCILER_ACTOR}}
+    responses = await db.arbitration_paragraph_responses.update_many(cited, revoked)
+    rows = await db.arbitration_rejoinder_matrix.update_many(cited, revoked)
+    return bool(getattr(responses, "modified_count", 0) or getattr(rows, "modified_count", 0))
+
+
 async def reconcile_stale_permission_receipts(
     db: Any,
     *,
@@ -319,63 +430,83 @@ async def reconcile_stale_permission_receipts(
     now: Optional[datetime] = None,
     dry_run: bool = False,
 ) -> Dict[str, List[str]]:
-    """Abort stale `pending` receipts, then withdraw every grant still citing an aborted one.
+    """Abort stale `pending` receipts, then withdraw every grant that cites an aborted one.
 
     The abort is one conditional write - still `pending` and older than the
     cutoff - so a decision that commits first keeps its receipt, and one that
-    commits later finds its commit refused and withdraws its own grant. Grants
-    are withdrawn only where they still cite that receipt, so a newer grant
-    under another receipt is never touched. Withdrawal also sweeps grants left
-    behind by an earlier abort whose withdrawal failed. A failure on one
-    receipt does not stop the others; the first error is raised at the end.
+    commits later finds its commit refused and withdraws its own grant.
+
+    Withdrawal starts from the grants: every recorded grant in scope whose
+    receipt is `aborted` is withdrawn, whoever aborted it and whenever the grant
+    was written. That covers a decision whose own undo failed, a grant written
+    after an earlier cleanup ran, and a cleanup that failed part-way. Each
+    withdrawal matches only records still citing that receipt.
+
+    Failures do not stop the run; they are listed in `errors` and the caller
+    decides how to surface them. `dry_run` lists what would be aborted and
+    withdrawn, and writes nothing.
     """
     cutoff = (now or datetime.utcnow()) - STALE_PENDING_RECEIPT_AGE
     scope: Dict[str, Any] = {"gate": PERMISSION_RECEIPT_GATE}
     if case_id:
         scope["case_id"] = case_id
     stale = {"receipt_status": "pending", "approved_at": {"$lte": cutoff}}
-    candidates = await _collect(db.arbitration_workflow_approvals.find({**scope, **stale}))
     report: Dict[str, List[str]] = {"aborted": [], "withdrawn_from": [], "errors": []}
+    try:
+        candidates = await _collect(db.arbitration_workflow_approvals.find({**scope, **stale}))
+    except Exception as exc:
+        report["errors"].append(f"reading stale receipts: {exc}")
+        return report
     if dry_run:
         report["aborted"] = [str(receipt["_id"]) for receipt in candidates]
-        return report
-    first_error: Optional[BaseException] = None
-    for receipt in candidates:
-        try:
-            result = await db.arbitration_workflow_approvals.update_one(
-                {"_id": receipt["_id"], **scope, **stale},
-                {
-                    "$set": {
-                        "receipt_status": "aborted",
-                        "aborted_at": datetime.utcnow(),
-                        "aborted_by": RECONCILER_ACTOR,
-                        "abort_reason": "stale_pending_receipt",
-                        "grants_withdrawn": False,
-                    }
-                },
+    else:
+        for receipt in candidates:
+            try:
+                result = await db.arbitration_workflow_approvals.update_one(
+                    {"_id": receipt["_id"], **scope, **stale},
+                    {
+                        "$set": {
+                            "receipt_status": "aborted",
+                            "aborted_at": datetime.utcnow(),
+                            "aborted_by": RECONCILER_ACTOR,
+                            "abort_reason": "stale_pending_receipt",
+                            "grants_withdrawn": False,
+                        }
+                    },
+                )
+                if getattr(result, "modified_count", 0):
+                    report["aborted"].append(str(receipt["_id"]))
+            except Exception as exc:  # keep going; reported
+                report["errors"].append(f"{receipt['_id']}: aborting: {exc}")
+    try:
+        cited = await _granted_receipt_ids(db, case_id)
+        aborted = (
+            await _collect(
+                db.arbitration_workflow_approvals.find({**scope, "_id": {"$in": cited}, "receipt_status": "aborted"})
             )
-            if getattr(result, "modified_count", 0):
-                report["aborted"].append(str(receipt["_id"]))
-        except Exception as exc:  # keep going; surfaced below
-            report["errors"].append(f"{receipt['_id']}: {exc}")
-            first_error = first_error or exc
-    # Every receipt this cleanup aborted whose withdrawal has not finished,
-    # including ones from an earlier run that failed part-way.
-    unfinished = {**scope, "receipt_status": "aborted", "grants_withdrawn": False}
-    for receipt in await _collect(db.arbitration_workflow_approvals.find(unfinished)):
-        cited = {"permission_approval_receipt_id": receipt["_id"], "permission_obtained": True}
-        revoked = {"$set": {**REVOKED_REJOINDER_PERMISSION, "updated_at": datetime.utcnow(), "updated_by": RECONCILER_ACTOR}}
+            if cited
+            else []
+        )
+    except Exception as exc:
+        report["errors"].append(f"reading grants: {exc}")
+        return report
+    to_withdraw = {str(receipt["_id"]): receipt["_id"] for receipt in aborted}
+    if dry_run:
+        # The stale receipts would be aborted first, so their grants count too.
+        cited_keys = {str(receipt_id) for receipt_id in cited}
+        for receipt in candidates:
+            if str(receipt["_id"]) in cited_keys:
+                to_withdraw[str(receipt["_id"])] = receipt["_id"]
+        report["withdrawn_from"] = sorted(to_withdraw)
+        return report
+    for key, receipt_id in to_withdraw.items():
         try:
-            responses = await db.arbitration_paragraph_responses.update_many(cited, revoked)
-            rows = await db.arbitration_rejoinder_matrix.update_many(cited, revoked)
-            if getattr(responses, "modified_count", 0) or getattr(rows, "modified_count", 0):
-                report["withdrawn_from"].append(str(receipt["_id"]))
+            if await withdraw_grants_citing(db, receipt_id):
+                report["withdrawn_from"].append(key)
             await db.arbitration_workflow_approvals.update_one(
-                {"_id": receipt["_id"]}, {"$set": {"grants_withdrawn": True, "grants_withdrawn_at": datetime.utcnow()}}
+                {"_id": receipt_id, "receipt_status": "aborted"},
+                {"$set": {"grants_withdrawn": True, "grants_withdrawn_at": datetime.utcnow()}},
             )
         except Exception as exc:
-            report["errors"].append(f"{receipt['_id']}: {exc}")
-            first_error = first_error or exc
-    if first_error is not None:
-        raise first_error
+            report["errors"].append(f"{key}: withdrawing: {exc}")
     return report
