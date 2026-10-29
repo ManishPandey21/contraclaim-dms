@@ -942,3 +942,78 @@ def test_a_dry_run_omits_unfinished_receipts_no_grant_cites(db: _FakeDb) -> None
 
     assert receipt["grants_withdrawn"] is False
     assert dry == {"aborted": [], "withdrawn_from": [], "errors": []}
+
+
+# Two decisions on the same row
+# ---------------------------------------------------------------------------
+# A grant does not advance the response's revision, so the response write is
+# also conditional on the grant read with the row. The interleavings themselves
+# are forced on real MongoDB in
+# `integration/test_arbitration_permission_decision_race_mongo.py`.
+
+
+def test_a_stale_decision_cannot_revoke_a_permission_committed_meanwhile(db: _FakeDb) -> None:
+    from backend.rbac_backend.tests.test_arbitration_matrix_approval_invalidation import _first_call_runs
+
+    # The stale decision has read the row; another decision then completes and
+    # commits before the stale one writes the response.
+    _first_call_runs(db.arbitration_paragraph_responses, "update_one", lambda: _grant(db))
+
+    with pytest.raises(HTTPException) as refused:
+        asyncio.run(_grant(db))
+
+    assert refused.value.status_code == 409
+    statuses = sorted(receipt["receipt_status"] for receipt in _receipts(db))
+    assert statuses == ["aborted", "committed"]
+    committed = next(receipt for receipt in _receipts(db) if receipt["receipt_status"] == "committed")
+    assert _row(db)["permission_approval_receipt_id"] == committed["_id"]
+    assert _response(db)["permission_approval_receipt_id"] == committed["_id"]
+    assert _state(db) == VERIFIED
+
+
+def test_an_undo_never_puts_back_a_grant_that_cleanup_withdrew(db: _FakeDb, monkeypatch: pytest.MonkeyPatch) -> None:
+    # An interrupted decision left a stale grant. Recording again withdraws it
+    # (cleanup), writes the response, and then loses the row write: its undo
+    # must leave no grant, not restore the withdrawn one.
+    _killed(db, monkeypatch, "after_row_write")
+    [old] = _receipts(db)
+    old["approved_at"] = datetime.utcnow() - STALE_PENDING_RECEIPT_AGE - timedelta(seconds=1)
+
+    async def _row_changed(*args, **kwargs):
+        return None
+
+    db.arbitration_rejoinder_matrix.find_one_and_update = _row_changed
+
+    with pytest.raises(HTTPException) as refused:
+        asyncio.run(_grant(db))
+
+    assert refused.value.status_code == 409
+    assert old["receipt_status"] == "aborted"
+    assert _response(db)["permission_obtained"] is False
+    assert _response(db)["permission_approval_receipt_id"] is None
+    assert _row(db)["permission_obtained"] is False
+    assert {receipt["receipt_status"] for receipt in _receipts(db)} == {"aborted"}
+
+
+def test_an_undo_never_overwrites_a_newer_grant(db: _FakeDb) -> None:
+    # A committed permission exists. A second decision reads it, overwrites the
+    # response grant, then loses its row write; before its undo runs, a newer
+    # decision has already granted the response. The undo restores only while the
+    # response still cites its own receipt, so the newer grant stays.
+    asyncio.run(_grant(db))
+    [first] = _receipts(db)
+    newer = {"permission_obtained": True, "permission_approval_receipt_id": "receipt-newer"}
+
+    async def _row_write_loses(*args, **kwargs):
+        _response(db).update(newer)
+        return None
+
+    db.arbitration_rejoinder_matrix.find_one_and_update = _row_write_loses
+
+    with pytest.raises(HTTPException) as refused:
+        asyncio.run(_grant(db))
+
+    assert refused.value.status_code == 409
+    assert _response(db)["permission_approval_receipt_id"] == "receipt-newer"
+    assert _response(db)["permission_obtained"] is True
+    assert first["receipt_status"] == "committed"

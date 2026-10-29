@@ -745,6 +745,17 @@ class ArbitrationCaseWorkspaceService:
                 status_code=status.HTTP_409_CONFLICT,
                 detail="A permission receipt is only applicable to rejoinder rows with permission-required new matter",
             )
+        # The grant the authoritative response carries as this decision reads the
+        # row. A grant does not advance `response_revision`, so the response write
+        # below is also conditional on this: otherwise a concurrent decision's
+        # grant could be overwritten here and then revoked by this decision's undo.
+        response_id = row.get("source_paragraph_response_id")
+        read_response = (
+            await self.db.arbitration_paragraph_responses.find_one({"_id": response_id, "draft_id": row.get("draft_id")})
+            if response_id
+            else None
+        )
+        read_response_receipt_id = (read_response or {}).get("permission_approval_receipt_id")
         from ...core.security import _expand_object_ids
 
         # Document ids are stored as ObjectIds; the payload carries the string form.
@@ -815,18 +826,27 @@ class ArbitrationCaseWorkspaceService:
             "permission_notes": payload.permission_notes,
             "permission_approval_receipt_id": receipt["_id"],
         }
-        response_id = row.get("source_paragraph_response_id")
         response_scope = {
             "_id": response_id,
             "draft_id": row.get("draft_id"),
             "response_revision": row.get("source_response_revision"),
         }
+        # The response grant this decision overwrites; its undo puts it back.
+        overwritten: Optional[Dict[str, Any]] = None
         if response_id:
             # The authoritative response first, and only while it still holds the
-            # text this projection showed: a rewrite in between refuses the grant.
-            written = await self.db.arbitration_paragraph_responses.update_one(
-                response_scope, {"$set": {**granted, "updated_at": now}}
+            # text this projection showed and the grant read with the row (or no
+            # grant, if cleanup withdrew that one meanwhile): a rewrite or another
+            # decision's grant in between refuses this one.
+            responses = self.db.arbitration_paragraph_responses
+            update = {"$set": {**granted, "updated_at": now}}
+            written = await responses.update_one(
+                {**response_scope, "permission_approval_receipt_id": read_response_receipt_id}, update
             )
+            if getattr(written, "matched_count", 0) and read_response_receipt_id:
+                overwritten = {key: (read_response or {}).get(key) for key in granted}
+            elif not getattr(written, "matched_count", 0) and read_response_receipt_id:
+                written = await responses.update_one({**response_scope, "permission_approval_receipt_id": None}, update)
             if not getattr(written, "matched_count", 0):
                 await self._abort_permission_receipt(receipt["_id"])
                 raise HTTPException(
@@ -854,10 +874,10 @@ class ArbitrationCaseWorkspaceService:
             )
         except BaseException:
             # A failed (or ambiguous) row write must leave no grant anywhere.
-            await self._withdraw_permission_grant(collection, row_id, response_id, response_scope, receipt["_id"])
+            await self._withdraw_permission_grant(collection, row_id, response_id, response_scope, receipt["_id"], overwritten)
             raise
         if not updated:
-            await self._withdraw_permission_grant(collection, row_id, response_id, response_scope, receipt["_id"])
+            await self._withdraw_permission_grant(collection, row_id, response_id, response_scope, receipt["_id"], overwritten)
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Rejoinder matrix row changed during the permission decision; review the current content",
@@ -866,11 +886,11 @@ class ArbitrationCaseWorkspaceService:
             committed = await commit_permission_receipt(self.db, receipt["_id"])
         except BaseException:
             # No committed receipt, so no permission.
-            await self._withdraw_permission_grant(collection, row_id, response_id, response_scope, receipt["_id"])
+            await self._withdraw_permission_grant(collection, row_id, response_id, response_scope, receipt["_id"], overwritten)
             raise
         if not committed:
             # The reconciler aborted this receipt as stale before it committed.
-            await self._withdraw_permission_grant(collection, row_id, response_id, response_scope, receipt["_id"])
+            await self._withdraw_permission_grant(collection, row_id, response_id, response_scope, receipt["_id"], overwritten)
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="The permission decision did not complete in time; record it again",
@@ -907,12 +927,15 @@ class ArbitrationCaseWorkspaceService:
         response_id: Any,
         response_scope: Dict[str, Any],
         receipt_id: str,
+        overwritten: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Undo every grant this decision may have written, and abort its receipt.
 
         Each revert matches only this decision's receipt, so a newer grant or a
-        rewrite is never touched. It runs shielded, so a cancelled request still
-        finishes it, and the receipt is aborted even if a revert fails.
+        rewrite is never touched. The response gets back the grant this decision
+        overwrote (`overwritten`), so a concurrent decision's grant survives this
+        one's failure. It runs shielded, so a cancelled request still finishes it,
+        and the receipt is aborted even if a revert fails.
         """
 
         async def _undo() -> None:
@@ -921,7 +944,7 @@ class ArbitrationCaseWorkspaceService:
                 if response_id:
                     await self.db.arbitration_paragraph_responses.update_one(
                         {**response_scope, "permission_approval_receipt_id": receipt_id},
-                        {"$set": {**REVOKED_REJOINDER_PERMISSION, "updated_at": datetime.utcnow()}},
+                        {"$set": {**(overwritten or REVOKED_REJOINDER_PERMISSION), "updated_at": datetime.utcnow()}},
                     )
                 # The row write may have applied before reporting an error.
                 await collection.update_one(
