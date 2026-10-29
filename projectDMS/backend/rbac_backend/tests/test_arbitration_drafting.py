@@ -1,6 +1,7 @@
 import asyncio
 import io
 import json
+import tempfile
 import uuid
 import zipfile
 from datetime import datetime, timedelta, timezone
@@ -91,6 +92,22 @@ from backend.rbac_backend.services.arbitration_drafting.historical_paragraph_rev
     classify_historical_row,
 )
 from backend.rbac_backend.models.arbitration_drafting import ArbitrationWorkflowCreateRequest
+
+#: The seeded source document's stored upload, created per test by `_fixture_upload`.
+_FIXTURE_UPLOAD: Path | None = None
+
+
+@pytest.fixture(autouse=True)
+def _fixture_upload(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Exhibit bytes are read only from inside a storage root, so every root is
+    this test's own `tmp_path` and the seeded upload lives there."""
+    upload = tmp_path / "delay-notice.txt"
+    upload.write_text("Delay notice fixture upload", encoding="utf-8")
+    monkeypatch.setattr(settings, "UPLOADS_DIR", str(tmp_path), raising=False)
+    monkeypatch.setattr(settings, "SECURE_UPLOADS_DIR", str(tmp_path), raising=False)
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setitem(globals(), "_FIXTURE_UPLOAD", upload)
+    return upload
 
 
 class _FakeCursor:
@@ -376,7 +393,7 @@ class _FakeDb:
                     "project_id": "project-1",
                     "subject": "Delay notice",
                     "filename": "delay-notice.txt",
-                    "filepath_local": __file__,
+                    "filepath_local": str(_FIXTURE_UPLOAD),
                 },
                 {
                     "_id": "doc-review",
@@ -1237,6 +1254,8 @@ def test_execute_queued_agent_run_updates_existing_run(monkeypatch):
 
 def test_matrix_review_assignment_creates_task_and_blocks_readiness():
     db = _FakeDb()
+    # The assignee must be an active user who holds the legal reviewer role.
+    db.users = _FakeCollection([{"_id": "reviewer-1", "roles": ["legal_reviewer"], "is_active": True}])
     db.arbitration_claim_matrix.rows.append(
         {
             "_id": "claim-row-review",
