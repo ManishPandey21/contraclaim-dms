@@ -449,7 +449,9 @@ ACCEPTED_ADVISORY = "PYSEC-2026-3740"
 #: line. 0.5.1 did, and the deploy manifests now pin pymongo 4.18.2. None of
 #: these ids may be ignored again, and the exception machinery must stay gone.
 PYMONGO_R4_ADVISORIES = ("CVE-2026-88029", "CVE-2026-96747", "CVE-2026-96748", "CVE-2026-96749")
-PYMONGO_FIXED_VERSION = "4.18.2"
+PYMONGO_FIXED_VERSION = "4.18.3"
+#: GHSA-45c3-73f7-pv4m (CVE-2026-114605) is fixed from dnspython 2.9.0.
+DNSPYTHON_FIXED_VERSION = "2.9.0"
 CHECKPOINT_MONGODB_VERSION = "0.5.1"
 #: Every manifest a deployed image installs. Each must pin the fixed driver.
 DEPLOY_MANIFESTS = (
@@ -536,10 +538,15 @@ def _pinned(manifest: Path, package: str) -> str:
 
 @pytest.mark.parametrize("manifest", DEPLOY_MANIFESTS, ids=lambda p: p.parent.name)
 def test_every_deployed_image_pins_the_fixed_pymongo(manifest: Path) -> None:
-    """The four R4 advisories are fixed only from 4.18.2."""
+    """The four R4 advisories are fixed from 4.18.2; GHSA-98qm-wvgf-w4cf from 4.18.3.
+
+    dnspython is pinned beside the driver so the image scan sees the fixed
+    version (GHSA-45c3-73f7-pv4m), not whatever the resolver picks.
+    """
     from packaging.version import Version
 
     assert Version(_pinned(manifest, "pymongo")) >= Version(PYMONGO_FIXED_VERSION)
+    assert Version(_pinned(manifest, "dnspython")) >= Version(DNSPYTHON_FIXED_VERSION)
     assert _pinned(manifest, "langgraph-checkpoint-mongodb") == CHECKPOINT_MONGODB_VERSION
 
 
