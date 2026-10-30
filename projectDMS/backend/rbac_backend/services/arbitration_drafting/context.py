@@ -16,6 +16,7 @@ from ..document_relationship_service import DocumentRelationshipService
 from ..evidence_graph_service import EvidenceGraphService
 from .matrix_evidence_authority import matrix_clause_fence
 from .matrix_registry import MATRIX_COLLECTIONS
+from .permission_receipts import VERIFIED, rejoinder_permission_states
 
 #: A bound on the clause rows read out of an ALREADY ELIGIBLE universe, and on
 #: the rows that reach the ledger. Both apply after the canonical fence, never
@@ -1357,6 +1358,9 @@ class ArbitrationContextBuilder:
                 rows = await _collect(collection.find({"case_id": case_id, "deleted_at": {"$exists": False}}).sort("created_at", 1))
             except Exception:
                 continue
+            # A rejoinder permission reaches the validator only when a committed
+            # receipt backs it; the stored flag alone is not enough.
+            permission_states = await rejoinder_permission_states(self.db, rows) if slug == "rejoinder-matrix" else {}
             for row in rows:
                 if not _is_verified_source(row, include_review_sources=include_review_sources):
                     continue
@@ -1396,7 +1400,11 @@ class ArbitrationContextBuilder:
                         "amount_or_days": row.get("amount_or_days"),
                         "new_matter": row.get("new_matter"),
                         "permission_required": row.get("permission_required"),
-                        "permission_obtained": row.get("permission_obtained"),
+                        "permission_obtained": (
+                            permission_states.get(str(row.get("_id"))) == VERIFIED
+                            if slug == "rejoinder-matrix"
+                            else row.get("permission_obtained")
+                        ),
                         "permission_source_id": row.get("permission_source_id"),
                         "permission_approved_by": row.get("permission_approved_by"),
                         "permission_approved_at": row.get("permission_approved_at"),

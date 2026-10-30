@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import io
 import json
+import logging
 import re
 import uuid
 import zipfile
@@ -56,6 +57,14 @@ from .approval_policy import (
 )
 from .workflow_governance import require_governed_workflow_chain
 from .paragraph_positions import PARAGRAPH_POSITION_MATRICES, is_paragraph_position_projection
+from .permission_receipts import (
+    PERMISSION_DISPLAY_FIELDS,
+    STATE_MESSAGES,
+    commit_permission_receipt,
+    permission_receipt_binding,
+    reconcile_stale_permission_receipts,
+    unverified_new_matter,
+)
 from .workflow_repository import ArbitrationWorkflowRepository
 from .filing_export_queue import get_filing_export_queue
 
@@ -148,6 +157,8 @@ def _clean_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {key: value for key, value in payload.items() if value is not None and key not in {"id", "_id"}}
 
 
+logger = logging.getLogger(__name__)
+
 SERVER_CONTROLLED_MATRIX_FIELDS = {
     "approved",
     "approved_at",
@@ -188,7 +199,7 @@ SERVER_CONTROLLED_MATRIX_FIELDS = {
 
 # Authorship bookkeeping the server writes itself. A client that echoes a row
 # back may send it, so it is dropped rather than refused.
-SERVER_BOOKKEEPING_MATRIX_FIELDS = {"created_at", "created_by", "updated_at", "updated_by"}
+SERVER_BOOKKEEPING_MATRIX_FIELDS = {"created_at", "created_by", "updated_at", "updated_by", *PERMISSION_DISPLAY_FIELDS}
 
 
 # A row belongs to the case it was created in: these are copied from that case,
@@ -734,7 +745,21 @@ class ArbitrationCaseWorkspaceService:
                 status_code=status.HTTP_409_CONFLICT,
                 detail="A permission receipt is only applicable to rejoinder rows with permission-required new matter",
             )
-        scope = {"_id": payload.permission_source_id}
+        # The grant the authoritative response carries as this decision reads the
+        # row. A grant does not advance `response_revision`, so the response write
+        # below is also conditional on this: otherwise a concurrent decision's
+        # grant could be overwritten here and then revoked by this decision's undo.
+        response_id = row.get("source_paragraph_response_id")
+        read_response = (
+            await self.db.arbitration_paragraph_responses.find_one({"_id": response_id, "draft_id": row.get("draft_id")})
+            if response_id
+            else None
+        )
+        read_response_receipt_id = (read_response or {}).get("permission_approval_receipt_id")
+        from ...core.security import _expand_object_ids
+
+        # Document ids are stored as ObjectIds; the payload carries the string form.
+        scope: Dict[str, Any] = {"_id": {"$in": _expand_object_ids([str(payload.permission_source_id)])}}
         if case.get("organization_id"):
             scope["organization_id"] = case.get("organization_id")
         if case.get("project_id"):
@@ -744,7 +769,11 @@ class ArbitrationCaseWorkspaceService:
             permission_source = await self.db[collection_name].find_one(scope)
             if permission_source:
                 break
-        if not permission_source:
+        if permission_source and collection_name == "documents":
+            authoritative = (await resolve_document_authority(self.db, str(permission_source.get("_id")))).consumable
+        else:
+            authoritative = bool(permission_source) and is_consumable(permission_source)
+        if not authoritative:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Permission source must be an authoritative document in the same organization and project",
@@ -752,6 +781,15 @@ class ArbitrationCaseWorkspaceService:
         actor = _actor_id(current_user)
         enforce_author_approver_separation(current_user, approval_barred_actors(row), gate="rejoinder permission")
         approver_role = resolve_gate_role("legal_review", current_user)
+        # Interrupted decisions on this case are cleaned up here, on a write path,
+        # never by a reader. Readers refuse those grants regardless, so a cleanup
+        # failure is logged and does not block this decision.
+        try:
+            cleanup = await reconcile_stale_permission_receipts(self.db, case_id=case_id)
+            if cleanup["errors"]:
+                logger.warning("Rejoinder permission receipt cleanup for case %s: %s", case_id, cleanup["errors"])
+        except Exception:
+            logger.exception("Rejoinder permission receipt cleanup failed for case %s", case_id)
         now = datetime.utcnow()
         receipt = {
             "_id": str(uuid.uuid4()),
@@ -775,6 +813,9 @@ class ArbitrationCaseWorkspaceService:
             "approver_role": approver_role,
             "comment": payload.permission_notes,
             "approved_at": now,
+            # Readers accept the permission only for this case, row, draft,
+            # response revision and content (permission_receipts).
+            **permission_receipt_binding(row, permission_source),
         }
         await self.db.arbitration_workflow_approvals.insert_one(_jsonable(receipt))
         granted = {
@@ -785,18 +826,27 @@ class ArbitrationCaseWorkspaceService:
             "permission_notes": payload.permission_notes,
             "permission_approval_receipt_id": receipt["_id"],
         }
-        response_id = row.get("source_paragraph_response_id")
         response_scope = {
             "_id": response_id,
             "draft_id": row.get("draft_id"),
             "response_revision": row.get("source_response_revision"),
         }
+        # The response grant this decision overwrites; its undo puts it back.
+        overwritten: Optional[Dict[str, Any]] = None
         if response_id:
             # The authoritative response first, and only while it still holds the
-            # text this projection showed: a rewrite in between refuses the grant.
-            written = await self.db.arbitration_paragraph_responses.update_one(
-                response_scope, {"$set": {**granted, "updated_at": now}}
+            # text this projection showed and the grant read with the row (or no
+            # grant, if cleanup withdrew that one meanwhile): a rewrite or another
+            # decision's grant in between refuses this one.
+            responses = self.db.arbitration_paragraph_responses
+            update = {"$set": {**granted, "updated_at": now}}
+            written = await responses.update_one(
+                {**response_scope, "permission_approval_receipt_id": read_response_receipt_id}, update
             )
+            if getattr(written, "matched_count", 0) and read_response_receipt_id:
+                overwritten = {key: (read_response or {}).get(key) for key in granted}
+            elif not getattr(written, "matched_count", 0) and read_response_receipt_id:
+                written = await responses.update_one({**response_scope, "permission_approval_receipt_id": None}, update)
             if not getattr(written, "matched_count", 0):
                 await self._abort_permission_receipt(receipt["_id"])
                 raise HTTPException(
@@ -824,23 +874,27 @@ class ArbitrationCaseWorkspaceService:
             )
         except BaseException:
             # A failed (or ambiguous) row write must leave no grant anywhere.
-            await self._withdraw_permission_grant(collection, row_id, response_id, response_scope, receipt["_id"])
+            await self._withdraw_permission_grant(collection, row_id, response_id, response_scope, receipt["_id"], overwritten)
             raise
         if not updated:
-            await self._withdraw_permission_grant(collection, row_id, response_id, response_scope, receipt["_id"])
+            await self._withdraw_permission_grant(collection, row_id, response_id, response_scope, receipt["_id"], overwritten)
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Rejoinder matrix row changed during the permission decision; review the current content",
             )
         try:
-            await self.db.arbitration_workflow_approvals.update_one(
-                {"_id": receipt["_id"], "receipt_status": "pending"},
-                {"$set": {"receipt_status": "committed", "committed_at": datetime.utcnow()}},
-            )
+            committed = await commit_permission_receipt(self.db, receipt["_id"])
         except BaseException:
             # No committed receipt, so no permission.
-            await self._withdraw_permission_grant(collection, row_id, response_id, response_scope, receipt["_id"])
+            await self._withdraw_permission_grant(collection, row_id, response_id, response_scope, receipt["_id"], overwritten)
             raise
+        if not committed:
+            # The reconciler aborted this receipt as stale before it committed.
+            await self._withdraw_permission_grant(collection, row_id, response_id, response_scope, receipt["_id"], overwritten)
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="The permission decision did not complete in time; record it again",
+            )
         receipt["receipt_status"] = "committed"
         await self.invalidate_readiness_approvals(case_id, "rejoinder_permission_changed", current_user)
         await self.readiness(case_id)
@@ -873,35 +927,43 @@ class ArbitrationCaseWorkspaceService:
         response_id: Any,
         response_scope: Dict[str, Any],
         receipt_id: str,
+        overwritten: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Undo every grant this decision may have written, and abort its receipt.
 
         Each revert matches only this decision's receipt, so a newer grant or a
-        rewrite is never touched. It runs shielded, so a cancelled request still
-        finishes it, and the receipt is aborted even if a revert fails.
+        rewrite is never touched. The response gets back the grant this decision
+        overwrote (`overwritten`), so a concurrent decision's grant survives this
+        one's failure. It runs shielded, so a cancelled request still finishes it,
+        and the receipt is aborted even if a revert fails.
         """
 
         async def _undo() -> None:
+            reverted = False
             try:
                 if response_id:
                     await self.db.arbitration_paragraph_responses.update_one(
                         {**response_scope, "permission_approval_receipt_id": receipt_id},
-                        {"$set": {**REVOKED_REJOINDER_PERMISSION, "updated_at": datetime.utcnow()}},
+                        {"$set": {**(overwritten or REVOKED_REJOINDER_PERMISSION), "updated_at": datetime.utcnow()}},
                     )
                 # The row write may have applied before reporting an error.
                 await collection.update_one(
                     {"_id": row_id, "permission_approval_receipt_id": receipt_id},
                     {"$set": {**REVOKED_REJOINDER_PERMISSION, "updated_at": datetime.utcnow()}},
                 )
+                reverted = True
             finally:
-                await self._abort_permission_receipt(receipt_id)
+                # A revert that failed leaves a grant citing this receipt; the
+                # flag records that, and cleanup withdraws it (it starts from the
+                # grants, so it finds it either way).
+                await self._abort_permission_receipt(receipt_id, grants_withdrawn=reverted)
 
         await asyncio.shield(_undo())
 
-    async def _abort_permission_receipt(self, receipt_id: str) -> None:
+    async def _abort_permission_receipt(self, receipt_id: str, *, grants_withdrawn: bool = True) -> None:
         await self.db.arbitration_workflow_approvals.update_one(
             {"_id": receipt_id, "receipt_status": "pending"},
-            {"$set": {"receipt_status": "aborted", "aborted_at": datetime.utcnow()}},
+            {"$set": {"receipt_status": "aborted", "aborted_at": datetime.utcnow(), "grants_withdrawn": grants_withdrawn}},
         )
 
     async def dashboard(self, case_id: str) -> Dict[str, Any]:
@@ -1099,6 +1161,18 @@ class ArbitrationCaseWorkspaceService:
     ) -> Dict[str, Any]:
         case_id = str(case.get("_id") or "")
         draft_type = str(draft.get("draft_type") or self._default_draft_type(case))
+        if draft_type == "rejoinder":
+            unverified = await unverified_new_matter(self.db, await self.list_matrix_rows(case_id, "rejoinder-matrix"))
+            if unverified:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "message": "Rejoinder new matter has no committed permission receipt",
+                        "case_id": case_id,
+                        "matrix_row_id": str(unverified[0]["row"].get("_id")),
+                        "permission_state": unverified[0]["state"],
+                    },
+                )
         artifact = await self._readiness_artifact_state(case, draft_type)
         cursor = self.db.arbitration_workflow_approvals.find({"case_id": case_id, "gate": "readiness"}).sort(
             "approved_at", -1
@@ -2619,7 +2693,7 @@ class ArbitrationCaseWorkspaceService:
         elif normalized_type == "counterclaim":
             self._counterclaim_readiness(add, counterclaim_rows)
         elif normalized_type == "rejoinder":
-            self._rejoinder_readiness(add, rejoinder_rows)
+            self._rejoinder_readiness(add, rejoinder_rows, await unverified_new_matter(self.db, rejoinder_rows))
 
         quantum_rows = rows.get("quantum-annexures") or []
         amount_claim_rows = [row for row in claim_rows + counterclaim_rows if row.get("amount_or_days") or row.get("amount")]
@@ -2862,7 +2936,12 @@ class ArbitrationCaseWorkspaceService:
             "Counterclaim matrix has approved jurisdiction, limitation, breach, causation, and relief rows." if ready_counterclaims else "Counterclaim requires approved counterclaim matrix rows.",
         )
 
-    def _rejoinder_readiness(self, add: Any, rejoinder_rows: List[Dict[str, Any]]) -> None:
+    def _rejoinder_readiness(
+        self,
+        add: Any,
+        rejoinder_rows: List[Dict[str, Any]],
+        unverified: List[Dict[str, Any]],
+    ) -> None:
         ready_replies = [row for row in rejoinder_rows if (row.get("claimant_reply") or row.get("reply_to_counterclaim")) and _is_ready_row(row)]
         add(
             "rejoinder_matrix",
@@ -2870,20 +2949,17 @@ class ArbitrationCaseWorkspaceService:
             ReadinessCheckStatus.READY if ready_replies else ReadinessCheckStatus.BLOCKED,
             "Rejoinder matrix has approved paragraph-wise replies." if ready_replies else "Rejoinder requires approved reply matrix rows.",
         )
-        new_matter = [
-            row
-            for row in rejoinder_rows
-            if _is_positive(row.get("new_matter"))
-            and _is_positive(row.get("permission_required"))
-            and not _is_positive(row.get("permission_obtained"))
-        ]
-        if new_matter:
+        # `unverified`: new-matter rows whose permission no committed receipt backs.
+        if unverified:
+            first = unverified[0]
+            reason = STATE_MESSAGES.get(first["state"])
             add(
                 "rejoinder_new_matter",
                 "rejoinder",
                 ReadinessCheckStatus.NEEDS_LEGAL_REVIEW,
-                "Rejoinder row introduces new matter but required permission has not been obtained.",
-                str(new_matter[0].get("_id")),
+                "Rejoinder row introduces new matter but required permission has not been obtained"
+                + (f": {reason}." if reason else "."),
+                str(first["row"].get("_id")),
             )
 
     async def _persist_readiness(

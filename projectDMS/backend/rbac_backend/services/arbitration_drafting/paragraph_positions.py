@@ -100,13 +100,22 @@ def _projection_content(matrix_slug: str, response: Dict[str, Any]) -> Dict[str,
                 "permission_source_id": response.get("permission_source_id"),
                 "permission_approved_by": response.get("permission_approved_by"),
                 "permission_approved_at": response.get("permission_approved_at"),
+                # The grant is copied with the receipt that backs it, so a
+                # resave never leaves a row granted without one.
+                "permission_approval_receipt_id": response.get("permission_approval_receipt_id"),
             }
         )
     return common
 
 
 def _projection_hash(content: Dict[str, Any]) -> str:
-    excluded = {"permission_approved_at", "permission_approved_by", "permission_obtained", "permission_source_id"}
+    excluded = {
+        "permission_approved_at",
+        "permission_approved_by",
+        "permission_obtained",
+        "permission_source_id",
+        "permission_approval_receipt_id",
+    }
     stable = {key: value for key, value in content.items() if key not in excluded}
     return hashlib.sha256(
         json.dumps(stable, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
