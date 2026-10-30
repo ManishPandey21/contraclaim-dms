@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
+import logging
 import re
 import uuid
 import zipfile
@@ -14,6 +16,7 @@ from fastapi import HTTPException, status
 from pymongo.errors import DuplicateKeyError
 
 from ...models.arbitration_drafting import (
+    APPROVAL_STATUS_VALUES,
     ArbitrationAgentRun,
     ArbitrationAgentRunRequest,
     ArbitrationApprovalReceipt,
@@ -43,12 +46,25 @@ from .matrix_evidence_authority import matrix_clause_fence
 from .matrix_registry import MATRIX_COLLECTIONS
 from .repository import ArbitrationDraftingRepository, _collect, _jsonable
 from .approval_policy import (
+    MATRIX_ROLE_CLAIMS,
+    REVOKED_REJOINDER_PERMISSION,
+    actor_roles,
+    approval_barred_actors,
+    material_change_review_reset,
     enforce_author_approver_separation,
     enforce_matrix_reviewer_role,
     resolve_gate_role,
 )
 from .workflow_governance import require_governed_workflow_chain
 from .paragraph_positions import PARAGRAPH_POSITION_MATRICES, is_paragraph_position_projection
+from .permission_receipts import (
+    PERMISSION_DISPLAY_FIELDS,
+    STATE_MESSAGES,
+    commit_permission_receipt,
+    permission_receipt_binding,
+    reconcile_stale_permission_receipts,
+    unverified_new_matter,
+)
 from .workflow_repository import ArbitrationWorkflowRepository
 from .filing_export_queue import get_filing_export_queue
 
@@ -136,8 +152,12 @@ def _actor_snapshot(user: Any) -> Dict[str, Any]:
 
 
 def _clean_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-    return {key: value for key, value in payload.items() if value is not None and key != "id"}
+    # Record ids are server-assigned; a client-chosen `_id` could collide with
+    # another case's row and reveal that it exists.
+    return {key: value for key, value in payload.items() if value is not None and key not in {"id", "_id"}}
 
+
+logger = logging.getLogger(__name__)
 
 SERVER_CONTROLLED_MATRIX_FIELDS = {
     "approved",
@@ -145,12 +165,20 @@ SERVER_CONTROLLED_MATRIX_FIELDS = {
     "approved_by",
     "approval_log",
     "approval_status",
+    "assigned_reviewer_id",
+    "deleted_at",
+    "deleted_by",
+    "edit_revision",
     "human_approval_status",
+    "last_material_editor_id",
     "last_review_action",
+    "material_contributor_ids",
     "last_reviewed_at",
     "last_reviewed_by",
     "permission_approved_at",
+    "permission_approval_receipt_id",
     "permission_approved_by",
+    "permission_notes",
     "permission_obtained",
     "permission_source_id",
     "projection_hash",
@@ -159,12 +187,37 @@ SERVER_CONTROLLED_MATRIX_FIELDS = {
     "readiness_status",
     "rejected_at",
     "rejected_by",
+    "review_assignments",
+    "review_comments",
     "review_completed_roles",
+    "review_required_roles",
     "review_status",
     "source_paragraph_response_id",
     "verified",
     "verification_status",
 }
+
+# Authorship bookkeeping the server writes itself. A client that echoes a row
+# back may send it, so it is dropped rather than refused.
+SERVER_BOOKKEEPING_MATRIX_FIELDS = {"created_at", "created_by", "updated_at", "updated_by", *PERMISSION_DISPLAY_FIELDS}
+
+
+# A row belongs to the case it was created in: these are copied from that case,
+# never taken from a client body. A body may echo them unchanged.
+MATRIX_ROW_OWNERSHIP_FIELDS = ("case_id", "organization_id", "project_id", "contract_id")
+
+
+def _strip_row_ownership(body: Dict[str, Any], owner: Dict[str, Any]) -> None:
+    changed = sorted(
+        key
+        for key in MATRIX_ROW_OWNERSHIP_FIELDS
+        if key in body and str(body.pop(key)) != str(owner.get(key) or "")
+    )
+    if changed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Matrix row ownership is server-controlled: " + ", ".join(changed),
+        )
 
 
 def _matrix_review_defaults(matrix_slug: str) -> Dict[str, Any]:
@@ -179,6 +232,25 @@ def _matrix_review_defaults(matrix_slug: str) -> Dict[str, Any]:
     if matrix_slug == "issue-matrix":
         defaults["status"] = "needs_review"
     return defaults
+
+
+def _material_edit_review_reset(
+    matrix_slug: str,
+    existing: Dict[str, Any],
+    update: Dict[str, Any],
+    changed: List[str],
+    actor: Optional[str],
+    now: datetime,
+) -> Dict[str, Any]:
+    """Return a row to review after a user edit changed its reviewed content.
+
+    Every client-editable field is reviewed content (exhibit source, title,
+    pages, dates, citations, ordering), so any change is material.
+    """
+    defaults = _matrix_review_defaults(matrix_slug)
+    if "status" in update:
+        defaults.pop("status", None)
+    return material_change_review_reset(defaults, existing, changed, actor, now)
 
 
 def _canonical_hash(value: Any) -> str:
@@ -232,7 +304,12 @@ def _date_sort_value(row: Dict[str, Any]) -> str:
     return str(value)
 
 
-from ..publication_policy import consumable_derived_text, resolve_derived_authority
+from ..publication_policy import (
+    consumable_derived_text,
+    is_consumable,
+    resolve_derived_authority,
+    resolve_document_authority,
+)
 
 
 class ArbitrationCaseWorkspaceService:
@@ -357,9 +434,10 @@ class ArbitrationCaseWorkspaceService:
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Draft-bound defence/rejoinder positions are server-owned projections; update the paragraph response instead",
             )
-        for key in SERVER_CONTROLLED_MATRIX_FIELDS:
+        _strip_row_ownership(body, {**case, "case_id": case_id})
+        for key in SERVER_CONTROLLED_MATRIX_FIELDS | SERVER_BOOKKEEPING_MATRIX_FIELDS:
             body.pop(key, None)
-        if str(body.get("status") or "").lower() in {"approved", "ready", "verified"}:
+        if str(body.get("status") or "").strip().lower() in APPROVAL_STATUS_VALUES:
             body.pop("status", None)
         body.update(_matrix_review_defaults(matrix_slug))
         now = datetime.utcnow()
@@ -392,28 +470,54 @@ class ArbitrationCaseWorkspaceService:
         existing = await collection.find_one(
             {"_id": row_id, "case_id": case_id, "deleted_at": {"$exists": False}}
         )
-        if existing and is_paragraph_position_projection(existing):
+        if not existing:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Arbitration matrix row not found")
+        if is_paragraph_position_projection(existing):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="This row is a read-only paragraph-response projection; update the authoritative paragraph response instead",
             )
         update = _clean_payload(payload.model_dump(exclude_unset=True, by_alias=True))
         update.pop("_id", None)
-        for key in SERVER_CONTROLLED_MATRIX_FIELDS:
+        _strip_row_ownership(update, existing)
+        for key in SERVER_CONTROLLED_MATRIX_FIELDS | SERVER_BOOKKEEPING_MATRIX_FIELDS:
             update.pop(key, None)
-        if str(update.get("status") or "").lower() in {"approved", "ready", "verified"}:
+        if str(update.get("status") or "").strip().lower() in APPROVAL_STATUS_VALUES:
             update.pop("status", None)
-        update["updated_by"] = _actor_id(current_user)
-        update["updated_at"] = datetime.utcnow()
+        prior = existing or {}
+        changed = sorted(key for key, value in _jsonable(update).items() if prior.get(key) != value)
+        if existing and not changed:
+            return existing
+        now = datetime.utcnow()
+        actor = _actor_id(current_user)
+        update.update(_material_edit_review_reset(matrix_slug, prior, update, changed, actor, now))
+        update["updated_by"] = actor
+        update["updated_at"] = now
+        update["edit_revision"] = int(prior.get("edit_revision") or 0) + 1
+        if matrix_slug == "document-index" and not {**prior, **update}.get("exhibit_id"):
+            # Number the exhibit in this same write, so no approval can land
+            # between the edit and the numbering.
+            numbered = await self._assign_exhibit_if_needed(case_id, matrix_slug, {**prior, **update})
+            update.update({key: numbered.get(key) for key in ("exhibit_prefix", "exhibit_number", "exhibit_id")})
+        # Compare-and-set on the revision this edit was computed from, so an edit
+        # and a review can never both apply to the same content.
         updated = await collection.find_one_and_update(
-            {"_id": row_id, "case_id": case_id, "deleted_at": {"$exists": False}},
+            {
+                "_id": row_id,
+                "case_id": case_id,
+                "deleted_at": {"$exists": False},
+                "edit_revision": prior.get("edit_revision"),
+            },
             {"$set": _jsonable(update)},
             return_document=True,
         )
         if not updated:
+            if existing:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Arbitration matrix row changed concurrently; reload it and retry",
+                )
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Arbitration matrix row not found")
-        if matrix_slug == "document-index" and not updated.get("exhibit_id"):
-            updated = await self._assign_and_update_exhibit(case_id, updated)
         await self._touch_case(case_id, current_user)
         return updated
 
@@ -458,11 +562,11 @@ class ArbitrationCaseWorkspaceService:
         assignments = list(row.get("review_assignments") or [])
         if claimed_role not in required_roles:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Reviewer role is not required for this matrix row")
-        role = (
-            claimed_role
-            if action == "assign"
-            else enforce_matrix_reviewer_role(claimed_role, current_user, assignments)
-        )
+        # A reviewer specialty comes only from the actor's own signed role claim.
+        # Assignments route work; none - new or already on record - confers it.
+        role = enforce_matrix_reviewer_role(claimed_role, current_user, [])
+        if action == "assign":
+            await self._require_qualified_assignee(payload.reviewer_user_id, role)
         comments = list(row.get("review_comments") or [])
         approval_log = list(row.get("approval_log") or [])
 
@@ -470,10 +574,11 @@ class ArbitrationCaseWorkspaceService:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Review comment is required for this action")
         if action == "assign" and not payload.reviewer_user_id:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="reviewer_user_id is required when assigning review")
+        if action == "assign" and str(payload.reviewer_user_id) == str(actor or ""):
+            # An assignment confers a reviewer specialty, so it must come from someone else.
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="A reviewer cannot assign themselves a review role")
         if action == "approve":
-            enforce_author_approver_separation(
-                current_user, [row.get("created_by"), row.get("last_material_editor_id")], gate=f"{matrix_slug} matrix review"
-            )
+            enforce_author_approver_separation(current_user, approval_barred_actors(row), gate=f"{matrix_slug} matrix review")
             prior_actors = {
                 str(item.get("actor_id") or "")
                 for item in approval_log
@@ -511,6 +616,7 @@ class ArbitrationCaseWorkspaceService:
             "last_reviewed_at": now,
             "updated_by": actor,
             "updated_at": now,
+            "edit_revision": int(row.get("edit_revision") or 0) + 1,
         }
 
         if action == "assign":
@@ -565,6 +671,8 @@ class ArbitrationCaseWorkspaceService:
                         "readiness_status": "ready",
                         "approved_by": actor,
                         "approved_at": now,
+                        # The approved content has no outstanding contributors.
+                        "material_contributor_ids": [],
                     }
                 )
             else:
@@ -593,13 +701,22 @@ class ArbitrationCaseWorkspaceService:
         else:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unsupported review action: {action}")
 
+        # The decision applies only to the content that was reviewed.
         updated = await collection.find_one_and_update(
-            {"_id": row_id, "case_id": case_id, "deleted_at": {"$exists": False}},
+            {
+                "_id": row_id,
+                "case_id": case_id,
+                "deleted_at": {"$exists": False},
+                "edit_revision": row.get("edit_revision"),
+            },
             {"$set": _jsonable(update)},
             return_document=True,
         )
         if not updated:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Arbitration matrix row not found")
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Arbitration matrix row changed during review; review the current content",
+            )
 
         task_sync = TaskSyncService(self.db)
         if action == "assign":
@@ -628,7 +745,21 @@ class ArbitrationCaseWorkspaceService:
                 status_code=status.HTTP_409_CONFLICT,
                 detail="A permission receipt is only applicable to rejoinder rows with permission-required new matter",
             )
-        scope = {"_id": payload.permission_source_id}
+        # The grant the authoritative response carries as this decision reads the
+        # row. A grant does not advance `response_revision`, so the response write
+        # below is also conditional on this: otherwise a concurrent decision's
+        # grant could be overwritten here and then revoked by this decision's undo.
+        response_id = row.get("source_paragraph_response_id")
+        read_response = (
+            await self.db.arbitration_paragraph_responses.find_one({"_id": response_id, "draft_id": row.get("draft_id")})
+            if response_id
+            else None
+        )
+        read_response_receipt_id = (read_response or {}).get("permission_approval_receipt_id")
+        from ...core.security import _expand_object_ids
+
+        # Document ids are stored as ObjectIds; the payload carries the string form.
+        scope: Dict[str, Any] = {"_id": {"$in": _expand_object_ids([str(payload.permission_source_id)])}}
         if case.get("organization_id"):
             scope["organization_id"] = case.get("organization_id")
         if case.get("project_id"):
@@ -638,16 +769,27 @@ class ArbitrationCaseWorkspaceService:
             permission_source = await self.db[collection_name].find_one(scope)
             if permission_source:
                 break
-        if not permission_source:
+        if permission_source and collection_name == "documents":
+            authoritative = (await resolve_document_authority(self.db, str(permission_source.get("_id")))).consumable
+        else:
+            authoritative = bool(permission_source) and is_consumable(permission_source)
+        if not authoritative:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Permission source must be an authoritative document in the same organization and project",
             )
         actor = _actor_id(current_user)
-        enforce_author_approver_separation(
-            current_user, [row.get("created_by"), row.get("last_material_editor_id")], gate="rejoinder permission"
-        )
+        enforce_author_approver_separation(current_user, approval_barred_actors(row), gate="rejoinder permission")
         approver_role = resolve_gate_role("legal_review", current_user)
+        # Interrupted decisions on this case are cleaned up here, on a write path,
+        # never by a reader. Readers refuse those grants regardless, so a cleanup
+        # failure is logged and does not block this decision.
+        try:
+            cleanup = await reconcile_stale_permission_receipts(self.db, case_id=case_id)
+            if cleanup["errors"]:
+                logger.warning("Rejoinder permission receipt cleanup for case %s: %s", case_id, cleanup["errors"])
+        except Exception:
+            logger.exception("Rejoinder permission receipt cleanup failed for case %s", case_id)
         now = datetime.utcnow()
         receipt = {
             "_id": str(uuid.uuid4()),
@@ -671,47 +813,158 @@ class ArbitrationCaseWorkspaceService:
             "approver_role": approver_role,
             "comment": payload.permission_notes,
             "approved_at": now,
+            # Readers accept the permission only for this case, row, draft,
+            # response revision and content (permission_receipts).
+            **permission_receipt_binding(row, permission_source),
         }
         await self.db.arbitration_workflow_approvals.insert_one(_jsonable(receipt))
-        updated = await collection.find_one_and_update(
-            {"_id": row_id, "case_id": case_id},
-            {
-                "$set": {
-                    "permission_obtained": True,
-                    "permission_source_id": payload.permission_source_id,
-                    "permission_approved_by": actor,
-                    "permission_approved_at": now,
-                    "permission_notes": payload.permission_notes,
-                    "permission_approval_receipt_id": receipt["_id"],
-                    "updated_by": actor,
-                    "updated_at": now,
-                }
-            },
-            return_document=True,
-        )
-        if updated and updated.get("source_paragraph_response_id"):
-            await self.db.arbitration_paragraph_responses.update_one(
-                {"_id": updated["source_paragraph_response_id"], "draft_id": updated.get("draft_id")},
+        granted = {
+            "permission_obtained": True,
+            "permission_source_id": payload.permission_source_id,
+            "permission_approved_by": actor,
+            "permission_approved_at": now,
+            "permission_notes": payload.permission_notes,
+            "permission_approval_receipt_id": receipt["_id"],
+        }
+        response_scope = {
+            "_id": response_id,
+            "draft_id": row.get("draft_id"),
+            "response_revision": row.get("source_response_revision"),
+        }
+        # The response grant this decision overwrites; its undo puts it back.
+        overwritten: Optional[Dict[str, Any]] = None
+        if response_id:
+            # The authoritative response first, and only while it still holds the
+            # text this projection showed and the grant read with the row (or no
+            # grant, if cleanup withdrew that one meanwhile): a rewrite or another
+            # decision's grant in between refuses this one.
+            responses = self.db.arbitration_paragraph_responses
+            update = {"$set": {**granted, "updated_at": now}}
+            written = await responses.update_one(
+                {**response_scope, "permission_approval_receipt_id": read_response_receipt_id}, update
+            )
+            if getattr(written, "matched_count", 0) and read_response_receipt_id:
+                overwritten = {key: (read_response or {}).get(key) for key in granted}
+            elif not getattr(written, "matched_count", 0) and read_response_receipt_id:
+                written = await responses.update_one({**response_scope, "permission_approval_receipt_id": None}, update)
+            if not getattr(written, "matched_count", 0):
+                await self._abort_permission_receipt(receipt["_id"])
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="The paragraph response changed during the permission decision; review the current content",
+                )
+        # The permission covers only the content that was read above.
+        try:
+            updated = await collection.find_one_and_update(
+                {"_id": row_id, "case_id": case_id, "edit_revision": row.get("edit_revision")},
                 {
                     "$set": {
+                        "edit_revision": int(row.get("edit_revision") or 0) + 1,
                         "permission_obtained": True,
                         "permission_source_id": payload.permission_source_id,
                         "permission_approved_by": actor,
                         "permission_approved_at": now,
                         "permission_notes": payload.permission_notes,
                         "permission_approval_receipt_id": receipt["_id"],
+                        "updated_by": actor,
                         "updated_at": now,
                     }
                 },
+                return_document=True,
             )
-        await self.db.arbitration_workflow_approvals.update_one(
-            {"_id": receipt["_id"], "receipt_status": "pending"},
-            {"$set": {"receipt_status": "committed", "committed_at": datetime.utcnow()}},
-        )
+        except BaseException:
+            # A failed (or ambiguous) row write must leave no grant anywhere.
+            await self._withdraw_permission_grant(collection, row_id, response_id, response_scope, receipt["_id"], overwritten)
+            raise
+        if not updated:
+            await self._withdraw_permission_grant(collection, row_id, response_id, response_scope, receipt["_id"], overwritten)
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Rejoinder matrix row changed during the permission decision; review the current content",
+            )
+        try:
+            committed = await commit_permission_receipt(self.db, receipt["_id"])
+        except BaseException:
+            # No committed receipt, so no permission.
+            await self._withdraw_permission_grant(collection, row_id, response_id, response_scope, receipt["_id"], overwritten)
+            raise
+        if not committed:
+            # The reconciler aborted this receipt as stale before it committed.
+            await self._withdraw_permission_grant(collection, row_id, response_id, response_scope, receipt["_id"], overwritten)
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="The permission decision did not complete in time; record it again",
+            )
         receipt["receipt_status"] = "committed"
         await self.invalidate_readiness_approvals(case_id, "rejoinder_permission_changed", current_user)
         await self.readiness(case_id)
-        return updated or row
+        return updated
+
+    async def _require_qualified_assignee(self, user_id: Any, role: str) -> None:
+        """403 unless the assignee is an active user holding this reviewer role's claim.
+
+        Fails closed when the user record cannot be found or read.
+        """
+        from ...core.security import _expand_object_ids
+
+        users = getattr(self.db, "users", None)
+        assignee = None
+        if users is not None and user_id:
+            try:
+                assignee = await users.find_one({"_id": {"$in": _expand_object_ids([str(user_id)])}})
+            except Exception:
+                assignee = None
+        qualified = bool(assignee) and assignee.get("is_active", True) is not False and bool(
+            actor_roles(assignee) & MATRIX_ROLE_CLAIMS.get(role, frozenset())
+        )
+        if not qualified:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="The assignee does not hold this reviewer role")
+
+    async def _withdraw_permission_grant(
+        self,
+        collection: Any,
+        row_id: str,
+        response_id: Any,
+        response_scope: Dict[str, Any],
+        receipt_id: str,
+        overwritten: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Undo every grant this decision may have written, and abort its receipt.
+
+        Each revert matches only this decision's receipt, so a newer grant or a
+        rewrite is never touched. The response gets back the grant this decision
+        overwrote (`overwritten`), so a concurrent decision's grant survives this
+        one's failure. It runs shielded, so a cancelled request still finishes it,
+        and the receipt is aborted even if a revert fails.
+        """
+
+        async def _undo() -> None:
+            reverted = False
+            try:
+                if response_id:
+                    await self.db.arbitration_paragraph_responses.update_one(
+                        {**response_scope, "permission_approval_receipt_id": receipt_id},
+                        {"$set": {**(overwritten or REVOKED_REJOINDER_PERMISSION), "updated_at": datetime.utcnow()}},
+                    )
+                # The row write may have applied before reporting an error.
+                await collection.update_one(
+                    {"_id": row_id, "permission_approval_receipt_id": receipt_id},
+                    {"$set": {**REVOKED_REJOINDER_PERMISSION, "updated_at": datetime.utcnow()}},
+                )
+                reverted = True
+            finally:
+                # A revert that failed leaves a grant citing this receipt; the
+                # flag records that, and cleanup withdraws it (it starts from the
+                # grants, so it finds it either way).
+                await self._abort_permission_receipt(receipt_id, grants_withdrawn=reverted)
+
+        await asyncio.shield(_undo())
+
+    async def _abort_permission_receipt(self, receipt_id: str, *, grants_withdrawn: bool = True) -> None:
+        await self.db.arbitration_workflow_approvals.update_one(
+            {"_id": receipt_id, "receipt_status": "pending"},
+            {"$set": {"receipt_status": "aborted", "aborted_at": datetime.utcnow(), "grants_withdrawn": grants_withdrawn}},
+        )
 
     async def dashboard(self, case_id: str) -> Dict[str, Any]:
         case = await self.get_case(case_id)
@@ -908,6 +1161,18 @@ class ArbitrationCaseWorkspaceService:
     ) -> Dict[str, Any]:
         case_id = str(case.get("_id") or "")
         draft_type = str(draft.get("draft_type") or self._default_draft_type(case))
+        if draft_type == "rejoinder":
+            unverified = await unverified_new_matter(self.db, await self.list_matrix_rows(case_id, "rejoinder-matrix"))
+            if unverified:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "message": "Rejoinder new matter has no committed permission receipt",
+                        "case_id": case_id,
+                        "matrix_row_id": str(unverified[0]["row"].get("_id")),
+                        "permission_state": unverified[0]["state"],
+                    },
+                )
         artifact = await self._readiness_artifact_state(case, draft_type)
         cursor = self.db.arbitration_workflow_approvals.find({"case_id": case_id, "gate": "readiness"}).sort(
             "approved_at", -1
@@ -1025,20 +1290,12 @@ class ArbitrationCaseWorkspaceService:
         rows: Dict[str, List[Dict[str, Any]]],
     ) -> List[Dict[str, Any]]:
         manifest: List[Dict[str, Any]] = []
-        scope = {"organization_id": case.get("organization_id"), "project_id": case.get("project_id")}
         for row in rows.get("document-index") or []:
             if not _is_ready_row(row) or not row.get("source_id"):
                 continue
             source_id = str(row.get("source_id"))
-            authoritative = None
-            for collection_name in ("documents", "letters"):
-                collection = getattr(self.db, collection_name, None)
-                if collection is None:
-                    continue
-                query = {"_id": source_id, **{key: value for key, value in scope.items() if value}}
-                authoritative = await collection.find_one(query)
-                if authoritative:
-                    break
+            found = await self._case_scoped_source(case, source_id)
+            authoritative = found[1] if found else None
             recorded_revision = str(row.get("source_revision_id") or row.get("current_version_id") or "")
             authoritative_revision = str((authoritative or {}).get("current_version_id") or "")
             recorded_sha = str(row.get("source_sha256") or "")
@@ -1306,50 +1563,95 @@ class ArbitrationCaseWorkspaceService:
         rows = [row for row in await self.list_matrix_rows(case_id, "document-index") if row.get("exhibit_id")]
         return sorted(rows, key=lambda row: (str(row.get("exhibit_prefix") or ""), int(row.get("exhibit_number") or 0)))
 
-    async def _find_exhibit_source_record(self, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        source_id = str(row.get("source_id") or "")
-        if not source_id:
+    async def _case_scoped_source(
+        self, case: Dict[str, Any], source_id: Any
+    ) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """(collection, record) for a document or letter inside the case's scope.
+
+        `source_id` is client-writable, so the record must belong to the case's
+        organisation, and to its project when the case has one; an
+        organisation-level record is not evidence of a project case. Ids and
+        scope fields are matched as string or ObjectId, the forms they are
+        stored in. The exporter and the readiness evidence manifest share this
+        lookup so they cannot disagree about which record a row names.
+        """
+        from ...core.security import _expand_object_ids
+
+        organization_id = (case or {}).get("organization_id")
+        if not source_id or not organization_id:
             return None
+        scope: Dict[str, Any] = {"organization_id": {"$in": _expand_object_ids([str(organization_id)])}}
+        if case.get("project_id"):
+            scope["project_id"] = {"$in": _expand_object_ids([str(case["project_id"])])}
         for collection_name in ("documents", "letters"):
             collection = getattr(self.db, collection_name, None)
             if collection is None:
                 continue
             try:
-                record = await collection.find_one({"_id": source_id})
+                record = await collection.find_one({"_id": {"$in": _expand_object_ids([str(source_id)])}, **scope})
             except Exception:
                 record = None
             if record:
-                return dict(record)
+                return collection_name, dict(record)
         return None
 
-    @staticmethod
-    def _existing_local_path(*candidates: Any) -> Optional[Path]:
-        for candidate in candidates:
-            if not candidate:
-                continue
-            try:
-                path = Path(str(candidate))
-                if path.is_file():
-                    return path
-            except OSError:
-                continue
-        return None
+    async def _find_exhibit_source_record(self, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """The authoritative record whose bytes the exhibit exports, or None.
+
+        Scope comes from the row's case. Authority is decided on the record
+        actually found, never on the row's client-writable `source_type`:
+        documents through `resolve_document_authority` (the quality gate),
+        letters through `is_consumable` (quarantine and deletion).
+        """
+        case_id = row.get("case_id")
+        if not row.get("source_id") or not case_id:
+            return None
+        case = await self.db.arbitration_cases.find_one({"_id": case_id, "deleted_at": {"$exists": False}})
+        found = await self._case_scoped_source(case or {}, row.get("source_id"))
+        if not found:
+            return None
+        collection_name, record = found
+        if collection_name == "documents":
+            consumable = (await resolve_document_authority(self.db, str(record.get("_id")))).consumable
+        else:
+            consumable = is_consumable(record)
+        return record if consumable else None
+
+    def _confined_local_path(self, value: Any) -> Optional[Path]:
+        """A server-recorded local path, only if it resolves inside a storage root.
+
+        Resolution follows symlinks and `..`, then applies the same check the
+        document download route uses (`FileObjectService.assert_local_path_allowed`).
+        A row's `source_file_link` is display metadata and never reaches here.
+        """
+        if not value:
+            return None
+        from ..file_object_service import FileObjectService
+
+        try:
+            path = Path(str(value)).resolve(strict=True)
+            if not path.is_file():
+                return None
+            FileObjectService(self.db).assert_local_path_allowed(str(path))
+        except (OSError, RuntimeError, PermissionError):
+            return None
+        return path
 
     async def _exhibit_file_status(self, row: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
         """Cheap resolvability check for the citation audit (no byte fetch)."""
         record = await self._find_exhibit_source_record(row)
-        if self._existing_local_path((record or {}).get("filepath_local"), row.get("source_file_link")):
-            return True, None
-        if (record or {}).get("filepath_s3"):
-            return True, None
         if record is None:
-            return False, "source record not found and source_file_link is not an existing file"
-        return False, "source record has no local file or storage key"
+            return False, "no authoritative source record in this case's scope"
+        if self._confined_local_path(record.get("filepath_local")) or record.get("filepath_s3"):
+            return True, None
+        return False, "source record has no usable local file or storage key"
 
     async def _load_exhibit_file(self, row: Dict[str, Any]) -> Dict[str, Any]:
-        """Resolve exhibit bytes: local path first, then S3 (mirrors document download)."""
+        """Resolve exhibit bytes from the case-scoped source record: local file, then S3."""
         record = await self._find_exhibit_source_record(row)
-        local = self._existing_local_path((record or {}).get("filepath_local"), row.get("source_file_link"))
+        if record is None:
+            return {"content": None, "filename": None, "error": "No authoritative source record in this case's scope."}
+        local = self._confined_local_path(record.get("filepath_local"))
         if local:
             try:
                 return {"content": local.read_bytes(), "filename": (record or {}).get("filename") or local.name, "error": None}
@@ -2220,14 +2522,6 @@ class ArbitrationCaseWorkspaceService:
         row["exhibit_id"] = f"{prefix}-{row['exhibit_number']}"
         return row
 
-    async def _assign_and_update_exhibit(self, case_id: str, row: Dict[str, Any]) -> Dict[str, Any]:
-        updated = await self._assign_exhibit_if_needed(case_id, "document-index", row)
-        await self.db.arbitration_document_index.update_one(
-            {"_id": updated["_id"], "case_id": case_id},
-            {"$set": {"exhibit_prefix": updated.get("exhibit_prefix"), "exhibit_number": updated.get("exhibit_number"), "exhibit_id": updated.get("exhibit_id")}},
-        )
-        return updated
-
     @staticmethod
     def _review_roles(values: Any) -> List[str]:
         if values in (None, ""):
@@ -2399,7 +2693,7 @@ class ArbitrationCaseWorkspaceService:
         elif normalized_type == "counterclaim":
             self._counterclaim_readiness(add, counterclaim_rows)
         elif normalized_type == "rejoinder":
-            self._rejoinder_readiness(add, rejoinder_rows)
+            self._rejoinder_readiness(add, rejoinder_rows, await unverified_new_matter(self.db, rejoinder_rows))
 
         quantum_rows = rows.get("quantum-annexures") or []
         amount_claim_rows = [row for row in claim_rows + counterclaim_rows if row.get("amount_or_days") or row.get("amount")]
@@ -2642,7 +2936,12 @@ class ArbitrationCaseWorkspaceService:
             "Counterclaim matrix has approved jurisdiction, limitation, breach, causation, and relief rows." if ready_counterclaims else "Counterclaim requires approved counterclaim matrix rows.",
         )
 
-    def _rejoinder_readiness(self, add: Any, rejoinder_rows: List[Dict[str, Any]]) -> None:
+    def _rejoinder_readiness(
+        self,
+        add: Any,
+        rejoinder_rows: List[Dict[str, Any]],
+        unverified: List[Dict[str, Any]],
+    ) -> None:
         ready_replies = [row for row in rejoinder_rows if (row.get("claimant_reply") or row.get("reply_to_counterclaim")) and _is_ready_row(row)]
         add(
             "rejoinder_matrix",
@@ -2650,20 +2949,17 @@ class ArbitrationCaseWorkspaceService:
             ReadinessCheckStatus.READY if ready_replies else ReadinessCheckStatus.BLOCKED,
             "Rejoinder matrix has approved paragraph-wise replies." if ready_replies else "Rejoinder requires approved reply matrix rows.",
         )
-        new_matter = [
-            row
-            for row in rejoinder_rows
-            if _is_positive(row.get("new_matter"))
-            and _is_positive(row.get("permission_required"))
-            and not _is_positive(row.get("permission_obtained"))
-        ]
-        if new_matter:
+        # `unverified`: new-matter rows whose permission no committed receipt backs.
+        if unverified:
+            first = unverified[0]
+            reason = STATE_MESSAGES.get(first["state"])
             add(
                 "rejoinder_new_matter",
                 "rejoinder",
                 ReadinessCheckStatus.NEEDS_LEGAL_REVIEW,
-                "Rejoinder row introduces new matter but required permission has not been obtained.",
-                str(new_matter[0].get("_id")),
+                "Rejoinder row introduces new matter but required permission has not been obtained"
+                + (f": {reason}." if reason else "."),
+                str(first["row"].get("_id")),
             )
 
     async def _persist_readiness(

@@ -17,12 +17,20 @@ PRIVILEGED_MATRIX_FIELDS = {
     "approved_by",
     "approval_log",
     "approval_status",
+    "assigned_reviewer_id",
+    "deleted_at",
+    "deleted_by",
+    "edit_revision",
     "human_approval_status",
+    "last_material_editor_id",
     "last_review_action",
+    "material_contributor_ids",
     "last_reviewed_at",
     "last_reviewed_by",
     "permission_approved_at",
+    "permission_approval_receipt_id",
     "permission_approved_by",
+    "permission_notes",
     "permission_obtained",
     "permission_source_id",
     "projection_hash",
@@ -31,12 +39,31 @@ PRIVILEGED_MATRIX_FIELDS = {
     "readiness_status",
     "rejected_at",
     "rejected_by",
+    "review_assignments",
+    "review_comments",
     "review_completed_roles",
+    "review_required_roles",
     "review_status",
     "source_paragraph_response_id",
     "verified",
     "verification_status",
 }
+
+# Every row `status` that a reader treats as approved or verified: the filing
+# readiness check (`case_workspace._is_ready_row`) and the drafting context
+# (`context.VERIFIED_SOURCE_STATUSES`). Only the review endpoint may confer them.
+APPROVAL_STATUS_VALUES = frozenset(
+    {
+        "approved",
+        "edited_verified",
+        "ready",
+        "selected",
+        "supported",
+        "user_verified",
+        "valid",
+        "verified",
+    }
+)
 
 ALLOWED_AGENT_OPTIONS = {
     "acknowledgement_dates",
@@ -326,11 +353,7 @@ class ArbitrationMatrixRowCreate(BaseModel):
     def _reject_privileged_review_fields(cls, value: Any) -> Any:
         if isinstance(value, dict):
             supplied = PRIVILEGED_MATRIX_FIELDS.intersection(value)
-            if "status" in value and str(value.get("status") or "").lower() in {
-                "approved",
-                "ready",
-                "verified",
-            }:
+            if "status" in value and str(value.get("status") or "").strip().lower() in APPROVAL_STATUS_VALUES:
                 supplied.add("status")
             if supplied:
                 raise ValueError(

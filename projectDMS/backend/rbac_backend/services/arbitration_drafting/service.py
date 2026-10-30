@@ -40,7 +40,7 @@ from .llm_generator import LLMDraftGenerator
 from .case_workspace import ArbitrationCaseWorkspaceService
 from .repository import ArbitrationDraftingRepository, _jsonable
 from .validator import ArbitrationDraftValidator
-from .approval_policy import enforce_author_approver_separation, resolve_gate_role
+from .approval_policy import REVOKED_REJOINDER_PERMISSION, enforce_author_approver_separation, resolve_gate_role
 from .workflow_governance import (
     require_approved_plan_for_generation,
     require_governed_workflow_chain,
@@ -391,19 +391,41 @@ class ArbitrationDraftingService:
             raise HTTPException(status_code=422, detail="A denial requires a reason")
         if not supporting_ids and payload.response_type in {ParagraphResponseType.DENY, ParagraphResponseType.REQUIRE_PROOF}:
             missing = missing or ["Supporting response evidence not selected."]
+        content = {
+            **payload.model_dump(mode="json"),
+            "supporting_source_ids": supporting_ids,
+            "missing_evidence": missing,
+        }
+        existing = next(
+            (row for row in await self.repo.list_paragraph_responses(draft_id) if str(row.get("_id")) == str(response_id)),
+            None,
+        )
+        changes = {
+            **content,
+            "last_material_editor_id": _actor_id(current_user),
+            "updated_by": _actor_id(current_user),
+            "updated_at": datetime.utcnow(),
+        }
+        increment: Optional[Dict[str, int]] = None
+        if existing and any(existing.get(key) != value for key, value in content.items()):
+            # New content: whatever permission the old content held - including one
+            # granted after the read above - does not cover it. The revision lets a
+            # permission decision on the old content detect the rewrite; it is
+            # incremented in the same write, so concurrent rewrites never share one.
+            changes.update(REVOKED_REJOINDER_PERMISSION)
+            increment = {"response_revision": 1}
+        # Compare-and-set on the revision read above: the change and the revocation
+        # were judged against that content, so a rewrite in between refuses this one.
         updated = await self.repo.update_paragraph_response(
             draft_id,
             response_id,
-            {
-                **payload.model_dump(mode="json"),
-                "supporting_source_ids": supporting_ids,
-                "missing_evidence": missing,
-                "last_material_editor_id": _actor_id(current_user),
-                "updated_by": _actor_id(current_user),
-                "updated_at": datetime.utcnow(),
-            },
+            changes,
+            increment=increment,
+            expected_revision=(existing or {}).get("response_revision"),
         )
         if not updated:
+            if existing:
+                raise HTTPException(status_code=409, detail="Paragraph response changed concurrently; reload it and retry")
             raise HTTPException(status_code=404, detail="Paragraph response not found")
         await sync_paragraph_position_projection(
             self.db,

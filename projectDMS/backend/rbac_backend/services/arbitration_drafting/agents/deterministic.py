@@ -13,6 +13,7 @@ from ...publication_policy import (
     synthetic_case_clause_id,
 )
 from ...document_relationship_service import DocumentRelationshipService
+from ..approval_policy import material_change_review_reset
 from ..matrix_registry import MATRIX_COLLECTIONS
 from ..repository import _collect, _jsonable
 
@@ -552,10 +553,46 @@ class DeterministicArbitrationAgent:
             {"case_id": self.case_id, "calculation_id": "Q-CLAIM-SUMMARY", "deleted_at": {"$exists": False}}
         )
         if existing:
-            # Agent-owned rollup: recompute totals on re-run without logging a new record.
-            await collection.update_one(
-                {"_id": existing["_id"], "case_id": self.case_id},
-                {"$set": _jsonable({**summary_fields, "updated_at": datetime.utcnow()})},
+            # Agent-owned rollup, recomputed on re-run. A changed total is new
+            # content: it goes back to review like any other material edit.
+            actor = _actor_id(self.current_user)
+            for _attempt in range(3):
+                changed = sorted(key for key, value in _jsonable(summary_fields).items() if existing.get(key) != value)
+                if not changed:
+                    return
+                now = datetime.utcnow()
+                # Built from the row as just read, so its contributors and audit
+                # entries are carried forward; written only at that revision.
+                reset = material_change_review_reset(self._status_defaults("quantum-annexures"), existing, changed, actor, now)
+                result = await collection.update_one(
+                    {
+                        "_id": existing["_id"],
+                        "case_id": self.case_id,
+                        "deleted_at": {"$exists": False},
+                        "edit_revision": existing.get("edit_revision"),
+                    },
+                    {"$set": _jsonable({**summary_fields, **reset, "updated_by": actor, "updated_at": now}), "$inc": {"edit_revision": 1}},
+                )
+                if getattr(result, "matched_count", 0):
+                    break
+                existing = await collection.find_one(
+                    {"_id": existing["_id"], "case_id": self.case_id, "deleted_at": {"$exists": False}}
+                )
+                if not existing:
+                    return
+            else:
+                self.warnings.append("Claim summary rollup kept changing concurrently and was not updated; re-run the agent.")
+                return
+            self.created_records.append(
+                {
+                    "agent_type": agent_type,
+                    "matrix": "quantum-annexures",
+                    "collection": MATRIX_COLLECTIONS["quantum-annexures"],
+                    "row_id": existing.get("_id"),
+                    "label": "Claim summary rollup",
+                    "source_id": "Q-CLAIM-SUMMARY",
+                    "action": "updated",
+                }
             )
             return
         await self._insert_matrix_row(

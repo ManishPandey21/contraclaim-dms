@@ -101,6 +101,20 @@ jobs:
       - name: Run backend test suite
         working-directory: projectDMS
         run: python -m pytest backend/rbac_backend/tests -q
+      # The exhibit path-confinement suite includes a symlink-escape test that can
+      # only run where symlinks can be created. It skips on Windows by design; on
+      # this runner it must execute, and a skip would read as green in the step
+      # above, so the module is re-run here and fails unless every test ran.
+      - name: Run the exhibit path-confinement suite (must run, not skip)
+        working-directory: projectDMS
+        run: |
+          python -m pytest -q -rs --junitxml=exhibit-confinement.xml             backend/rbac_backend/tests/test_arbitration_exhibit_source_resolution.py
+          python scripts/assert_suites_ran.py exhibit-confinement.xml             backend/rbac_backend/tests/test_arbitration_exhibit_source_resolution.py
+          # The module check passes as long as some test in it ran; the symlink
+          # test itself must also be in the report (a rename, removal or
+          # deselection would otherwise go unnoticed). With no skips allowed
+          # above, being in the report means it executed.
+          grep -q 'name="test_a_recorded_symlink_escaping_the_storage_roots_is_refused"' exhibit-confinement.xml             || { echo "symlink-escape test did not run" >&2; exit 1; }
       # The canonical-relationship suites need transactions, which the `mongo`
       # service above (a standalone mongod) cannot give, so in the step above they
       # skip. CL-2: a disposable single-node replica set, used by these suites
@@ -168,6 +182,8 @@ jobs:
           # extraction -> review -> publication, plus the live-index hard gate,
           # retry/race idempotency, purge and restore, over real HTTP and Mongo.
           ENCLOSURE_CHILD_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          # FU-1: rejoinder permission receipt commit vs stale-receipt cleanup.
+          ARBITRATION_PERMISSION_RECEIPTS_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
         # Every real-Mongo module is in this list or excused by name, with a
         # reason, in test_ci_real_mongo_coverage.py: a module in neither is red.
         # That is how the reprojection review, source-mutation and
@@ -204,6 +220,8 @@ jobs:
             backend/rbac_backend/tests/integration/test_contract_source_mutation_mongo.py
             backend/rbac_backend/tests/integration/test_contract_generic_ingestion_isolation_mongo.py
             backend/rbac_backend/tests/integration/test_tags_subtag_batch_mongo.py
+            backend/rbac_backend/tests/integration/test_arbitration_permission_receipts_mongo.py
+            backend/rbac_backend/tests/integration/test_arbitration_permission_decision_race_mongo.py
           )
           python -m pytest -q -rs --junitxml=real-mongo-relationships.xml "${suites[@]}" \
             | tee real-mongo-relationships.log
