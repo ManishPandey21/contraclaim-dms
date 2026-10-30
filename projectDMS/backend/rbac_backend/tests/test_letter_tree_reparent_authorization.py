@@ -34,7 +34,11 @@ from rbac_backend.routers.letters import LetterController, get_letter_controller
 from rbac_backend.routers.letters import router as letters_router
 from rbac_backend.services.authorization_service import AuthorizationService
 from rbac_backend.utils.error_handler import AuthorizationError
-from rbac_backend.services.conversation_service import DEPENDENT_LETTER_BLOCKS_MOVE, ConversationService
+from rbac_backend.services.conversation_service import (
+    DEPENDENT_LETTER_BLOCKS_MOVE,
+    PARENT_ANCESTRY_BLOCKS_MOVE,
+    ConversationService,
+)
 from rbac_backend.services.entitlement_service import EntitlementService
 from rbac_backend.services.letter_service import LetterService
 from rbac_backend.services.permission_service import PermissionService
@@ -772,3 +776,107 @@ async def test_the_same_move_succeeds_when_every_descendant_is_the_callers(db: _
     after = _snapshot(db)
     assert after[CHILD_A1] == (BRANCH_A1, [ROOT_A1, BRANCH_A1], 2)
     assert after[GRAND_A1] == (CHILD_A1, [ROOT_A1, BRANCH_A1, CHILD_A1], 3)
+
+
+# ---------------------------------------------------------------------------
+# Reparent: the new parent's stored ancestry must be a same-scope chain
+#
+# A move copies the new parent's ancestry into the moved letter and every
+# descendant. Copying an id that names a letter in another organisation or
+# project, a missing letter, or no letter at all would carry that anomaly into
+# the moved subtree (and make the foreign letter's own moves see it). Filtering
+# it out instead would break `ancestors == parent.ancestors + [parent]`, so the
+# move is refused whole, with one answer for every reason.
+# ---------------------------------------------------------------------------
+
+
+def _parent_ancestry(db: _Database, ancestors: list[Any]) -> None:
+    for row in db.letters.docs:
+        if str(row["_id"]) == BRANCH_A1:
+            row["ancestors"] = ancestors
+            row["depth"] = len(ancestors)
+
+
+_UNVERIFIABLE_ANCESTRY = {
+    "foreign organisation": lambda: [ROOT_B1, ROOT_A1],
+    "foreign organisation as ObjectId": lambda: [ObjectId(ROOT_B1), ROOT_A1],
+    "sibling project": lambda: [SIBLING_A2, ROOT_A1],
+    "missing letter": lambda: [str(ObjectId()), ROOT_A1],
+    "malformed id": lambda: ["not-a-letter-id", ROOT_A1],
+}
+
+
+@pytest.mark.parametrize("case", sorted(_UNVERIFIABLE_ANCESTRY))
+@pytest.mark.parametrize("user", [PROJECT_A1_EDITOR, ORG_A_ADMIN, SUPERADMIN], ids=["project", "org", "superadmin"])
+async def test_a_parent_whose_ancestry_leaves_the_project_is_refused_before_any_write(
+    db: _Database, case: str, user: Any
+) -> None:
+    _without_foreign(db)
+    _parent_ancestry(db, _UNVERIFIABLE_ANCESTRY[case]())
+    before = _rows(db)
+
+    response = await _move_child_under_branch(db, user)
+
+    assert response.status_code == 409, response.text
+    assert PARENT_ANCESTRY_BLOCKS_MOVE in response.text
+    assert _rows(db) == before
+    assert not _leaks(response.text, ROOT_B1, SIBLING_A2)
+
+
+async def test_every_unverifiable_parent_ancestry_gets_the_same_answer(db: _Database) -> None:
+    answers = set()
+    for case in sorted(_UNVERIFIABLE_ANCESTRY):
+        database = _seeded()
+        _without_foreign(database)
+        _parent_ancestry(database, _UNVERIFIABLE_ANCESTRY[case]())
+        response = await _move_child_under_branch(database, PROJECT_A1_EDITOR)
+        answers.add((response.status_code, response.content))
+    assert len(answers) == 1, answers
+
+
+async def test_a_parent_with_a_valid_multi_level_ancestry_is_copied_exactly(db: _Database) -> None:
+    # Same-project control: BRANCH moves under GRAND, whose ancestry [ROOT, CHILD]
+    # is a verified chain; it is copied unchanged and extended with GRAND.
+    _without_foreign(db)
+    async with _as(db, PROJECT_A1_EDITOR) as client:
+        response = await client.post(f"/api/letters/{BRANCH_A1}/reparent", json={"new_parent_id": GRAND_A1})
+
+    assert response.status_code == 200, response.text
+    assert _snapshot(db)[BRANCH_A1] == (GRAND_A1, [ROOT_A1, CHILD_A1, GRAND_A1], 3)
+
+
+async def test_a_same_project_ancestor_the_caller_cannot_read_does_not_block_the_move(db: _Database) -> None:
+    # The ancestry check is about scope, not readability: a drafter whose parent
+    # descends from an unassigned same-project letter moves as before, so the
+    # check reveals nothing about assignment.
+    _without_foreign(db)
+    for letter_id in (CHILD_A1, BRANCH_A1, GRAND_A1):
+        _assign(db, letter_id, DRAFTER_EDITOR_A1)  # ROOT_A1 stays unassigned
+
+    response = await _move_child_under_branch(db, DRAFTER_EDITOR_A1)
+
+    assert response.status_code == 200, response.text
+
+
+async def test_a_valid_parent_ancestry_stored_as_object_ids_is_accepted(db: _Database) -> None:
+    # Ancestry entries are stored as strings or ObjectIds (letter `_id`s are
+    # always ObjectIds: `create_letter` lets Mongo assign them and `get_letter`
+    # reads only by ObjectId). An ObjectId-typed same-project chain still moves.
+    _without_foreign(db)
+    _parent_ancestry(db, [ObjectId(ROOT_A1)])
+
+    response = await _move_child_under_branch(db, PROJECT_A1_EDITOR)
+
+    assert response.status_code == 200, response.text
+    assert _snapshot(db)[CHILD_A1] == (BRANCH_A1, [ROOT_A1, BRANCH_A1], 2)
+
+
+async def test_a_cycle_is_still_refused_as_400_when_the_parent_ancestry_is_valid(db: _Database) -> None:
+    # The cycle check runs before the ancestry check and keeps its own answer.
+    before = _rows(db)
+    async with _as(db, PROJECT_A1_EDITOR) as client:
+        response = await client.post(f"/api/letters/{CHILD_A1}/reparent", json={"new_parent_id": GRAND_A1})
+
+    assert response.status_code == 400, response.text
+    assert PARENT_ANCESTRY_BLOCKS_MOVE not in response.text
+    assert _rows(db) == before

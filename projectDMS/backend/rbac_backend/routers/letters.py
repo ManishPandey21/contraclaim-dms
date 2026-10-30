@@ -63,7 +63,7 @@ from ..dependencies import get_notification_service
 
 
 
-from ..services.conversation_service import DEPENDENT_LETTER_BLOCKS_MOVE, ConversationService
+from ..services.conversation_service import DEPENDENT_LETTER_BLOCKS_MOVE, PARENT_ANCESTRY_BLOCKS_MOVE, ConversationService
 from ..services.strategy_context_service import StrategyContextService
 
 
@@ -1201,6 +1201,13 @@ class LetterController:
 
 
             await self._validate_reparenting(letter, new_parent)
+
+            # The parent's ancestry is copied into the moved letter and every
+            # descendant, so it must be a same-scope chain of existing letters.
+            if not await self.conversation_service.ancestry_in_scope(
+                new_parent.ancestors, letter.organization_id, letter.project_id
+            ):
+                raise LetterError(PARENT_ANCESTRY_BLOCKS_MOVE, status.HTTP_409_CONFLICT)
 
 
 

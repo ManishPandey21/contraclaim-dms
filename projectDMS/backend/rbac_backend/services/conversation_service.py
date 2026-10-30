@@ -17,6 +17,9 @@ logger = logging.getLogger(__name__)
 #: One answer for every reason a reparent's dependent letters block it, so the
 #: response never reveals whether a letter the caller cannot see exists.
 DEPENDENT_LETTER_BLOCKS_MOVE = "A dependent letter blocks this move"
+#: One answer for every reason the new parent's stored ancestry cannot be
+#: copied (an ancestor that is missing, malformed, or in another scope).
+PARENT_ANCESTRY_BLOCKS_MOVE = "The new parent's thread cannot be verified"
 
 
 class ConversationService:
@@ -330,6 +333,28 @@ class ConversationService:
                 # rewritten; skipping it would leave its threading stale.
                 raise LetterError(DEPENDENT_LETTER_BLOCKS_MOVE, 409) from exc
         return descendants
+
+    async def ancestry_in_scope(self, ancestors: Iterable[Any], organization_id: Any, project_id: Any) -> bool:
+        """Whether every ancestor id names an existing letter in this organisation and project.
+
+        A reparent copies the new parent's ancestry into the moved letter and its
+        descendants, so an id that is malformed, missing or in another scope must
+        stop the move rather than spread. Filtering it out instead would break
+        ``ancestors == parent.ancestors + [parent]``.
+        """
+        ids = {str(ancestor) for ancestor in ancestors or []}
+        if not ids:
+            return True
+        if not all(ObjectId.is_valid(ancestor) for ancestor in ids):
+            return False
+        db = await self._get_db()
+        rows = await db.letters.find(
+            {"_id": {"$in": [ObjectId(ancestor) for ancestor in ids]}},
+            {"organization_id": 1, "project_id": 1},
+        ).to_list(length=None)
+        scope = (str(organization_id or ""), str(project_id or ""))
+        found = {str(row["_id"]): (str(row.get("organization_id") or ""), str(row.get("project_id") or "")) for row in rows}
+        return all(found.get(ancestor) == scope for ancestor in ids)
 
     async def reparent_letter_atomic(
         self,
