@@ -1,14 +1,25 @@
 ﻿from __future__ import annotations
 
+import logging
 from collections import defaultdict, deque
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional, Set
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Set
 
 from bson import ObjectId
 
 from ..core.database import get_database
 from ..models.letter import Letter, ConversationTree
 from .letter_service import LetterService, LetterServiceError
+from ..utils.error_handler import LetterError
+
+logger = logging.getLogger(__name__)
+
+#: One answer for every reason a reparent's dependent letters block it, so the
+#: response never reveals whether a letter the caller cannot see exists.
+DEPENDENT_LETTER_BLOCKS_MOVE = "A dependent letter blocks this move"
+#: One answer for every reason the new parent's stored ancestry cannot be
+#: copied (an ancestor that is missing, malformed, or in another scope).
+PARENT_ANCESTRY_BLOCKS_MOVE = "The new parent's thread cannot be verified"
 
 
 class ConversationService:
@@ -61,11 +72,12 @@ class ConversationService:
         pipeline and the drafting context builder) whose semantics must not
         change implicitly.
 
-        The boundary is the canonical `build_scope_query`, asked of Mongo so the
+        The boundary is the canonical letter-listing query (`build_scope_query`
+        plus the drafter-assignment rule), asked of Mongo so the
         one row-visibility primitive decides. The ANCHOR letter's own
         organisation and project narrow INSIDE that entitlement - a value
-        outside it denies every row - and are never the authority source. No
-        role name is read here.
+        outside it denies every row - and are never the authority source. Role
+        names are read only by that builder, for the drafter rule.
         """
         ordered = await self.get_conversation_chain(letter_id, current_user)
         if not ordered or current_user is None:
@@ -74,7 +86,7 @@ class ConversationService:
         # Private to `core.security` by name only; it is the canonical id
         # expansion that `build_scope_query` itself uses, and reimplementing it
         # here would let the two drift.
-        from ..core.security import build_scope_query, _expand_object_ids
+        from ..core.security import _expand_object_ids
 
         anchor = next(
             (letter for letter in ordered if str(letter.id) == str(letter_id)), None
@@ -90,10 +102,14 @@ class ConversationService:
             else None
         )
 
-        scope = build_scope_query(
+        # The letter-listing query: `build_scope_query` plus the per-letter rules
+        # it cannot express (a contract drafter sees only assigned letters).
+        # Drafting, LangGraph and strategy consumers read the thread through here.
+        from .authorization_service import AuthorizationService
+
+        scope = await AuthorizationService().build_letter_query(
             current_user,
-            organization_id=organization_id,
-            project_id=project_id,
+            {"organization_id": organization_id, "project_id": project_id},
         )
 
         identifiers = [str(letter.id) for letter in ordered if letter.id]
@@ -142,7 +158,211 @@ class ConversationService:
 
         return build_node(root)
 
-    async def reparent_letter_atomic(self, letter_id: str, new_parent_id: str, current_user: Any) -> None:
+    async def build_authorized_conversation_tree(
+        self,
+        letter_id: str,
+        current_user: Any,
+        include: Optional[Callable[[Letter], Awaitable[bool]]] = None,
+    ) -> Optional[ConversationTree]:
+        """The conversation tree, bounded by the ACTOR's canonical row visibility.
+
+        Same boundary as `get_authorized_conversation_chain`: every letter is read
+        through `build_scope_query`, narrowed to the ANCHOR letter's organisation
+        and project. Association (`conversation_id`, `previous_letter_id`,
+        `ancestors`) only nominates candidates; a letter outside that scope is
+        never loaded. A hidden letter is pruned and its visible descendants are
+        re-attached to their nearest visible ancestor.
+
+        Returns None when the anchor itself is not visible to the actor. The
+        caller authorises the anchor separately (`check_letter_access`).
+        `include`, when given, applies the per-letter rules row scope cannot
+        express (drafter assignment) to every other member.
+        """
+        if current_user is None:
+            return None
+        letter_service = await self._get_letter_service()
+        seed = await letter_service.get_letter(letter_id)
+        if not seed or not seed.id:
+            return None
+        seed_id = str(seed.id)
+
+        from ..core.security import build_scope_query, _expand_object_ids
+
+        scope = build_scope_query(
+            current_user,
+            organization_id=str(seed.organization_id) if seed.organization_id else None,
+            project_id=str(seed.project_id) if seed.project_id else None,
+        )
+        db = await self._get_db()
+
+        async def visible(query: Dict[str, Any]) -> List[Letter]:
+            bounded = {"$and": [query, scope]} if scope else query
+            letters: List[Letter] = []
+            for row in await db.letters.find(bounded).to_list(length=None):
+                try:
+                    letters.append(Letter(**letter_service._augment_letter_document(row)))
+                except Exception:
+                    # Left out of the tree, like a letter the caller cannot read.
+                    logger.warning("Letter %s is unreadable (stored row failed validation)", row.get("_id"))
+                    continue
+            return letters
+
+        family: Dict[str, Letter] = {}
+        queue: deque[str] = deque()
+
+        def enqueue(letter: Letter) -> None:
+            letter_id = str(letter.id) if letter.id else ""
+            if letter_id and letter_id not in family:
+                family[letter_id] = letter
+                queue.append(letter_id)
+
+        for letter in await visible({"_id": {"$in": _expand_object_ids([seed_id])}}):
+            enqueue(letter)
+        if seed_id not in family:
+            return None
+        if seed.conversation_id:
+            for letter in await visible({"conversation_id": seed.conversation_id}):
+                enqueue(letter)
+
+        while queue:
+            current = family[queue.popleft()]
+            related = [str(value) for value in [current.previous_letter_id, *(current.ancestors or [])] if value]
+            if related:
+                for letter in await visible({"_id": {"$in": _expand_object_ids(related)}}):
+                    enqueue(letter)
+            for letter in await visible({"previous_letter_id": str(current.id)}):
+                enqueue(letter)
+
+        if include is not None:
+            # Per-letter rules beyond row scope (for example drafter assignment).
+            family = {key: member for key, member in family.items() if key == seed_id or await include(member)}
+        family = await self.with_visible_threading(family)
+        return self._pruned_tree(family[seed_id], family)
+
+    async def with_visible_threading(self, letters: Dict[str, Letter]) -> Dict[str, Letter]:
+        """Copies of ``letters`` whose threading fields name only letters in ``letters``.
+
+        `previous_letter_id` becomes the nearest returned ancestor (or None),
+        `ancestors` keeps only returned letters, and a `conversation_id` that is
+        the id of a letter not returned is cleared. An opaque conversation key
+        that names no letter is kept.
+        """
+        from ..core.security import _expand_object_ids
+
+        visible = set(letters)
+        unseen = {
+            str(letter.conversation_id)
+            for letter in letters.values()
+            if letter.conversation_id and str(letter.conversation_id) not in visible
+        }
+        hidden_conversations: Set[str] = set()
+        if unseen:
+            db = await self._get_db()
+            rows = await db.letters.find({"_id": {"$in": _expand_object_ids(sorted(unseen))}}, {"_id": 1}).to_list(length=None)
+            hidden_conversations = {str(row.get("_id")) for row in rows}
+
+        redacted: Dict[str, Letter] = {}
+        for key, letter in letters.items():
+            candidates = [letter.previous_letter_id, *reversed(letter.ancestors or [])]
+            parent = next(
+                (str(candidate) for candidate in candidates if candidate and str(candidate) in visible and str(candidate) != key),
+                None,
+            )
+            update: Dict[str, Any] = {
+                "previous_letter_id": parent,
+                "ancestors": [str(ancestor) for ancestor in (letter.ancestors or []) if str(ancestor) in visible],
+            }
+            if letter.conversation_id and str(letter.conversation_id) in hidden_conversations:
+                update["conversation_id"] = None
+            redacted[key] = letter.model_copy(update=update)
+        return redacted
+
+    @staticmethod
+    def _pruned_tree(seed: Letter, family: Dict[str, Letter]) -> ConversationTree:
+        def visible_parent(letter: Letter) -> Optional[str]:
+            candidates = [letter.previous_letter_id, *reversed(letter.ancestors or [])]
+            for candidate in candidates:
+                if candidate and str(candidate) in family and str(candidate) != letter.id:
+                    return str(candidate)
+            return None
+
+        parent_of = {letter_id: visible_parent(letter) for letter_id, letter in family.items()}
+
+        root_id = str(seed.id)
+        seen: Set[str] = {root_id}
+        while True:
+            parent = parent_of.get(root_id)
+            if not parent or parent in seen:
+                break
+            root_id = parent
+            seen.add(root_id)
+
+        children_map: Dict[str, List[Letter]] = defaultdict(list)
+        for letter_id, parent_id in parent_of.items():
+            if parent_id:
+                children_map[parent_id].append(family[letter_id])
+
+        built: Set[str] = set()
+
+        def build_node(node: Letter) -> ConversationTree:
+            built.add(str(node.id))
+            ordered_children = sorted(
+                (child for child in children_map.get(str(node.id), []) if str(child.id) not in built),
+                key=lambda item: (
+                    getattr(item, "depth", 0) if getattr(item, "depth", None) is not None else 0,
+                    getattr(item, "created_at", None) or getattr(item, "createdAt", None) or datetime.min,
+                ),
+            )
+            return ConversationTree(letter=node, children=[build_node(child) for child in ordered_children])
+
+        return build_node(family[root_id])
+
+    async def get_descendants(self, letter_id: str) -> List[Letter]:
+        """Every letter whose stored ancestry includes ``letter_id`` (what a reparent rewrites)."""
+        from ..core.security import _expand_object_ids
+
+        letter_service = await self._get_letter_service()
+        db = await self._get_db()
+        descendants: List[Letter] = []
+        query = {"ancestors": {"$in": _expand_object_ids([str(letter_id)])}}
+        for row in await db.letters.find(query).to_list(length=None):
+            try:
+                descendants.append(Letter(**letter_service._augment_letter_document(row)))
+            except Exception as exc:
+                # A descendant that cannot be read can be neither authorised nor
+                # rewritten; skipping it would leave its threading stale.
+                raise LetterError(DEPENDENT_LETTER_BLOCKS_MOVE, 409) from exc
+        return descendants
+
+    async def ancestry_in_scope(self, ancestors: Iterable[Any], organization_id: Any, project_id: Any) -> bool:
+        """Whether every ancestor id names an existing letter in this organisation and project.
+
+        A reparent copies the new parent's ancestry into the moved letter and its
+        descendants, so an id that is malformed, missing or in another scope must
+        stop the move rather than spread. Filtering it out instead would break
+        ``ancestors == parent.ancestors + [parent]``.
+        """
+        ids = {str(ancestor) for ancestor in ancestors or []}
+        if not ids:
+            return True
+        if not all(ObjectId.is_valid(ancestor) for ancestor in ids):
+            return False
+        db = await self._get_db()
+        rows = await db.letters.find(
+            {"_id": {"$in": [ObjectId(ancestor) for ancestor in ids]}},
+            {"organization_id": 1, "project_id": 1},
+        ).to_list(length=None)
+        scope = (str(organization_id or ""), str(project_id or ""))
+        found = {str(row["_id"]): (str(row.get("organization_id") or ""), str(row.get("project_id") or "")) for row in rows}
+        return all(found.get(ancestor) == scope for ancestor in ids)
+
+    async def reparent_letter_atomic(
+        self,
+        letter_id: str,
+        new_parent_id: str,
+        current_user: Any,
+        descendant_ids: Optional[List[str]] = None,
+    ) -> None:
         letter_service = await self._get_letter_service()
         db = await self._get_db()
 
@@ -173,7 +393,7 @@ class ConversationService:
             },
         )
 
-        await self._recompute_descendants(letter.id, new_ancestors)
+        await self._recompute_descendants(letter.id, new_ancestors, descendant_ids=descendant_ids)
 
     async def _load_conversation_family(self, seed: Letter) -> Dict[str, Letter]:
         letter_service = await self._get_letter_service()
@@ -233,18 +453,24 @@ class ConversationService:
                 return candidate
         return seed
 
-    async def _recompute_descendants(self, root_id: str, base_ancestors: List[str]) -> None:
+    async def _recompute_descendants(
+        self, root_id: str, base_ancestors: List[str], descendant_ids: Optional[List[str]] = None
+    ) -> None:
+        from ..core.security import _expand_object_ids
+
         db = await self._get_db()
-        cursor = db.letters.find({"ancestors": root_id})
+        # Ancestry may be stored as strings or ObjectIds. When the caller
+        # authorised a descendant set, rewrite exactly that set.
+        query: Dict[str, Any] = {"ancestors": {"$in": _expand_object_ids([root_id])}}
+        if descendant_ids is not None:
+            query["_id"] = {"$in": _expand_object_ids(descendant_ids)}
+        cursor = db.letters.find(query)
         descendants = await cursor.to_list(length=None)
 
         for doc in descendants:
-            try:
-                letter = Letter(**doc)
-            except Exception:
-                continue
-
-            ancestors = [str(a) for a in (letter.ancestors or [])]
+            # Read the stored ancestry directly: parsing the raw row as `Letter`
+            # fails on its ObjectId `_id`, which silently skipped every descendant.
+            ancestors = [str(a) for a in (doc.get("ancestors") or [])]
             if root_id in ancestors:
                 tail = ancestors[ancestors.index(root_id) + 1 :]
             else:

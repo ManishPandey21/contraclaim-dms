@@ -7,6 +7,8 @@ from pymongo.database import Database
 from bson.objectid import ObjectId
 from bson.errors import InvalidId
 
+from pydantic import ValidationError as PydanticValidationError
+
 from ..models.letter import Letter
 from ..models.notification import NotificationContext, NotificationType
 from ..models.ai_models import (
@@ -40,6 +42,11 @@ class LetterNotFoundError(LetterServiceError):
 
 class InvalidLetterIdError(LetterServiceError):
     """Exception raised when letter ID is invalid"""
+    pass
+
+
+class CorruptLetterError(LetterServiceError):
+    """A stored letter row that does not validate. Its contents are never logged."""
     pass
 
 class InvalidLetterTransitionError(LetterServiceError):
@@ -234,11 +241,17 @@ class LetterService:
                 return None
 
             prepared = self._augment_letter_document(letter_data)
-            letter = Letter(**prepared)
+            try:
+                letter = Letter(**prepared)
+            except PydanticValidationError as exc:
+                # The validation message carries the stored values; log the
+                # id and the error count only.
+                logger.error("Stored letter %s failed validation (%d errors)", letter_id, exc.error_count())
+                raise CorruptLetterError(f"Stored letter {letter_id} failed validation") from None
             logger.info(f"Retrieved letter: {letter_id}")
             return letter
 
-        except InvalidLetterIdError:
+        except (InvalidLetterIdError, CorruptLetterError):
             raise
         except Exception as e:
             logger.error(f"Failed to retrieve letter {letter_id}: {e}")
