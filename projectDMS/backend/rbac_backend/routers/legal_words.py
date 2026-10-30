@@ -24,7 +24,7 @@ from ..models.legal_word import (
     TodayLegalWordsResponse,
 )
 from ..services.legal_word_service import LegalWordService, LegalWordServiceError
-from ..utils.error_handler import handle_exceptions
+from ..utils.error_handler import BaseDomainError, handle_exceptions
 
 
 logger = logging.getLogger(__name__)
@@ -54,7 +54,7 @@ async def get_today_legal_words(
         return await service.get_today_words(date_value)
     except LegalWordServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as exc:
         logger.exception("Failed to get today's legal words")
@@ -76,7 +76,7 @@ async def search_legal_word(
         return await service.search_or_request_word(payload.query, current_user)
     except LegalWordServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as exc:
         logger.exception("Failed to search legal word")
@@ -117,7 +117,7 @@ async def list_published_legal_words(
         )
     except LegalWordServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as exc:
         logger.exception("Failed to list published legal words")
@@ -163,7 +163,7 @@ async def list_admin_legal_words(
         )
     except LegalWordServiceError as exc:
         raise _raise_service_error(exc) from exc
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as exc:
         logger.exception("Failed to list admin legal words")
@@ -187,7 +187,7 @@ async def create_admin_legal_word(
         return await service.create_word(payload, current_user)
     except LegalWordServiceError as exc:
         raise _raise_service_error(exc) from exc
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as exc:
         logger.exception("Failed to create legal word")
@@ -210,7 +210,7 @@ async def suggest_admin_legal_words_with_ai(
         return await service.suggest_words_with_ai(current_user)
     except LegalWordServiceError as exc:
         raise _raise_service_error(exc) from exc
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as exc:
         logger.exception("Failed to suggest legal words with AI")
@@ -235,7 +235,7 @@ async def update_admin_legal_word(
         return await service.update_word(word_id, payload, current_user)
     except LegalWordServiceError as exc:
         raise _raise_service_error(exc) from exc
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as exc:
         logger.exception("Failed to update legal word %s", word_id)
@@ -259,7 +259,7 @@ async def approve_admin_legal_word(
         return await service.approve_word(word_id, current_user)
     except LegalWordServiceError as exc:
         raise _raise_service_error(exc) from exc
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as exc:
         logger.exception("Failed to approve legal word %s", word_id)
@@ -283,7 +283,7 @@ async def reject_admin_legal_word(
         return await service.reject_word(word_id, current_user)
     except LegalWordServiceError as exc:
         raise _raise_service_error(exc) from exc
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as exc:
         logger.exception("Failed to reject legal word %s", word_id)
@@ -307,7 +307,7 @@ async def deactivate_admin_legal_word(
         return await service.deactivate_word(word_id, current_user)
     except LegalWordServiceError as exc:
         raise _raise_service_error(exc) from exc
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as exc:
         logger.exception("Failed to deactivate legal word %s", word_id)
@@ -336,7 +336,7 @@ async def schedule_admin_legal_word(
         )
     except LegalWordServiceError as exc:
         raise _raise_service_error(exc) from exc
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as exc:
         logger.exception("Failed to schedule legal word %s", word_id)
@@ -365,7 +365,7 @@ async def publish_admin_legal_word(
         )
     except LegalWordServiceError as exc:
         raise _raise_service_error(exc) from exc
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as exc:
         logger.exception("Failed to publish legal word %s", word_id)
@@ -394,7 +394,7 @@ async def unpublish_admin_legal_word(
         )
     except LegalWordServiceError as exc:
         raise _raise_service_error(exc) from exc
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as exc:
         logger.exception("Failed to unpublish legal word %s", word_id)
@@ -418,7 +418,7 @@ async def delete_admin_legal_word(
         return await service.delete_word(word_id, current_user)
     except LegalWordServiceError as exc:
         raise _raise_service_error(exc) from exc
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as exc:
         logger.exception("Failed to delete legal word %s", word_id)

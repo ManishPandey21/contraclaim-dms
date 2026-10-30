@@ -12,6 +12,7 @@ from rbac_backend.routers.claims import create_claim
 from rbac_backend.services.claim_service import ClaimService
 from rbac_backend.services.policy_service import PolicyService
 from rbac_backend.services.scope_service import ScopeService
+from rbac_backend.tests.selection_fixtures import selection
 
 
 # --- fakes ----------------------------------------------------------------
@@ -192,5 +193,10 @@ async def test_update_and_delete():
 async def test_create_claim_denies_cross_tenant():
     payload = ClaimCreate(title="X", organization_id="org-B", project_id="proj-B")
     with pytest.raises(HTTPException) as exc:
-        await create_claim(payload, db=_DB(), current_user=_user(org="org-A"), policy=_policy())
+        # The selection is the body's own project, so the tenant gate is what answers.
+        db = _DB()
+        await create_claim(
+            payload, db=db, current_user=_user(org="org-A"), policy=_policy(),
+            selection=selection(db, "org-B", "proj-B"),
+        )
     assert exc.value.status_code == 403

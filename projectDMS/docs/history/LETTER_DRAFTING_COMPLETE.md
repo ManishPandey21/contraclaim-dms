@@ -4,7 +4,7 @@
 
 **Purpose**: Comprehensive analysis of the current letter drafting workflow with detailed improvement recommendations and a complete backend redesign plan.
 
-**Date**: February 2025  
+**Date**: February 2025
 **Status**: Analysis Complete - Ready for Implementation
 
 ---
@@ -1166,21 +1166,21 @@ CREATE TABLE letters (
     letter_no VARCHAR(100) UNIQUE NOT NULL,
     organization_id UUID NOT NULL,
     project_id UUID NOT NULL,
-    
+
     -- Metadata
     subject TEXT NOT NULL,
     recipient VARCHAR(255),
     status VARCHAR(50) NOT NULL,
-    
+
     -- Content
     content TEXT,
     current_draft_version INT DEFAULT 0,
-    
+
     -- Strategy
     strategy_role VARCHAR(50),
     strategy_recipient VARCHAR(100),
     strategy_plan_id UUID REFERENCES strategy_plans(id),
-    
+
     -- Timestamps
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW(),
@@ -1191,7 +1191,7 @@ CREATE TABLE letters (
     review_started_at TIMESTAMP,
     approved_at TIMESTAMP,
     finalized_at TIMESTAMP,
-    
+
     -- Durations (in hours)
     duration_input DECIMAL(10,2),
     duration_strategy DECIMAL(10,2),
@@ -1199,18 +1199,18 @@ CREATE TABLE letters (
     duration_review DECIMAL(10,2),
     duration_approval DECIMAL(10,2),
     duration_total DECIMAL(10,2),
-    
+
     -- Users
     created_by UUID NOT NULL,
     assigned_to UUID,
     reviewed_by UUID,
     approved_by UUID,
-    
+
     -- Files
     template_key VARCHAR(255),
     s3_key_docx VARCHAR(500),
     s3_key_pdf VARCHAR(500),
-    
+
     CONSTRAINT fk_organization FOREIGN KEY (organization_id) REFERENCES organizations(id),
     CONSTRAINT fk_project FOREIGN KEY (project_id) REFERENCES projects(id),
     CONSTRAINT fk_created_by FOREIGN KEY (created_by) REFERENCES users(id)
@@ -1227,27 +1227,27 @@ CREATE TABLE draft_versions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     letter_id UUID NOT NULL REFERENCES letters(id) ON DELETE CASCADE,
     version INT NOT NULL,
-    
+
     -- Content
     body TEXT NOT NULL,
     key_points JSONB,
-    
+
     -- Metadata
     created_at TIMESTAMP DEFAULT NOW(),
     created_by UUID NOT NULL REFERENCES users(id),
-    
+
     -- AI Generation
     model_used VARCHAR(100),
     prompt_template TEXT,
     generation_time_ms INT,
-    
+
     -- Sources
     sources JSONB,
-    
+
     -- Review
     reviewer_findings JSONB,
     is_approved BOOLEAN DEFAULT FALSE,
-    
+
     CONSTRAINT unique_letter_version UNIQUE (letter_id, version)
 );
 
@@ -1259,7 +1259,7 @@ CREATE INDEX idx_draft_versions_letter ON draft_versions(letter_id, version DESC
 CREATE TABLE strategy_plans (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     letter_id UUID NOT NULL REFERENCES letters(id) ON DELETE CASCADE,
-    
+
     -- Plan Content
     plan_text TEXT NOT NULL,
     tone_approach JSONB,
@@ -1267,24 +1267,24 @@ CREATE TABLE strategy_plans (
     specific_responses JSONB,
     risk_mitigation JSONB,
     desired_outcome JSONB,
-    
+
     -- Context
     contractor_context TEXT,
     engineer_context TEXT,
     employer_context TEXT,
     summary_points JSONB,
-    
+
     -- Metadata
     created_at TIMESTAMP DEFAULT NOW(),
     created_by UUID NOT NULL REFERENCES users(id),
     approved_at TIMESTAMP,
     approved_by UUID REFERENCES users(id),
-    
+
     -- AI Generation
     model_used VARCHAR(100),
     run_id VARCHAR(100),
     trace JSONB,
-    
+
     CONSTRAINT fk_letter FOREIGN KEY (letter_id) REFERENCES letters(id)
 );
 
@@ -1297,16 +1297,16 @@ CREATE TABLE letter_context_documents (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     letter_id UUID NOT NULL REFERENCES letters(id) ON DELETE CASCADE,
     document_id UUID NOT NULL,
-    
+
     -- Selection
     selected_at TIMESTAMP DEFAULT NOW(),
     selected_by UUID NOT NULL REFERENCES users(id),
     selection_source VARCHAR(50), -- 'manual', 'ai_suggested', 'fallback'
-    
+
     -- Metadata
     document_type VARCHAR(50), -- 'contract', 'letter', 'clause'
     relevance_score DECIMAL(5,4),
-    
+
     CONSTRAINT unique_letter_document UNIQUE (letter_id, document_id)
 );
 
@@ -1318,30 +1318,30 @@ CREATE INDEX idx_context_docs_letter ON letter_context_documents(letter_id);
 CREATE TABLE contract_clauses (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     document_id UUID NOT NULL,
-    
+
     -- Clause Identity
     clause_id VARCHAR(50) NOT NULL,
     clause_number VARCHAR(50),
     heading TEXT,
-    
+
     -- Hierarchy
     path JSONB, -- ["Part A", "Section 4", "Clause 4.2"]
     parent_clause_id UUID REFERENCES contract_clauses(id),
     level INT,
-    
+
     -- Content
     text TEXT NOT NULL,
     start_offset INT,
     end_offset INT,
-    
+
     -- Metadata
     page_numbers INT[],
     extracted_at TIMESTAMP DEFAULT NOW(),
     extraction_method VARCHAR(50), -- 'ai', 'manual', 'ocr'
-    
+
     -- Embeddings
     embedding_id VARCHAR(100), -- Qdrant point ID
-    
+
     CONSTRAINT unique_doc_clause UNIQUE (document_id, clause_id)
 );
 
@@ -1354,34 +1354,34 @@ CREATE INDEX idx_clauses_number ON contract_clauses(clause_number);
 CREATE TABLE letter_templates (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     project_id UUID NOT NULL REFERENCES projects(id),
-    
+
     -- Template Info
     name VARCHAR(255) NOT NULL,
     description TEXT,
     version INT DEFAULT 1,
-    
+
     -- File
     s3_key VARCHAR(500) NOT NULL,
     file_name VARCHAR(255),
     file_size_bytes BIGINT,
-    
+
     -- Placeholders
     placeholders JSONB, -- ["Letter_No", "Date", "Subject", ...]
-    
+
     -- Signatory Defaults
     default_from_name VARCHAR(255),
     default_from_designation VARCHAR(255),
     default_organization VARCHAR(255),
-    
+
     -- Status
     is_active BOOLEAN DEFAULT TRUE,
     is_default BOOLEAN DEFAULT FALSE,
-    
+
     -- Metadata
     created_at TIMESTAMP DEFAULT NOW(),
     created_by UUID NOT NULL REFERENCES users(id),
     updated_at TIMESTAMP DEFAULT NOW(),
-    
+
     CONSTRAINT unique_project_template_version UNIQUE (project_id, name, version)
 );
 
@@ -1408,7 +1408,7 @@ class StrategyState(TypedDict):
     engineer_context: str
     employer_context: str
     requirements: str
-    
+
     # Outputs
     plan: str
     tone_approach: Dict[str, Any]
@@ -1520,16 +1520,16 @@ class DraftState(TypedDict):
     strategy_plan: str
     subject: str
     recipient: str
-    
+
     # Retrieval
     contract_sources: List[Dict]
     letter_sources: List[Dict]
     context_documents: List[Dict]
-    
+
     # Generation
     draft_body: str
     key_points: List[str]
-    
+
     # Review
     reviewer_findings: List[Dict]
     is_approved: bool
@@ -1557,10 +1557,10 @@ async def generate_draft(state: DraftState) -> DraftState:
     Subject: {state['subject']}
     Recipient: {state['recipient']}
     Strategic Plan: {state['strategy_plan']}
-    
+
     Sources:
     {sources}
-    
+
     Generate a formal letter that:
     1. Follows the strategic plan
     2. Cites sources using [S1], [S2] format
@@ -1654,7 +1654,7 @@ async def generate_strategy_plan(
         letter_id=letter_id,
         user_id=current_user.id
     )
-    
+
     # Queue background task
     background_tasks.add_task(
         strategy_graph.ainvoke,
@@ -1665,7 +1665,7 @@ async def generate_strategy_plan(
         },
         job_id=job_id
     )
-    
+
     return {"job_id": job_id, "status": "queued"}
 
 # GET /api/v2/jobs/{job_id}
@@ -1700,7 +1700,7 @@ async def generate_draft(
         letter_id=letter_id,
         user_id=current_user.id
     )
-    
+
     background_tasks.add_task(
         draft_graph.ainvoke,
         {
@@ -1709,7 +1709,7 @@ async def generate_draft(
         },
         job_id=job_id
     )
-    
+
     return {"job_id": job_id, "status": "queued"}
 
 # GET /api/v2/letters/{letter_id}/drafts
@@ -1817,13 +1817,13 @@ async def extract_clauses(
         document_id=document_id,
         user_id=current_user.id
     )
-    
+
     background_tasks.add_task(
         clause_extraction_service.extract,
         document_id=document_id,
         job_id=job_id
     )
-    
+
     return {"job_id": job_id, "status": "queued"}
 
 # GET /api/v2/contracts/{document_id}/clauses
@@ -1877,22 +1877,22 @@ def cache_result(ttl: int = 3600, key_prefix: str = ""):
             # Generate cache key
             key_data = f"{key_prefix}:{func.__name__}:{args}:{kwargs}"
             cache_key = hashlib.md5(key_data.encode()).hexdigest()
-            
+
             # Check cache
             cached = redis_client.get(cache_key)
             if cached:
                 return json.loads(cached)
-            
+
             # Execute function
             result = await func(*args, **kwargs)
-            
+
             # Store in cache
             redis_client.setex(
                 cache_key,
                 ttl,
                 json.dumps(result, default=str)
             )
-            
+
             return result
         return wrapper
     return decorator
@@ -1944,21 +1944,21 @@ def generate_strategy_plan_task(self, letter_id: str, params: dict):
     try:
         # Update job status
         self.update_state(state='PROGRESS', meta={'progress': 0})
-        
+
         # Run LangGraph workflow
         result = asyncio.run(
             strategy_graph.ainvoke(
                 {"letter_id": letter_id, **params}
             )
         )
-        
+
         # Save result
         asyncio.run(
             strategy_service.save_plan(letter_id, result)
         )
-        
+
         return {"status": "completed", "result": result}
-        
+
     except Exception as exc:
         self.update_state(state='FAILURE', meta={'error': str(exc)})
         raise
@@ -1968,13 +1968,13 @@ def extract_clauses_task(self, document_id: str):
     """Background task for clause extraction"""
     try:
         self.update_state(state='PROGRESS', meta={'progress': 0})
-        
+
         # Step 1: Convert PDF to Markdown (20%)
         markdown = asyncio.run(
             marker_service.convert(document_id)
         )
         self.update_state(state='PROGRESS', meta={'progress': 20})
-        
+
         # Step 2: Extract clauses with AI (60%)
         clauses = asyncio.run(
             clause_extraction_service.extract_from_markdown(
@@ -1982,15 +1982,15 @@ def extract_clauses_task(self, document_id: str):
             )
         )
         self.update_state(state='PROGRESS', meta={'progress': 80})
-        
+
         # Step 3: Create embeddings (20%)
         asyncio.run(
             embedding_service.embed_clauses(clauses)
         )
         self.update_state(state='PROGRESS', meta={'progress': 100})
-        
+
         return {"status": "completed", "clause_count": len(clauses)}
-        
+
     except Exception as exc:
         self.update_state(state='FAILURE', meta={'error': str(exc)})
         raise
@@ -2007,17 +2007,17 @@ from typing import Dict, Set
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[str, Set[WebSocket]] = {}
-    
+
     async def connect(self, user_id: str, websocket: WebSocket):
         await websocket.accept()
         if user_id not in self.active_connections:
             self.active_connections[user_id] = set()
         self.active_connections[user_id].add(websocket)
-    
+
     def disconnect(self, user_id: str, websocket: WebSocket):
         if user_id in self.active_connections:
             self.active_connections[user_id].discard(websocket)
-    
+
     async def send_to_user(self, user_id: str, message: dict):
         if user_id in self.active_connections:
             for connection in self.active_connections[user_id]:
@@ -2051,7 +2051,7 @@ async def notify_user(user_id: str, event_type: str, data: dict):
 @celery_app.task
 def generate_draft_task(letter_id: str, user_id: str):
     # ... generation logic
-    
+
     # Notify user of completion
     asyncio.run(
         notify_user(

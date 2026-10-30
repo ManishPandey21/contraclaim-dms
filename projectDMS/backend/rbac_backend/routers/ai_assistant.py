@@ -36,7 +36,7 @@ from ..models.ai_models import (
     LangGraphLLMConfig,
 )
 from ..utils.validation import validate_input, sanitize_text
-from ..utils.error_handler import handle_exceptions
+from ..utils.error_handler import BaseDomainError, LetterError, handle_exceptions
 
 # Configure structured logging
 logger = logging.getLogger(__name__)
@@ -55,7 +55,7 @@ def _require_platform_admin(current_user: CurrentUser) -> None:
 
 class AIAssistantController:
     """Clean controller with proper dependency injection."""
-    
+
     def __init__(
         self,
         ai_service: AIService,
@@ -109,6 +109,49 @@ class AIAssistantController:
         )
         return org_id, project_id
 
+    async def _authorize_letter_action(
+        self,
+        letter_id: str,
+        request: Any,
+        current_user: CurrentUser,
+        permission: str,
+        *,
+        resource_type: str,
+        meter_event_type: Optional[str] = None,
+        meter_metadata: Optional[Dict[str, Any]] = None,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Authorise an action on ONE letter against that letter's own scope.
+
+        `_authorize_ai_action` answers "may this actor work in the requested
+        organisation/project?", and the letter was then only required to be
+        visible. Those two can name different tenants: the request may carry no
+        organisation (org-less ContraClaim staff), a defaulted first project, or
+        an organisation the letter is not in. So the letter's stored
+        organisation/project is resolved first - inside the actor's visibility,
+        narrowed by the selected org and any project the caller named - and the
+        policy (permission, subscription, expert allocation, metering) is
+        evaluated for exactly that target. Returns the target's scope.
+        """
+        org_id, project_id = await self.ai_service.resolve_letter_scope(
+            letter_id,
+            current_user,
+            organization_id=getattr(request, "organization_id", None)
+            or getattr(current_user, "organization_id", None),
+            project_id=getattr(request, "project_id", None),
+        )
+        await self.policy_service.authorize(
+            current_user,
+            permission,
+            resource_type=resource_type,
+            resource_id=letter_id,
+            organization_id=org_id,
+            project_id=project_id,
+            letter_id=letter_id,
+            meter_event_type=meter_event_type,
+            meter_metadata=meter_metadata,
+        )
+        return org_id, project_id
+
     async def search_similar_letters(
         self,
         request: LetterSearchRequest,
@@ -118,7 +161,7 @@ class AIAssistantController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id)
-            
+
             # Input validation and sanitization
             query = sanitize_text(validate_input(request.query, max_length=1000))
             org_id, project_id = await self._authorize_ai_action(
@@ -130,7 +173,7 @@ class AIAssistantController:
                 meter_metadata={"operation": "search_similar_letters"},
                 audit=False,
             )
-            
+
             # Check cache first. hashlib, not hash(): Python's hash() is
             # randomized per process (PYTHONHASHSEED), so keys built with it
             # never match across workers or restarts and the cache was
@@ -141,11 +184,21 @@ class AIAssistantController:
                 f"{project_id or 'global'}:{query_digest}:{request.limit}"
             )
             cached_result = await self.cache_service.get(cache_key)
-            
+
             if cached_result:
-                logger.info(f"Cache hit for search query: {query[:50]}...")
+                # The digest, not the query. `observability/service.py::
+                # _redact_query` already reduces this exact value to
+                # `[redacted len=N]`, so the repository's own position is that
+                # a search query is sensitive; this line rendered 50 characters
+                # of it at INFO. The digest is already computed above and is
+                # what makes a cache hit diagnosable.
+                logger.info(
+                    "Cache hit for search query digest=%s len=%s",
+                    query_digest,
+                    len(query),
+                )
                 return VectorSearchResponse(**cached_result, cached_results=True)
-            
+
             # Perform search
             result = await self.ai_service.search_similar_letters(
                 query,
@@ -154,15 +207,15 @@ class AIAssistantController:
                 organization_id=org_id,
                 project_id=project_id,
             )
-            
+
             # Cache result
             await self.cache_service.set(
                 cache_key, result.model_dump(), ttl=1800
             )
-            
+
             return result
-            
-        except HTTPException:
+
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Search failed for user {current_user.id}: {str(e)}")
@@ -180,7 +233,7 @@ class AIAssistantController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id)
-            
+
             org_id, project_id = await self._authorize_ai_action(
                 request,
                 current_user,
@@ -190,26 +243,26 @@ class AIAssistantController:
                 meter_event_type=UsageEventType.DRAFTED_LETTER,
                 meter_metadata={"operation": "generate_letter_draft"},
             )
-            
+
             # Input validation and sanitization
             sanitized_request = await self._sanitize_draft_request(request)
             sanitized_request = sanitized_request.model_copy(
                 update={"organization_id": org_id, "project_id": project_id}
             )
-            
+
             # Generate draft
             result = await self.ai_service.generate_draft(
                 sanitized_request, current_user
             )
-            
+
             logger.info(
                 f"Draft generated for user {current_user.id}, "
                 f"subject: {request.subject[:50]}..."
             )
-            
+
             return result
-            
-        except HTTPException:
+
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Draft generation failed: {str(e)}")
@@ -226,12 +279,12 @@ class AIAssistantController:
         """Execute LangGraph pipeline for the requested letter."""
         try:
             await self.rate_limiter.check_user_limit(current_user.id, cost=2)
-            org_id, project_id = await self._authorize_ai_action(
+            org_id, project_id = await self._authorize_letter_action(
+                request.letter_id,
                 request,
                 current_user,
                 Permissions.DRAFTING_REQUEST_CREATE,
                 resource_type="ai_assistant_langgraph_draft",
-                resource_id=request.letter_id,
                 meter_event_type=(
                     UsageEventType.AI_REVIEW
                     if getattr(request, "analysis_only", False)
@@ -253,12 +306,16 @@ class AIAssistantController:
                 update={"organization_id": org_id, "project_id": project_id}
             )
 
+            # org_id / project_id are the target letter's own scope, the one the
+            # policy was just evaluated for; the service re-checks and writes
+            # inside it.
             result = await self.ai_service.generate_draft_with_langgraph(
                 sanitized,
                 current_user,
+                requested_project_id=project_id,
             )
             return result
-        except HTTPException:
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as exc:
             logger.error("LangGraph draft failed: %s", exc)
@@ -275,20 +332,24 @@ class AIAssistantController:
         """Generate the structured Strategy-stage plan via LangGraph."""
         try:
             await self.rate_limiter.check_user_limit(current_user.id, cost=2)
-            org_id, project_id = await self._authorize_ai_action(
+            org_id, project_id = await self._authorize_letter_action(
+                request.letter_id,
                 request,
                 current_user,
                 Permissions.DRAFTING_REQUEST_CREATE,
                 resource_type="ai_assistant_strategy_plan",
-                resource_id=request.letter_id,
                 meter_event_type=UsageEventType.AI_REVIEW,
                 meter_metadata={"operation": "generate_strategy_plan"},
             )
             scoped_request = request.model_copy(
                 update={"organization_id": org_id, "project_id": project_id}
             )
-            return await self.ai_service.generate_strategy_plan(scoped_request, current_user)
-        except HTTPException:
+            return await self.ai_service.generate_strategy_plan(
+                scoped_request,
+                current_user,
+                requested_project_id=project_id,
+            )
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as exc:  # pragma: no cover - defensive
             logger.error("LangGraph strategy plan failed: %s", exc)
@@ -304,29 +365,29 @@ class AIAssistantController:
     ) -> LangGraphDraftResponse:
         """Retrieve the last LangGraph run for a letter."""
         await self.rate_limiter.check_user_limit(current_user.id)
-        request_scope = SimpleNamespace(
-            organization_id=getattr(current_user, "organization_id", None),
-            project_id=(getattr(current_user, "projects", []) or [None])[0]
-            if getattr(current_user, "projects", None)
-            else None,
+        not_found = HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No LangGraph run recorded for this letter",
         )
-        org_id, project_id = await self._authorize_ai_action(
-            request_scope,
-            current_user,
-            Permissions.DRAFTING_REQUEST_VIEW,
-            resource_type="ai_assistant_langgraph_run",
-            resource_id=letter_id,
-        )
+        try:
+            org_id, project_id = await self._authorize_letter_action(
+                letter_id,
+                SimpleNamespace(organization_id=None, project_id=None),
+                current_user,
+                Permissions.DRAFTING_REQUEST_VIEW,
+                resource_type="ai_assistant_langgraph_run",
+            )
+        except LetterError:
+            # Invisible, missing and malformed ids answer like a letter with no run.
+            raise not_found from None
         snapshot = await self.ai_service.get_latest_langgraph_run(
             letter_id,
+            current_user,
             organization_id=org_id,
             project_id=project_id,
         )
         if not snapshot:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="No LangGraph run recorded for this letter",
-            )
+            raise not_found
         return snapshot
 
     async def get_langgraph_config(
@@ -519,20 +580,20 @@ async def get_prompts(
 ):
     """List letter drafting prompt keys and metadata (superadmin only)."""
     _require_platform_admin(current_user)
-    
+
     from ..services.letter_drafting.prompts import (
         PromptRegistry,
         STRATEGY_PROMPT_KEY,
         DRAFT_PROMPT_KEY,
     )
     from ..core.database import get_database
-    
+
     db = await get_database()
     registry = PromptRegistry(db)
-    
+
     strategy = await registry.get_enabled(STRATEGY_PROMPT_KEY)
     draft = await registry.get_enabled(DRAFT_PROMPT_KEY)
-    
+
     return [
         {
             "prompt_key": STRATEGY_PROMPT_KEY,
@@ -561,13 +622,13 @@ async def get_prompt_by_key(
 ):
     """Fetch the latest enabled prompt template configuration (superadmin only)."""
     _require_platform_admin(current_user)
-    
+
     from ..services.letter_drafting.prompts import PromptRegistry
     from ..core.database import get_database
-    
+
     db = await get_database()
     registry = PromptRegistry(db)
-    
+
     record = await registry.get_enabled(prompt_key)
     return record
 
@@ -581,14 +642,14 @@ async def update_prompt_template(
 ):
     """Modify/create a new enabled version of a prompt template (superadmin only)."""
     _require_platform_admin(current_user)
-    
+
     from ..services.letter_drafting.prompts import (
         PromptRegistry,
         STRATEGY_PROMPT_KEY,
         DRAFT_PROMPT_KEY,
     )
     from ..core.database import get_database
-    
+
     required_variables = set()
     if prompt_key == STRATEGY_PROMPT_KEY:
         required_variables = {"active_workspace", "role", "recipient", "subject", "recipient_focus", "current_materials", "sources"}
@@ -599,17 +660,17 @@ async def update_prompt_template(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid prompt key: {prompt_key}"
         )
-        
+
     missing = PromptRegistry.validate_template(payload.template, required_variables)
     if missing:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Missing required template placeholder variables: {', '.join(missing)}"
         )
-        
+
     db = await get_database()
     registry = PromptRegistry(db)
-    
+
     user_id = getattr(current_user, "id", None) or getattr(current_user, "email", None) or "superadmin"
     record = await registry.update_prompt(prompt_key, payload.template, user_id)
     return record

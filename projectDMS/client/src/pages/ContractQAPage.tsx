@@ -27,6 +27,7 @@ import {
   MessageSquare,
   Search,
 } from "lucide-react";
+import { usePinnedPageScope } from "@/hooks/useRegisterProjectScope";
 
 type Organization = { id: string; name: string; shortName?: string | null };
 type Project = { _id: string; name: string; organization_id: string };
@@ -73,6 +74,8 @@ const ContractQAPage: React.FC = () => {
   const [projects, setProjects] = useState<Project[]>([]);
   const [orgId, setOrgId] = useState<string>(() => window.localStorage.getItem("org_id") || "");
   const [projId, setProjId] = useState<string>(() => window.localStorage.getItem("proj_id") || "");
+  // CL-4A: while the navbar selects a project, this page's picker follows it.
+  usePinnedPageScope(orgId, setOrgId, projId, setProjId);
   const [uploads, setUploads] = useState<UploadOption[]>([]);
   const [selectedUpload, setSelectedUpload] = useState<string>("");
   const [question, setQuestion] = useState<string>("");

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List
 
 from .models import Chunk, compute_content_hash
 from .chunk_ids import deterministic_chunk_id
@@ -25,7 +25,9 @@ def chunk_text(
         end = min(length, start + chunk_size)
         chunk_body = text[start:end]
         chunk = Chunk(
-            id=deterministic_chunk_id(document_id, idx, page_start=None, text=chunk_body[:50]),
+            id=deterministic_chunk_id(
+                document_id, idx, page_start=None, text=chunk_body[:50]
+            ),
             document_id=document_id,
             org_id=org_id,
             project_id=project_id,

@@ -106,6 +106,12 @@ PERMISSION_FEATURE_REQUIREMENTS: Dict[str, Tuple[str, ...]] = {
     "dms.evidence_graph.view": ("feature.dms.evidence_graph",),
     "dms.evidence_graph.verify": ("feature.dms.evidence_graph",),
     "dms.evidence_graph.manage": ("feature.dms.evidence_graph",),
+    # The register rides the evidence-graph feature it grew out of, so enabling
+    # it widens no plan: exactly the plans that carried delay events carry it.
+    "dms.hindrance.view": ("feature.dms.evidence_graph",),
+    "dms.hindrance.create": ("feature.dms.evidence_graph",),
+    "dms.hindrance.edit": ("feature.dms.evidence_graph",),
+    "dms.hindrance.archive": ("feature.dms.evidence_graph",),
     "dms.contract.timeline.view": ("feature.dms.contract_timeline",),
     "dms.chronology.view": ("feature.dms.chronology",),
     "dms.chronology.create": ("feature.dms.chronology",),

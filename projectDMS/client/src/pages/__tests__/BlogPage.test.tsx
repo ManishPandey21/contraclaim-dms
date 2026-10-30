@@ -1,6 +1,7 @@
+import type { ReactNode } from "react";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import BlogPage from "../BlogPage";
@@ -24,7 +25,7 @@ function LocationProbe() {
   );
 }
 
-function renderBlog(initialEntry = "/blog") {
+function renderBlogWith(initialEntry: string, extra?: ReactNode) {
   return render(
     <MemoryRouter initialEntries={[initialEntry]}>
       <Routes>
@@ -33,6 +34,7 @@ function renderBlog(initialEntry = "/blog") {
           element={
             <>
               <BlogPage />
+              {extra}
               <LocationProbe />
             </>
           }
@@ -41,6 +43,13 @@ function renderBlog(initialEntry = "/blog") {
     </MemoryRouter>,
   );
 }
+
+function renderBlog(initialEntry = "/blog") {
+  return renderBlogWith(initialEntry);
+}
+
+const searchBox = () =>
+  screen.getByRole("searchbox", { name: /search articles/i });
 
 const currentUrl = () => screen.getByTestId("location").textContent ?? "";
 const articleCards = () =>
@@ -236,9 +245,12 @@ describe("BlogPage search and filters", () => {
     const user = userEvent.setup();
     renderBlog();
 
-    await user.type(screen.getByRole("searchbox", { name: /search articles/i }), "chronology");
+    await user.type(searchBox(), "chronology");
 
+    // Every prefix from "ch" onwards also matches exactly one article, so the
+    // URL has to settle before the count means anything.
     await waitFor(() => expect(currentUrl()).toContain("q=chronology"));
+    expect(searchBox()).toHaveValue("chronology");
     await waitFor(() => expect(articleCards()).toHaveLength(1));
     expect(
       screen.getByRole("link", { name: /how to build a defensible project chronology/i }),
@@ -288,6 +300,123 @@ describe("BlogPage search and filters", () => {
 
     await waitFor(() => expect(articleCards()).toHaveLength(MOBILE_PAGE_SIZE));
   });
+});
+
+/**
+ * The search box and the URL are two mutable copies of the same text, and the
+ * router applies `setSearchParams` on its own schedule. Before `BlogPage`
+ * learned to tell its own in-flight update apart from an externally sourced
+ * one, the lagging URL value was copied back over the box mid-word and the
+ * search assertion above failed roughly two runs in three, with "chronology"
+ * reaching the URL as "chrnology", "chronolgy" or "chroolgy".
+ *
+ * These cases hold the other half of the contract: the URL must still drive
+ * the box whenever the change did not come from typing in it. The precise
+ * interleaving is pinned separately in `BlogPage.search-url-race.test.tsx`.
+ */
+describe("BlogPage search and URL synchronisation", () => {
+  function renderBlogWithHistory(initialEntry = "/blog") {
+    function HistoryControls() {
+      const navigate = useNavigate();
+      return (
+        <>
+          <button type="button" onClick={() => navigate(-1)}>
+            history back
+          </button>
+          <button type="button" onClick={() => navigate(1)}>
+            history forward
+          </button>
+        </>
+      );
+    }
+
+    return renderBlogWith(initialEntry, <HistoryControls />);
+  }
+
+  it("hydrates the search box from a q already in the URL", () => {
+    renderBlog("/blog?q=chronology");
+
+    expect(searchBox()).toHaveValue("chronology");
+    expect(articleCards()).toHaveLength(1);
+  });
+
+  it("restores the earlier search on Back and re-applies it on Forward", async () => {
+    const user = userEvent.setup();
+    renderBlogWithHistory("/blog?q=chronology");
+    expect(searchBox()).toHaveValue("chronology");
+
+    // A push navigation, so there is something to go back from: the search box
+    // itself replaces, by design, to keep typing out of the history stack.
+    await user.click(screen.getByRole("button", { name: "Claims Evidence" }));
+    await waitFor(() => expect(currentUrl()).toContain("category=claims-evidence"));
+
+    await user.click(screen.getByRole("button", { name: "history back" }));
+
+    await waitFor(() => expect(currentUrl()).not.toContain("category="));
+    expect(searchBox()).toHaveValue("chronology");
+
+    await user.click(screen.getByRole("button", { name: "history forward" }));
+
+    await waitFor(() => expect(currentUrl()).toContain("category=claims-evidence"));
+    expect(searchBox()).toHaveValue("chronology");
+  });
+
+  it("drops q from the URL when the box is cleared", async () => {
+    const user = userEvent.setup();
+    renderBlog("/blog?q=chronology");
+
+    await user.clear(searchBox());
+
+    expect(searchBox()).toHaveValue("");
+    await waitFor(() => expect(currentUrl()).not.toContain("q="));
+    expect(articleCards()).toHaveLength(MOBILE_PAGE_SIZE);
+  });
+
+  it("leaves unrelated search params alone while typing", async () => {
+    const user = userEvent.setup();
+    renderBlog("/blog?type=videos");
+
+    await user.type(
+      screen.getByRole("searchbox", { name: /search videos/i }),
+      "delay",
+    );
+
+    await waitFor(() => expect(currentUrl()).toContain("q=delay"));
+    expect(currentUrl()).toContain("type=videos");
+  });
+
+  it("empties the box when Clear filters removes q from the URL", async () => {
+    const user = userEvent.setup();
+    renderBlog("/blog?q=zzzzznomatch");
+    expect(searchBox()).toHaveValue("zzzzznomatch");
+
+    await user.click(screen.getByRole("button", { name: /clear filters/i }));
+
+    await waitFor(() => expect(currentUrl()).not.toContain("q="));
+    expect(searchBox()).toHaveValue("");
+  });
+
+  it("keeps syncing the box after an update that changed nothing", async () => {
+    const user = userEvent.setup();
+    renderBlog();
+
+    // Clicking a chip that is already active asks the URL for what it already
+    // says. Nothing commits, so nothing can acknowledge the request - and the
+    // box must not be cut off from the URL because of it.
+    await user.click(screen.getByRole("button", { name: "Claims Evidence" }));
+    await waitFor(() => expect(currentUrl()).toContain("category=claims-evidence"));
+    await user.click(screen.getByRole("button", { name: "Claims Evidence" }));
+
+    await user.type(searchBox(), "chronology");
+    await waitFor(() => expect(currentUrl()).toContain("q=chronology"));
+    expect(searchBox()).toHaveValue("chronology");
+
+    await user.click(screen.getByRole("button", { name: "All topics" }));
+
+    await waitFor(() => expect(currentUrl()).not.toContain("category="));
+    expect(searchBox()).toHaveValue("chronology");
+  });
+
 });
 
 describe("BlogPage navigation and CTA", () => {

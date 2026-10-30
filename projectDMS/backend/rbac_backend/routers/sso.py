@@ -22,8 +22,10 @@ from ..core.config import settings
 from ..core.database import get_db
 from ..core.security import create_access_token
 from ..services.authentication_service import AuthenticationService
+from ..services.credential_fields import CREDENTIAL_VERSION_CLAIM, credential_version
 from ..services.oidc_service import OidcError, OidcService, resolve_or_provision_user
 from .auth import _set_auth_cookie
+from ..utils.error_handler import BaseDomainError
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -45,7 +47,7 @@ async def sso_login():
     nonce = secrets.token_urlsafe(24)
     try:
         url = await OidcService().authorization_url(state, nonce)
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as exc:  # noqa: BLE001
         logger.error("OIDC authorization URL failed: %s", exc)
@@ -89,7 +91,7 @@ async def sso_callback(
         )
     except OidcError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as exc:  # noqa: BLE001
         logger.error("OIDC callback failed: %s", exc)
@@ -110,6 +112,7 @@ async def sso_callback(
             "user_id": user_id,
             "roles": user.get("roles", []),
             "session_id": session_id,
+            CREDENTIAL_VERSION_CLAIM: credential_version(user),
         },
         expires_delta=expires,
     )

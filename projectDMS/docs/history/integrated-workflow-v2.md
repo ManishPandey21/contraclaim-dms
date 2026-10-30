@@ -33,13 +33,13 @@ This document integrates the **consolidated requirements**, **strategy plan impl
 
 ```typescript
 // client/src/components/letter-workflow/types.ts
-export type LetterStatus = 
-  | "Input" 
+export type LetterStatus =
+  | "Input"
   | "Strategy"     // ← NEW
-  | "Draft" 
-  | "Review" 
-  | "Approval" 
-  | "Completed" 
+  | "Draft"
+  | "Review"
+  | "Approval"
+  | "Completed"
   | "Rejected";
 ```
 
@@ -50,40 +50,40 @@ export type LetterStatus =
 
 class LetterRecord(BaseModel):
     # ... existing fields ...
-    
+
     # ========== STRATEGY STAGE FIELDS ==========
     strategy_plan: Optional[str] = None
     strategic_outline: Optional[Dict[str, Any]] = None
     summary_points: List[str] = []
     strategy_plan_approved_by: Optional[str] = None
     strategy_plan_approved_at: Optional[datetime] = None
-    
+
     # Context documents for strategy
     context_document_ids: List[str] = []
     background_summary: List[Dict[str, Any]] = []
-    
+
     # ========== NEW: ROLE-BASED CONSOLIDATED CONTEXTS ==========
     contractor_context: Optional[str] = None     # Full consolidated contractor perspective
     engineer_context: Optional[str] = None       # Full consolidated engineer perspective
     employer_context: Optional[str] = None       # Full consolidated employer perspective
-    
+
     # Thread linking
     thread_id: Optional[str] = None              # Group related letters in correspondence
     thread_letters: List[str] = []               # All letter IDs in thread
-    
+
     # Role selection for strategy generation
     strategy_role: Optional[str] = None          # "contractor", "engineer", "employer"
     strategy_recipient: Optional[str] = None     # "Contractor", "Engineer", "Employer" (if engineer role)
-    
+
     # Three-way correspondence metadata
     correspondence_type: Optional[str] = None    # "three-way", "two-way", "standalone"
     parties_involved: List[str] = []             # ["Contractor", "Engineer", "Employer"]
-    
+
     # LangGraph strategy run
     strategy_run_id: Optional[str] = None
     strategy_graph_status: Optional[str] = None  # "success", "needs_input", "failed"
     strategy_graph_trace: List[Dict[str, Any]] = []
-    
+
     # Time tracking
     strategy_started_at: Optional[datetime] = None
     strategy_completed_at: Optional[datetime] = None
@@ -141,12 +141,12 @@ const tabs = useMemo(
 ```typescript
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { 
-  ArrowLeft, 
-  Sparkles, 
-  CheckCircle, 
-  Edit3, 
-  RefreshCw, 
+import {
+  ArrowLeft,
+  Sparkles,
+  CheckCircle,
+  Edit3,
+  RefreshCw,
   AlertCircle,
   Users,
   FileText
@@ -183,10 +183,10 @@ const LetterStrategyPage = () => {
     fetchLetters,
   } = useLetterWorkflow();
 
-  const { 
-    generateStrategyPlan, 
-    loading: planLoading, 
-    error: planError 
+  const {
+    generateStrategyPlan,
+    loading: planLoading,
+    error: planError
   } = useLanggraphStrategyPlan();
 
   // ========== STATE ==========
@@ -194,11 +194,11 @@ const LetterStrategyPage = () => {
   const [strategyPlanData, setStrategyPlanData] = useState<any>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [editedPlan, setEditedPlan] = useState('');
-  
+
   // ← NEW: Role-based context states
   const [selectedRole, setSelectedRole] = useState<'contractor' | 'engineer' | 'employer'>('engineer');
   const [recipientIfEngineer, setRecipientIfEngineer] = useState<'Contractor' | 'Employer'>('Contractor');
-  
+
   const [contractorContext, setContractorContext] = useState<string>('');
   const [engineerContext, setEngineerContext] = useState<string>('');
   const [employerContext, setEmployerContext] = useState<string>('');
@@ -236,7 +236,7 @@ const LetterStrategyPage = () => {
   // ========== NEW: GENERATE THREE-WAY CONSOLIDATED CONTEXTS ==========
   const handleGenerateContexts = useCallback(async () => {
     if (!id) return;
-    
+
     setGeneratingContexts(true);
     try {
       // Generate all three contexts in parallel using complete letter content
@@ -257,16 +257,16 @@ const LetterStrategyPage = () => {
           body: JSON.stringify({ role: 'employer' })
         })
       ]);
-      
+
       const contractor = await contractorRes.json();
       const engineer = await engineerRes.json();
       const employer = await employerRes.json();
-      
+
       setContractorContext(contractor.context);
       setEngineerContext(engineer.context);
       setEmployerContext(employer.context);
       setContextsGenerated(true);
-      
+
       // Save contexts to database
       await handleLetterUpdate(id, {
         contractorContext: contractor.context,
@@ -275,7 +275,7 @@ const LetterStrategyPage = () => {
         correspondenceType: 'three-way',
         partiesInvolved: ['Contractor', 'Engineer', 'Employer']
       });
-      
+
       toast({
         title: 'Contexts Generated',
         description: `Three-way consolidated contexts created successfully from ${contractor.letter_count} letters.`,
@@ -345,17 +345,17 @@ const LetterStrategyPage = () => {
       });
     }
   }, [
-    id, 
-    uiLetter, 
-    selectedDocIds, 
-    selectedRole, 
+    id,
+    uiLetter,
+    selectedDocIds,
+    selectedRole,
     recipientIfEngineer,
     contractorContext,
     engineerContext,
     employerContext,
     contextsGenerated,
-    generateStrategyPlan, 
-    handleLetterUpdate, 
+    generateStrategyPlan,
+    handleLetterUpdate,
     toast
   ]);
 
@@ -779,24 +779,24 @@ async def generate_consolidated_context(
     Generate consolidated context from all linked letters in thread.
     Uses complete letter content instead of summaries.
     """
-    
+
     try:
         # Get all letters in thread (same subject/topic)
         thread_letters = await LetterService.get_thread_letters(letter_id)
-        
+
         # Consolidate by role using full letter content
         context = await ContextService.consolidate_context_by_role(
             thread_letters=thread_letters,
             role=request.role
         )
-        
+
         return {
             "role": request.role,
             "context": context,
             "letter_count": len(thread_letters),
             "parties": ["Contractor", "Engineer", "Employer"]
         }
-    
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 ```
@@ -825,7 +825,7 @@ async def generate_strategy_plan(
     current_user: dict = Depends(verify_auth)
 ):
     """Generate role-based strategic plan"""
-    
+
     try:
         # Select prompt template based on role
         if request.role == "contractor":
@@ -837,7 +837,7 @@ async def generate_strategy_plan(
                 prompt_template = ENGINEER_TO_EMPLOYER_PROMPT
         elif request.role == "employer":
             prompt_template = EMPLOYER_TO_ENGINEER_PROMPT
-        
+
         # Inject contexts into prompt
         full_prompt = prompt_template.format(
             CONTRACTOR_FULL_CONTEXT=request.contractor_context,
@@ -846,7 +846,7 @@ async def generate_strategy_plan(
             LETTER_REFERENCE=request.letter_reference,
             LETTER_DATE=request.letter_date
         )
-        
+
         # Run LangGraph with role-specific prompt
         result = await AIService.generate_strategy_plan(
             letter_id=request.letter_id,
@@ -855,9 +855,9 @@ async def generate_strategy_plan(
             recipient=request.recipient,
             document_ids=request.document_ids
         )
-        
+
         return result
-    
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 ```
@@ -935,14 +935,14 @@ async def generate_strategy_plan(
 
 ### 7.1 What Was Added
 
-✅ **Role Selection Interface** - Dropdown for Contractor/Engineer/Employer  
-✅ **Three-Way Context Generation** - Consolidates complete letter content by party  
-✅ **Role-Specific Prompts** - 9-section strategic plan templates for each role  
-✅ **Context Preview Tabs** - View Contractor, Engineer, and Employer contexts  
-✅ **Database Schema Updates** - New fields for contexts and role metadata  
-✅ **Backend API Endpoints** - Context generation and role-based strategy  
-✅ **Time Tracking** - Duration in strategy stage  
-✅ **Workflow Validation** - Ensure contexts generated before plan creation  
+✅ **Role Selection Interface** - Dropdown for Contractor/Engineer/Employer
+✅ **Three-Way Context Generation** - Consolidates complete letter content by party
+✅ **Role-Specific Prompts** - 9-section strategic plan templates for each role
+✅ **Context Preview Tabs** - View Contractor, Engineer, and Employer contexts
+✅ **Database Schema Updates** - New fields for contexts and role metadata
+✅ **Backend API Endpoints** - Context generation and role-based strategy
+✅ **Time Tracking** - Duration in strategy stage
+✅ **Workflow Validation** - Ensure contexts generated before plan creation
 
 ### 7.2 User Workflow
 
@@ -959,14 +959,14 @@ async def generate_strategy_plan(
 
 ## 8. Key Benefits
 
-✅ **Complete Context**: Uses full letter content instead of summaries for accuracy  
-✅ **Role Perspective**: Strategy tailored to Contractor, Engineer, or Employer viewpoint  
-✅ **Three-Way Analysis**: Understands all parties' positions simultaneously  
-✅ **Structured Output**: 9-section plan covering all strategic aspects  
-✅ **FIDIC Compliance**: Prompts aligned with FIDIC contract procedures  
-✅ **Dispute Preparedness**: Risk assessment and alternative options included  
-✅ **Audit Trail**: Tracks role selection and contexts used  
-✅ **Flexible Workflows**: Can iterate back to Input or forward to Draft  
+✅ **Complete Context**: Uses full letter content instead of summaries for accuracy
+✅ **Role Perspective**: Strategy tailored to Contractor, Engineer, or Employer viewpoint
+✅ **Three-Way Analysis**: Understands all parties' positions simultaneously
+✅ **Structured Output**: 9-section plan covering all strategic aspects
+✅ **FIDIC Compliance**: Prompts aligned with FIDIC contract procedures
+✅ **Dispute Preparedness**: Risk assessment and alternative options included
+✅ **Audit Trail**: Tracks role selection and contexts used
+✅ **Flexible Workflows**: Can iterate back to Input or forward to Draft
 
 ---
 
@@ -1001,12 +1001,12 @@ async def generate_strategy_plan(
 
 This integrated workflow system adds comprehensive **role-based strategic planning** to the letter management process, positioned between **Input** and **Draft** stages. It provides:
 
-✅ **Clear Strategic Phase** - Separate planning from execution  
-✅ **Role-Specific Intelligence** - AI adapts to user's role perspective  
-✅ **Complete Context** - Full letter content, not just summaries  
-✅ **Three-Way Understanding** - Simultaneous view of all parties' positions  
-✅ **Structured Analysis** - 9-section strategic framework  
-✅ **Time Tracking** - New duration metrics for strategy development  
-✅ **Flexible Workflows** - Iterate or progress as needed  
+✅ **Clear Strategic Phase** - Separate planning from execution
+✅ **Role-Specific Intelligence** - AI adapts to user's role perspective
+✅ **Complete Context** - Full letter content, not just summaries
+✅ **Three-Way Understanding** - Simultaneous view of all parties' positions
+✅ **Structured Analysis** - 9-section strategic framework
+✅ **Time Tracking** - New duration metrics for strategy development
+✅ **Flexible Workflows** - Iterate or progress as needed
 
 Ready to implement! 🚀

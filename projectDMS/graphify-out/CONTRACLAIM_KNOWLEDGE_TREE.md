@@ -1,7 +1,7 @@
 # ContraClaim DMS Knowledge Tree
 
-Repository: `ManishPandey21/contraclaim-dms`  
-Local path inspected: `C:\Users\manish.p\Documents\Contraclaim-DMS`  
+Repository: `ManishPandey21/contraclaim-dms`
+Local path inspected: `C:\Users\manish.p\Documents\Contraclaim-DMS`
 Date: 2026-06-18
 
 ## Graphify Status

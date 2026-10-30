@@ -8,14 +8,17 @@ import {
   UploadResult,
   StatusResponse,
   ContractSearchResponse,
+  ContractJobStatus,
+  isTerminalContractStatus,
 } from "@/services/contracts-api";
+import { usePinnedPageScope } from "@/hooks/useRegisterProjectScope";
 
 type UploadProgress = {
   file: File;
   mode: "multipart" | "chunked";
   progress: number; // 0-100
   upload_id?: string;
-  status?: "queued" | "processing" | "completed" | "failed" | "unknown";
+  status?: ContractJobStatus;
   error?: string | null;
 };
 
@@ -33,6 +36,8 @@ const ContractsPage: React.FC = () => {
   const [projId, setProjId] = useState<string>(
     () => window.localStorage.getItem("proj_id") || ""
   );
+  // CL-4A: while the navbar selects a project, this page's picker follows it.
+  usePinnedPageScope(orgId, setOrgId, projId, setProjId);
   const [tags, setTags] = useState<string>("");
   const [files, setFiles] = useState<File[]>([]);
   const [uploads, setUploads] = useState<UploadProgress[]>([]);
@@ -84,7 +89,7 @@ const ContractsPage: React.FC = () => {
                 : u
             )
           );
-          if (st.status === "completed" || st.status === "failed") {
+          if (isTerminalContractStatus(st.status)) {
             stopPolling(uploadId);
           }
         } catch (e) {
@@ -337,7 +342,7 @@ const ContractsPage: React.FC = () => {
                     {u.status ? (
                       <span
                         className={`px-2 py-0.5 rounded text-white ${
-                          u.status === "failed"
+                          u.status === "failed" || u.status === "human_review_required"
                             ? "bg-red-600"
                             : u.status === "completed"
                             ? "bg-green-600"

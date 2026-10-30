@@ -103,7 +103,7 @@ def _check_falkor_schema(config: DocumentProcessingConfig):
     client = _get_falkor_client(config)
     if not client:
         return False
-    
+
     try:
         # Use the graph name from config
         result = client.execute_command("GRAPH.QUERY", config.falkordb_graph_name, "CALL db.labels()")
@@ -124,11 +124,11 @@ def _count_falkor_letters(config: DocumentProcessingConfig) -> Optional[int]:
     client = _get_falkor_client(config)
     if not client:
         return None
-    
+
     try:
         # Use the graph name from config
         result = client.execute_command("GRAPH.QUERY", config.falkordb_graph_name, "MATCH (l:Letter) RETURN COUNT(l)")
-        
+
         if result and len(result) >= 2 and result[1]:
             count = int(result[1][0][0])
             return count
@@ -146,13 +146,13 @@ def _check_mongo_documents() -> Optional[int]:
     try:
         from pymongo import MongoClient
         from rbac_backend.config.document_processing_config import DocumentProcessingConfig
-        
+
         config = DocumentProcessingConfig()
         client = MongoClient(config.mongo_uri)
         db = client[config.database_name]
         # Adjust collection name as needed
-        collection = db['documents']  
-        
+        collection = db['documents']
+
         count = collection.count_documents({})
         return count
     except Exception as exc:
@@ -172,13 +172,13 @@ async def main(args: argparse.Namespace) -> int:
 
     print("=== STORAGE STATUS OVERVIEW ===")
     print("=" * 40)
-    
+
     # Display actual FalkorDB configuration
     print(f"\n🔧 FalkorDB Configuration:")
     print(f"   URL: {config.falkordb_url}")
     print(f"   Graph: '{config.falkordb_graph_name}'")
     print(f"   Enabled: {config.falkordb_enabled}")
-    
+
     # Check MongoDB
     print("\n📊 MongoDB (Source Data):")
     mongo_count = _check_mongo_documents()
@@ -186,7 +186,7 @@ async def main(args: argparse.Namespace) -> int:
         print(f"   Documents: {mongo_count}")
     else:
         print("   Status: <cannot connect>")
-    
+
     # Check Qdrant
     print("\n🔍 Qdrant (Vector Store):")
     print(f"   Enabled: {bool(qdrant)}")
@@ -198,11 +198,11 @@ async def main(args: argparse.Namespace) -> int:
             print("   ⚠️  No vectors found - documents need to be processed")
     else:
         print("   Status: <connection failed>")
-    
+
     # Check FalkorDB
     print("\n🕸️  FalkorDB (Graph Database):")
     print(f"   Connection: {config.falkordb_host}:{config.falkordb_port} (no password)")
-    
+
     total_falkor = _count_falkor_letters(config)
     if total_falkor is not None:
         print(f"   Letters: {total_falkor}")
@@ -210,7 +210,7 @@ async def main(args: argparse.Namespace) -> int:
             print("   ⚠️  No letters found - graph needs to be populated")
     else:
         print("   Status: <connection failed>")
-    
+
     has_schema = _check_falkor_schema(config)
     if has_schema:
         print("   Schema: ✓ Letter nodes defined")
@@ -220,7 +220,7 @@ async def main(args: argparse.Namespace) -> int:
     # Recommendations
     print("\n🎯 RECOMMENDATIONS:")
     print("=" * 40)
-    
+
     if mongo_count == 0:
         print("1. 📥 Upload documents to MongoDB first")
     elif total_qdrant == 0 and mongo_count > 0:
@@ -229,7 +229,7 @@ async def main(args: argparse.Namespace) -> int:
         print("1. 🕸️  Build knowledge graph from processed documents")
     else:
         print("1. ✅ All systems ready - you can query your data!")
-    
+
     if total_falkor == 0:
         print("2. 💡 Run graph processing to populate FalkorDB with letter data")
 

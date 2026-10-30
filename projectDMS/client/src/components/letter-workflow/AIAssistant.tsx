@@ -20,13 +20,13 @@ interface AIAssistantProps {
   };
 }
 
-const AIAssistant: React.FC<AIAssistantProps> = ({ 
-  letterContent, 
-  onContentSuggestion, 
+const AIAssistant: React.FC<AIAssistantProps> = ({
+  letterContent,
+  onContentSuggestion,
   onGenerateDraft,
   disabled = false,
   disabledReason,
-  letterContext 
+  letterContext
 }) => {
   const [userPrompt, setUserPrompt] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
@@ -125,10 +125,10 @@ const AIAssistant: React.FC<AIAssistantProps> = ({
               className="resize-none"
             />
           </div>
-          
+
           <div className="flex flex-wrap gap-2">
-            <Button 
-              onClick={handleGenerateDraft} 
+            <Button
+              onClick={handleGenerateDraft}
               disabled={isGenerating || disabled}
               className="gap-2"
               title={disabled ? disabledReason : undefined}
@@ -136,19 +136,19 @@ const AIAssistant: React.FC<AIAssistantProps> = ({
               {isGenerating ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Wand2 className="h-4 w-4" />}
               Generate AI Draft
             </Button>
-            
-            <Button 
-              variant="outline" 
+
+            <Button
+              variant="outline"
               onClick={handleSearchSimilar}
               className="gap-2"
             >
               <Search className="h-4 w-4" />
               Search Similar Letters
             </Button>
-            
+
             {letterContent && (
-              <Button 
-                variant="outline" 
+              <Button
+                variant="outline"
                 onClick={improveDraft}
                 disabled={isGenerating || disabled || !onGenerateDraft}
                 className="gap-2"
@@ -180,8 +180,8 @@ const AIAssistant: React.FC<AIAssistantProps> = ({
               <Button onClick={applySuggestion} className="bg-green-600 hover:bg-green-700">
                 Apply to Letter
               </Button>
-              <Button 
-                variant="outline" 
+              <Button
+                variant="outline"
                 onClick={() => setLastSuggestion('')}
                 className="border-green-200 text-green-700 hover:bg-green-100"
               >

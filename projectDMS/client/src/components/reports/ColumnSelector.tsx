@@ -24,12 +24,12 @@ export const ColumnSelector: React.FC<ColumnSelectorProps> = ({
       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
         {availableColumns.map(column => (
           <div key={column.id} className="flex items-center space-x-2">
-            <Checkbox 
-              id={`column-${column.id}`} 
+            <Checkbox
+              id={`column-${column.id}`}
               checked={selectedColumns.includes(column.id)}
               onCheckedChange={() => onColumnToggle(column.id)}
             />
-            <label 
+            <label
               htmlFor={`column-${column.id}`}
               className="text-sm cursor-pointer"
             >

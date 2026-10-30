@@ -45,6 +45,70 @@ class ConversationService:
         )
         return ordered
 
+    async def get_authorized_conversation_chain(
+        self, letter_id: str, current_user: Any
+    ) -> List[Letter]:
+        """The conversation chain, bounded by the ACTOR's canonical row visibility.
+
+        `get_conversation_chain` accepts `current_user` and never reads it, and
+        the family it assembles is built from association alone - a shared
+        `conversation_id` or a `previous_letter_id` edge. Association is not
+        authority: a reply chain may cross projects and organisations, and every
+        member's `content` and `subject` flow into whatever consumes the chain.
+
+        This is a SEPARATE method rather than a change to the generic one,
+        which has other callers (the letters router, the LangGraph letter
+        pipeline and the drafting context builder) whose semantics must not
+        change implicitly.
+
+        The boundary is the canonical `build_scope_query`, asked of Mongo so the
+        one row-visibility primitive decides. The ANCHOR letter's own
+        organisation and project narrow INSIDE that entitlement - a value
+        outside it denies every row - and are never the authority source. No
+        role name is read here.
+        """
+        ordered = await self.get_conversation_chain(letter_id, current_user)
+        if not ordered or current_user is None:
+            return []
+
+        # Private to `core.security` by name only; it is the canonical id
+        # expansion that `build_scope_query` itself uses, and reimplementing it
+        # here would let the two drift.
+        from ..core.security import build_scope_query, _expand_object_ids
+
+        anchor = next(
+            (letter for letter in ordered if str(letter.id) == str(letter_id)), None
+        )
+        organization_id = (
+            str(anchor.organization_id)
+            if anchor is not None and anchor.organization_id
+            else None
+        )
+        project_id = (
+            str(anchor.project_id)
+            if anchor is not None and anchor.project_id
+            else None
+        )
+
+        scope = build_scope_query(
+            current_user,
+            organization_id=organization_id,
+            project_id=project_id,
+        )
+
+        identifiers = [str(letter.id) for letter in ordered if letter.id]
+        if not identifiers:
+            return []
+
+        id_clause: Dict[str, Any] = {"_id": {"$in": _expand_object_ids(identifiers)}}
+        query = {"$and": [id_clause, scope]} if scope else id_clause
+
+        db = await self._get_db()
+        rows = await db.letters.find(query, {"_id": 1}).to_list(length=None)
+        allowed = {str(row.get("_id")) for row in rows}
+
+        return [letter for letter in ordered if str(letter.id) in allowed]
+
     async def build_conversation_tree(self, letter_id: Optional[str], current_user: Any) -> ConversationTree:
         if not letter_id:
             raise ValueError("letter_id is required")
@@ -198,6 +262,3 @@ class ConversationService:
                     }
                 },
             )
-
-
-

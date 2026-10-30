@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+import uuid
 
 import pytest
 
@@ -41,6 +42,7 @@ class _Coll:
         self.docs = {}
 
     async def insert_one(self, doc):
+        doc.setdefault("_id", str(uuid.uuid4()))
         self.docs[doc["_id"]] = dict(doc)
         return SimpleNamespace(inserted_id=doc["_id"])
 
@@ -76,6 +78,8 @@ class _DB:
         self.contract_master = _Coll()
         self.variations = _Coll()
         self.bank_guarantees = _Coll()
+        self.bank_guarantee_events = _Coll()
+        self.audit_events = _Coll()
 
 
 def _user(org="org-A"):
@@ -125,6 +129,7 @@ async def test_revise_completion_cascades_to_bg():
                             bg_expiry_date=NOW + timedelta(days=10)),
         _user(),
     )
+    event_ids_before = set(db.bank_guarantee_events.docs)
     # required-up-to computed = completion (NOW+5); expiry NOW+10 >= required → no extension
     assert extension_required(bg, NOW) is False
 
@@ -136,3 +141,8 @@ async def test_revise_completion_cascades_to_bg():
     refreshed = await svc.get(bg["_id"])
     assert refreshed["contractual_required_up_to"] == NOW + timedelta(days=120)
     assert refreshed["extension_required"] is True  # expiry now before required
+    assert set(db.bank_guarantee_events.docs) == event_ids_before
+    assert any(
+        row.get("action") == "bank_guarantee.required_date_recomputed"
+        for row in db.audit_events.docs.values()
+    )

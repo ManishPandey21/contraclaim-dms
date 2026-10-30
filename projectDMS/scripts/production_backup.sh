@@ -10,12 +10,13 @@ RETENTION_DAYS=${RETENTION_DAYS:-14}
 
 cd "$ROOT_DIR"
 
-if [[ -f "$ENV_FILE" ]]; then
-  set -a
-  # shellcheck disable=SC1090
-  source "$ENV_FILE"
-  set +a
-fi
+# The environment file is data, never a program: `source` executed it, and one
+# unquoted `&` in the staging DATABASE_URL backgrounded the assignment so this
+# script died on "MONGO_URI or DATABASE_URL is required" with no backup taken
+# (F-A8M-2). See scripts/lib/env_file.sh.
+# shellcheck source=scripts/lib/env_file.sh
+. "$ROOT_DIR/scripts/lib/env_file.sh"
+env_file_load "$ENV_FILE"
 MONGO_DB_NAME=${MONGO_DB:-${MONGODB_DATABASE:-contraclaim}}
 
 mkdir -p "$BACKUP_ROOT/mongo" "$BACKUP_ROOT/volumes" "$BACKUP_ROOT/manifests"
@@ -55,25 +56,37 @@ project_name=${COMPOSE_PROJECT_NAME:-$(basename "$ROOT_DIR" | tr '[:upper:]' '[:
 backup_volume() {
   local volume=$1
   local label=$2
+  shift 2
   local archive="$BACKUP_ROOT/volumes/${label}-${STAMP}.tar.gz"
-  echo "Backing up Docker volume $volume to $archive"
-  docker run --rm \
-    -v "${volume}:/source:ro" \
-    -v "$BACKUP_ROOT/volumes:/backup" \
-    busybox sh -c "cd /source && tar -czf /backup/$(basename "$archive") ."
+  bash "$ROOT_DIR/scripts/backup_volume.sh" "$volume" "$archive" "$@"
 }
 
-echo "Flushing Redis/FalkorDB persistence where available..."
-docker compose --env-file "$ENV_FILE" $COMPOSE_FILES exec -T redis \
-  sh -c 'redis-cli -a "$REDIS_PASSWORD" BGSAVE' || true
-docker compose --env-file "$ENV_FILE" $COMPOSE_FILES exec -T falkordb \
-  sh -c 'redis-cli -a "$FALKORDB_PASSWORD" BGSAVE' || true
+echo "Flushing Redis/FalkorDB persistence, and proving it landed..."
+# `|| true` around a compose exec made a flush that reached nothing look exactly
+# like one that worked, and R-A9G's out-of-band FalkorDB engine turned that into
+# a nightly no-op. The engine is now resolved by compose service *or* network
+# alias, and LASTSAVE has to advance before the flush counts (R-A9H D1).
+# shellcheck source=scripts/lib/redis_flush.sh
+. "$ROOT_DIR/scripts/lib/redis_flush.sh"
+REDIS_FLUSH_PROJECT=$project_name
+flush_failures=0
+flush_status_redis=ok
+flush_status_falkordb=ok
+redis_flush redis REDIS_PASSWORD redis ||
+  { flush_status_redis=FAILED; flush_failures=$((flush_failures + 1)); }
+redis_flush falkordb FALKORDB_PASSWORD falkordb ||
+  { flush_status_falkordb=FAILED; flush_failures=$((flush_failures + 1)); }
 
-backup_volume "${project_name}_backend_uploads" "backend-uploads"
-backup_volume "${project_name}_qdrant_data" "qdrant-data"
-backup_volume "${project_name}_qdrant_snapshots" "qdrant-snapshots"
-backup_volume "${project_name}_falkordb_data" "falkordb-data"
-backup_volume "${project_name}_redis_data" "redis-data"
+# Uploads and Qdrant's snapshot scratch are legitimately empty on a fresh install.
+# With no contract, backup_volume.sh refused that archive and set -e aborted the
+# whole backup before any later volume (F-A8W-B1). `application-volume` accepts an
+# empty volume and still refuses an unreadable or root-escaping archive; the
+# stateful volumes below keep contracts that refuse emptiness.
+backup_volume "${project_name}_backend_uploads" "backend-uploads" --profile application-volume
+backup_volume "${project_name}_qdrant_data" "qdrant-data" --any-of "*/collections/*" --any-of "*raft_state*"
+backup_volume "${project_name}_qdrant_snapshots" "qdrant-snapshots" --profile application-volume
+backup_volume "${project_name}_falkordb_data" "falkordb-data" --profile redis-persistence
+backup_volume "${project_name}_redis_data" "redis-data" --profile redis-persistence
 
 echo "Writing backup checksums and completion manifest..."
 checksum_file="$BACKUP_ROOT/manifests/checksums-$STAMP.sha256"
@@ -97,16 +110,29 @@ cat >"$manifest_json" <<EOF
     "$BACKUP_ROOT/volumes/falkordb-data-$STAMP.tar.gz",
     "$BACKUP_ROOT/volumes/redis-data-$STAMP.tar.gz"
   ],
-  "checksum_file": "$checksum_file"
+  "checksum_file": "$checksum_file",
+  "persistence_flush": {
+    "redis": "$flush_status_redis",
+    "falkordb": "$flush_status_falkordb"
+  }
 }
 EOF
 cp "$manifest_json" "$BACKUP_ROOT/manifests/latest.json"
 
-if ! find "$BACKUP_ROOT" -type f -mtime "+$RETENTION_DAYS" -delete 2>/dev/null; then
-  # Do not invalidate a freshly completed backup when a legacy artifact is
-  # owned by another account. Keep the warning actionable and leave the
-  # inaccessible artifact untouched for an authorized retention cleanup.
-  echo "WARN: unable to remove one or more expired backup artifacts; retention cleanup is required" >&2
-fi
+# Do not invalidate a freshly completed backup when a legacy artifact is owned
+# by another account. The warning now names the artifact, so the cleanup is an
+# action rather than a hunt (R-A9H D2).
+# shellcheck source=scripts/lib/retention.sh
+. "$ROOT_DIR/scripts/lib/retention.sh"
+retention_prune "$BACKUP_ROOT" "$RETENTION_DAYS" || true
 
 echo "Production backup complete: $BACKUP_ROOT ($STAMP)"
+
+# 3, not 1 and not 0. Every artefact above was written and is worth replicating,
+# but the persistence flush was not proven, so an archive may hold only what
+# happened to be on disk. `backup_offsite_s3.sh` carries 3 through its own sync
+# for exactly that reason. Reporting 0 here is the defect R-A9G shipped with.
+if [ "$flush_failures" -ne 0 ]; then
+  echo "WARN: $flush_failures persistence flush(es) did not reach a live engine; the archives above hold only what was already on disk" >&2
+  exit 3
+fi

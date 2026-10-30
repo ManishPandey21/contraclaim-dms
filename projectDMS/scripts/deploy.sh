@@ -12,6 +12,11 @@ fi
 
 pushd "$PROJECT_DIR" >/dev/null
 
+# The checked-out commit is the release identity baked into every backend
+# image (backend/Dockerfile, docs/OPERATIONS.md 7a).
+RELEASE_SHA="$(git -C "$PROJECT_DIR" rev-parse HEAD)"
+export RELEASE_SHA
+
 COMPOSE_CMD=(docker compose --env-file "$ENV_FILE")
 "${COMPOSE_CMD[@]}" pull
 "${COMPOSE_CMD[@]}" up -d --build

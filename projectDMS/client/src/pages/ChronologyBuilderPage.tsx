@@ -1,10 +1,12 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useParams, useSearchParams } from "react-router-dom";
 import {
   CalendarDays,
   Check,
   Download,
   FileText,
   GitBranch,
+  Link2,
   Loader2,
   Plus,
   RefreshCw,
@@ -13,6 +15,12 @@ import {
   X,
 } from "lucide-react";
 import { toast } from "sonner";
+
+import EntityDocumentLinks from "@/components/document-links/EntityDocumentLinks";
+import { useTenant } from "@/contexts/TenantContext";
+import useRBAC from "@/hooks/useRBAC";
+import { scopeErrorCode } from "@/services/active-scope";
+import { CHRONOLOGY_EVENT_DOCUMENT_RELATIONSHIP_ROLES } from "@/services/document-relationships-api";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -42,8 +50,6 @@ import {
   verifyChronologyEvent,
 } from "@/services/chronology-api";
 import { DocumentItem, listDocuments } from "@/services/documents-api";
-import { Organization, listOrganizations } from "@/services/organizations-api";
-import { Project, listProjects } from "@/services/projects-api";
 
 const CHRONOLOGY_TYPES = [
   "general_dispute",
@@ -90,13 +96,33 @@ const SummaryTile: React.FC<{ label: string; value: number; tone?: string }> = (
   </div>
 );
 
+/** Chronology (CL-3B) is held to the navbar selection; say so plainly. */
+function scopeMessage(error: unknown, fallback: string): string {
+  const code = scopeErrorCode(error);
+  if (code === "selection_required") return "Select a project in the navbar to work on chronologies.";
+  if (code === "context_forbidden") return "This chronology is not in the project selected in the navbar.";
+  return fallback;
+}
+
 const EventCard: React.FC<{
   event: ChronologyEventDTO;
   busy: boolean;
   onVerify: (event: ChronologyEventDTO) => void;
   onReject: (event: ChronologyEventDTO) => void;
-}> = ({ event, busy, onVerify, onReject }) => (
-  <Card className="rounded-md">
+  /** Documents section open (deep link `?event_id=` opens it). */
+  documentsOpen: boolean;
+  onToggleDocuments: (event: ChronologyEventDTO) => void;
+  canManageDocuments: boolean;
+  focused: boolean;
+  /** The chronology's scope: an older event may carry none of its own. */
+  scope: { organizationId?: string | null; projectId?: string | null };
+}> = ({ event, busy, onVerify, onReject, documentsOpen, onToggleDocuments, canManageDocuments, focused, scope }) => (
+  <Card
+    className={cn("rounded-md", focused && "border-sky-300 ring-1 ring-sky-200")}
+    data-testid="chronology-event"
+    data-event-id={event.id}
+    id={`chronology-event-${event.id}`}
+  >
     <CardHeader className="pb-3">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
@@ -152,6 +178,32 @@ const EventCard: React.FC<{
           <Badge key={tag} variant="outline">{titleCase(tag)}</Badge>
         ))}
       </div>
+      <div>
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          aria-expanded={documentsOpen}
+          aria-controls={documentsOpen ? `chronology-event-documents-${event.id}` : undefined}
+          onClick={() => onToggleDocuments(event)}
+        >
+          <Link2 className="mr-1 h-3.5 w-3.5" />
+          {documentsOpen ? "Hide documents" : "Documents"}
+        </Button>
+        {documentsOpen && (
+          <div id={`chronology-event-documents-${event.id}`} className="mt-2 rounded-md border p-3">
+            <EntityDocumentLinks
+              targetType="chronology_event"
+              targetId={event.id}
+              organizationId={scope.organizationId || event.organization_id}
+              projectId={scope.projectId || event.project_id}
+              roles={CHRONOLOGY_EVENT_DOCUMENT_RELATIONSHIP_ROLES}
+              defaultRole="correspondence"
+              canManage={canManageDocuments}
+            />
+          </div>
+        )}
+      </div>
     </CardContent>
   </Card>
 );
@@ -203,12 +255,20 @@ const DocumentPicker: React.FC<{
 };
 
 const ChronologyBuilderPage: React.FC = () => {
-  // Org/project selector state
-  const [organizations, setOrganizations] = useState<Organization[]>([]);
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [scopeOrgId, setScopeOrgId] = useState("");
-  const [scopeProjectId, setScopeProjectId] = useState("");
-  const [scopeLoading, setScopeLoading] = useState(false);
+  // CL-3B: the navbar selection is the scope (the server holds every chronology
+  // record and write to it). `/chronology/:chronologyId?event_id=` deep-links.
+  const tenant = useTenant();
+  const scopeOrgId = tenant.selectedOrganizationId || "";
+  const scopeProjectId = tenant.selectedProjectId || "";
+  const { chronologyId: routeChronologyId = "" } = useParams<{ chronologyId: string }>();
+  const [searchParams] = useSearchParams();
+  const focusEventId = searchParams.get("event_id") || "";
+  const { can } = useRBAC();
+  const canEditChronology = can("dms.chronology.edit");
+  const [openDocuments, setOpenDocuments] = useState<Set<string>>(
+    () => new Set(focusEventId ? [focusEventId] : []),
+  );
+  const scrolledTo = useRef("");
 
   // Project documents for the picker
   const [projectDocs, setProjectDocs] = useState<DocumentItem[]>([]);
@@ -217,6 +277,8 @@ const ChronologyBuilderPage: React.FC = () => {
   // Chronology list + selection
   const [chronologies, setChronologies] = useState<MatterChronologyDTO[]>([]);
   const [selectedId, setSelectedId] = useState<string>("");
+  // A deep-linked chronology that the navbar selection does not contain.
+  const [deepLinkRefused, setDeepLinkRefused] = useState(false);
   const [events, setEvents] = useState<ChronologyEventDTO[]>([]);
   const [loading, setLoading] = useState(false);
   const [eventLoading, setEventLoading] = useState(false);
@@ -256,24 +318,9 @@ const ChronologyBuilderPage: React.FC = () => {
     return base;
   }, [events]);
 
-  // Load orgs on mount
   useEffect(() => {
-    setScopeLoading(true);
-    listOrganizations()
-      .then(setOrganizations)
-      .catch(() => toast.error("Failed to load organizations"))
-      .finally(() => setScopeLoading(false));
-  }, []);
-
-  // Load projects when org changes
-  useEffect(() => {
-    setScopeProjectId("");
-    setProjects([]);
-    if (!scopeOrgId) return;
-    listProjects({ organization_id: scopeOrgId })
-      .then(setProjects)
-      .catch(() => toast.error("Failed to load projects"));
-  }, [scopeOrgId]);
+    if (focusEventId) setOpenDocuments((current) => new Set(current).add(focusEventId));
+  }, [focusEventId]);
 
   // Load project documents when project changes
   useEffect(() => {
@@ -288,27 +335,39 @@ const ChronologyBuilderPage: React.FC = () => {
       .finally(() => setDocsLoading(false));
   }, [scopeOrgId, scopeProjectId]);
 
+  // Re-runs on every project switch; the server bounds the list by the selection.
   const loadChronologies = useCallback(async () => {
+    if (tenant.loading) return;
+    if (!scopeProjectId) {
+      setChronologies([]);
+      setSelectedId("");
+      return;
+    }
     try {
       setLoading(true);
-      const rows = await listChronologies(
-        scopeOrgId || scopeProjectId
-          ? {
-              organization_id: scopeOrgId || undefined,
-              project_id: scopeProjectId || undefined,
-            }
-          : undefined,
-      );
+      const rows = await listChronologies();
       setChronologies(rows);
-      setSelectedId((current) => current || rows[0]?.id || "");
-    } catch {
-      toast.error("Failed to load chronologies");
+      const refused = Boolean(routeChronologyId) && !rows.some((row) => row.id === routeChronologyId);
+      setDeepLinkRefused(refused);
+      // A chronology of the previous project never stays selected, and a refused
+      // deep link never silently opens another chronology in its place.
+      setSelectedId((current) => {
+        if (routeChronologyId) return refused ? "" : current && rows.some((row) => row.id === current) ? current : routeChronologyId;
+        if (current && rows.some((row) => row.id === current)) return current;
+        return rows[0]?.id || "";
+      });
+    } catch (error) {
+      setChronologies([]);
+      setSelectedId("");
+      toast.error(scopeMessage(error, "Failed to load chronologies"));
     } finally {
       setLoading(false);
     }
-  }, [scopeOrgId, scopeProjectId]);
+  }, [routeChronologyId, scopeProjectId, tenant.loading]);
 
+  const eventSequence = useRef(0);
   const loadEvents = useCallback(async () => {
+    const current = ++eventSequence.current;
     if (!selectedId) {
       setEvents([]);
       setContextCount(0);
@@ -318,13 +377,26 @@ const ChronologyBuilderPage: React.FC = () => {
       setEventLoading(true);
       const params = filterStatus === "all" ? undefined : { verification_status: filterStatus };
       const rows = await listChronologyEvents(selectedId, params);
+      // A response for a chronology that is no longer selected is dropped.
+      if (current !== eventSequence.current) return;
       setEvents(rows);
-      const context = await getChronologyPleadingContext(selectedId);
-      setContextCount(context.source_ledger.length);
-    } catch {
-      toast.error("Failed to load chronology events");
+    } catch (error) {
+      if (current !== eventSequence.current) return;
+      setEvents([]);
+      toast.error(scopeMessage(error, "Failed to load chronology events"));
+      return;
     } finally {
-      setEventLoading(false);
+      if (current === eventSequence.current) setEventLoading(false);
+    }
+    // The drafting-source count is separate: its failure keeps the events on screen.
+    try {
+      const context = await getChronologyPleadingContext(selectedId);
+      if (current === eventSequence.current) setContextCount(context.source_ledger.length);
+    } catch {
+      if (current === eventSequence.current) {
+        setContextCount(0);
+        toast.error("Drafting sources could not be counted");
+      }
     }
   }, [filterStatus, selectedId]);
 
@@ -335,6 +407,22 @@ const ChronologyBuilderPage: React.FC = () => {
   useEffect(() => {
     void loadEvents();
   }, [loadEvents]);
+
+  // Deep link: bring the linked event into view once, when it has loaded.
+  useEffect(() => {
+    if (!focusEventId || scrolledTo.current === focusEventId) return;
+    if (!events.some((event) => event.id === focusEventId)) return;
+    scrolledTo.current = focusEventId;
+    document.getElementById(`chronology-event-${focusEventId}`)?.scrollIntoView?.({ block: "center" });
+  }, [events, focusEventId]);
+
+  const toggleDocuments = (event: ChronologyEventDTO) =>
+    setOpenDocuments((current) => {
+      const next = new Set(current);
+      if (next.has(event.id)) next.delete(event.id);
+      else next.add(event.id);
+      return next;
+    });
 
   const submit = async () => {
     if (!scopeProjectId.trim() || !form.title.trim()) {
@@ -356,8 +444,8 @@ const ChronologyBuilderPage: React.FC = () => {
       setChronologies((prev) => [created, ...prev]);
       setSelectedId(created.id);
       setCreateDocIds(new Set());
-    } catch {
-      toast.error("Unable to create chronology");
+    } catch (error) {
+      toast.error(scopeMessage(error, "Unable to create chronology"));
     }
   };
 
@@ -421,47 +509,16 @@ const ChronologyBuilderPage: React.FC = () => {
         </Button>
       </div>
 
-      {/* Org / Project scope selector */}
-      <Card className="rounded-md">
-        <CardContent className="pt-4 pb-4">
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div className="grid gap-1.5">
-              <Label>Organization</Label>
-              <Select
-                value={scopeOrgId}
-                onValueChange={(v) => { setScopeOrgId(v); setScopeProjectId(""); }}
-                disabled={scopeLoading}
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder={scopeLoading ? "Loading…" : "Select organization"} />
-                </SelectTrigger>
-                <SelectContent>
-                  {organizations.map((org) => (
-                    <SelectItem key={org._id} value={org._id}>{org.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="grid gap-1.5">
-              <Label>Project</Label>
-              <Select
-                value={scopeProjectId}
-                onValueChange={setScopeProjectId}
-                disabled={!scopeOrgId || projects.length === 0}
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder={!scopeOrgId ? "Select org first" : projects.length === 0 ? "No projects" : "Select project"} />
-                </SelectTrigger>
-                <SelectContent>
-                  {projects.map((p) => (
-                    <SelectItem key={p._id} value={p._id}>{p.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
+      {deepLinkRefused && scopeProjectId && (
+        <div role="alert" className="rounded-md border border-destructive/40 bg-white p-4 text-sm text-destructive">
+          This chronology is not available in the project selected in the navbar.
+        </div>
+      )}
+      {!tenant.loading && !scopeProjectId && (
+        <div role="status" className="rounded-md border border-dashed bg-white p-4 text-sm text-muted-foreground">
+          Select a project in the navbar to work on its chronologies.
+        </div>
+      )}
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
         <SummaryTile label="Events" value={counts.total} />
@@ -526,7 +583,7 @@ const ChronologyBuilderPage: React.FC = () => {
                   onClearAll={() => setCreateDocIds(new Set())}
                 />
                 {!scopeProjectId && (
-                  <p className="text-xs text-muted-foreground">Select a project above to pick documents.</p>
+                  <p className="text-xs text-muted-foreground">Select a project in the navbar to pick documents.</p>
                 )}
               </div>
               <Button className="w-full" onClick={submit} disabled={!scopeProjectId || !form.title.trim()}>
@@ -542,7 +599,7 @@ const ChronologyBuilderPage: React.FC = () => {
             <CardContent className="space-y-2">
               {chronologies.length === 0 ? (
                 <div className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
-                  {scopeProjectId ? "No chronologies found for this project." : "Select a project to load chronologies."}
+                  {scopeProjectId ? "No chronologies found for this project." : "Select a project in the navbar to load chronologies."}
                 </div>
               ) : (
                 chronologies.map((item) => (
@@ -684,6 +741,12 @@ const ChronologyBuilderPage: React.FC = () => {
                   busy={busyEvent === event.id}
                   onVerify={(row) => decide(row, "verify")}
                   onReject={(row) => decide(row, "reject")}
+                  documentsOpen={openDocuments.has(event.id)}
+                  onToggleDocuments={toggleDocuments}
+                  // An archived chronology is read-only for its evidence (the server refuses too).
+                  canManageDocuments={canEditChronology && selected?.status !== "archived"}
+                  focused={event.id === focusEventId}
+                  scope={{ organizationId: selected?.organization_id, projectId: selected?.project_id }}
                 />
               ))}
             </div>

@@ -69,6 +69,41 @@ ANALYSIS_FINDING_FIELDS = {
     "expert_alignment": ("expert_type", "claim_no", "alignment_status", "verified_amount", "contradictions"),
 }
 
+#: Which of the fields named above are DERIVED from a document's extracted
+#: text, and how to reach the document they came from: (source_type override,
+#: id field on the row). `None` means infer from the row, which is right for
+#: document-index rows and wrong for clause-matrix rows - those store a
+#: `contract_clauses` child id under a different key and carry no source_type.
+#:
+#: One list, because the dereference below is generic: the earlier version
+#: special-cased `relevance_note` inline, so `clause_text_excerpt` - 900
+#: characters of the parent document's text, on the very next line of
+#: ANALYSIS_FINDING_FIELDS - went straight into the analysis artifact ungated.
+DERIVED_ANALYSIS_FIELDS = {
+    "relevance_note": (None, None),
+    "summary": (None, None),
+    "clause_text_excerpt": ("clause", "clause_source_id"),
+    # `f"{title}. {description}"` composed from the source document's extracted
+    # span by the chronology adapter, so it is document text under another name.
+    "event": (None, "source_document_id"),
+}
+
+
+async def _gated_fact(db: Any, row: Dict[str, Any], key: str) -> Any:
+    """One finding field, withheld when its source document is not publishable."""
+    derived = DERIVED_ANALYSIS_FIELDS.get(key)
+    if derived is None:
+        return row.get(key)
+    source_type, id_field = derived
+    return await consumable_derived_text(
+        db,
+        row,
+        key,
+        source_type=source_type,
+        source_id=row.get(id_field) if id_field else None,
+    )
+
+
 DOCUMENT_SIGNAL_TERMS = (
     "notice", "delay", "extension of time", "clause", "jurisdiction",
     "limitation", "quantum", "payment", "expert", "counterclaim",
@@ -136,7 +171,27 @@ def _source_revision_ids(row: Dict[str, Any]) -> List[str]:
     return sorted(revisions)
 
 
+def _row_satisfies_requirement(row: Dict[str, Any]) -> bool:
+    """Whether a matrix row counts toward the required-matrix presence gate.
+
+    Approval is necessary but not sufficient: a row whose source authority was
+    refused (stamped `authority_denied` by `safe_matrix_rows`) must not satisfy a
+    requirement, or the `matrix_review` gate advances the pleading on the
+    strength of a source nobody may consume - influence, not disclosure, since
+    the derived text is already blanked but the row's PRESENCE is what the gate
+    reads.
+    """
+    return _is_ready_row(row) and not row.get("authority_denied")
+
+
 def _evidence_status(row: Dict[str, Any], source_revision_ids: Sequence[str]) -> str:
+    # A row whose source authority was refused cannot count as supported
+    # evidence, no matter how complete or approved it looks - counting it would
+    # improve readiness and legal completeness on the strength of a document
+    # nobody may consume. The decision is carried on the row by the matrix
+    # projection (`safe_matrix_rows`), not re-inferred here.
+    if row.get("authority_denied"):
+        return "authority_denied"
     if not source_revision_ids:
         return "missing"
     if not _is_ready_row(row) or any(str(value).endswith("@unversioned") for value in source_revision_ids):
@@ -201,6 +256,9 @@ def _branch_matrices(branch: str, pleading_type: str) -> tuple[str, ...]:
     if branch == "pleading_position":
         matrices.extend(PLEADING_POSITION_MATRICES.get(pleading_type, ()))
     return tuple(dict.fromkeys(matrices))
+
+
+from ..publication_policy import consumable_derived_text, is_consumable
 
 
 class ArbitrationWorkflowDomain:
@@ -353,7 +411,9 @@ class ArbitrationWorkflowDomain:
         )
         document_signals: List[Dict[str, Any]] = []
         for item in ((document_manifest or {}).get("payload") or {}).get("documents") or []:
-            query = {"_id": item.get("document_id")}
+            from ..publication_policy import document_id_candidates
+
+            query = {"_id": {"$in": document_id_candidates(item.get("document_id"))}}
             if case.get("organization_id"):
                 query["organization_id"] = case.get("organization_id")
             if case.get("project_id"):
@@ -362,9 +422,24 @@ class ArbitrationWorkflowDomain:
             if not record:
                 document_signals.append({"document_id": item.get("document_id"), "resolution_status": "missing_or_out_of_scope"})
                 continue
+            # Extracted body text only when the document may be consumed;
+            # metadata fields stay searchable either way so a blocked document
+            # is still findable by subject/filename for review.
+            # `summary` belongs with the extracted content, not the metadata.
+            # It is generated from the same extraction pass, which is why the
+            # policy lists it in _TEXT_FIELDS and exposes authoritative_summary
+            # - leaving it unguarded here let a blocked document's condensed
+            # content influence arbitration document selection. Only genuinely
+            # independent identifiers stay ungated so a blocked document is
+            # still findable for review.
+            _consumable = is_consumable(record)
             searchable = " ".join(
-                str(record.get(key) or "")
-                for key in ("subject", "filename", "summary", "ocrText", "text", "text_enriched")
+                [str(record.get(key) or "") for key in ("subject", "filename")]
+                + [
+                    str(record.get(key) or "")
+                    for key in ("summary", "ocrText", "text", "text_enriched")
+                    if _consumable
+                ]
             ).lower()
             document_signals.append(
                 {
@@ -416,8 +491,16 @@ class ArbitrationWorkflowDomain:
                             "row_id": canonical["row_id"],
                             "source_revision_ids": canonical["source_revision_ids"],
                             "evidence_status": canonical["evidence_status"],
+                            # ANALYSIS_FINDING_FIELDS is a declaration that is
+                            # generically dereferenced here, so a field named in
+                            # it becomes content. Any field on that list which
+                            # is derived from a document's extracted text is
+                            # gated by that document's current authority -
+                            # DERIVED_ANALYSIS_FIELDS is the single list of
+                            # which ones those are, so adding a derived field to
+                            # a branch cannot silently escape the check.
                             "facts": {
-                                key: row.get(key)
+                                key: await _gated_fact(self.db, row, key)
                                 for key in allowed_fields
                                 if row.get(key) not in (None, "", [])
                             },
@@ -564,7 +647,7 @@ class ArbitrationWorkflowDomain:
         required = PLEADING_MATRIX_REQUIREMENTS.get(pleading_type, ())
         blockers = [
             {"code": "missing_required_matrix", "matrix": slug, "message": f"No approved {slug} row is available"}
-            for slug in required if not any(_is_ready_row(row) for row in rows_by_matrix.get(slug) or [])
+            for slug in required if not any(_row_satisfies_requirement(row) for row in rows_by_matrix.get(slug) or [])
         ]
         opponent_snapshot = context.get("opponent_snapshot")
         if OPPONENT_REQUIREMENTS.get(pleading_type):
@@ -681,13 +764,17 @@ class ArbitrationWorkflowDomain:
                 "message": f"No approved {slug} row is available",
             }
             for slug in required
-            if not any(_is_ready_row(row) for row in rows_by_matrix.get(slug) or [])
+            if not any(_row_satisfies_requirement(row) for row in rows_by_matrix.get(slug) or [])
         ]
         return {**merged, "blockers": blockers}
 
     async def build_plan(self, run: Dict[str, Any], current_user: Any) -> Dict[str, Any]:
         case_id = str(run["case_id"])
-        rows = {slug: [row for row in await self.cases.list_matrix_rows(case_id, slug, draft_id=run.get("draft_id")) if _is_ready_row(row)] for slug in MATRIX_COLLECTIONS}
+        # `_row_satisfies_requirement`, not bare `_is_ready_row`: the plan's
+        # provenance map must not list a source whose authority was refused, so
+        # the same authority-aware predicate the required-matrix gate uses
+        # governs which rows enter the plan.
+        rows = {slug: [row for row in await self.cases.list_matrix_rows(case_id, slug, draft_id=run.get("draft_id")) if _row_satisfies_requirement(row)] for slug in MATRIX_COLLECTIONS}
         structure = {
             "statement_of_claim": ["introduction", "jurisdiction", "facts", "claims", "quantum", "relief"],
             "statement_of_defence": ["introduction", "preliminary_objections", "paragraph_responses", "defences", "quantum", "relief"],

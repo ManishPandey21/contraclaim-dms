@@ -242,7 +242,7 @@ const LetterTemplatePage = () => {
         </div>
         <Dialog open={isCreateDialogOpen} onOpenChange={setIsCreateDialogOpen}>
           <DialogTrigger asChild>
-            <Button 
+            <Button
               className="bg-docsumo-blue hover:bg-docsumo-blue/90"
             >
               <Plus className="mr-2 h-4 w-4" />

@@ -16,7 +16,7 @@ from ..models.concern import (
     Concern, ConcernCreate, ConcernUpdate, ConcernListResponse
 )
 from ..utils.validation import validate_input, sanitize_text, validate_object_id
-from ..utils.error_handler import handle_exceptions, ConcernError
+from ..utils.error_handler import BaseDomainError, handle_exceptions, ConcernError
 from ..utils.rate_limiter import RateLimiter
 from ..utils.audit_logger import AuditLogger
 
@@ -30,7 +30,7 @@ router = APIRouter(
 
 class ConcernController:
     """Secure concern controller with comprehensive validation and authorization."""
-    
+
     def __init__(
         self,
         concern_service: ConcernService,
@@ -52,13 +52,13 @@ class ConcernController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id, cost=3)
-            
+
             # Authorization check
             await self.auth_service.require_permission(current_user, "concerns:create")
-            
+
             # Validate and sanitize input
             validated_data = await self._validate_concern_input(concern_data)
-            
+
             # Validate party access if party is specified
             if validated_data.party_id:
                 party = await self.party_service.get_party_by_id(validated_data.party_id)
@@ -67,25 +67,25 @@ class ConcernController:
                         f"Party with id {validated_data.party_id} not found",
                         status.HTTP_404_NOT_FOUND
                     )
-                
+
                 # Check authorization for this specific party
                 await self.auth_service.check_party_access(
                     current_user, party, "create_concern"
                 )
-            
+
             # Create concern
             concern = await self.concern_service.create_concern(
                 validated_data, current_user
             )
-            
+
             # Audit log
             await self.audit_logger.log_concern_created(
-                current_user.id, concern.id, validated_data.party_id
+                current_user.id, concern.id, party_id=validated_data.party_id
             )
-            
+
             return concern
-            
-        except (ConcernError, HTTPException):
+
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Concern creation failed: {str(e)}")
@@ -104,28 +104,28 @@ class ConcernController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id)
-            
+
             # Authorization check
             await self.auth_service.require_permission(current_user, "concerns:read")
-            
+
             # Build authorized query based on user scope
             authorized_query = await self.auth_service.build_concern_query(
                 current_user, filters
             )
-            
+
             # Get concerns with pagination
             concerns, total_count = await self.concern_service.get_concerns_paginated(
                 authorized_query, pagination
             )
-            
+
             return ConcernListResponse(
                 concerns=concerns,
                 total=total_count,
                 page=pagination["skip"] // pagination["limit"] + 1,
                 limit=pagination["limit"]
             )
-            
-        except HTTPException:
+
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to get concerns: {str(e)}")
@@ -141,13 +141,13 @@ class ConcernController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id)
-            
+
             # Authorization check
             await self.auth_service.require_permission(current_user, "concerns:read")
-            
+
             # Validate concern ID
             validated_concern_id = validate_object_id(concern_id)
-            
+
             # Get concern
             concern = await self.concern_service.get_concern_by_id(validated_concern_id)
             if not concern:
@@ -155,13 +155,13 @@ class ConcernController:
                     f"Concern with id {concern_id} not found",
                     status.HTTP_404_NOT_FOUND
                 )
-            
+
             # Check authorization for this specific concern
             await self.auth_service.check_concern_access(current_user, concern, "read")
-            
+
             return concern
-            
-        except (ConcernError, HTTPException):
+
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to get concern {concern_id}: {str(e)}")
@@ -177,13 +177,13 @@ class ConcernController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id, cost=2)
-            
+
             # Authorization check
             await self.auth_service.require_permission(current_user, "concerns:update")
-            
+
             # Validate concern ID
             validated_concern_id = validate_object_id(concern_id)
-            
+
             # Get existing concern
             existing_concern = await self.concern_service.get_concern_by_id(validated_concern_id)
             if not existing_concern:
@@ -191,29 +191,29 @@ class ConcernController:
                     f"Concern with id {concern_id} not found",
                     status.HTTP_404_NOT_FOUND
                 )
-            
+
             # Check authorization for this specific concern
             await self.auth_service.check_concern_access(
                 current_user, existing_concern, "update"
             )
-            
+
             # Validate update data
             validated_update = await self._validate_concern_update(update_data)
-            
+
             # Update concern
             updated_concern = await self.concern_service.update_concern(
                 validated_concern_id, validated_update, current_user
             )
-            
+
             # Audit log
             changed_fields = list(validated_update.dict(exclude_unset=True).keys())
             await self.audit_logger.log_concern_updated(
                 current_user.id, validated_concern_id, changed_fields
             )
-            
+
             return updated_concern
-            
-        except (ConcernError, HTTPException):
+
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to update concern {concern_id}: {str(e)}")
@@ -229,13 +229,13 @@ class ConcernController:
         try:
             # Rate limiting for destructive operations
             await self.rate_limiter.check_user_limit(current_user.id, cost=5)
-            
+
             # Authorization check
             await self.auth_service.require_permission(current_user, "concerns:delete")
-            
+
             # Validate concern ID
             validated_concern_id = validate_object_id(concern_id)
-            
+
             # Get concern for validation
             concern = await self.concern_service.get_concern_by_id(validated_concern_id)
             if not concern:
@@ -243,23 +243,23 @@ class ConcernController:
                     f"Concern with id {concern_id} not found",
                     status.HTTP_404_NOT_FOUND
                 )
-            
+
             # Check authorization for this specific concern
             await self.auth_service.check_concern_access(
                 current_user, concern, "delete"
             )
-            
+
             # Delete concern
             await self.concern_service.delete_concern(validated_concern_id, current_user)
-            
+
             # Audit log
             await self.audit_logger.log_concern_deleted(
-                current_user.id, validated_concern_id, concern.name or "unnamed"
+                current_user.id, validated_concern_id, name=concern.name or "unnamed"
             )
-            
+
             return {"message": "Concern deleted successfully"}
-            
-        except (ConcernError, HTTPException):
+
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to delete concern {concern_id}: {str(e)}")
@@ -280,7 +280,7 @@ class ConcernController:
             description=sanitize_text(
                 validate_input(concern_data.description, max_length=2000)
             ) if concern_data.description else None,
-            party_id=validate_object_id(concern_data.party_id) 
+            party_id=validate_object_id(concern_data.party_id)
                 if concern_data.party_id else None,
             status=concern_data.status or "open",
             priority=concern_data.priority or "medium"
@@ -289,28 +289,28 @@ class ConcernController:
     async def _validate_concern_update(self, update_data: ConcernUpdate) -> ConcernUpdate:
         """Validate concern update data."""
         validated_fields = {}
-        
+
         if update_data.name is not None:
             validated_fields['name'] = sanitize_text(
                 validate_input(update_data.name, max_length=200)
             )
-        
+
         if update_data.email is not None:
             validated_fields['email'] = sanitize_text(
                 validate_input(update_data.email, max_length=255)
             )
-        
+
         if update_data.description is not None:
             validated_fields['description'] = sanitize_text(
                 validate_input(update_data.description, max_length=2000)
             )
-        
+
         if update_data.status is not None:
             validated_fields['status'] = update_data.status
-        
+
         if update_data.priority is not None:
             validated_fields['priority'] = update_data.priority
-        
+
         return ConcernUpdate(**validated_fields)
 
 
@@ -322,7 +322,7 @@ async def get_concern_controller() -> ConcernController:
     auth_service = AuthorizationService()
     rate_limiter = RateLimiter(scope="concerns")
     audit_logger = AuditLogger()
-    
+
     return ConcernController(
         concern_service, party_service, auth_service,
         rate_limiter, audit_logger
@@ -361,7 +361,7 @@ async def get_concerns(
         "priority": priority
     }
     pagination = {"skip": skip, "limit": limit}
-    
+
     return await controller.get_concerns(pagination, filters, current_user)
 
 

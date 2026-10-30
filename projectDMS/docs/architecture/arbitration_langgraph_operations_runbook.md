@@ -100,7 +100,7 @@ Production startup rejects primary rollout unless LangGraph is the default, acce
 
 Do not enable canary or primary until all of the following pass in a production-like environment:
 
-1. `langgraph==1.2.9` and `langgraph-checkpoint-mongodb==0.4.0` import in the backend runtime.
+1. `langgraph==1.2.9` and `langgraph-checkpoint-mongodb==0.5.1` import in the backend runtime.
 2. Both arbitration migrations apply to a restored production-sized MongoDB copy and their indexes complete without duplicate-key failures.
 3. Mongo checkpoint interrupt/restart/resume tests prove the last checkpoint is recovered and raw legal text is absent.
 4. Redis worker process-kill/retry tests prove bundle failures raise and are retried without duplicate exports.
