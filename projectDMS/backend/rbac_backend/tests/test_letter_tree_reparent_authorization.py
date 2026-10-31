@@ -832,6 +832,9 @@ async def test_every_unverifiable_parent_ancestry_gets_the_same_answer(db: _Data
         response = await _move_child_under_branch(database, PROJECT_A1_EDITOR)
         answers.add((response.status_code, response.content))
     assert len(answers) == 1, answers
+    # Identical, and a refusal: without the check every case is the same 200.
+    (status_code, body), = answers
+    assert status_code == 409 and PARENT_ANCESTRY_BLOCKS_MOVE.encode() in body, answers
 
 
 async def test_a_parent_with_a_valid_multi_level_ancestry_is_copied_exactly(db: _Database) -> None:
