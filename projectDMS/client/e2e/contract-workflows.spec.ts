@@ -343,6 +343,10 @@ test("contract search renders success, empty, and API-error states", async ({ pa
 
 test("contract Q&A validates required scope and renders cited answer", async ({ page }) => {
   await page.goto("/contracts/qa");
+  // Super Admin now lands on All Organisations / All Projects; Q&A needs one
+  // project, chosen in the navbar.
+  await page.getByRole("combobox", { name: "Select organisation" }).selectOption(org.id);
+  await page.getByRole("combobox", { name: "Select project" }).selectOption(project.id);
 
   // CL-4A: the page's organisation/project follow the navbar selection, so the
   // first unmet requirement is the contract document.
