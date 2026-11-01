@@ -308,6 +308,14 @@ class _FakeLetterController:
     async def get_conversation_chain(self, letter_id: str, current_user: CurrentUser) -> List[Letter]:
         return await self.conversation_service.get_conversation_chain(letter_id, current_user)
 
+    # The tree and reparent routes go through the controller; authorisation is
+    # covered by test_letter_tree_reparent_authorization.py, so these stay delegates.
+    async def get_conversation_tree(self, letter_id: str, current_user: CurrentUser) -> ConversationTree:
+        return await self.conversation_service.build_conversation_tree(letter_id, current_user)
+
+    async def reparent_letter(self, letter_id: str, new_parent_id: str, current_user: CurrentUser) -> None:
+        await self.conversation_service.reparent_letter_atomic(letter_id, new_parent_id, current_user)
+
 
 @pytest.fixture
 def fake_letter_controller():
