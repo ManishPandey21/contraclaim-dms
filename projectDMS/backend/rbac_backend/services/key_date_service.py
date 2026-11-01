@@ -10,7 +10,7 @@ counts. Authorization/scope is enforced by the router via PolicyService.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, TypeVar
 
 from ..core.database import get_database
 from ..models.key_date import (
@@ -29,6 +29,13 @@ from .audit_event_service import AuditEventService
 
 class KeyDateError(Exception):
     """Validation / workflow error surfaced as a 400/409 by the router."""
+
+    def __init__(self, message: str, status_code: int = 400) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+_TransactionResult = TypeVar("_TransactionResult")
 
 
 # --- pure domain functions (trivially testable) ---------------------------
@@ -186,6 +193,9 @@ def build_dashboard(milestones: List[Dict[str, Any]], now: Optional[datetime] = 
 def decorate(milestone: Dict[str, Any], now: Optional[datetime] = None) -> Dict[str, Any]:
     """Attach derived status + days_remaining for responses."""
     m = dict(milestone)
+    # Stored legacy membership is discovery-only. It cannot confer Document
+    # authority or flow into native UI/count/export consumers.
+    m["linked_document_ids"] = []
     m["status"] = derive_status(m, now)
     m["days_remaining"] = days_remaining(m, now)
     return m
@@ -201,6 +211,22 @@ class KeyDateService:
 
     async def _get_db(self) -> Any:
         return self.db if self.db is not None else await get_database()
+
+    async def _run_transaction(
+        self,
+        callback: Callable[[Any], Awaitable[_TransactionResult]],
+    ) -> _TransactionResult:
+        db = await self._get_db()
+        start_session = getattr(getattr(db, "client", None), "start_session", None)
+        if not callable(start_session):
+            return await callback(None)
+        session = await start_session()
+        async with session:
+            with_transaction = getattr(session, "with_transaction", None)
+            if callable(with_transaction):
+                return await with_transaction(callback)
+            async with session.start_transaction():
+                return await callback(session)
 
     async def _assert_original_baseline_editable(self, milestone_or_project: Dict[str, Any]) -> None:
         """Prevent every legacy write path from changing a frozen baseline."""
@@ -265,6 +291,11 @@ class KeyDateService:
 
     async def create_milestone(self, payload: KeyDateMilestoneCreate, current_user: Any) -> Dict[str, Any]:
         db = await self._get_db()
+        if payload.linked_document_ids:
+            raise KeyDateError(
+                "Legacy relationship intent is ambiguous and requires manual review",
+                status_code=409,
+            )
         await self._assert_original_baseline_editable({
             "project_id": payload.project_id,
             "organization_id": payload.organization_id or getattr(current_user, "organization_id", None),
@@ -276,7 +307,10 @@ class KeyDateService:
             payload.organization_id or getattr(current_user, "organization_id", None),
         )
         calc = calculate_key_date(start, payload.contractual_week_number, basis)
-        doc = KeyDateMilestone(**payload.model_dump(exclude={"project_start_date"})).model_dump(by_alias=True)
+        doc = KeyDateMilestone(
+            **payload.model_dump(exclude={"project_start_date", "linked_document_ids"})
+        ).model_dump(by_alias=True)
+        doc.pop("linked_document_ids", None)
         doc["calculated_key_date"] = calc
         doc["original_planned_key_date"] = doc.get("original_planned_key_date") or calc
         doc["current_approved_key_date"] = doc.get("original_planned_key_date")
@@ -408,6 +442,13 @@ class KeyDateService:
 
     async def update(self, milestone: Dict[str, Any], payload: Dict[str, Any], current_user: Any) -> Optional[Dict[str, Any]]:
         db = await self._get_db()
+        if payload.get("linked_document_ids"):
+            raise KeyDateError(
+                "Legacy relationship intent is ambiguous and requires manual review",
+                status_code=409,
+            )
+        payload = {**payload}
+        payload.pop("linked_document_ids", None)
         await self._assert_original_baseline_editable(milestone)
         update = {k: v for k, v in payload.items() if v is not None and k != "project_start_date"}
         # Recalculate only the calculated/current date (never the original baseline)
@@ -432,9 +473,90 @@ class KeyDateService:
     async def delete(self, milestone: Dict[str, Any], current_user: Any) -> bool:
         db = await self._get_db()
         await self._assert_original_baseline_editable(milestone)
-        res = await db.key_date_milestones.delete_one({"_id": milestone["_id"]})
-        await self._emit("keydate.milestone.deleted", current_user, milestone, before=milestone)
-        return res.deleted_count > 0
+        milestone_id = str(milestone["_id"])
+        deleting_at = datetime.utcnow()
+
+        async def commit(session: Any) -> bool:
+            write_kwargs = {"session": session} if session is not None else {}
+            claimed = await db.key_date_milestones.update_one(
+                {
+                    "_id": milestone["_id"],
+                    "organization_id": milestone.get("organization_id"),
+                    "project_id": milestone.get("project_id"),
+                    "deleting_at": None,
+                },
+                {
+                    "$set": {
+                        "deleting_at": deleting_at,
+                        "deleting_by": getattr(current_user, "id", None),
+                    }
+                },
+                **write_kwargs,
+            )
+            if not getattr(claimed, "matched_count", 0):
+                existing = await db.key_date_milestones.find_one(
+                    {"_id": milestone["_id"]}, **write_kwargs
+                )
+                if not existing:
+                    return False
+                raise KeyDateError("Key Date deletion is already in progress", status_code=409)
+
+            stored_milestone = await db.key_date_milestones.find_one(
+                {"_id": milestone["_id"], "deleting_at": deleting_at}, **write_kwargs
+            )
+            has_achievement = await db.key_date_achievements.find_one(
+                {"milestone_id": milestone_id}, **write_kwargs
+            )
+            has_legacy_eot = await db.key_date_eot_applications.find_one(
+                {"milestone_id": milestone_id}, **write_kwargs
+            )
+            has_legacy_history = await db.key_date_extension_history.find_one(
+                {"milestone_id": milestone_id}, **write_kwargs
+            )
+            has_submission_item = await db.key_date_eot_submission_items.find_one(
+                {"key_date_id": milestone_id}, **write_kwargs
+            )
+            has_determination_item = await db.key_date_eot_determination_items.find_one(
+                {"key_date_id": milestone_id}, **write_kwargs
+            )
+            if (
+                has_achievement
+                or has_legacy_eot
+                or has_legacy_history
+                or has_submission_item
+                or has_determination_item
+                or (stored_milestone or {}).get("linked_document_ids")
+            ):
+                raise KeyDateError(
+                    "Key Date cannot be deleted while achievement, EOT, history, or legacy evidence records exist",
+                    status_code=409,
+                )
+            res = await db.key_date_milestones.delete_one(
+                {"_id": milestone["_id"], "deleting_at": deleting_at}, **write_kwargs
+            )
+            if not getattr(res, "deleted_count", 0):
+                raise KeyDateError("Key Date changed while deletion was in progress", status_code=409)
+            await self._emit(
+                "keydate.milestone.deleted",
+                current_user,
+                stored_milestone or milestone,
+                before=stored_milestone or milestone,
+                session=session,
+            )
+            return True
+
+        transaction_supported = callable(
+            getattr(getattr(db, "client", None), "start_session", None)
+        )
+        try:
+            return await self._run_transaction(commit)
+        except Exception:
+            if not transaction_supported:
+                await db.key_date_milestones.update_one(
+                    {"_id": milestone["_id"], "deleting_at": deleting_at},
+                    {"$unset": {"deleting_at": "", "deleting_by": ""}},
+                )
+            raise
 
     async def recalculate_project(self, scope_filter: Dict[str, Any], project_id: str,
                                   current_user: Any, *, override_start: Optional[datetime] = None) -> Dict[str, Any]:
@@ -484,6 +606,10 @@ class KeyDateService:
     # --- EOT --------------------------------------------------------------
 
     async def submit_eot(self, milestone: Dict[str, Any], payload: EOTApplicationCreate, current_user: Any) -> Dict[str, Any]:
+        if payload.linked_document_ids:
+            raise KeyDateError(
+                "Legacy relationship intent is ambiguous and requires manual review"
+            )
         await self._assert_original_baseline_editable(milestone)
         if payload.submit and not (payload.eot_letter_reference or "").strip():
             raise KeyDateError("EOT letter reference is mandatory when submitting an EOT")
@@ -498,20 +624,52 @@ class KeyDateService:
             requested_extension_days=payload.requested_extension_days,
             requested_revised_key_date=payload.requested_revised_key_date,
             reason=payload.reason,
-            linked_document_ids=payload.linked_document_ids,
             status=status,
             submitted_by=getattr(current_user, "id", None),
             submitted_date=datetime.utcnow() if payload.submit else None,
         ).model_dump(by_alias=True)
-        await db.key_date_eot_applications.insert_one(eot)
-        if payload.submit:
-            await db.key_date_milestones.update_one(
-                {"_id": milestone["_id"]}, {"$set": {"eot_status": EOTStatus.SUBMITTED.value, "updated_at": datetime.utcnow()}}
+
+        async def commit(session: Any) -> Dict[str, Any]:
+            write_kwargs = {"session": session} if session is not None else {}
+            parent_update: Dict[str, Any] = {
+                "$inc": {"legacy_eot_revision": 1},
+                "$set": {"updated_at": datetime.utcnow()},
+            }
+            if payload.submit:
+                parent_update["$set"]["eot_status"] = EOTStatus.SUBMITTED.value
+            parent_result = await db.key_date_milestones.update_one(
+                {
+                    "_id": milestone["_id"],
+                    "organization_id": milestone.get("organization_id"),
+                    "project_id": milestone.get("project_id"),
+                    "deleting_at": None,
+                },
+                parent_update,
+                **write_kwargs,
             )
-        await self._emit("keydate.eot.submitted", current_user, milestone, after={"eot_id": eot["_id"], "status": status.value})
-        return eot
+            if not getattr(parent_result, "matched_count", 0):
+                raise KeyDateError(
+                    "Key Date deletion or concurrent lifecycle change prevents EOT creation",
+                    status_code=409,
+                )
+            await db.key_date_eot_applications.insert_one(eot, **write_kwargs)
+            await self._emit(
+                "keydate.eot.submitted",
+                current_user,
+                milestone,
+                after={"eot_id": eot["_id"], "status": status.value},
+                session=session,
+            )
+            return eot
+
+        return await self._run_transaction(commit)
 
     async def review_eot(self, milestone: Dict[str, Any], eot: Dict[str, Any], review: EOTReview, current_user: Any) -> Dict[str, Any]:
+        if review.linked_document_ids:
+            raise KeyDateError(
+                "Legacy relationship intent is ambiguous and requires manual review"
+            )
+        await self._assert_original_baseline_editable(milestone)
         db = await self._get_db()
         decision = review.decision
         now = datetime.utcnow()
@@ -520,9 +678,6 @@ class KeyDateService:
             "reviewed_date": now,
             "remarks": review.approval_remarks,
         }
-        if review.linked_document_ids is not None:
-            eot_set["linked_document_ids"] = review.linked_document_ids
-
         if decision == "under_review":
             eot_set["status"] = EOTStatus.UNDER_REVIEW.value
             await db.key_date_eot_applications.update_one({"_id": eot["_id"]}, {"$set": eot_set})
@@ -598,15 +753,67 @@ class KeyDateService:
         ).model_dump(by_alias=True)
         await db.key_date_extension_history.insert_one(history)
 
-    async def list_extension_history(self, milestone_id: str) -> List[Dict[str, Any]]:
+    @staticmethod
+    def _legacy_row_in_parent_scope(
+        row: Dict[str, Any],
+        *,
+        organization_id: Optional[str],
+        project_id: Optional[str],
+    ) -> bool:
+        row_org = row.get("organization_id")
+        row_project = row.get("project_id")
+        return (
+            (row_org in (None, "") or str(row_org) == str(organization_id or ""))
+            and (
+                row_project in (None, "")
+                or str(row_project) == str(project_id or "")
+            )
+        )
+
+    async def list_extension_history(
+        self,
+        milestone_id: str,
+        *,
+        organization_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         db = await self._get_db()
         cursor = db.key_date_extension_history.find({"milestone_id": str(milestone_id)}).sort("revision_number", 1)
-        return [h async for h in cursor]
+        rows = [h async for h in cursor]
+        if organization_id is None and project_id is None:
+            return rows
+        return [
+            row
+            for row in rows
+            if self._legacy_row_in_parent_scope(
+                row,
+                organization_id=organization_id,
+                project_id=project_id,
+            )
+        ]
 
-    async def list_eots(self, milestone_id: str) -> List[Dict[str, Any]]:
+    async def list_eots(
+        self,
+        milestone_id: str,
+        *,
+        organization_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         db = await self._get_db()
         cursor = db.key_date_eot_applications.find({"milestone_id": str(milestone_id)}).sort("created_at", 1)
-        return [e async for e in cursor]
+        rows = [e async for e in cursor]
+        if organization_id is None and project_id is None:
+            return [{**row, "linked_document_ids": []} for row in rows]
+        rows = [
+            row
+            for row in rows
+            if self._legacy_row_in_parent_scope(
+                row,
+                organization_id=organization_id,
+                project_id=project_id,
+            )
+        ]
+        return [{**row, "linked_document_ids": []} for row in rows]
 
     # --- achievement ------------------------------------------------------
 
@@ -634,13 +841,51 @@ class KeyDateService:
             "updated_at": datetime.utcnow(),
             "updated_by": getattr(current_user, "id", None),
         }
-        await db.key_date_milestones.update_one({"_id": milestone["_id"]}, {"$set": summary})
-        achievement = {**summary, "_id": milestone["_id"] + ":ach", "milestone_id": str(milestone["_id"]),
-                       "project_id": milestone.get("project_id"), "organization_id": milestone.get("organization_id"),
-                       "linked_document_ids": rec.linked_document_ids, "created_at": datetime.utcnow()}
-        await db.key_date_achievements.replace_one({"_id": achievement["_id"]}, achievement, upsert=True)
-        await self._emit("keydate.achievement.recorded", current_user, milestone, after={"on_time": on_time, "delay": delay, "early": early})
-        updated = await db.key_date_milestones.find_one({"_id": milestone["_id"]})
+        async def commit(session: Any) -> Dict[str, Any]:
+            write_kwargs = {"session": session} if session is not None else {}
+            result = await db.key_date_milestones.update_one(
+                {
+                    "_id": milestone["_id"],
+                    "organization_id": milestone.get("organization_id"),
+                    "project_id": milestone.get("project_id"),
+                    "deleting_at": None,
+                },
+                {"$set": summary},
+                **write_kwargs,
+            )
+            matched = getattr(
+                result, "matched_count", getattr(result, "modified_count", 0)
+            )
+            if not matched:
+                raise KeyDateError("Milestone changed while achievement was being recorded")
+            achievement = {
+                **summary,
+                "_id": f"{milestone['_id']}:ach",
+                "milestone_id": str(milestone["_id"]),
+                "project_id": milestone.get("project_id"),
+                "organization_id": milestone.get("organization_id"),
+            }
+            await db.key_date_achievements.update_one(
+                {"_id": achievement["_id"]},
+                {
+                    "$set": achievement,
+                    "$setOnInsert": {"created_at": datetime.utcnow()},
+                },
+                upsert=True,
+                **write_kwargs,
+            )
+            await self._emit(
+                "keydate.achievement.recorded",
+                current_user,
+                milestone,
+                after={"on_time": on_time, "delay": delay, "early": early},
+                session=session,
+            )
+            return await db.key_date_milestones.find_one(
+                {"_id": milestone["_id"]}, **write_kwargs
+            )
+
+        updated = await self._run_transaction(commit)
         return decorate(updated or {**milestone, **summary})
 
     # --- dashboard --------------------------------------------------------
@@ -685,7 +930,7 @@ class KeyDateService:
 
     # --- audit ------------------------------------------------------------
 
-    async def _emit(self, action: str, current_user: Any, milestone: Dict[str, Any], *, before: Any = None, after: Any = None) -> None:
+    async def _emit(self, action: str, current_user: Any, milestone: Dict[str, Any], *, before: Any = None, after: Any = None, session: Any = None) -> None:
         await self.audit.emit(
             action=action,
             actor_id=getattr(current_user, "id", None),
@@ -695,6 +940,7 @@ class KeyDateService:
             project_id=milestone.get("project_id"),
             before=before,
             after=after,
+            session=session,
         )
 
 

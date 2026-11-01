@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import List, Optional
+from typing import Optional
 
 from ..config.document_processing_config import DocumentProcessingConfig
 
@@ -24,7 +24,9 @@ class LLMGenerator:
         try:
             from openai import AsyncOpenAI  # type: ignore
 
-            self._client = AsyncOpenAI(api_key=self.config.openai_api_key, timeout=self.config.openai_timeout)
+            self._client = AsyncOpenAI(
+                api_key=self.config.openai_api_key, timeout=self.config.openai_timeout
+            )
         except Exception as exc:  # pragma: no cover - best-effort init
             logger.warning("Failed to initialize AsyncOpenAI client: %s", exc)
             self._client = None
@@ -34,13 +36,18 @@ class LLMGenerator:
         """True when a live LLM client is configured; False in offline fallback mode."""
         return self._client is not None
 
-    async def generate(self, prompt: str, max_tokens: int = 512, model: Optional[str] = None) -> str:
+    async def generate(
+        self, prompt: str, max_tokens: int = 512, model: Optional[str] = None
+    ) -> str:
         if self._client:
             try:
                 completion = await self._client.chat.completions.create(
                     model=model or self._model,
                     messages=[
-                        {"role": "system", "content": "You are a precise contract assistant. Keep responses grounded in provided context."},
+                        {
+                            "role": "system",
+                            "content": "You are a precise contract assistant. Keep responses grounded in provided context.",
+                        },
                         {"role": "user", "content": prompt},
                     ],
                     max_tokens=max_tokens,

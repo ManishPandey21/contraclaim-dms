@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigationType, useSearchParams } from "react-router-dom";
 import { Search, X } from "lucide-react";
 
 import Seo from "@/components/seo/Seo";
@@ -32,6 +32,13 @@ function parseType(value: string | null): BlogContentType {
   return value === "videos" ? "videos" : "articles";
 }
 
+/** Order-insensitive identity for a parameter set, for comparing two of them. */
+function paramsIdentity(params: URLSearchParams): string {
+  const sorted = new URLSearchParams(params);
+  sorted.sort();
+  return sorted.toString();
+}
+
 /** Case-insensitive match across title, excerpt, tags and category. */
 function matchesQuery(entry: ResolvedEntry, query: string): boolean {
   if (!query) return true;
@@ -56,8 +63,52 @@ export function BlogPage() {
     rawCategory && isBlogCategoryId(rawCategory) ? rawCategory : null;
   const query = searchParams.get("q") ?? "";
 
+  // The URL this component has asked for and the router has not applied yet.
+  //
+  // `setSearchParams` resolves against the location the router has COMMITTED,
+  // and it commits on its own schedule, so a second update issued before the
+  // first lands is built on the same stale snapshot and silently reinstates
+  // whatever the first removed - clearing the topic filter and then typing put
+  // `category` back, and the page went from one article to none. For the same
+  // reason `query` lags behind the search box mid-word, and copying that
+  // lagging value into the box deleted characters the user had already typed:
+  // the next keystroke appended to the truncated prefix, and "chronology"
+  // reached the URL as "chrnology" or "chroolgy".
+  //
+  // One record of intent answers both: further changes layer onto it rather
+  // than onto the stale committed params, and a committed value that does not
+  // match it is known to be older than what the user has done.
+  const requestedParams = useRef<URLSearchParams | null>(null);
+
+  // The search box owns its own text while the user is typing. The URL owns it
+  // for anything the user did not type here - a pasted link, Back or Forward.
   const [searchInput, setSearchInput] = useState(query);
-  useEffect(() => setSearchInput(query), [query]);
+  const navigationType = useNavigationType();
+
+  useEffect(() => {
+    if (navigationType === "POP") {
+      // Back, Forward or a first render: the URL wins outright, and anything
+      // this component had asked for is superseded.
+      requestedParams.current = null;
+      setSearchInput(query);
+      return;
+    }
+    const requested = requestedParams.current;
+    if (requested === null) {
+      setSearchInput(query);
+      return;
+    }
+    if (paramsIdentity(requested) === paramsIdentity(searchParams)) {
+      // The router caught up, so this value is the newest thing asked for and
+      // there is nothing left to guard. Adopt it rather than assume the box
+      // already matches: "Clear filters" empties `q` through this path without
+      // touching the box, and skipping the assignment left the cleared search
+      // still showing its old text.
+      requestedParams.current = null;
+      setSearchInput(query);
+    }
+    // Otherwise the committed params are older than the user's intent.
+  }, [navigationType, query, searchParams]);
 
   const allEntries = useMemo(() => getEntries(type), [type]);
   const availableCategories = useMemo(() => getUsedCategories(type), [type]);
@@ -86,19 +137,15 @@ export function BlogPage() {
       changes: Record<string, string | null>,
       options?: { replace?: boolean },
     ) => {
-      setSearchParams(
-        (current) => {
-          const next = new URLSearchParams(current);
-          Object.entries(changes).forEach(([key, value]) => {
-            if (value === null || value === "") next.delete(key);
-            else next.set(key, value);
-          });
-          return next;
-        },
-        { replace: options?.replace ?? false },
-      );
+      const next = new URLSearchParams(requestedParams.current ?? searchParams);
+      Object.entries(changes).forEach(([key, value]) => {
+        if (value === null || value === "") next.delete(key);
+        else next.set(key, value);
+      });
+      requestedParams.current = next;
+      setSearchParams(next, { replace: options?.replace ?? false });
     },
-    [setSearchParams],
+    [searchParams, setSearchParams],
   );
 
   // Keep the URL honest: if the requested page was invalid or the page size

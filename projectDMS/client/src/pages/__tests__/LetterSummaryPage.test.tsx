@@ -145,6 +145,31 @@ global.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     return jsonResponse(currentDoc);
   }
 
+  if (url.match(/\/api\/documents\/([^/]+)\/grounded-summary$/)) {
+    return jsonResponse({
+      document_id: "doc-1",
+      summary_status: "current",
+      short_summary: "Letter from AFCONS regarding the additional borewell construction cost.",
+      detailed_summary: {
+        schema_version: "1",
+        executive_overview: "Letter AFC/PM/KNPCC-06/4930 dated 17 November 2025.",
+        requests_relief: [
+          {
+            text: "AFCONS requests (as written): “submit the construction cost”",
+            role: "request",
+            fact_ids: ["request_statement-1"],
+            page_numbers: [1],
+            verification_status: "source_stated",
+          },
+        ],
+        facts: [],
+        markdown: "",
+        generated_from: { canonical_revision: 1, canonical_sha256: "abc" },
+        generator: { mode: "deterministic", prompt_version: "grounded_letter_summary.v1", generated_at: "", degraded: false },
+      },
+    });
+  }
+
   if (url.match(/\/api\/documents\/([^/]+)\/comments$/)) {
     return jsonResponse([]);
   }
@@ -263,5 +288,52 @@ describe("LetterSummaryPage summary metadata editing", () => {
     expect(await screen.findByText("Kanpur Metro")).toBeInTheDocument();
     expect(screen.getByText("Tunnel Package")).toBeInTheDocument();
     expect(mockToast.success).toHaveBeenCalledWith("Letter summary metadata saved");
+  });
+});
+
+describe("LetterSummaryPage extraction quality", () => {
+  it("warns when the stored metadata is a partial extraction", async () => {
+    currentDoc = {
+      ...makeDocument(),
+      metadata_quality: { status: "partial_extraction", degraded: true },
+    };
+    renderAt();
+
+    await screen.findByText(currentDoc.subject);
+    expect(
+      screen.getByRole("status", { name: "" })
+    ).toHaveTextContent(/only partially extracted/i);
+  });
+
+  it("shows no warning for a complete extraction", async () => {
+    currentDoc = { ...makeDocument(), metadata_quality: { status: "complete" } };
+    renderAt();
+
+    await screen.findByText(currentDoc.subject);
+    expect(screen.queryByText(/only partially extracted/i)).not.toBeInTheDocument();
+  });
+
+  it("labels key reply points as AI advice, not letter content", async () => {
+    const user = userEvent.setup();
+    renderAt();
+
+    await screen.findByText(currentDoc.subject);
+    await user.click(screen.getByRole("tab", { name: /key reply points/i }));
+    expect(screen.getAllByText(/not statements made in this letter/i).length).toBeGreaterThan(0);
+  });
+
+  it("shows the grounded short summary and keeps reply points separate and advisory", async () => {
+    const user = userEvent.setup();
+    renderAt();
+
+    expect(
+      await screen.findByText("Letter from AFCONS regarding the additional borewell construction cost.")
+    ).toBeInTheDocument();
+    const detailed = screen.getByTestId("grounded-summary");
+    expect(within(detailed).getByRole("heading", { name: /Requests/ })).toBeInTheDocument();
+    // Reply advice is never part of the grounded summary.
+    expect(within(detailed).queryByText(/Confirm entitlement/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: /key reply points/i }));
+    expect(screen.getByText(/Confirm entitlement/)).toBeInTheDocument();
   });
 });

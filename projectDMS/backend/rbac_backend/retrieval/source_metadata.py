@@ -17,9 +17,19 @@ def source_hash(payload: Dict[str, Any]) -> str:
         str(payload.get("project_id") or ""),
         str(payload.get("document_id") or ""),
         str(payload.get("chunk_id") or ""),
-        str(payload.get("source_type") or payload.get("document_type") or payload.get("uploadType") or ""),
+        str(
+            payload.get("source_type")
+            or payload.get("document_type")
+            or payload.get("uploadType")
+            or ""
+        ),
         str(payload.get("letter_no") or payload.get("letterNo") or ""),
-        str(payload.get("clause_number") or payload.get("clause_no") or payload.get("clause_id") or ""),
+        str(
+            payload.get("clause_number")
+            or payload.get("clause_no")
+            or payload.get("clause_id")
+            or ""
+        ),
         str(payload.get("text") or payload.get("snippet") or ""),
     ]
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
@@ -35,7 +45,9 @@ def normalize_source_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         normalized.get("organisation_id"),
     )
     project_id = first_present(normalized.get("project_id"), normalized.get("proj_id"))
-    document_id = first_present(normalized.get("document_id"), normalized.get("doc_id"), normalized.get("_id"))
+    document_id = first_present(
+        normalized.get("document_id"), normalized.get("doc_id"), normalized.get("_id")
+    )
     letter_no = first_present(normalized.get("letter_no"), normalized.get("letterNo"))
     clause_number = first_present(
         normalized.get("clause_number"),
@@ -66,7 +78,11 @@ def normalize_source_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if source_type is not None:
         normalized["source_type"] = str(source_type)
     if "page_numbers" not in normalized:
-        page = first_present(normalized.get("page"), normalized.get("page_number"), normalized.get("page_start"))
+        page = first_present(
+            normalized.get("page"),
+            normalized.get("page_number"),
+            normalized.get("page_start"),
+        )
         normalized["page_numbers"] = [int(page)] if str(page or "").isdigit() else []
     normalized.setdefault("source_hash", source_hash(normalized))
     return normalized

@@ -8,6 +8,7 @@ from botocore.config import Config as BotoConfig
 from botocore.exceptions import BotoCoreError, ClientError
 
 from ..core.config import settings
+from .upload_streaming import read_file_within_limit
 
 
 class S3Service:
@@ -103,8 +104,17 @@ class S3Service:
         organization_id: str,
         project_id: Optional[str],
     ) -> str:
-        # Backward compatibility wrapper; expects file to be a file-like with read()
-        data = file.read() if hasattr(file, "read") else file
+        # Backward compatibility wrapper; expects file to be a file-like with read().
+        # The read is bounded (R-A8U, F-A8T2-5): the parameter is unannotated, so
+        # the Gate 5 guard never watched it, and `file.read()` held whatever the
+        # caller handed over. No caller exists today; the seam is closed anyway.
+        if hasattr(file, "read"):
+            data = read_file_within_limit(
+                file,
+                max(1, int(settings.GENERAL_UPLOAD_MAX_FILE_SIZE_MB)) * 1024 * 1024,
+            )
+        else:
+            data = file
         key_prefix = path.strip("/").rstrip("/")
         object_key = f"{organization_id}/{project_id or 'shared'}/{key_prefix}/{name}"
         return await self.upload_bytes(object_key, data)

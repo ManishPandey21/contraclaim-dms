@@ -104,7 +104,12 @@ async def upgrade(db: Any, dry_run: bool) -> MigrationResult:
         for collection, keys, name, unique in INDEXES
     )
 
-    warnings = [
+    # Notices, not warnings: both sentences are the same on every database and
+    # on every run, and they record decisions this migration already made rather
+    # than anything it found in front of it. Filed as warnings they made
+    # `--fail-on-warning` - the documented pre-deploy gate - exit 2 on every
+    # healthy tree (F-A8M-1). See `MigrationResult`.
+    notices = [
         "Historical approver identities and timestamps are not fabricated. Rows without an approval event return to needs_review.",
         "The data downgrade intentionally does not restore legacy approvals; only indexes are removed on rollback.",
     ]
@@ -200,7 +205,7 @@ async def upgrade(db: Any, dry_run: bool) -> MigrationResult:
         name=NAME,
         status="dry_run" if dry_run else "applied",
         operations=operations,
-        warnings=warnings,
+        notices=notices,
     )
 
 
@@ -222,5 +227,5 @@ async def downgrade(db: Any, dry_run: bool) -> MigrationResult:
         name=NAME,
         status="dry_run" if dry_run else "rolled_back",
         operations=operations,
-        warnings=["Review-safe data changes are intentionally retained; rollback never restores unverifiable approvals."],
+        notices=["Review-safe data changes are intentionally retained; rollback never restores unverifiable approvals."],
     )

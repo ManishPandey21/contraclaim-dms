@@ -3,7 +3,7 @@ import React, { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { 
+import {
   Dialog,
   DialogContent,
   DialogHeader,
@@ -12,13 +12,13 @@ import {
   DialogFooter
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
-import { 
-  Table, 
-  TableHeader, 
-  TableBody, 
-  TableRow, 
-  TableHead, 
-  TableCell 
+import {
+  Table,
+  TableHeader,
+  TableBody,
+  TableRow,
+  TableHead,
+  TableCell
 } from '@/components/ui/table';
 import { Search, X, Plus, Sparkles } from 'lucide-react';
 import { format } from 'date-fns';
@@ -106,7 +106,7 @@ const LetterDraftEditor: React.FC<LetterDraftEditorProps> = ({
   useEffect(() => {
     setContent(letter.content);
   }, [letter.content]);
-  
+
   // Filter letters based on search query
   const filteredLetters = referenceLetters.filter((l) => {
     const refNo = l.referenceNumber ?? "";
@@ -118,10 +118,10 @@ const LetterDraftEditor: React.FC<LetterDraftEditorProps> = ({
       recipient.toLowerCase().includes(searchQuery.toLowerCase())
     );
   });
-  
+
   const handleSubmitForReview = () => {
     const now = new Date().toISOString();
-    
+
     onSave({
       ...letter,
       content,
@@ -130,10 +130,10 @@ const LetterDraftEditor: React.FC<LetterDraftEditorProps> = ({
       updatedAt: now
     });
   };
-  
+
   const handleSaveDraft = () => {
     const now = new Date().toISOString();
-    
+
     onSave({
       ...letter,
       content,
@@ -141,7 +141,7 @@ const LetterDraftEditor: React.FC<LetterDraftEditorProps> = ({
       updatedAt: now
     });
   };
-  
+
   const selectLetterReference = (selectedLetter: ReferenceLetterOption) => {
     setReference({
       id: selectedLetter.id,
@@ -152,11 +152,11 @@ const LetterDraftEditor: React.FC<LetterDraftEditorProps> = ({
     });
     setIsReferenceDialogOpen(false);
   };
-  
+
   const removeReference = () => {
     setReference(undefined);
   };
-  
+
   return (
     <div className="space-y-4">
       <div className="rounded-md border p-4">
@@ -170,12 +170,12 @@ const LetterDraftEditor: React.FC<LetterDraftEditorProps> = ({
             <div className="font-medium">{letter.recipient}</div>
           </div>
         </div>
-        
+
         <div className="mb-4">
           <Label className="text-muted-foreground text-sm">Subject</Label>
           <div className="font-medium">{letter.subject}</div>
         </div>
-        
+
         {/* Reference Section */}
         <div className="mb-4">
           <div className="flex items-center justify-between mb-2">
@@ -191,7 +191,7 @@ const LetterDraftEditor: React.FC<LetterDraftEditorProps> = ({
                 <DialogHeader>
                   <DialogTitle>Select a Letter Reference</DialogTitle>
                 </DialogHeader>
-                
+
                 <div className="relative mb-4">
                   <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
                   <Input
@@ -201,7 +201,7 @@ const LetterDraftEditor: React.FC<LetterDraftEditorProps> = ({
                     onChange={(e) => setSearchQuery(e.target.value)}
                   />
                 </div>
-                
+
                 <div className="overflow-y-auto max-h-[300px]">
                   <Table>
                     <TableHeader>
@@ -228,8 +228,8 @@ const LetterDraftEditor: React.FC<LetterDraftEditorProps> = ({
                           </TableCell>
                           <TableCell>{prevLetter.recipient ?? "-"}</TableCell>
                             <TableCell>
-                              <Button 
-                                size="sm" 
+                              <Button
+                                size="sm"
                                 variant="outline"
                                 onClick={() => selectLetterReference(prevLetter)}
                               >
@@ -248,7 +248,7 @@ const LetterDraftEditor: React.FC<LetterDraftEditorProps> = ({
                     </TableBody>
                   </Table>
                 </div>
-                
+
                 <DialogFooter>
                   <Button variant="outline" onClick={() => setIsReferenceDialogOpen(false)}>
                     Cancel
@@ -257,13 +257,13 @@ const LetterDraftEditor: React.FC<LetterDraftEditorProps> = ({
               </DialogContent>
             </Dialog>
           </div>
-          
+
           {reference ? (
             <div className="p-3 bg-muted rounded-md border relative">
-              <Button 
-                variant="ghost" 
-                size="icon" 
-                className="absolute top-2 right-2 h-6 w-6" 
+              <Button
+                variant="ghost"
+                size="icon"
+                className="absolute top-2 right-2 h-6 w-6"
                 onClick={removeReference}
               >
                 <X className="h-4 w-4" />
@@ -293,7 +293,7 @@ const LetterDraftEditor: React.FC<LetterDraftEditorProps> = ({
             </div>
           )}
         </div>
-        
+
         {letter.inputRequests && letter.inputRequests.length > 0 && (
           <div className="mb-4 p-3 bg-blue-50 rounded-md border border-blue-200">
             <Label className="text-muted-foreground text-sm block mb-2">Input Information</Label>
@@ -313,7 +313,7 @@ const LetterDraftEditor: React.FC<LetterDraftEditorProps> = ({
             ))}
           </div>
         )}
-        
+
         {letter.comments && letter.comments.length > 0 && (
           <div className="mb-4 p-3 bg-amber-50 rounded-md border border-amber-200">
             <Label className="text-muted-foreground text-sm block mb-1">Reviewer Comments</Label>
@@ -324,7 +324,7 @@ const LetterDraftEditor: React.FC<LetterDraftEditorProps> = ({
             </ul>
           </div>
         )}
-        
+
         <Tabs defaultValue="editor" className="w-full">
           <TabsList className="grid w-full grid-cols-2">
             <TabsTrigger value="editor">Letter Editor</TabsTrigger>
@@ -333,7 +333,7 @@ const LetterDraftEditor: React.FC<LetterDraftEditorProps> = ({
               AI Assistant
             </TabsTrigger>
           </TabsList>
-          
+
           <TabsContent value="editor" className="mt-4">
             <div className="mb-4">
               <Label htmlFor="content" className="block mb-2">Letter Content</Label>
@@ -350,7 +350,7 @@ const LetterDraftEditor: React.FC<LetterDraftEditorProps> = ({
               </div>
             </div>
           </TabsContent>
-          
+
           <TabsContent value="ai-assistant" className="mt-4">
             <AIAssistant
               letterContent={content}
@@ -368,7 +368,7 @@ const LetterDraftEditor: React.FC<LetterDraftEditorProps> = ({
           </TabsContent>
         </Tabs>
       </div>
-      
+
       <div className="flex justify-end gap-2">
         <Button variant="outline" onClick={onCancel}>
           Cancel

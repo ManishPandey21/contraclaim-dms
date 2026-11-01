@@ -162,26 +162,45 @@ class ObservabilityRegistry:
     async def record_arbitration_workflow(
         self, *, engine: str, status: str, node: str, event: str
     ) -> None:
-        key = tuple(str(value or "unknown") for value in (engine, status, node, event))
+        # Built element by element rather than with a generator: the metric is
+        # keyed by a 4-tuple, and a comprehension only ever proves "some tuple
+        # of str".
+        key = (
+            str(engine or "unknown"),
+            str(status or "unknown"),
+            str(node or "unknown"),
+            str(event or "unknown"),
+        )
         async with self._lock:
             self._arbitration_workflow_events_total[key] = self._arbitration_workflow_events_total.get(key, 0) + 1
 
     async def record_arbitration_shadow_comparison(self, comparison: Dict[str, object]) -> None:
         pleading_type = str(comparison.get("pleading_type") or "unknown")
+        # `comparison` arrives as a decoded payload, so its values are `object`
+        # until something checks. Recording a metric from a malformed payload is
+        # not worth an AttributeError inside a fire-and-forget task, so each
+        # level is validated and skipped rather than assumed.
+        raw_dimensions = comparison.get("dimensions")
+        dimensions: Dict[str, object] = raw_dimensions if isinstance(raw_dimensions, dict) else {}
         async with self._lock:
-            for dimension, value in (comparison.get("dimensions") or {}).items():
-                status = str((value or {}).get("status") or "unknown")
+            for dimension, value in dimensions.items():
+                status = str(value.get("status") or "unknown") if isinstance(value, dict) else "unknown"
                 key = (pleading_type, str(dimension), status)
                 self._arbitration_shadow_comparisons_total[key] = self._arbitration_shadow_comparisons_total.get(key, 0) + 1
-            latency = (comparison.get("dimensions") or {}).get("output_latency") or {}
+            raw_latency = dimensions.get("output_latency")
+            latency: Dict[str, object] = raw_latency if isinstance(raw_latency, dict) else {}
             for engine, field in (("arbitration_v2", "authoritative_ms"), ("langgraph_v1", "candidate_ms")):
-                if field in latency:
-                    self._arbitration_shadow_latency_ms[(engine, pleading_type)] = float(latency[field])
+                measured = latency.get(field)
+                if isinstance(measured, (int, float)):
+                    self._arbitration_shadow_latency_ms[(engine, pleading_type)] = float(measured)
 
     async def record_arbitration_workflow_health(self, health: Dict[str, object]) -> None:
+        raw_alerts = health.get("alerts")
+        alerts = raw_alerts if isinstance(raw_alerts, list) else []
         active = {
             (str(item.get("severity") or "unknown"), str(item.get("code") or "unknown"))
-            for item in health.get("alerts") or []
+            for item in alerts
+            if isinstance(item, dict)
         }
         async with self._lock:
             known = set(self._arbitration_workflow_alerts) | active
@@ -276,9 +295,9 @@ class ObservabilityRegistry:
                 "contractdms_http_request_duration_ms_bucket"
                 f"{_labels((('method', method), ('path', path), ('status_class', status_class), ('le', le)))} {value}"
             )
-        for (method, path, status_class), value in sorted(self._request_latency_sum.items()):
+        for (method, path, status_class), latency_sum_ms in sorted(self._request_latency_sum.items()):
             labels = _labels((("method", method), ("path", path), ("status_class", status_class)))
-            lines.append(f"contractdms_http_request_duration_ms_sum{labels} {value:.3f}")
+            lines.append(f"contractdms_http_request_duration_ms_sum{labels} {latency_sum_ms:.3f}")
         for (method, path, status_class), value in sorted(self._request_latency_count.items()):
             labels = _labels((("method", method), ("path", path), ("status_class", status_class)))
             lines.append(f"contractdms_http_request_duration_ms_count{labels} {value}")
@@ -368,9 +387,9 @@ class ObservabilityRegistry:
                 "# TYPE contractdms_arbitration_readiness_score gauge",
             ]
         )
-        for (case_id, readiness_status), value in sorted(self._arbitration_readiness_score.items()):
+        for (case_id, readiness_status), readiness_score in sorted(self._arbitration_readiness_score.items()):
             labels = _labels((("case_id", case_id), ("status", readiness_status)))
-            lines.append(f"contractdms_arbitration_readiness_score{labels} {value:.3f}")
+            lines.append(f"contractdms_arbitration_readiness_score{labels} {readiness_score:.3f}")
 
         lines.extend(
             [
@@ -406,18 +425,18 @@ class ObservabilityRegistry:
                 "# TYPE contractdms_arbitration_shadow_latency_ms gauge",
             ]
         )
-        for (engine, pleading_type), value in sorted(self._arbitration_shadow_latency_ms.items()):
+        for (engine, pleading_type), shadow_latency_ms in sorted(self._arbitration_shadow_latency_ms.items()):
             labels = _labels((("engine", engine), ("pleading_type", pleading_type)))
-            lines.append(f"contractdms_arbitration_shadow_latency_ms{labels} {value:.3f}")
+            lines.append(f"contractdms_arbitration_shadow_latency_ms{labels} {shadow_latency_ms:.3f}")
         lines.extend(
             [
                 "# HELP contractdms_arbitration_workflow_alert Active arbitration rollout alert, 1 active / 0 clear.",
                 "# TYPE contractdms_arbitration_workflow_alert gauge",
             ]
         )
-        for (severity, code), value in sorted(self._arbitration_workflow_alerts.items()):
+        for (severity, code), alert_state in sorted(self._arbitration_workflow_alerts.items()):
             labels = _labels((("severity", severity), ("code", code)))
-            lines.append(f"contractdms_arbitration_workflow_alert{labels} {value:.0f}")
+            lines.append(f"contractdms_arbitration_workflow_alert{labels} {alert_state:.0f}")
         lines.extend(
             [
                 "# HELP contractdms_arbitration_workflow_fallbacks_total Arbitration workflow fallbacks by source engine and bounded reason category.",
@@ -443,9 +462,9 @@ class ObservabilityRegistry:
                 "# TYPE contractdms_arbitration_runtime_value gauge",
             ]
         )
-        for (signal, scope), value in sorted(self._arbitration_runtime_values.items()):
+        for (signal, scope), runtime_value in sorted(self._arbitration_runtime_values.items()):
             labels = _labels((("signal", signal), ("scope", scope)))
-            lines.append(f"contractdms_arbitration_runtime_value{labels} {value:.3f}")
+            lines.append(f"contractdms_arbitration_runtime_value{labels} {runtime_value:.3f}")
 
         lines.extend(
             [
@@ -463,8 +482,8 @@ class ObservabilityRegistry:
                 "# TYPE contractdms_dependency_up gauge",
             ]
         )
-        for name, value in sorted(self._dependency_health.items()):
-            lines.append(f"contractdms_dependency_up{_labels((('dependency', name),))} {value:.0f}")
+        for name, health_state in sorted(self._dependency_health.items()):
+            lines.append(f"contractdms_dependency_up{_labels((('dependency', name),))} {health_state:.0f}")
 
         return "\n".join(lines) + "\n"
 

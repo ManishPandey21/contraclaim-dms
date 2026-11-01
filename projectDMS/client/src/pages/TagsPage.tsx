@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   Plus,
   Search,
@@ -34,20 +34,71 @@ import {
   updateTag as updateTagRequest,
 } from "@/services/tags-api";
 import { extractErrorMessage, logError } from "@/lib/error-logger";
+import { useTenant } from "@/contexts/TenantContext";
 
 interface TagWithFrontendState extends MainTag {
   subTags: SubTag[];
   isExpanded?: boolean;
   isEditing?: boolean;
   subtagsLoading?: boolean;
+  // Loaded at least once. Not `subTags.length > 0`: a tag with no subtags
+  // would otherwise be refetched on every expand.
+  subtagsLoaded?: boolean;
+}
+
+// Typing in the search box must not issue a request per keystroke: each one
+// draws on the per-user Tags read budget, and a burst of them used to exhaust
+// it and lock the page out with 429.
+export const TAG_SEARCH_DEBOUNCE_MS = 350;
+
+type TagsLoadState = "loading" | "ready" | "error";
+
+type TagsLoadError = {
+  message: string;
+  retryAfterSeconds: number | null;
+};
+
+/** Seconds from a `Retry-After` header (delay-seconds or HTTP-date), if any. */
+function retryAfterSeconds(error: unknown): number | null {
+  const headers = (error as { response?: { headers?: Record<string, unknown> } })?.response
+    ?.headers;
+  const raw = headers?.["retry-after"] ?? headers?.["Retry-After"];
+  if (raw === undefined || raw === null || raw === "") return null;
+  const value = String(raw).trim();
+  if (/^\d+$/.test(value)) return Math.max(1, Number(value));
+  const at = Date.parse(value);
+  if (Number.isNaN(at)) return null;
+  return Math.max(1, Math.ceil((at - Date.now()) / 1000));
+}
+
+function describeTagsLoadError(error: unknown): TagsLoadError {
+  const status = (error as { response?: { status?: number } })?.response?.status;
+  if (status === 429) {
+    const seconds = retryAfterSeconds(error);
+    return {
+      message:
+        "Too many tag requests. Please try again shortly." +
+        (seconds ? ` You can retry in about ${seconds} second${seconds === 1 ? "" : "s"}.` : ""),
+      retryAfterSeconds: seconds,
+    };
+  }
+  return {
+    message: extractErrorMessage(error, "Unable to load tags."),
+    retryAfterSeconds: null,
+  };
 }
 
 const TagsPage = () => {
+  const tenant = useTenant();
   const tagsPerPage = 10;
   const [tags, setTags] = useState<TagWithFrontendState[]>([]);
   const [totalTags, setTotalTags] = useState(0);
   const [currentPage, setCurrentPage] = useState(1);
   const [tagSearchTerm, setTagSearchTerm] = useState("");
+  // The search the list was (or is being) loaded for; trails the input by
+  // TAG_SEARCH_DEBOUNCE_MS.
+  const [appliedSearch, setAppliedSearch] = useState("");
+  const appliedSearchRef = useRef("");
   const [newTagName, setNewTagName] = useState("");
   const [newSubTagNames, setNewSubTagNames] = useState<Record<string, string>>(
     {}
@@ -58,7 +109,19 @@ const TagsPage = () => {
     subTagId: string;
   } | null>(null);
   const [editingValue, setEditingValue] = useState("");
-  const [loading, setLoading] = useState(false);
+  // LOADING, ERROR and a successful load are distinct: only a successful load
+  // with zero tags may say "No Tags Yet". A failed refresh keeps the rows the
+  // last successful load returned.
+  const [loadState, setLoadState] = useState<TagsLoadState>("loading");
+  const [loadError, setLoadError] = useState<TagsLoadError | null>(null);
+  const [retryBlockedUntil, setRetryBlockedUntil] = useState<number | null>(null);
+  const loadSequence = useRef(0);
+  // Bumped to reload the list for the CURRENT search and page. Mutations and
+  // Retry use it instead of calling fetchTags, whose closure may hold the
+  // search and page from before an await.
+  const [reloadToken, setReloadToken] = useState(0);
+  const requestReload = useCallback(() => setReloadToken((token) => token + 1), []);
+  const loading = loadState === "loading";
   const [operationLoading, setOperationLoading] = useState({
     addTag: false,
     deleteTag: false,
@@ -87,19 +150,24 @@ const TagsPage = () => {
   );
 
   const fetchTags = useCallback(async () => {
-    setLoading(true);
+    // Only the newest request may write state: an older search that answers
+    // last must not replace the results of the newer one.
+    const current = ++loadSequence.current;
+    setLoadState("loading");
     try {
       const result = await listTags({
-        search: tagSearchTerm,
+        search: appliedSearch,
         page: currentPage,
         limit: tagsPerPage,
       });
+      if (current !== loadSequence.current) return;
       const nextTotalPages = Math.max(
         1,
         Math.ceil(result.total / tagsPerPage)
       );
       setTotalTags(result.total);
       if (result.total > 0 && currentPage > nextTotalPages) {
+        // The page change reloads; stay in LOADING until it answers.
         setCurrentPage(nextTotalPages);
         return;
       }
@@ -112,22 +180,65 @@ const TagsPage = () => {
         subtagsLoading: false,
       }));
       setTags(withSubtags);
+      setLoadError(null);
+      setRetryBlockedUntil(null);
+      setLoadState("ready");
     } catch (error) {
+      if (current !== loadSequence.current) return;
       logError(error, {
         scope: "TagsPage",
         action: "fetchTags",
       });
-      toast.error("Failed to load tags", {
-        description: extractErrorMessage(error, "Unable to load tags."),
-      });
-    } finally {
-      setLoading(false);
+      // Shown inline (see the render below), never as an empty list. No
+      // automatic retry: retrying into a full rate-limit bucket only extends
+      // the lockout.
+      const described = describeTagsLoadError(error);
+      setLoadError(described);
+      setRetryBlockedUntil(
+        described.retryAfterSeconds
+          ? Date.now() + described.retryAfterSeconds * 1000
+          : null
+      );
+      setLoadState("error");
     }
-  }, [currentPage, tagSearchTerm]);
+  }, [appliedSearch, currentPage]);
 
+  // Commit the search box to the query after the user pauses. Only a changed
+  // query resets the page: the timer also fires once after mount and must not
+  // throw a user who has paged on back to page 1.
   useEffect(() => {
-    fetchTags();
-  }, [fetchTags]);
+    const timer = window.setTimeout(() => {
+      const next = tagSearchTerm.trim();
+      if (appliedSearchRef.current === next) return;
+      appliedSearchRef.current = next;
+      setAppliedSearch(next);
+      setCurrentPage(1);
+    }, TAG_SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [tagSearchTerm]);
+
+  // Wait for the navbar scope: the page remounts once the selection resolves
+  // (MainLayout keys it by organisation and project), so a request made
+  // before that would be spent on a scope nobody is looking at.
+  useEffect(() => {
+    if (tenant.loading) return;
+    void fetchTags();
+  }, [fetchTags, reloadToken, tenant.loading]);
+
+  // Retry stays disabled until the server's Retry-After has passed.
+  useEffect(() => {
+    if (!retryBlockedUntil) return;
+    const timer = window.setTimeout(
+      () => setRetryBlockedUntil(null),
+      Math.max(0, retryBlockedUntil - Date.now())
+    );
+    return () => window.clearTimeout(timer);
+  }, [retryBlockedUntil]);
+
+  const retryLoad = () => {
+    if (loading || retryBlockedUntil) return;
+    requestReload();
+  };
 
   const addNewTag = async () => {
     if (!newTagName.trim()) {
@@ -140,11 +251,8 @@ const TagsPage = () => {
       await createTag({ name: newTagName.trim() });
       toast.success("Tag created");
       setNewTagName("");
-      if (currentPage !== 1) {
-        setCurrentPage(1);
-      } else {
-        fetchTags().catch(() => {});
-      }
+      setCurrentPage(1);
+      requestReload();
     } catch (error) {
       logError(error, {
         scope: "TagsPage",
@@ -186,12 +294,19 @@ const TagsPage = () => {
       const latest = await listSubTags(tagId);
       setTags((prev) =>
         prev.map((t) =>
-          t._id === tagId ? { ...t, subTags: latest, isExpanded: true } : t
+          t._id === tagId
+            ? { ...t, subTags: latest, isExpanded: true, subtagsLoaded: true }
+            : t
         )
       );
       setNewSubTagNames((prev) => ({ ...prev, [tagId]: "" }));
       toast.success("Subtag added");
     } catch (error) {
+      // If the create landed but the refresh failed, the held list is stale:
+      // let the next expand load it again.
+      setTags((prev) =>
+        prev.map((t) => (t._id === tagId ? { ...t, subtagsLoaded: false } : t))
+      );
       logError(error, {
         scope: "TagsPage",
         action: "createSubTag",
@@ -313,11 +428,8 @@ const TagsPage = () => {
       const nextTotal = Math.max(0, totalTags - 1);
       const nextTotalPages = Math.max(1, Math.ceil(nextTotal / tagsPerPage));
       setTotalTags(nextTotal);
-      if (currentPage > nextTotalPages) {
-        setCurrentPage(nextTotalPages);
-      } else {
-        fetchTags().catch(() => {});
-      }
+      setCurrentPage((page) => Math.min(page, nextTotalPages));
+      requestReload();
 
       toast.success("Tag deleted");
     } catch (error) {
@@ -405,7 +517,7 @@ const TagsPage = () => {
       return;
     }
 
-    if (selectedTag.subTags.length > 0) {
+    if (selectedTag.subtagsLoaded) {
       setTags((prevTags) =>
         prevTags.map((tag) =>
           tag._id === tagId ? { ...tag, isExpanded: true } : tag
@@ -430,6 +542,7 @@ const TagsPage = () => {
                 subTags,
                 isExpanded: true,
                 subtagsLoading: false,
+                subtagsLoaded: true,
               }
             : tag
         )
@@ -699,17 +812,16 @@ const TagsPage = () => {
                 <Input
                   placeholder="Search tags"
                   value={tagSearchTerm}
-                  onChange={(e) => {
-                    setTagSearchTerm(e.target.value);
-                    setCurrentPage(1);
-                  }}
+                  onChange={(e) => setTagSearchTerm(e.target.value)}
                   className="pl-9"
                 />
               </div>
               <div className="text-sm text-gray-500">
                 {totalTags > 0
                   ? `Showing ${firstResult}-${lastResult} of ${totalTags}`
-                  : "No tags to show"}
+                  : loadState === "ready"
+                  ? "No tags to show"
+                  : null}
               </div>
             </div>
 
@@ -732,20 +844,51 @@ const TagsPage = () => {
                 </Button>
               </div>
             </div>
+            {loadState === "error" && loadError && (
+              <div
+                role="alert"
+                className="mb-4 flex flex-col gap-3 rounded-md border border-red-200 bg-red-50 px-4 py-3 md:flex-row md:items-center md:justify-between"
+              >
+                <div>
+                  <h3 className="text-sm font-medium text-red-800">
+                    Unable to load tags
+                  </h3>
+                  <p className="mt-1 text-sm text-red-700">{loadError.message}</p>
+                  {tags.length > 0 && (
+                    <p className="mt-1 text-xs text-red-700">
+                      Showing the tags from the last successful load.
+                    </p>
+                  )}
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={retryLoad}
+                  disabled={Boolean(retryBlockedUntil)}
+                >
+                  Retry
+                </Button>
+              </div>
+            )}
             {loading ? (
-              <div className="flex justify-center items-center h-40">
+              <div
+                role="status"
+                aria-label="Loading tags"
+                className="flex justify-center items-center h-40"
+              >
                 <Loader2 className="h-10 w-10 animate-spin" />
               </div>
-            ) : (
+            ) : loadState === "ready" || tags.length > 0 ? (
               <div className="border rounded-md">
                 {tags.length === 0 ? (
                   <div className="flex flex-col items-center justify-center px-4 py-12 text-center">
                     <TagIcon size={28} className="mb-3 text-gray-400" />
                     <h3 className="text-base font-medium">
-                      {tagSearchTerm.trim() ? "No Matching Tags" : "No Tags Yet"}
+                      {appliedSearch ? "No Matching Tags" : "No Tags Yet"}
                     </h3>
                     <p className="mt-1 max-w-md text-sm text-gray-500">
-                      {tagSearchTerm.trim()
+                      {appliedSearch
                         ? "No tags match your search. Try a different term or clear the search field."
                         : "Create a tag to start categorizing documents."}
                     </p>
@@ -754,7 +897,7 @@ const TagsPage = () => {
                   tags.map((tag) => renderTagItem(tag))
                 )}
               </div>
-            )}
+            ) : null}
 
             {!loading && totalTags > tagsPerPage && (
               <div className="mt-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">

@@ -46,6 +46,7 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { AlertTriangle, Download, Edit, Eye, FileText, Loader2, PlusCircle, Search, ShieldCheck, Trash2, Upload, X } from "lucide-react";
+import { Link, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import {
   InsuranceDTO,
@@ -56,16 +57,26 @@ import {
   deleteInsurance,
   exportInsurance,
   getInsurance,
+  getInsuranceById,
   getInsuranceAlerts,
   getInsuranceSummary,
   getInsuranceTypes,
-  insuranceFileUrl,
   updateInsurance,
-  uploadInsuranceFile,
+  uploadInsuranceDocument,
 } from "@/services/insurance-api";
 import { listContractMaster } from "@/services/contract-master-api";
 import { enhancedApi } from "@/services/enhanced-api";
 import { fmtAmount } from "@/lib/contract-controls-helpers";
+import EntityDocumentLinks from "@/components/document-links/EntityDocumentLinks";
+import {
+  INSURANCE_DOCUMENT_RELATIONSHIP_ROLES,
+  searchLinkableDocuments,
+} from "@/services/document-relationships-api";
+import type { DocumentItem } from "@/services/documents-api";
+import type { InsuranceUploadRole } from "@/services/insurance-api";
+import useHasPermission from "@/hooks/useHasPermission";
+import { useRegisterProjectScope } from "@/hooks/useRegisterProjectScope";
+import { scopeRefusalMessage } from "@/services/active-scope";
 
 const STATUSES = ["active", "expiring_soon", "expired"];
 const fmtDate = (d?: string | null) => (d ? new Date(d).toLocaleDateString() : "—");
@@ -124,12 +135,18 @@ const Stat: React.FC<{ label: string; value: string; cls?: string }> = ({ label,
 );
 
 const InsuranceRegisterPage: React.FC = () => {
+  // Deep link from a Document's Linked Records: /insurance?insurance_id=...
+  const [searchParams] = useSearchParams();
+  const deepLinkId = searchParams.get("insurance_id");
+  const openedDeepLink = useRef<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
   const [items, setItems] = useState<InsuranceDTO[]>([]);
   const [alerts, setAlerts] = useState<InsuranceDTO[]>([]);
   const [summary, setSummary] = useState<InsuranceSummaryDTO | null>(null);
   const [projects, setProjects] = useState<{ id: string; name: string }[]>([]);
   const [types, setTypes] = useState<InsuranceTypeDTO[]>([]);
-  const [projectFilter, setProjectFilter] = useState("all");
+  // CL-4A: the navbar project pins this filter (useRegisterProjectScope).
+  const { projectFilter, setProjectFilter, projectLocked, tenantLoading } = useRegisterProjectScope();
   const [statusFilter, setStatusFilter] = useState("all");
   const [typeFilter, setTypeFilter] = useState("all");
   const [companyFilter, setCompanyFilter] = useState("");
@@ -138,10 +155,20 @@ const InsuranceRegisterPage: React.FC = () => {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<IForm>({ ...EMPTY });
   const [saving, setSaving] = useState(false);
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [pendingRole, setPendingRole] = useState<InsuranceUploadRole>("policy");
+  // Create-time evidence can come from a new upload OR an existing Document.
+  const [linkExisting, setLinkExisting] = useState(false);
+  const [existingQuery, setExistingQuery] = useState("");
+  const [existingResults, setExistingResults] = useState<DocumentItem[]>([]);
+  const [selectedExisting, setSelectedExisting] = useState<DocumentItem | null>(null);
   // Contracts for the selected project drive the Contract ID dropdown + auto-fill.
   const [contracts, setContracts] = useState<{ contract_id: string; contractor_name?: string | null }[]>([]);
-  const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const canEdit = useHasPermission("dms.insurance.edit");
+  const canCreate = useHasPermission("dms.insurance.create");
+  const canDelete = useHasPermission("dms.insurance.delete");
+  const canExport = useHasPermission("dms.insurance.export");
 
   const load = useCallback(async () => {
     try {
@@ -155,12 +182,33 @@ const InsuranceRegisterPage: React.FC = () => {
       setItems(await getInsurance(params));
       setSummary(await getInsuranceSummary(scoped));
       setAlerts(await getInsuranceAlerts(scoped));
-    } catch {
-      toast.error("Failed to load insurance policies");
+    } catch (error) {
+      toast.error(scopeRefusalMessage(error, "insurance policy") || "Failed to load insurance policies");
+    } finally {
+      setLoaded(true);
     }
   }, [projectFilter, statusFilter, typeFilter, companyFilter, search]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { if (!tenantLoading) void load(); }, [load, tenantLoading]);
+
+  // Server-side canonical search. No client-side filtering of a preloaded list:
+  // the Document library is far larger than any page we could hold.
+  useEffect(() => {
+    if (!linkExisting || !existingQuery.trim()) {
+      setExistingResults([]);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void searchLinkableDocuments({
+        q: existingQuery.trim(),
+        project_id: form.project_id || undefined,
+      })
+        .then((rows) => { if (!cancelled) setExistingResults(rows); })
+        .catch(() => { if (!cancelled) setExistingResults([]); });
+    }, 250);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [linkExisting, existingQuery, form.project_id]);
 
   useEffect(() => {
     let active = true;
@@ -199,7 +247,7 @@ const InsuranceRegisterPage: React.FC = () => {
 
   const onPickFile = () => fileInputRef.current?.click();
 
-  const onFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const onFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = ""; // allow re-selecting the same file
     if (!file) return;
@@ -212,33 +260,33 @@ const InsuranceRegisterPage: React.FC = () => {
       toast.error("File exceeds the 20 MB limit");
       return;
     }
-    setUploading(true);
-    try {
-      const res = await uploadInsuranceFile(file);
-      setForm((f) => ({
-        ...f,
-        document_id: res.document_id,
-        document_name: res.document_name,
-        document_content_type: res.content_type,
-      }));
-      toast.success("File uploaded");
-    } catch (err: any) {
-      toast.error(err?.response?.data?.detail || "Upload failed");
-    } finally {
-      setUploading(false);
-    }
+    setPendingFile(file);
   };
 
-  const clearFile = () =>
-    setForm((f) => ({ ...f, document_id: "", document_name: "", document_content_type: "" }));
+  const clearFile = () => {
+    setPendingFile(null);
+    setPendingRole("policy");
+  };
+
+  const resetExistingSelection = () => {
+    setLinkExisting(false);
+    setExistingQuery("");
+    setExistingResults([]);
+    setSelectedExisting(null);
+  };
 
   const openCreate = () => {
     setEditingId(null);
+    setPendingFile(null);
+    setPendingRole("policy");
+    resetExistingSelection();
     setForm({ ...EMPTY, project_id: projectFilter !== "all" ? projectFilter : "" });
     setDialogOpen(true);
   };
   const openEdit = (b: InsuranceDTO) => {
     setEditingId(b.id);
+    setPendingFile(null);
+    setPendingRole("policy");
     setForm({
       project_id: b.project_id || "", contract_id: b.contract_id || "", contractor_name: b.contractor_name || "",
       insurance_type: b.insurance_type || "", insurance_company: b.insurance_company || "",
@@ -252,6 +300,19 @@ const InsuranceRegisterPage: React.FC = () => {
     setDialogOpen(true);
   };
 
+  useEffect(() => {
+    if (!deepLinkId || !loaded || openedDeepLink.current === deepLinkId) return;
+    openedDeepLink.current = deepLinkId;
+    const local = items.find((item) => item.id === deepLinkId);
+    if (local) {
+      openEdit(local);
+      return;
+    }
+    void getInsuranceById(deepLinkId)
+      .then(openEdit)
+      .catch((error) => toast.error(scopeRefusalMessage(error, "insurance policy") || "Linked insurance policy could not be opened"));
+  }, [deepLinkId, items, loaded]);
+
   const buildPayload = (): InsurancePayload => ({
     project_id: form.project_id,
     insurance_type: form.insurance_type,
@@ -263,9 +324,6 @@ const InsuranceRegisterPage: React.FC = () => {
     currency: form.currency || "INR",
     date_of_issue: toISO(form.date_of_issue),
     date_of_expiry: toISO(form.date_of_expiry),
-    document_id: form.document_id.trim() || undefined,
-    document_name: form.document_name.trim() || undefined,
-    document_content_type: form.document_content_type.trim() || undefined,
     remarks: form.remarks.trim() || undefined,
   });
 
@@ -274,18 +332,44 @@ const InsuranceRegisterPage: React.FC = () => {
       toast.error("Project, insurance type, policy number, issue and expiry dates are required");
       return;
     }
-    if (!editingId && !form.document_id) {
-      toast.error("Please upload the insurance document");
+    if (!editingId && !pendingFile && !selectedExisting) {
+      toast.error("Upload the insurance document or link an existing Document");
       return;
     }
     setSaving(true);
     try {
       const payload = buildPayload();
-      if (editingId) await updateInsurance(editingId, payload);
-      else await createInsurance(payload);
+      const existingDocumentId = selectedExisting
+        ? String(selectedExisting._id || selectedExisting.id || "")
+        : "";
+      if (!editingId && existingDocumentId) {
+        payload.existing_document_links = [
+          { document_id: existingDocumentId, relationship_role: pendingRole },
+        ];
+      }
+      const saved = editingId
+        ? await updateInsurance(editingId, payload)
+        : await createInsurance(payload);
+      const savedId = editingId || saved.id;
+      if (pendingFile) {
+        try {
+          await uploadInsuranceDocument(savedId, pendingFile, pendingRole);
+          setPendingFile(null);
+          setPendingRole("policy");
+        } catch (uploadError: any) {
+          setEditingId(savedId);
+          toast.error(uploadError?.response?.data?.detail || "Policy saved, but Document upload failed; retry the upload");
+          await load();
+          return;
+        }
+      }
       await load();
       toast.success(editingId ? "Policy updated" : "Policy created");
       if (addAnother && !editingId) {
+        setPendingFile(null);
+        // The next policy is a different policy: it must not silently inherit
+        // the previous one's evidence.
+        resetExistingSelection();
         setForm({ ...EMPTY, project_id: form.project_id, contract_id: form.contract_id, contractor_name: form.contractor_name });
       } else {
         setDialogOpen(false);
@@ -330,10 +414,10 @@ const InsuranceRegisterPage: React.FC = () => {
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button variant="outline" size="sm" onClick={() => onExport("csv")}><Download className="mr-2 h-4 w-4" />CSV</Button>
-          <Button variant="outline" size="sm" onClick={() => onExport("xlsx")}><Download className="mr-2 h-4 w-4" />Excel</Button>
-          <Button variant="outline" size="sm" onClick={() => onExport("pdf")}><Download className="mr-2 h-4 w-4" />PDF</Button>
-          <Button onClick={openCreate}><PlusCircle className="mr-2 h-4 w-4" />Add Insurance</Button>
+          {canExport && <Button variant="outline" size="sm" onClick={() => onExport("csv")}><Download className="mr-2 h-4 w-4" />CSV</Button>}
+          {canExport && <Button variant="outline" size="sm" onClick={() => onExport("xlsx")}><Download className="mr-2 h-4 w-4" />Excel</Button>}
+          {canExport && <Button variant="outline" size="sm" onClick={() => onExport("pdf")}><Download className="mr-2 h-4 w-4" />PDF</Button>}
+          {canCreate && <Button onClick={openCreate}><PlusCircle className="mr-2 h-4 w-4" />Add Insurance</Button>}
         </div>
       </div>
 
@@ -385,7 +469,7 @@ const InsuranceRegisterPage: React.FC = () => {
                 onChange={(e) => setSearch(e.target.value)}
               />
             </div>
-            <Select value={projectFilter} onValueChange={setProjectFilter}>
+            <Select value={projectFilter} onValueChange={setProjectFilter} disabled={projectLocked}>
               <SelectTrigger className="w-48"><SelectValue placeholder="Project" /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All projects</SelectItem>
@@ -451,33 +535,23 @@ const InsuranceRegisterPage: React.FC = () => {
                     <TableCell>{b.sum_insured != null ? fmtAmount(b.sum_insured, b.currency) : "—"}</TableCell>
                     <TableCell className="text-xs">{b.created_by_name || "—"}</TableCell>
                     <TableCell>
-                      {b.document_id ? (
-                        <div className="flex items-center gap-1">
-                          <a
-                            href={insuranceFileUrl(b.id)}
-                            target="_blank"
-                            rel="noreferrer"
-                            title="Preview"
-                            className="inline-flex h-8 w-8 items-center justify-center rounded-md hover:bg-muted"
-                          >
-                            <Eye className="h-4 w-4" />
-                          </a>
-                          <a
-                            href={insuranceFileUrl(b.id, true)}
-                            title="Download"
-                            className="inline-flex h-8 w-8 items-center justify-center rounded-md hover:bg-muted"
-                          >
-                            <Download className="h-4 w-4" />
-                          </a>
-                        </div>
-                      ) : (
-                        <span className="text-xs text-muted-foreground">—</span>
-                      )}
+                      {b.linked_document_ids?.length ? (
+                        <Link
+                          to={`/documentviewer/${b.linked_document_ids[0]}`}
+                          className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                          title="Open linked Document"
+                        >
+                          <FileText className="h-3.5 w-3.5" />
+                          Documents ({b.linked_document_ids.length})
+                        </Link>
+                      ) : b.document_id
+                        ? <Badge variant="outline">Legacy review</Badge>
+                        : <span className="text-xs text-muted-foreground">No linked Document</span>}
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-1">
-                        <Button variant="ghost" size="icon" className="h-8 w-8" title="Edit" onClick={() => openEdit(b)}><Edit className="h-4 w-4" /></Button>
-                        <AlertDialog>
+                        <Button variant="ghost" size="icon" className="h-8 w-8" title={canEdit ? "Edit" : "View"} onClick={() => openEdit(b)}>{canEdit ? <Edit className="h-4 w-4" /> : <Eye className="h-4 w-4" />}</Button>
+                        {canDelete && <AlertDialog>
                           <AlertDialogTrigger asChild>
                             <Button variant="ghost" size="icon" className="h-8 w-8" title="Delete"><Trash2 className="h-4 w-4 text-destructive" /></Button>
                           </AlertDialogTrigger>
@@ -493,7 +567,7 @@ const InsuranceRegisterPage: React.FC = () => {
                               <AlertDialogAction onClick={() => onDelete(b)}>Delete</AlertDialogAction>
                             </AlertDialogFooter>
                           </AlertDialogContent>
-                        </AlertDialog>
+                        </AlertDialog>}
                       </div>
                     </TableCell>
                   </TableRow>
@@ -506,17 +580,17 @@ const InsuranceRegisterPage: React.FC = () => {
 
       {/* Create / edit */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="sm:max-w-lg">
+        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
           <DialogHeader>
-            <DialogTitle>{editingId ? "Edit Insurance Policy" : "Add Insurance Policy"}</DialogTitle>
+            <DialogTitle>{editingId ? (canEdit ? "Edit Insurance Policy" : "View Insurance Policy") : "Add Insurance Policy"}</DialogTitle>
             <DialogDescription>Status is derived from the expiry date (active / expiring soon / expired).</DialogDescription>
           </DialogHeader>
-          <div className="space-y-3">
+          <fieldset className="space-y-3" disabled={Boolean(editingId && !canEdit)}>
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <Label>Project</Label>
                 <Select value={form.project_id} onValueChange={(v) => setForm({ ...form, project_id: v })}>
-                  <SelectTrigger><SelectValue placeholder="Select project" /></SelectTrigger>
+                  <SelectTrigger aria-label="Project"><SelectValue placeholder="Select project" /></SelectTrigger>
                   <SelectContent>{projects.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}</SelectContent>
                 </Select>
               </div>
@@ -554,22 +628,38 @@ const InsuranceRegisterPage: React.FC = () => {
               <div>
                 <Label>Insurance type</Label>
                 <Select value={form.insurance_type} onValueChange={(v) => setForm({ ...form, insurance_type: v })}>
-                  <SelectTrigger><SelectValue placeholder="Select type" /></SelectTrigger>
+                  <SelectTrigger aria-label="Insurance type"><SelectValue placeholder="Select type" /></SelectTrigger>
                   <SelectContent>{types.map((t) => <SelectItem key={t.id} value={t.name}>{t.name}</SelectItem>)}</SelectContent>
                 </Select>
               </div>
             </div>
             <div className="grid grid-cols-2 gap-3">
-              <div><Label>Policy number</Label><Input value={form.policy_number} onChange={(e) => setForm({ ...form, policy_number: e.target.value })} /></div>
+              <div><Label>Policy number</Label><Input aria-label="Policy number" value={form.policy_number} onChange={(e) => setForm({ ...form, policy_number: e.target.value })} /></div>
               <div><Label>Insurance company</Label><Input value={form.insurance_company} onChange={(e) => setForm({ ...form, insurance_company: e.target.value })} /></div>
             </div>
             <div className="grid grid-cols-3 gap-3">
               <div><Label>Sum insured</Label><Input type="number" value={form.sum_insured} onChange={(e) => setForm({ ...form, sum_insured: e.target.value })} /></div>
-              <div><Label>Date of issue</Label><Input type="date" value={form.date_of_issue} onChange={(e) => setForm({ ...form, date_of_issue: e.target.value })} /></div>
-              <div><Label>Date of expiry</Label><Input type="date" value={form.date_of_expiry} onChange={(e) => setForm({ ...form, date_of_expiry: e.target.value })} /></div>
+              <div><Label>Date of issue</Label><Input aria-label="Date of issue" type="date" value={form.date_of_issue} onChange={(e) => setForm({ ...form, date_of_issue: e.target.value })} /></div>
+              <div><Label>Date of expiry</Label><Input aria-label="Date of expiry" type="date" value={form.date_of_expiry} onChange={(e) => setForm({ ...form, date_of_expiry: e.target.value })} /></div>
             </div>
-            <div>
+            {(!editingId || canEdit) && <div>
               <Label>Policy document (PDF, JPG, PNG · max 20MB)</Label>
+              <div className="mb-2">
+                <Label htmlFor="insurance-upload-role">Document relationship role</Label>
+                <select
+                  id="insurance-upload-role"
+                  aria-label="Upload relationship role"
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  value={pendingRole}
+                  onChange={(event) => setPendingRole(event.target.value as InsuranceUploadRole)}
+                >
+                  {INSURANCE_DOCUMENT_RELATIONSHIP_ROLES.map((role) => (
+                    <option key={role.value} value={role.value}>
+                      {role.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
               <input
                 ref={fileInputRef}
                 type="file"
@@ -577,45 +667,127 @@ const InsuranceRegisterPage: React.FC = () => {
                 className="hidden"
                 onChange={onFileSelected}
               />
-              {form.document_id ? (
+              {pendingFile ? (
                 <div className="flex items-center gap-2 rounded-md border p-2">
                   <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
-                  <span className="flex-1 truncate text-sm">{form.document_name || "Uploaded file"}</span>
-                  {editingId && (
-                    <a
-                      href={insuranceFileUrl(editingId)}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-xs text-blue-600 hover:underline"
-                    >
-                      View
-                    </a>
-                  )}
-                  <Button type="button" variant="ghost" size="sm" onClick={onPickFile} disabled={uploading}>
-                    {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : "Replace"}
-                  </Button>
+                  <span className="flex-1 truncate text-sm">{pendingFile.name}</span>
+                  <Button type="button" variant="ghost" size="sm" onClick={onPickFile}>Replace</Button>
                   <Button type="button" variant="ghost" size="icon" className="h-7 w-7" onClick={clearFile}>
                     <X className="h-4 w-4" />
                   </Button>
                 </div>
               ) : (
-                <Button type="button" variant="outline" className="w-full" onClick={onPickFile} disabled={uploading}>
-                  {uploading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
-                  {uploading ? "Uploading…" : "Upload policy file"}
+                <Button type="button" variant="outline" className="w-full" onClick={onPickFile}>
+                  <Upload className="mr-2 h-4 w-4" />
+                  Select policy file
                 </Button>
               )}
-            </div>
+            </div>}
+            {editingId && form.document_id && (
+              <p className="text-xs text-muted-foreground">
+                A legacy Insurance file is preserved for canonicalization or manual review.
+              </p>
+            )}
+            {editingId ? (
+              <EntityDocumentLinks
+                targetType="insurance"
+                targetId={editingId}
+                organizationId={items.find((item) => item.id === editingId)?.organization_id}
+                projectId={form.project_id}
+                roles={INSURANCE_DOCUMENT_RELATIONSHIP_ROLES}
+                defaultRole="policy"
+                canManage={canEdit}
+              />
+            ) : (
+              <div className="space-y-2">
+                {!linkExisting ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="w-full"
+                    onClick={() => { setLinkExisting(true); clearFile(); }}
+                  >
+                    <Search className="mr-2 h-4 w-4" />
+                    Link existing Document
+                  </Button>
+                ) : (
+                  <div className="space-y-2 rounded-md border p-2">
+                    <div className="flex items-center justify-between">
+                      <Label htmlFor="insurance-existing-search">Search existing Documents</Label>
+                      <Button type="button" variant="ghost" size="sm" onClick={resetExistingSelection}>
+                        Upload a new file instead
+                      </Button>
+                    </div>
+                    <Input
+                      id="insurance-existing-search"
+                      aria-label="Search existing Documents"
+                      value={existingQuery}
+                      onChange={(event) => setExistingQuery(event.target.value)}
+                      placeholder="Search by number, subject or filename"
+                    />
+                    {selectedExisting ? (
+                      <div className="flex items-center gap-2 rounded-md border p-2">
+                        <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
+                        <span className="flex-1 truncate text-sm">
+                          {selectedExisting.filename || selectedExisting.subject || "Document"}
+                        </span>
+                        <Button asChild variant="ghost" size="sm">
+                          <Link
+                            to={`/documentviewer/${selectedExisting._id || selectedExisting.id}`}
+                            aria-label={`View ${selectedExisting.filename || selectedExisting.subject || "Document"}`}
+                          >
+                            <Eye className="h-4 w-4" />
+                          </Link>
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7"
+                          onClick={() => setSelectedExisting(null)}
+                        >
+                          <X className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    ) : (
+                      <ul className="max-h-48 space-y-1 overflow-y-auto">
+                        {existingResults.map((row) => {
+                          const label = row.filename || row.subject || "Document";
+                          return (
+                            <li key={String(row._id || row.id)}>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                className="w-full justify-start"
+                                aria-label={`Select ${label}`}
+                                onClick={() => setSelectedExisting(row)}
+                              >
+                                <FileText className="mr-2 h-4 w-4 shrink-0" />
+                                <span className="truncate">{label}</span>
+                              </Button>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                  </div>
+                )}
+                <p className="text-sm text-muted-foreground">
+                  Additional Documents can be linked once the policy is saved.
+                </p>
+              </div>
+            )}
             <div><Label>Remarks</Label><Textarea value={form.remarks} onChange={(e) => setForm({ ...form, remarks: e.target.value })} rows={2} /></div>
-          </div>
+          </fieldset>
           <DialogFooter className="flex-wrap gap-2">
             <Button variant="outline" onClick={() => setDialogOpen(false)} disabled={saving}>Cancel</Button>
             {!editingId && (
               <Button variant="outline" onClick={() => submit(true)} disabled={saving}>Save &amp; Add New</Button>
             )}
-            <Button onClick={() => submit(false)} disabled={saving}>
+            {(!editingId || canEdit) && <Button onClick={() => submit(false)} disabled={saving}>
               {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <PlusCircle className="mr-2 h-4 w-4" />}
               {editingId ? "Save changes" : "Save"}
-            </Button>
+            </Button>}
           </DialogFooter>
         </DialogContent>
       </Dialog>

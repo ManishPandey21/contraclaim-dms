@@ -248,6 +248,27 @@ class SubtagListResponse(BaseModel):
         return self
 
 
+class SubtagLookupItem(BaseModel):
+    """The fields a display lookup needs: no usage counts, no enrichment."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str = Field(alias="_id")
+    name: str
+    tag_id: str
+
+
+class SubtagBatchResponse(BaseModel):
+    """Subtags of the requested tags the caller may see.
+
+    A requested tag the caller cannot see is simply absent: the response never
+    says whether it exists.
+    """
+
+    subtags: List[SubtagLookupItem]
+    truncated: bool = False
+
+
 __all__ = [
     "Tag",
     "TagCreate",
@@ -259,4 +280,6 @@ __all__ = [
     "SubtagUpdate",
     "SubtagResponse",
     "SubtagListResponse",
+    "SubtagLookupItem",
+    "SubtagBatchResponse",
 ]

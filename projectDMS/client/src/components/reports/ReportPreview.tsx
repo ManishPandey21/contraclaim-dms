@@ -48,7 +48,7 @@ export const ReportPreview: React.FC<ReportPreviewProps> = ({
       <CardHeader>
         <CardTitle className="text-lg">Report Preview</CardTitle>
         <CardDescription>
-          {startDate && endDate 
+          {startDate && endDate
             ? `Showing data from ${format(startDate, 'PP')} to ${format(endDate, 'PP')}`
             : 'Preview of generated report'
           }

@@ -1,7 +1,7 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Download, FileCheck2, Gavel, History, Loader2, LockKeyhole, PlusCircle, Upload } from "lucide-react";
 import { toast } from "sonner";
-import LinkedDocumentsPicker from "@/components/documents/LinkedDocumentsPicker";
+import EntityDocumentLinks from "@/components/document-links/EntityDocumentLinks";
 import CsvImportDialog from "@/components/registers/CsvImportDialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -41,6 +41,11 @@ import {
   updateEOTDetermination,
 } from "@/services/key-dates-api";
 import { formatDate } from "@/utils/dateFormat";
+import useHasPermission from "@/hooks/useHasPermission";
+import {
+  EOT_DETERMINATION_RELATIONSHIP_ROLES,
+  EOT_SUBMISSION_RELATIONSHIP_ROLES,
+} from "@/services/document-relationships-api";
 
 const fmt = (value?: string | null) => (value ? formatDate(value) : "—");
 const iso = (value: string) => value ? new Date(value).toISOString() : undefined;
@@ -109,21 +114,34 @@ interface Props {
   milestones: MilestoneDTO[];
   onChanged: () => Promise<void> | void;
   onBaselineStatusChange?: (frozen: boolean) => void;
+  /** Deep-linked evidence section to highlight and scroll to. */
+  focusSubmissionId?: string | null;
+  focusDeterminationId?: string | null;
 }
 
-const KeyDateRevisionWorkflow: React.FC<Props> = ({ projectId, milestones, onChanged, onBaselineStatusChange }) => {
+const KeyDateRevisionWorkflow: React.FC<Props> = ({
+  projectId, milestones, onChanged, onBaselineStatusChange, focusSubmissionId, focusDeterminationId,
+}) => {
   const [workflow, setWorkflow] = useState<KeyDateWorkflowSummaryDTO | null>(null);
+  const focusedSectionRef = useRef<HTMLElement | null>(null);
+  const focusKey = focusSubmissionId ? `submission-evidence-${focusSubmissionId}`
+    : focusDeterminationId ? `determination-evidence-${focusDeterminationId}` : null;
+  const focusFound = Boolean(workflow && focusKey && (
+    workflow.submissions.some((row) => row.id === focusSubmissionId)
+    || workflow.determinations.some((row) => row.id === focusDeterminationId)
+  ));
+  useEffect(() => {
+    if (focusFound) focusedSectionRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+  }, [focusFound]);
   const [busy, setBusy] = useState(false);
   const [submissionOpen, setSubmissionOpen] = useState(false);
   const [editingSubmission, setEditingSubmission] = useState<EOTSubmissionRevisionDTO | null>(null);
   const [submissionForm, setSubmissionForm] = useState({ ...blankSubmission });
   const [submissionRows, setSubmissionRows] = useState<Record<string, SubmissionRow>>({});
-  const [submissionDocIds, setSubmissionDocIds] = useState<string[]>([]);
   const [determinationOpen, setDeterminationOpen] = useState(false);
   const [editingDetermination, setEditingDetermination] = useState<EOTDeterminationDTO | null>(null);
   const [selectedSubmissionIds, setSelectedSubmissionIds] = useState<string[]>([]);
   const [determinationOrigin, setDeterminationOrigin] = useState<EOTDeterminationOrigin>("contractor_submission");
-  const [determinationDocIds, setDeterminationDocIds] = useState<string[]>([]);
   const [supersedeTarget, setSupersedeTarget] = useState<EOTSubmissionRevisionDTO | null>(null);
   const [supersedeForm, setSupersedeForm] = useState({ replacementId: "", reason: "" });
   const [determinationForm, setDeterminationForm] = useState({
@@ -132,6 +150,8 @@ const KeyDateRevisionWorkflow: React.FC<Props> = ({ projectId, milestones, onCha
   });
   const [determinationRows, setDeterminationRows] = useState<Record<string, DeterminationRow>>({});
   const [csvTarget, setCsvTarget] = useState<null | { kind: "submission" | "determination"; id: string; label: string }>(null);
+  const canManageSubmissions = useHasPermission("dms.keydate.eot_submit");
+  const canManageDeterminations = useHasPermission("dms.keydate.eot.determine");
 
   const load = useCallback(async () => {
     if (!projectId) return;
@@ -160,7 +180,6 @@ const KeyDateRevisionWorkflow: React.FC<Props> = ({ projectId, milestones, onCha
       remarks: submission.remarks || "",
       status: submission.status === "draft" ? "draft" : "submitted",
     } : { ...blankSubmission });
-    setSubmissionDocIds(submission?.linked_document_ids ?? []);
     const existing = new Map((submission?.items ?? []).map((item) => [item.milestone_ref.toLowerCase(), item]));
     setSubmissionRows(Object.fromEntries(milestones.map((milestone) => {
       const ref = milestone.milestone_ref || "";
@@ -201,7 +220,6 @@ const KeyDateRevisionWorkflow: React.FC<Props> = ({ projectId, milestones, onCha
         claim_cutoff_date: iso(submissionForm.cutoffDate),
         remarks: submissionForm.remarks || undefined,
         status: submissionForm.status,
-        linked_document_ids: submissionDocIds,
         items,
       };
       if (editingSubmission) await updateEOTSubmissionRevision(editingSubmission.id, payload);
@@ -274,7 +292,6 @@ const KeyDateRevisionWorkflow: React.FC<Props> = ({ projectId, milestones, onCha
     const ids = submission ? [submission.id] : [];
     setSelectedSubmissionIds(ids);
     setDeterminationOrigin(submission ? "contractor_submission" : "employer_initiated");
-    setDeterminationDocIds([]);
     setDeterminationForm({ reference: "", date: "", grantReference: "", approvedBy: "", status: "under_review", remarks: "" });
     setDeterminationRows(Object.fromEntries(
       (submission?.items ?? []).map((item) => [item.milestone_ref, blankDeterminationRow()]),
@@ -286,7 +303,6 @@ const KeyDateRevisionWorkflow: React.FC<Props> = ({ projectId, milestones, onCha
     setEditingDetermination(determination);
     setSelectedSubmissionIds(determination.eot_submission_ids);
     setDeterminationOrigin(determination.origin);
-    setDeterminationDocIds(determination.linked_document_ids ?? []);
     setDeterminationForm({
       reference: determination.determination_reference || "",
       date: determination.determination_date?.slice(0, 10) || "",
@@ -364,7 +380,6 @@ const KeyDateRevisionWorkflow: React.FC<Props> = ({ projectId, milestones, onCha
         approved_by: determinationForm.approvedBy || undefined,
         status: determinationForm.status,
         remarks: determinationForm.remarks || undefined,
-        linked_document_ids: determinationDocIds,
         items,
       };
       if (editingDetermination) {
@@ -522,6 +537,50 @@ const KeyDateRevisionWorkflow: React.FC<Props> = ({ projectId, milestones, onCha
               </TableRow>)}
             </TableBody>
           </Table>
+          <div className="space-y-5 border-t pt-4">
+            {workflow.submissions.map((submission) => (
+              <section key={`submission-evidence-${submission.id}`} id={`submission-evidence-${submission.id}`}
+                ref={submission.id === focusSubmissionId ? focusedSectionRef : undefined}
+                data-focused={submission.id === focusSubmissionId ? "true" : undefined}
+                className={`space-y-2 rounded-md border p-4 ${submission.id === focusSubmissionId ? "ring-2 ring-primary" : ""}`}>
+                <div>
+                  <h4 className="font-semibold">{submission.revision_label} evidence</h4>
+                  <p className="text-xs text-muted-foreground">Documents remain attached to this exact Contractor submission.</p>
+                </div>
+                <EntityDocumentLinks
+                  targetType="eot_submission"
+                  targetId={submission.id}
+                  organizationId={submission.organization_id}
+                  projectId={submission.project_id || projectId}
+                  roles={EOT_SUBMISSION_RELATIONSHIP_ROLES}
+                  defaultRole="eot_submission"
+                  frozen={!!submission.locked_at}
+                  canManage={canManageSubmissions}
+                />
+              </section>
+            ))}
+            {workflow.determinations.map((determination) => (
+              <section key={`determination-evidence-${determination.id}`} id={`determination-evidence-${determination.id}`}
+                ref={determination.id === focusDeterminationId ? focusedSectionRef : undefined}
+                data-focused={determination.id === focusDeterminationId ? "true" : undefined}
+                className={`space-y-2 rounded-md border p-4 ${determination.id === focusDeterminationId ? "ring-2 ring-primary" : ""}`}>
+                <div>
+                  <h4 className="font-semibold">{determination.determination_reference || "EOT determination"} evidence</h4>
+                  <p className="text-xs text-muted-foreground">Documents remain attached to this exact Engineer/Employer determination.</p>
+                </div>
+                <EntityDocumentLinks
+                  targetType="eot_determination"
+                  targetId={determination.id}
+                  organizationId={determination.organization_id}
+                  projectId={determination.project_id || projectId}
+                  roles={EOT_DETERMINATION_RELATIONSHIP_ROLES}
+                  defaultRole="engineer_determination"
+                  frozen={!!determination.frozen_at}
+                  canManage={canManageDeterminations}
+                />
+              </section>
+            ))}
+          </div>
         </CardContent>
       </Card>
 
@@ -536,13 +595,6 @@ const KeyDateRevisionWorkflow: React.FC<Props> = ({ projectId, milestones, onCha
             <div><Label>Status before lock</Label><Select value={submissionForm.status} onValueChange={(value: "draft" | "submitted") => setSubmissionForm({ ...submissionForm, status: value })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="draft">Draft</SelectItem><SelectItem value="submitted">Submitted</SelectItem></SelectContent></Select></div>
             <div><Label>Remarks</Label><Input value={submissionForm.remarks} onChange={(e) => setSubmissionForm({ ...submissionForm, remarks: e.target.value })} /></div>
           </div>
-          <LinkedDocumentsPicker
-            projectId={projectId}
-            linkedIds={submissionDocIds}
-            onChange={setSubmissionDocIds}
-            title="Contractor's EOT application document"
-            disabled={!!editingSubmission?.locked_at}
-          />
           <Table><TableHeader><TableRow><TableHead className="w-10">Use</TableHead><TableHead>Ref / Description</TableHead><TableHead>Current Contractual</TableHead><TableHead>EOT Submitted</TableHead><TableHead>Claimed Days</TableHead><TableHead>Remarks</TableHead></TableRow></TableHeader><TableBody>
             {milestones.map((milestone) => {
               const ref = milestone.milestone_ref || "";
@@ -594,13 +646,6 @@ const KeyDateRevisionWorkflow: React.FC<Props> = ({ projectId, milestones, onCha
             <div><Label>Determination status</Label><Select value={determinationForm.status} onValueChange={(value: EOTDeterminationStatus) => setDeterminationForm({ ...determinationForm, status: value })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["under_review", "pending", "granted", "partially_granted", "rejected", "no_extension"] .map((value) => <SelectItem key={value} value={value}>{value.replaceAll("_", " ")}</SelectItem>)}</SelectContent></Select></div>
             <div><Label>Remarks</Label><Input value={determinationForm.remarks} onChange={(e) => setDeterminationForm({ ...determinationForm, remarks: e.target.value })} /></div>
           </div>
-          <LinkedDocumentsPicker
-            projectId={projectId}
-            linkedIds={determinationDocIds}
-            onChange={setDeterminationDocIds}
-            title="Employer's determination letter"
-            disabled={!!editingDetermination?.frozen_at}
-          />
           <Table><TableHeader><TableRow><TableHead>Milestone</TableHead><TableHead>Against Claim</TableHead><TableHead>Submitted</TableHead><TableHead>Result</TableHead><TableHead>Granted Date</TableHead><TableHead>Granted Days</TableHead><TableHead>Remarks</TableHead></TableRow></TableHeader><TableBody>{determinationTargets.map((target) => {
             const row = determinationRows[target.milestone_ref] || blankDeterminationRow();
             const change = (next: Partial<DeterminationRow>) => setDeterminationRows({ ...determinationRows, [target.milestone_ref]: { ...row, ...next } });

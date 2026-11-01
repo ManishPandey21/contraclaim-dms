@@ -27,6 +27,7 @@ from ...models.letter_drafting import (
     DraftExecutionEffect,
     DraftOutboxEvent,
     DraftCommentRequest,
+    DraftLifecycleEventType,
     DraftGovernanceResponse,
     DraftMetricBottleneck,
     DraftMetricBreakdownItem,
@@ -68,6 +69,8 @@ from ...core.config import settings
 from ...services.ai_guardrails import AIOutputGuardrailService
 from ...services.authorization_service import AuthorizationService
 from ...services.policy_service import PolicyService
+from ...models.contract_document import CurrentState
+from ...services.contract_scope_resolver import resolve_authorized_project_universe
 from ...services.contract_service import ContractService
 from ...services.conversation_service import ConversationService
 from ...services.document_service import DocumentService
@@ -108,6 +111,9 @@ _AI_DRAFT_MODES = frozenset(["draft", "review"])
 _FINALIZED_STATUSES = frozenset(["approved", "exported", "issued"])
 _ACTIVE_STATUSES = frozenset(["completed", "needs_attention", "blocked"])
 _EXPORTED_ISSUED_STATUSES = frozenset(["exported", "issued"])
+
+
+from ..publication_policy import authoritative_fact_text, authoritative_summary
 
 
 class DraftRunService:
@@ -1223,7 +1229,14 @@ class DraftRunService:
         for doc in docs:
             doc_id = str(doc.get("_id") or doc.get("document_id") or "")
             letter_no = doc.get("letterNo") or doc.get("letter_no") or raw_reference
-            text = doc.get("summary") or doc.get("full_text") or doc.get("ocrText") or doc.get("subject")
+            # Reference resolution hands this to the drafting model as
+            # citable fact, so it obeys the publication policy like any other
+            # authoritative-content consumer.
+            text = (
+                authoritative_fact_text(doc)
+                or authoritative_summary(doc)
+                or doc.get("subject")
+            )
             sources.append(
                 SourceEvidence(
                     source_id=f"document:{doc_id}",
@@ -2250,14 +2263,26 @@ class DraftRunService:
                 now,
             )
         else:
-            run = await self.repository.update_fields(letter_id, run_id, fields)
-            if not run:
+            updated = await self.repository.update_fields(letter_id, run_id, fields)
+            if not updated:
                 raise HTTPException(status_code=404, detail="Draft run not found")
+            run = updated
+
+        # Spelled out per stage rather than interpolated. `stage` is already
+        # Literal["drafter", "reviewer", "final"] and the event type is its own
+        # Literal, so the mapping is total in both directions - an f-string only
+        # ever proves "some str", which is how an unknown lifecycle event could
+        # reach the repository.
+        approval_events: Dict[ApprovalStage, DraftLifecycleEventType] = {
+            "drafter": "drafter_approved",
+            "reviewer": "reviewer_approved",
+            "final": "final_approved",
+        }
 
         await self.repository.append_event(
             letter_id,
             run_id,
-            f"{stage}_approved",
+            approval_events[stage],
             actor_user_id=actor,
             status=run.status,
             payload={"comment": request.comment} if request.comment else None,
@@ -3162,27 +3187,87 @@ class DraftRunService:
         context: Any,
         current_user: Any,
     ) -> List[SourceEvidence]:
+        """The second door into the same persisted DraftRun.
+
+        Whatever this returns is merged into ``working_sources``, and that list
+        is what reaches the prompt, the ``DraftRun``, the immutable evidence
+        snapshot and the context pack. It therefore needs the SAME canonical
+        contract-evidence universe as the initial context build - one universe
+        for the whole run, not a second opinion.
+
+        It used to call ``exact_clause_search``, which is the generic
+        ``ContractService.search_contracts`` path with an exact clause filter.
+        Generic search resolves no applicability, no projection currency and no
+        positive publication authority, so it could re-admit a clause the
+        context builder had just excluded. That route is gone from the run;
+        ``exact_clause_search`` itself is untouched for its HTTP caller.
+        """
         org_id = context.active_workspace.get("organization_id")
         project_id = context.active_workspace.get("project_id")
-        if not org_id or not project_id:
+        if not org_id or not project_id or self.db is None:
             return []
+
+        try:
+            universe = await resolve_authorized_project_universe(
+                self.db,
+                current_user,
+                organization_id=str(org_id),
+                project_id=str(project_id),
+                mode=CurrentState(),
+            )
+        except Exception:
+            # Eligibility could not be resolved. No partial answer, and no
+            # broader retrieval to fall back to.
+            return []
+        eligible = sorted(universe.eligible_document_ids)
+        if not eligible:
+            return []
+
+        wanted = [str(query).strip() for query in refinement_queries if query]
+        if not wanted:
+            return []
+
+        try:
+            cursor = self.db.contract_clauses.find(
+                {
+                    "org_id": str(org_id),
+                    "project_id": str(project_id),
+                    "is_current": True,
+                    "is_authorised_for_ai": True,
+                    "document_id": {"$in": eligible},
+                    "clause_no": {"$in": wanted},
+                }
+            ).limit(5 * len(wanted))
+            records = [doc async for doc in cursor]
+        except Exception:
+            return []
+
         retrieved: List[SourceEvidence] = []
-        for query in refinement_queries:
-            if not query:
-                continue
-            try:
-                result = await self.exact_clause_search(
-                    ExactClauseSearchRequest(
-                        organization_id=str(org_id),
-                        project_id=str(project_id),
-                        clause_number=query,
-                        limit=5,
-                    ),
-                    current_user,
+        for record in records:
+            clause_no = record.get("clause_no")
+            text = record.get("cleaned_text")
+            pages = [p for p in [record.get("page_start"), record.get("page_end")] if p]
+            retrieved.append(
+                SourceEvidence(
+                    source_id=f"clause_record:{record.get('clause_uid')}",
+                    source_type="contract_clause",
+                    allowed_use="clause",
+                    organization_id=str(org_id),
+                    project_id=str(project_id),
+                    label=f"Clause {clause_no or ''} {record.get('clause_title') or ''}".strip(),
+                    text=text,
+                    snippet=self._snippet(text),
+                    document_id=str(record.get("document_id") or "") or None,
+                    clause_number=clause_no,
+                    clause_title=record.get("clause_title"),
+                    page_numbers=sorted({int(p) for p in pages}),
+                    metadata={
+                        "clause_uid": record.get("clause_uid"),
+                        "document_type": record.get("document_type"),
+                        "structured": True,
+                    },
                 )
-                retrieved.extend(result.sources)
-            except Exception:
-                continue
+            )
         return self._with_source_hashes(retrieved)
 
     @staticmethod

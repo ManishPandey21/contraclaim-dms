@@ -20,7 +20,7 @@ from uuid import uuid4
 import uuid
 import urllib.parse
 from pydantic import Field
-import pymongo 
+import pymongo
 from ..services.metadata import process_document
 from ..services import metadata
 from ..utils.file_validation import sniff_mime_from_bytes, is_allowed_mime
@@ -49,7 +49,7 @@ class LinkDocumentsResponse(BaseModel):
 class ReferenceCreate(BaseModel):
     referenced_document_id: str  # Must match frontend
     link_type: Literal["direct", "indirect"]  # Allowed values
-    
+
 class DocumentListResponse(BaseModel):
     documents: List[Document]
     total: int
@@ -63,7 +63,7 @@ class EnclosureResponse(BaseModel):
     filesize: int
     uploadedAt: str
     uploadedBy: str
-    
+
 # Configure Logger
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -94,7 +94,7 @@ def run_ocr_background(
             document_id=document_id  # Pass to process_document
         )
         # ...
-        
+
     except Exception as e:
         logger.error(f"OCR processing failed: {str(e)}")
 
@@ -206,14 +206,14 @@ async def create_document(
         logger.info(f"Starting document upload for user {current_user.id}")
         logger.info(f"Upload parameters: letterNo={letterNo}, uploadType={uploadType}, date={date}, ocrEnabled={ocrEnabled}")
 
-        
+
         # Validate required fields
         if not file.filename:
             raise HTTPException(status_code=400, detail="No file provided")
-        
+
         if not letterNo:
             raise HTTPException(status_code=400, detail="Letter number is required")
-        
+
         # Read file once and validate MIME type (PDF only for main documents)
         content = await file.read()
         detected_mime = sniff_mime_from_bytes(content[:16] if len(content) > 16 else content)
@@ -222,7 +222,7 @@ async def create_document(
                 status_code=415,
                 detail=f"Unsupported file type: {detected_mime}. Allowed types: {', '.join(sorted(ALLOWED_DOCUMENT_MIME))}"
             )
-            
+
         # Parse date string to datetime
         try:
             if date:
@@ -263,12 +263,12 @@ async def create_document(
 
         # Replace backslashes with forward slashes
         normalized_path = local_filepath.replace('\\', '/')  # f"{pathStructure1}/{unique_filename}" # file_path
-        
+
         # Save the file locally
         logger.info(f"Saving file to: {local_filepath}")
         with open(local_filepath, "wb") as buffer:
             buffer.write(content)
-            
+
         logger.info(f"passing document to metadata.py: {normalized_path}")
         # Background OCR will be scheduled after DB insert to ensure we have the document ID.
 
@@ -345,7 +345,7 @@ async def create_document(
         logger.info(f"Document created successfully with ID: {result.inserted_id}")
         return Document(**created_document)
 
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -744,9 +744,9 @@ async def list_documents(
                 # Convert ObjectId to string for the document ID
                 if "_id" in doc:
                     doc["id"] = str(doc["_id"])
-                
+
                 populated_doc = await populate_tags(doc, db)
-                
+
                 # Populate from and to fields - check if they are ObjectIds or plain strings
                 from_field = doc.get("from_") or doc.get("from")
                 if from_field:
@@ -912,21 +912,21 @@ async def list_documents(
                         "compressionEnabled": doc.get("compressionEnabled", False),
                         "createdBy": doc.get("createdBy", ""),
                     }
-                    
+
                     document_obj = Document(**doc_data)
                     document_list.append(document_obj)
                 except Exception as e:
                     logger.error(f"Error creating Document object for {doc.get('_id', 'unknown')}: {str(e)}")
                     # Continue processing other documents
                     continue
-            
+
             logger.info(f"Successfully processed {len(document_list)} documents")
             return DocumentListResponse(documents=document_list, total=total_count)
-            
+
         except Exception as e:
             logger.error(f"Error creating document list: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Error processing documents: {str(e)}")
-            
+
     except HTTPException:
         raise
     except Exception as e:
@@ -1310,9 +1310,9 @@ async def delete_reference(
 
     if not updated_document:
         raise HTTPException(status_code=404, detail="Document not found") # Shouldn't happen
-    
+
     return Document(**updated_document)
-    
+
 @router.delete("/documents/{id}/enclosures/{enclosure_id}", response_model=Document)
 async def delete_enclosure(
     id: str,
@@ -1331,7 +1331,7 @@ async def delete_enclosure(
         organization_id=str(document.get("organization_id")),
         project_id=(str(document.get("project_id")) if document.get("project_id") is not None else None)
     )
-            
+
     # Find the enclosure to delete
     enclosure_to_delete = None
     for enc in document.get('enclosures', []):
@@ -1362,7 +1362,7 @@ async def get_enclosures(
 ):
     try:
         logger.info(f"Fetching enclosures for document {id}")
-        
+
         # Fetch the document
         document = await db.documents.find_one({"_id": id})
         if not document:
@@ -1378,7 +1378,7 @@ async def get_enclosures(
         # Get enclosures and format them properly
         enclosures = document.get("enclosures", [])
         formatted_enclosures = []
-        
+
         for enc in enclosures:
             # Generate fresh presigned URL if needed
             presigned_url = enc.get("presigned_url", enc.get("filepath_s3", ""))
@@ -1397,7 +1397,7 @@ async def get_enclosures(
             # If not S3 URL, expose backend download endpoint for local files
             if not isinstance(presigned_url, str) or not presigned_url.startswith("https://"):
                 presigned_url = f"/api/documents/{id}/enclosures/{enc.get('id')}/download"
-            
+
             # Get uploader username from user ID
             uploader_name = "Unknown"
             uploader_id = enc.get("uploadedBy")
@@ -1413,10 +1413,10 @@ async def get_enclosures(
                 except Exception as e:
                     logger.error(f"Failed to fetch user info for {uploader_id}: {str(e)}")
                     uploader_name = str(uploader_id) if uploader_id else "Unknown"
-            
+
             # Debug logging to see what data we have
             logger.info(f"Enclosure data: id={enc.get('id')}, filename={enc.get('filename')}, uploadedBy={enc.get('uploadedBy')}")
-            
+
             formatted_enclosures.append(EnclosureResponse(
                 id=enc.get("id", str(uuid.uuid4())),
                 filename=enc.get("filename", "Unknown"),
@@ -1429,13 +1429,13 @@ async def get_enclosures(
 
         logger.info(f"Found {len(formatted_enclosures)} enclosures for document {id}")
         return formatted_enclosures
-        
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Unexpected error in get_enclosures: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-    
+
 @router.get("/documents/{id}/references", response_model=List[DocumentReference])
 async def get_references(
     id: str,
@@ -1646,7 +1646,7 @@ async def delete_document(
 
     await db.documents.delete_one({"_id": id})
     return
-    
+
 
 @router.post("/documents/{id}/enclosures", response_model=EnclosureResponse)
 
@@ -1658,7 +1658,7 @@ async def add_enclosure(
 ):
     try:
         logger.info(f"Adding enclosure to document {id}: {file.filename}")
-        
+
         # Fetch the existing document
         document = await db.documents.find_one({"_id": id})
         if not document:
@@ -1758,10 +1758,10 @@ async def add_enclosure(
             raise HTTPException(status_code=404, detail="Document not found")
 
         logger.info(f"Enclosure added successfully: {enclosure_id}")
-        
+
         # Get current user's username for the response
         uploader_name = current_user.username if hasattr(current_user, 'username') else current_user.id
-        
+
         # Return the enclosure response
         return EnclosureResponse(
             id=enclosure_id,
@@ -1772,7 +1772,7 @@ async def add_enclosure(
             uploadedAt=datetime.now().isoformat(),
             uploadedBy=uploader_name
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:

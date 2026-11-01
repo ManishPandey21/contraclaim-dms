@@ -344,11 +344,13 @@ test("contract search renders success, empty, and API-error states", async ({ pa
 test("contract Q&A validates required scope and renders cited answer", async ({ page }) => {
   await page.goto("/contracts/qa");
 
+  // CL-4A: the page's organisation/project follow the navbar selection, so the
+  // first unmet requirement is the contract document.
+  await expect(page.getByTestId("contract-qa-org-select")).toHaveValue(org.id);
+  await expect(page.getByTestId("contract-qa-project-select")).toHaveValue(project.id);
   await page.getByTestId("contract-qa-submit").click();
-  await expect(page.getByText("Select an organization.")).toBeVisible();
+  await expect(page.getByText("Select a contract document.")).toBeVisible();
 
-  await page.getByTestId("contract-qa-org-select").selectOption(org.id);
-  await page.getByTestId("contract-qa-project-select").selectOption(project.id);
   await page.getByTestId("contract-qa-file-select").selectOption("doc-gcc");
   await page.getByTestId("contract-qa-question-input").fill("What does GCC 8.4 say about extension of time?");
   await page.getByTestId("contract-qa-submit").click();

@@ -151,6 +151,32 @@ export async function listSubTags(
   return normalizeList(data, "subtags", normalizeSubTag);
 }
 
+/** Most distinct tag ids the batch endpoint accepts (backend: SUBTAG_BATCH_MAX_TAG_IDS). */
+export const SUBTAG_BATCH_MAX_TAG_IDS = 100;
+
+/**
+ * Subtags of many tags in ONE request (`GET /tags/subtags/batch`), for display
+ * lookups. Never loop over `listSubTags`: each call draws on the per-user Tags
+ * read budget. Tags the caller cannot see are simply absent from the result.
+ * Callers pass the tags of one displayed page, far below the maximum.
+ */
+export async function listSubTagsBatch(
+  tagIds: string[],
+  options: { signal?: AbortSignal } = {}
+): Promise<SubTag[]> {
+  const unique = Array.from(
+    new Set(tagIds.map((id) => String(id ?? "").trim()).filter(Boolean))
+  ).slice(0, SUBTAG_BATCH_MAX_TAG_IDS);
+  if (unique.length === 0) return [];
+  const { data } = await api.get("/tags/subtags/batch", {
+    params: { tag_ids: unique },
+    // Repeated keys (?tag_ids=a&tag_ids=b), which FastAPI reads as a list.
+    paramsSerializer: { indexes: null },
+    signal: options.signal,
+  });
+  return normalizeList(data, "subtags", normalizeSubTag);
+}
+
 export async function createSubTag(
   tagId: string,
   payload: { name: string }

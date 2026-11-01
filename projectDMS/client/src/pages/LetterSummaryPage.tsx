@@ -33,12 +33,14 @@ import {
   Pencil,
   Plus,
   X,
+  AlertTriangle,
 } from "lucide-react";
 import { format } from "date-fns";
 import { toast } from "sonner";
 import { joinApiUrl } from "@/config/api";
 import { authenticatedFetch } from "@/services/http";
 import useHasPermission from "@/hooks/useHasPermission";
+import GroundedSummaryPanel from "@/components/letter-summary/GroundedSummaryPanel";
 
 interface LetterOut {
   id: string;
@@ -630,7 +632,7 @@ const LetterSummaryPage: React.FC = () => {
               <BookOpen className="h-6 w-6" /> Letter Summary
             </h1>
             <p className="text-sm text-muted-foreground">
-              Subject, key points, clauses, and references
+              Grounded summary, clauses, reply points and references
             </p>
           </div>
         </div>
@@ -678,6 +680,8 @@ const LetterSummaryPage: React.FC = () => {
           </div>
         </CardContent>
       </Card>
+
+      <GroundedSummaryPanel documentId={doc.id} canGenerate={canEditMetadata} />
 
       <Card>
         <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -731,9 +735,22 @@ const LetterSummaryPage: React.FC = () => {
         </CardContent>
       </Card>
 
+      {(doc as any)?.metadata_quality?.status === "partial_extraction" && (
+        <div
+          role="status"
+          className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100"
+        >
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>
+            Metadata for this letter was only partially extracted. Verify the letter number, date,
+            parties and references before relying on them.
+          </span>
+        </div>
+      )}
+
       <Tabs defaultValue="keypoints" className="w-full">
         <TabsList className="grid w-full grid-cols-3">
-          <TabsTrigger value="keypoints">Summary</TabsTrigger>
+          <TabsTrigger value="keypoints">AI Key Points</TabsTrigger>
           <TabsTrigger value="clauses">Contractual Clauses</TabsTrigger>
           <TabsTrigger value="keyreply">Key Reply Points</TabsTrigger>
         </TabsList>
@@ -742,9 +759,10 @@ const LetterSummaryPage: React.FC = () => {
           <Card>
             <CardHeader className="flex flex-row items-center justify-between">
               <div>
-                <CardTitle>Summary</CardTitle>
+                <CardTitle>AI Key Points</CardTitle>
                 <CardDescription>
-                  Concise items captured from the letter
+                  AI-generated description of the letter, not page-cited. The Detailed Summary above is
+                  grounded in the letter's pages.
                 </CardDescription>
               </div>
               <Button
@@ -815,7 +833,10 @@ const LetterSummaryPage: React.FC = () => {
             <CardHeader className="flex flex-row items-center justify-between">
               <div>
                 <CardTitle>Key Reply Points</CardTitle>
-                <CardDescription>Points to be addressed while responding</CardDescription>
+                <CardDescription>
+                  AI-generated reply considerations — advisory suggestions for the response, not
+                  statements made in this letter. Verify before relying on them.
+                </CardDescription>
               </div>
               <Button
                 size="sm"

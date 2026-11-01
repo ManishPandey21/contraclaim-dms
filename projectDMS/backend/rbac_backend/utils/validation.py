@@ -156,7 +156,13 @@ def validate_object_id(value: str) -> str:
 def validate_password_strength(password: str) -> PasswordValidationResult:
     if not isinstance(password, str):
         return PasswordValidationResult(False, "Password must be a string")
-    pw = password.strip()
+    # Login strips the submitted password (validate_input), so a stored secret
+    # with leading/trailing whitespace could never authenticate. Refuse it.
+    if password != password.strip():
+        return PasswordValidationResult(
+            False, "Password must not start or end with a space"
+        )
+    pw = password
     if len(pw) < 8:
         return PasswordValidationResult(False, "Password must be at least 8 characters long")
     if not re.search(r"[A-Z]", pw):

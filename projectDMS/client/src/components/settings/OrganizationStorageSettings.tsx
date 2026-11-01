@@ -345,7 +345,7 @@ const OrganizationStorageSettings = () => {
               )}
             </div>
             <p className="text-xs text-muted-foreground">
-              A short identifier for your organization (max 10 characters). 
+              A short identifier for your organization (max 10 characters).
               {isShortNameSet && " Once set, only Super Admins can modify this."}
             </p>
           </div>
@@ -389,11 +389,11 @@ const OrganizationStorageSettings = () => {
           <div className="space-y-4">
             <div className="grid gap-4">
               {AVAILABLE_PROVIDERS.map(location => (
-                <div 
+                <div
                   key={location.id}
                   className={`flex items-center justify-between p-4 rounded-lg border transition-all ${
-                    selectedLocations.includes(location.id) 
-                      ? 'border-primary bg-primary/5' 
+                    selectedLocations.includes(location.id)
+                      ? 'border-primary bg-primary/5'
                       : 'border-border hover:border-muted-foreground/50'
                   } ${!location.enabled ? 'opacity-50' : ''}`}
                 >
@@ -406,15 +406,15 @@ const OrganizationStorageSettings = () => {
                     />
                     <div className="flex items-center gap-2">
                       <div className={`p-2 rounded-md ${
-                        selectedLocations.includes(location.id) 
-                          ? 'bg-primary/20 text-primary' 
+                        selectedLocations.includes(location.id)
+                          ? 'bg-primary/20 text-primary'
                           : 'bg-muted text-muted-foreground'
                       }`}>
                         {location.icon}
                       </div>
                       <div>
-                        <Label 
-                          htmlFor={`org-${location.id}`} 
+                        <Label
+                          htmlFor={`org-${location.id}`}
                           className="font-medium cursor-pointer"
                         >
                           {location.name}

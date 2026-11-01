@@ -53,6 +53,10 @@ import { useToast } from "@/hooks/use-toast";
 import { useStepUp } from "@/hooks/useStepUp";
 import { enhancedApi as api } from "@/services/enhanced-api";
 import { ENTITY_PERMISSIONS } from "@/constants/entityPermissions";
+import {
+  PERMISSION_CATALOG_PERMISSION_ITEMS,
+  ROLE_ADMIN_PERMISSION_ITEMS,
+} from "./permissionsCatalog";
 
 // Helper to normalize role id across potential API variations
 const getRoleId = (role: any) =>
@@ -82,21 +86,6 @@ const deriveRoleLevel = (role: any) => {
   // Default to project-level to keep permissions scoped conservatively
   return "project";
 };
-
-export const ROLE_ADMIN_PERMISSION_ITEMS = [
-  { id: "roles:read", name: "View Roles" },
-  { id: "roles:create", name: "Create Roles" },
-  { id: "roles:update", name: "Edit Roles" },
-  { id: "roles:delete", name: "Delete Roles" },
-  { id: "roles:assign", name: "Assign/Reset Roles" },
-] as const;
-
-export const PERMISSION_CATALOG_PERMISSION_ITEMS = [
-  { id: "permissions:read", name: "View Permission Catalog" },
-  { id: "permissions:create", name: "Create Permissions" },
-  { id: "permissions:update", name: "Edit Permissions" },
-  { id: "permissions:delete", name: "Delete Permissions" },
-] as const;
 
 const PermissionsPage = () => {
   const [selectedRole, setSelectedRole] = useState("all");

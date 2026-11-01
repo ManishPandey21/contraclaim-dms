@@ -16,7 +16,7 @@ from ..models.letter_template import (
 )
 from ..services.authorization_service import AuthorizationService
 from ..services.letter_template_service import LetterTemplateService
-from ..utils.error_handler import AuthorizationError, TemplateError, handle_exceptions
+from ..utils.error_handler import BaseDomainError, AuthorizationError, TemplateError, handle_exceptions
 from ..utils.rate_limiter import RateLimiter
 
 logger = logging.getLogger(__name__)
@@ -59,7 +59,7 @@ class LetterTemplateController:
                 page=pagination["skip"] // pagination["limit"] + 1,
                 limit=pagination["limit"],
             )
-        except (AuthorizationError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as exc:
             logger.error("Failed to get templates: %s", exc)
@@ -85,7 +85,7 @@ class LetterTemplateController:
             return template
         except (AuthorizationError, HTTPException):
             raise
-        except TemplateError:
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as exc:
             logger.error("Failed to get template %s: %s", template_id, exc)
@@ -105,7 +105,7 @@ class LetterTemplateController:
             return await self.template_service.create_template(data, current_user)
         except (AuthorizationError, HTTPException):
             raise
-        except TemplateError:
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as exc:
             logger.error("Failed to create template: %s", exc)
@@ -136,7 +136,7 @@ class LetterTemplateController:
             )
         except (AuthorizationError, HTTPException):
             raise
-        except TemplateError:
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as exc:
             logger.error("Failed to update template %s: %s", template_id, exc)
@@ -163,7 +163,7 @@ class LetterTemplateController:
             return {"message": "Template deleted successfully"}
         except (AuthorizationError, HTTPException):
             raise
-        except TemplateError:
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as exc:
             logger.error("Failed to delete template %s: %s", template_id, exc)

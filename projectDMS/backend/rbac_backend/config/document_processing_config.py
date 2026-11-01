@@ -170,7 +170,7 @@ class DocumentProcessingConfig:
     falkordb_graph_name: str = "contraclaim"
     falkordb_index_name: str = "document_vectors"
     falkordb_vector_dim: int = 1536
-    
+
     _falkordb_url_override: Optional[str] = None
 
     def __post_init__(self):
@@ -536,7 +536,7 @@ class DocumentProcessingConfig:
         """Get FalkorDB URL from components or override"""
         if self._falkordb_url_override:
             return self._falkordb_url_override
-        
+
         password = self.falkordb_password or ""
         if password:
             return f"redis://:{password}@{self.falkordb_host}:{self.falkordb_port}"

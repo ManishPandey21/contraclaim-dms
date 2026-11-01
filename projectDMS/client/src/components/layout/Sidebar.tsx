@@ -32,6 +32,7 @@ import {
   Activity,
   CreditCard,
   CalendarClock,
+  OctagonAlert,
   GitCompareArrows,
   Landmark,
   FileSignature,
@@ -40,6 +41,7 @@ import {
   ShieldCheck,
   Eye,
   ListTree,
+  ClipboardCheck,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import useRBAC from "@/hooks/useRBAC";
@@ -106,6 +108,12 @@ const Sidebar = () => {
       icon: <Search size={20} />,
       label: "Search Letters",
     },
+    {
+      path: "/extraction-reviews",
+      icon: <ClipboardCheck size={20} />,
+      label: "Extraction Review",
+      permission: "dms.document.review_extraction",
+    },
     //{ path: "/reference/663c9a72a3b039f4cd364bcf", icon: <FileSearch size={20} />, label: "Reference Page" },
 
     //{
@@ -168,6 +176,7 @@ const Sidebar = () => {
     // ── Contract registers ──
     { path: "/contracts/master", icon: <FileSignature size={20} />, label: "Contract Master" },
     { path: "/key-dates", icon: <CalendarClock size={20} />, label: "Key Dates" },
+    { path: "/hindrances", icon: <OctagonAlert size={20} />, label: "Hindrance & Constraint Register" },
     { path: "/bank-guarantees", icon: <Landmark size={20} />, label: "Bank Guarantee Register" },
     { path: "/insurance", icon: <ShieldCheck size={20} />, label: "Insurance Management" },
     { path: "/ipc-bills", icon: <FileSignature size={20} />, label: "IPC / Bill Register" },

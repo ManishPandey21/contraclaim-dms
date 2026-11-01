@@ -100,6 +100,18 @@ class KeyDateRevisionService:
         self.db = db
         self.audit = AuditEventService(db)
 
+    async def _run_transaction(self, callback: Any) -> Any:
+        start_session = getattr(getattr(self.db, "client", None), "start_session", None)
+        if not callable(start_session):
+            return await callback(None)
+        session = await start_session()
+        async with session:
+            with_transaction = getattr(session, "with_transaction", None)
+            if callable(with_transaction):
+                return await with_transaction(callback)
+            async with session.start_transaction():
+                return await callback(session)
+
     @staticmethod
     def scope(
         organization_id: Optional[str], project_id: str, contract_id: str = "primary"
@@ -310,6 +322,10 @@ class KeyDateRevisionService:
     async def create_submission(
         self, payload: EOTSubmissionCreate, current_user: Any, *, source: str = "API"
     ) -> Dict[str, Any]:
+        if payload.linked_document_ids:
+            raise KeyDateError(
+                "Legacy relationship intent is ambiguous and requires manual review"
+            )
         organization_id = payload.organization_id or getattr(current_user, "organization_id", None)
         scope = self.scope(organization_id, payload.project_id, payload.contract_id)
         baseline = await self.db.key_date_baselines.find_one({**scope, "status": BaselineStatus.FROZEN.value})
@@ -350,7 +366,6 @@ class KeyDateRevisionService:
             "claim_cutoff_date": payload.claim_cutoff_date,
             "status": requested_status,
             "remarks": payload.remarks,
-            "linked_document_ids": list(payload.linked_document_ids or []),
             "linked_letter_ids": list(payload.linked_letter_ids or []),
             "created_at": now,
             "created_by": getattr(current_user, "id", None),
@@ -385,7 +400,7 @@ class KeyDateRevisionService:
                 "milestone_ref", 1
             )
         )
-        return {**doc, "items": items}
+        return {**doc, "linked_document_ids": [], "items": items}
 
     async def list_submissions(
         self, organization_id: Optional[str], project_id: str, contract_id: str = "primary"
@@ -396,6 +411,7 @@ class KeyDateRevisionService:
             ).sort("revision_number", 1)
         )
         for row in rows:
+            row["linked_document_ids"] = []
             row["items"] = await _cursor_list(
                 self.db.key_date_eot_submission_items.find(
                     {"eot_submission_id": str(row.get("_id"))}
@@ -414,6 +430,11 @@ class KeyDateRevisionService:
         if submission.get("status") == EOTSubmissionStatus.LOCKED.value or submission.get("locked_at"):
             raise KeyDateError("Locked EOT submissions are immutable")
         update = payload.model_dump(exclude_unset=True, exclude={"items"})
+        if update.get("linked_document_ids"):
+            raise KeyDateError(
+                "Legacy relationship intent is ambiguous and requires manual review"
+            )
+        update.pop("linked_document_ids", None)
         if "status" in update:
             status = _enum_value(update["status"])
             if status not in {EOTSubmissionStatus.DRAFT.value, EOTSubmissionStatus.SUBMITTED.value}:
@@ -436,24 +457,33 @@ class KeyDateRevisionService:
             )
             update["items_count"] = len(new_items)
 
-        result = await self.db.key_date_eot_submissions.find_one_and_update(
-            {"_id": submission["_id"], "locked_at": None},
-            {"$set": update},
-            return_document=ReturnDocument.AFTER,
-        )
-        if not result:
-            raise KeyDateError("The EOT submission was locked by another user")
-        if new_items is not None:
-            await self.db.key_date_eot_submission_items.delete_many(
-                {"eot_submission_id": str(submission["_id"])}
+        async def persist(session: Any) -> Dict[str, Any]:
+            write_kwargs = {"session": session} if session is not None else {}
+            result = await self.db.key_date_eot_submissions.find_one_and_update(
+                {"_id": submission["_id"], "locked_at": None},
+                {"$set": update, "$inc": {"lifecycle_revision": 1}},
+                return_document=ReturnDocument.AFTER,
+                **write_kwargs,
             )
-            if new_items:
-                await self.db.key_date_eot_submission_items.insert_many(new_items)
-        await self._emit(
-            "keydate.eot_submission.updated", current_user, result, source=source,
-            before={"status": submission.get("status")},
-            after={"status": result.get("status"), "item_count": result.get("items_count")},
-        )
+            if not result:
+                raise KeyDateError("The EOT submission was locked by another user")
+            if new_items is not None:
+                await self.db.key_date_eot_submission_items.delete_many(
+                    {"eot_submission_id": str(submission["_id"])}, **write_kwargs
+                )
+                if new_items:
+                    await self.db.key_date_eot_submission_items.insert_many(
+                        new_items, **write_kwargs
+                    )
+            await self._emit(
+                "keydate.eot_submission.updated", current_user, result, source=source,
+                before={"status": submission.get("status")},
+                after={"status": result.get("status"), "item_count": result.get("items_count")},
+                session=session,
+            )
+            return result
+
+        await self._run_transaction(persist)
         return await self.get_submission(str(submission["_id"]))
 
     async def lock_submission(
@@ -492,6 +522,32 @@ class KeyDateRevisionService:
             after={"revision": updated.get("revision_number"), "locked_at": str(now)},
         )
         return await self.get_submission(str(submission["_id"]))
+
+    async def emit_submission_relationship_lock(
+        self,
+        submission: Dict[str, Any],
+        current_user: Any,
+        *,
+        source: str = "API",
+    ) -> Dict[str, Any]:
+        """Preserve the domain audit after the canonical evidence freeze commits."""
+
+        updated = await self.get_submission(str(submission["_id"]))
+        if not updated:
+            raise KeyDateError("EOT submission not found after evidence freeze")
+        await self._emit_lifecycle_domain_audit_once(
+            self.db.key_date_eot_submissions,
+            updated,
+            marker_field="relationship_lock_domain_audit_at",
+            action="keydate.eot_submission.locked",
+            current_user=current_user,
+            source=source,
+            after={
+                "revision": updated.get("revision_number"),
+                "locked_at": str(updated.get("locked_at")),
+            },
+        )
+        return updated
 
     async def _determined_submission_ids(
         self,
@@ -781,6 +837,10 @@ class KeyDateRevisionService:
     async def create_determination(
         self, payload: EOTDeterminationCreate, current_user: Any, *, source: str = "API"
     ) -> Dict[str, Any]:
+        if payload.linked_document_ids:
+            raise KeyDateError(
+                "Legacy relationship intent is ambiguous and requires manual review"
+            )
         organization_id = payload.organization_id or getattr(current_user, "organization_id", None)
         scope = self.scope(organization_id, payload.project_id, payload.contract_id)
         unique_ids = list(dict.fromkeys(str(value) for value in payload.eot_submission_ids))
@@ -840,7 +900,6 @@ class KeyDateRevisionService:
             "status": status,
             "remarks": payload.remarks,
             "supersedes_determination_ids": [str(value) for value in payload.supersedes_determination_ids],
-            "linked_document_ids": list(payload.linked_document_ids or []),
             "linked_letter_ids": list(payload.linked_letter_ids or []),
             "created_at": now,
             "created_by": getattr(current_user, "id", None),
@@ -876,7 +935,7 @@ class KeyDateRevisionService:
                 {"determination_id": str(determination_id)}
             ).sort("milestone_ref", 1)
         )
-        return {**doc, "items": items}
+        return {**doc, "linked_document_ids": [], "items": items}
 
     async def list_determinations(
         self, organization_id: Optional[str], project_id: str, contract_id: str = "primary"
@@ -887,6 +946,7 @@ class KeyDateRevisionService:
             ).sort("created_at", 1)
         )
         for row in rows:
+            row["linked_document_ids"] = []
             row["items"] = await _cursor_list(
                 self.db.key_date_eot_determination_items.find(
                     {"determination_id": str(row.get("_id"))}
@@ -905,6 +965,11 @@ class KeyDateRevisionService:
         if determination.get("frozen_at"):
             raise KeyDateError("Frozen determinations are immutable")
         update = payload.model_dump(exclude_unset=True, exclude={"items"})
+        if update.get("linked_document_ids"):
+            raise KeyDateError(
+                "Legacy relationship intent is ambiguous and requires manual review"
+            )
+        update.pop("linked_document_ids", None)
         if "status" in update:
             update["status"] = _enum_value(update["status"])
         if "supersedes_determination_ids" in update:
@@ -955,23 +1020,33 @@ class KeyDateRevisionService:
             )
             update["items_count"] = len(new_items)
 
-        updated = await self.db.key_date_eot_determinations.find_one_and_update(
-            {"_id": determination["_id"], "frozen_at": None},
-            {"$set": update},
-            return_document=ReturnDocument.AFTER,
-        )
-        if not updated:
-            raise KeyDateError("The determination was frozen by another user")
-        if new_items is not None:
-            await self.db.key_date_eot_determination_items.delete_many(
-                {"determination_id": str(determination["_id"])}
+        async def persist(session: Any) -> Dict[str, Any]:
+            write_kwargs = {"session": session} if session is not None else {}
+            updated = await self.db.key_date_eot_determinations.find_one_and_update(
+                {"_id": determination["_id"], "frozen_at": None},
+                {"$set": update, "$inc": {"lifecycle_revision": 1}},
+                return_document=ReturnDocument.AFTER,
+                **write_kwargs,
             )
-            if new_items:
-                await self.db.key_date_eot_determination_items.insert_many(new_items)
-        await self._emit(
-            "keydate.eot_determination.updated", current_user, updated, source=source,
-            before={"status": determination.get("status")}, after={"status": updated.get("status")},
-        )
+            if not updated:
+                raise KeyDateError("The determination was frozen by another user")
+            if new_items is not None:
+                await self.db.key_date_eot_determination_items.delete_many(
+                    {"determination_id": str(determination["_id"])}, **write_kwargs
+                )
+                if new_items:
+                    await self.db.key_date_eot_determination_items.insert_many(
+                        new_items, **write_kwargs
+                    )
+            await self._emit(
+                "keydate.eot_determination.updated", current_user, updated, source=source,
+                before={"status": determination.get("status")},
+                after={"status": updated.get("status")},
+                session=session,
+            )
+            return updated
+
+        await self._run_transaction(persist)
         return await self.get_determination(str(determination["_id"]))
 
     async def freeze_determination(
@@ -1046,6 +1121,44 @@ class KeyDateRevisionService:
         await self._emit(
             "keydate.eot_determination.frozen", current_user, updated, source=source,
             after={"status": status, "covers": updated.get("covered_revision_labels"), "frozen_at": str(now)},
+        )
+        return await self.get_determination(str(determination["_id"]))
+
+    async def emit_determination_relationship_freeze(
+        self,
+        determination: Dict[str, Any],
+        current_user: Any,
+        *,
+        source: str = "API",
+    ) -> Dict[str, Any]:
+        """Recompute dates and preserve the domain audit after evidence freeze."""
+
+        updated = await self.get_determination(str(determination["_id"]))
+        if not updated:
+            raise KeyDateError("EOT determination not found after evidence freeze")
+        scope = self.scope(
+            updated.get("organization_id"),
+            updated.get("project_id"),
+            updated.get("contract_id", "primary"),
+        )
+        await self.recompute_effective_dates(
+            scope.get("organization_id"),
+            scope["project_id"],
+            scope["contract_id"],
+            current_user=current_user,
+        )
+        await self._emit_lifecycle_domain_audit_once(
+            self.db.key_date_eot_determinations,
+            updated,
+            marker_field="relationship_freeze_domain_audit_at",
+            action="keydate.eot_determination.frozen",
+            current_user=current_user,
+            source=source,
+            after={
+                "status": updated.get("status"),
+                "covers": updated.get("covered_revision_labels"),
+                "frozen_at": str(updated.get("frozen_at")),
+            },
         )
         return await self.get_determination(str(determination["_id"]))
 
@@ -1452,6 +1565,72 @@ class KeyDateRevisionService:
             created_ids=[str(item.get("_id")) for item in updated.get("items") or []],
         )
 
+    async def _emit_lifecycle_domain_audit_once(
+        self,
+        collection: Any,
+        resource: Dict[str, Any],
+        *,
+        marker_field: str,
+        action: str,
+        current_user: Any,
+        source: str,
+        after: Dict[str, Any],
+    ) -> None:
+        """Atomically claim and emit one effective lifecycle audit per event."""
+
+        marker_at = datetime.utcnow()
+
+        async def persist(session: Any) -> bool:
+            write_kwargs = {"session": session} if session is not None else {}
+            claimed = await collection.update_one(
+                {"_id": resource["_id"], marker_field: None},
+                {"$set": {marker_field: marker_at}},
+                **write_kwargs,
+            )
+            if not getattr(claimed, "matched_count", 0):
+                return False
+            try:
+                if not await self._domain_audit_exists(
+                    action, str(resource["_id"]), session=session
+                ):
+                    await self._emit(
+                        action,
+                        current_user,
+                        resource,
+                        source=source,
+                        after=after,
+                        session=session,
+                    )
+            except Exception:
+                if session is None:
+                    await collection.update_one(
+                        {"_id": resource["_id"], marker_field: marker_at},
+                        {"$unset": {marker_field: ""}},
+                    )
+                raise
+            return True
+
+        await self._run_transaction(persist)
+
+    async def _domain_audit_exists(
+        self, action: str, resource_id: str, *, session: Any = None
+    ) -> bool:
+        collection = getattr(self.db, "audit_events", None)
+        if collection is None:
+            return False
+        read_kwargs = {"session": session} if session is not None else {}
+        return bool(
+            await collection.find_one(
+                {
+                    "action": action,
+                    "resource_type": "key_date_revision",
+                    "resource_id": str(resource_id),
+                    "result": "success",
+                },
+                **read_kwargs,
+            )
+        )
+
     async def _emit(
         self,
         action: str,
@@ -1461,6 +1640,7 @@ class KeyDateRevisionService:
         source: str,
         before: Optional[Dict[str, Any]] = None,
         after: Optional[Dict[str, Any]] = None,
+        session: Any = None,
     ) -> None:
         await self.audit.emit(
             action=action,
@@ -1476,4 +1656,5 @@ class KeyDateRevisionService:
                 "revision": resource.get("revision_number"),
                 "source": source,
             },
+            session=session,
         )

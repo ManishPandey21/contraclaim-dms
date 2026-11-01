@@ -2,6 +2,7 @@ import { toast } from "sonner";
 
 import { createHttpClient } from "./http";
 import { redirectToLoginAfterSessionExpiry } from "./auth";
+import { scopeErrorCode } from "./active-scope";
 
 type ApiRequestConfig = {
   _retry?: boolean;
@@ -61,7 +62,9 @@ api.interceptors.response.use(
         redirectToLoginAfterSessionExpiry();
       }
     }
-    showGlobalStatusToast(status);
+    // A scope refusal is not a permission problem: the page says which project
+    // the record belongs outside of (scopeRefusalMessage), so no generic toast.
+    if (!scopeErrorCode(error)) showGlobalStatusToast(status);
     return Promise.reject(error);
   }
 );

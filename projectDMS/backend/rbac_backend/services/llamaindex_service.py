@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 class LlamaIndexVectorService:
     """
     Vector service for MongoDB 8 with local Vector Search support.
-    
+
     Works with both Atlas and local MongoDB 8 deployments that have
     Vector Search enabled. For local deployments, ensure MongoDB 8.0+
     is running with integrated Search/Vector Search (mongot) enabled.
@@ -37,10 +37,10 @@ class LlamaIndexVectorService:
         self._database_name = database_name
         self._collection_name = collection_name
         self._embedding_model_name = embedding_model
-        
+
         # FIXED: Actually read OpenAI API key instead of storing the string literal
         self._openai_api_key = openai_api_key or os.environ.get('OPENAI_API_KEY')
-        
+
         self._mongo_client: Optional[MongoClient] = existing_mongo_client
         self._owns_mongo_client: bool = existing_mongo_client is None
         self._vector_store: Optional[MongoDBAtlasVectorSearch] = None
@@ -63,17 +63,17 @@ class LlamaIndexVectorService:
                     logger.info("Using ServerApi for Atlas SRV connection")
                 else:
                     logger.info("Using direct connection for local MongoDB")
-                
+
                 self._mongo_client = MongoClient(self._mongo_uri, **client_kwargs)
-                
+
                 # Ping to verify connection
                 self._mongo_client.admin.command("ping")
-                logger.info("MongoClient initialized successfully for URI: %s", 
+                logger.info("MongoClient initialized successfully for URI: %s",
                           self._mongo_uri.split('@')[-1] if '@' in self._mongo_uri else self._mongo_uri)
-                
+
             except Exception as exc:
                 raise DocumentProcessingError(f"Failed to initialize Mongo client: {exc}") from exc
-        
+
         return self._mongo_client
 
     def _ensure_embedding_model(self) -> OpenAIEmbedding:
@@ -84,13 +84,13 @@ class LlamaIndexVectorService:
                 embedding_kwargs = {"model": self._embedding_model_name}
                 if self._openai_api_key:
                     embedding_kwargs["api_key"] = self._openai_api_key
-                
+
                 self._embedding_model = OpenAIEmbedding(**embedding_kwargs)
                 logger.info("OpenAIEmbedding model initialized: %s", self._embedding_model_name)
-                
+
             except Exception as exc:
                 raise DocumentProcessingError(f"Failed to initialize OpenAI embedding model: {exc}") from exc
-        
+
         return self._embedding_model
 
     def _ensure_vector_store(self) -> MongoDBAtlasVectorSearch:
@@ -110,17 +110,21 @@ class LlamaIndexVectorService:
                     logger.warning("Failed to create indexes (may already exist): %s", idx_exc)
 
                 # UPDATED COMMENT: For local MongoDB 8.0+, pre-create Search index via mongosh:
+                # Keys are quoted below because mypy reads `#<space>type:` as a
+                # PEP 484 type comment and fails the whole file on `invalid
+                # syntax`, which stops it checking anything that imports this
+                # module. mongosh accepts quoted keys unchanged.
                 # db.runCommand({
-                #   createSearchIndexes: "<collection_name>",
-                #   indexes: [{
-                #     name: "vector_index",
-                #     definition: {
-                #       type: "vectorSearch",
-                #       fields: [{
-                #         type: "vector",
-                #         path: "embedding",
-                #         numDimensions: 1536, // for text-embedding-3-small
-                #         similarity: "cosine"
+                #   "createSearchIndexes": "<collection_name>",
+                #   "indexes": [{
+                #     "name": "vector_index",
+                #     "definition": {
+                #       "type": "vectorSearch",
+                #       "fields": [{
+                #         "type": "vector",
+                #         "path": "embedding",
+                #         "numDimensions": 1536, // for text-embedding-3-small
+                #         "similarity": "cosine"
                 #       }]
                 #     }
                 #   }]
@@ -137,12 +141,12 @@ class LlamaIndexVectorService:
                 )
 
                 self._index = VectorStoreIndex.from_vector_store(vector_store=self._vector_store)
-                logger.info("MongoDB vector store initialized successfully for %s", 
+                logger.info("MongoDB vector store initialized successfully for %s",
                           "Atlas" if self._mongo_uri.startswith("mongodb+srv://") else "local MongoDB 8+")
-                
+
             except Exception as exc:
                 raise DocumentProcessingError(f"Failed to initialize MongoDB vector store: {exc}") from exc
-        
+
         return self._vector_store
 
     async def index_chunks(
@@ -216,7 +220,7 @@ class LlamaIndexVectorService:
 
         try:
             node_ids = await asyncio.to_thread(_persist_nodes)
-            
+
             if len(node_ids) != len(results):
                 raise DocumentProcessingError(
                     f"Vector store returned {len(node_ids)} ids for {len(results)} chunks"

@@ -307,9 +307,11 @@ class ArbitrationGraphCommandExecutor:
                 raise HTTPException(status_code=422, detail="Workflow pleading type does not match the linked draft")
         documents = []
         for document_id in sorted(set(payload.selected_document_ids)):
+            from ..publication_policy import document_id_candidates
+
             record = await self.db.documents.find_one(
                 {
-                    "_id": document_id,
+                    "_id": {"$in": document_id_candidates(document_id)},
                     "organization_id": case.get("organization_id"),
                     "project_id": case.get("project_id"),
                 }

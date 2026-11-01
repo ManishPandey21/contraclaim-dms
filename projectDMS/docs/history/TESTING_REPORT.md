@@ -2,8 +2,8 @@
 
 ## Testing Overview
 
-**Date**: December 2024  
-**Scope**: Services defined in `backend/rbac_backend/services/metadata_with_all_funtion.md`  
+**Date**: December 2024
+**Scope**: Services defined in `backend/rbac_backend/services/metadata_with_all_funtion.md`
 **Testing Approach**: Static Code Analysis + Runtime Testing Attempts
 
 ## Testing Results Summary

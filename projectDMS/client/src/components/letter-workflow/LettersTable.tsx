@@ -15,8 +15,8 @@ interface LettersTableProps {
   selectedLetterId?: string;
 }
 
-export const LettersTable: React.FC<LettersTableProps> = ({ 
-  letters, 
+export const LettersTable: React.FC<LettersTableProps> = ({
+  letters,
   formatDate,
   onSelectLetter,
   selectedLetterId,
@@ -105,9 +105,9 @@ export const LettersTable: React.FC<LettersTableProps> = ({
             <TableCell><StatusBadge status={letter.status} /></TableCell>
             <TableCell>
               {letter.statusStartDate && (
-                <PendencyIndicator 
+                <PendencyIndicator
                   date={letter.statusStartDate}
-                  status={letter.status} 
+                  status={letter.status}
                 />
               )}
             </TableCell>

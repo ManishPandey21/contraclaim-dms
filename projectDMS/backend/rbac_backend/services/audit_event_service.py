@@ -54,6 +54,7 @@ class AuditEventService:
         after: Optional[Dict[str, Any]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         correlation_id: Optional[str] = None,
+        session: Any = None,
     ) -> None:
         db = await self._get_db()
         now = datetime.utcnow()
@@ -76,7 +77,8 @@ class AuditEventService:
         audit_events = getattr(db, "audit_events", None)
         inserted_id: Any = None
         if audit_events is not None:
-            inserted = await audit_events.insert_one(event)
+            insert_kwargs = {"session": session} if session is not None else {}
+            inserted = await audit_events.insert_one(event, **insert_kwargs)
             inserted_id = getattr(inserted, "inserted_id", None)
 
         await observability_registry.record_audit_event(
@@ -86,7 +88,13 @@ class AuditEventService:
         )
 
         if self._requires_admin_review(event):
-            await self._upsert_admin_review_item(db, event, inserted_id=inserted_id, now=now)
+            await self._upsert_admin_review_item(
+                db,
+                event,
+                inserted_id=inserted_id,
+                now=now,
+                session=session,
+            )
 
     def _requires_admin_review(self, event: Dict[str, Any]) -> bool:
         metadata = event.get("metadata") or {}
@@ -162,6 +170,7 @@ class AuditEventService:
         *,
         inserted_id: Any,
         now: datetime,
+        session: Any = None,
     ) -> None:
         admin_review_items = getattr(db, "admin_review_items", None)
         if admin_review_items is None:
@@ -171,6 +180,7 @@ class AuditEventService:
         metadata = event.get("metadata") or {}
         review_key = str(metadata.get("admin_review_key") or self._review_key(event))
         latest_audit_event_id = str(inserted_id) if inserted_id is not None else None
+        update_kwargs = {"session": session} if session is not None else {}
         await admin_review_items.update_one(
             {"review_key": review_key},
             {
@@ -203,6 +213,7 @@ class AuditEventService:
                 "$inc": {"occurrence_count": 1},
             },
             upsert=True,
+            **update_kwargs,
         )
         await observability_registry.record_admin_review_item(
             status="open",

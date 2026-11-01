@@ -13,7 +13,6 @@ import hashlib
 import json
 import uuid
 from datetime import datetime, timezone
-from types import SimpleNamespace
 from typing import Any, Dict, Optional, TypedDict
 from urllib.parse import urlparse
 
@@ -26,6 +25,7 @@ from pymongo import MongoClient
 
 from ...core.config import settings
 from ...core.database import get_database
+from ...core.security import CurrentUser, resolve_stored_principal
 from ...models.letter_drafting import (
     DraftRun,
     DraftRunAccepted,
@@ -204,6 +204,30 @@ class LangGraphDraftingEngine:
         self.repository = DraftRunRepository(db)
         self.queue = queue or get_drafting_queue()
         self.checkpointer = checkpointer
+
+    async def initiating_principal(self, run: DraftRun) -> CurrentUser:
+        """The REAL authenticated actor this run belongs to, re-resolved now.
+
+        Only identifiers cross the durable queue boundary, so the worker cannot
+        be handed the request's ``current_user`` object. ``run.created_by`` is
+        the durable identity of the human who started the run; this resolves it
+        through the canonical principal resolver, which reads the entitlement
+        store and returns exactly what ``get_current_user`` would have built.
+
+        The engine used to synthesise ``SimpleNamespace(id=run.created_by,
+        organization_id=letter.organization_id, project_id=letter.project_id)``
+        instead. Authority taken from the resource being read is circular: it
+        cannot deny anything the resource already contains. It also carried no
+        roles, so every canonical seam denied it and a legitimate actor's own
+        prior correspondence and contract evidence vanished from the sealed
+        evidence snapshot.
+
+        Resolution happens per attempt, not once at creation, so a revoked
+        assignment is honoured on a retry rather than replayed from a cached
+        role list. An unresolvable reference raises: the stage fails, visibly,
+        rather than continuing against a stand-in.
+        """
+        return await resolve_stored_principal(self.db, run.created_by)
 
     async def create(
         self,
@@ -518,17 +542,13 @@ class LangGraphDraftingEngine:
         request_payload["mode"] = run.mode
         request = DraftRunCreateRequest(**request_payload)
         legacy = DraftRunService(self.db)
-        worker_principal = SimpleNamespace(
-            id=run.created_by,
-            organization_id=getattr(letter, "organization_id", None),
-            project_id=getattr(letter, "project_id", None),
-        )
+        principal = await self.initiating_principal(run)
         builder = DraftContextBuilder(
             document_service=DocumentService(self.db),
             conversation_service=ConversationService(legacy.letter_service),
             db=self.db,
         )
-        context, sources, warnings = await builder.build(letter, request, worker_principal)
+        context, sources, warnings = await builder.build(letter, request, principal)
         sources = await legacy._add_governance_comment_context(
             run.letter_id, context, sources, current_run_id=run.run_id
         )
@@ -608,19 +628,17 @@ class LangGraphDraftingEngine:
             request_payload["points"] = "\n\n".join(part for part in (points, request_payload["user_direction"]) if part)
         request = DraftRunCreateRequest(**request_payload)
 
-        async def _already_authorized(*_args: Any, **_kwargs: Any):
-            return letter
-
-        legacy._load_and_authorize = _already_authorized  # type: ignore[method-assign]
-        worker_principal = SimpleNamespace(
-            id=run.created_by,
-            organization_id=getattr(letter, "organization_id", None),
-            project_id=getattr(letter, "project_id", None),
-        )
+        # The adapter's `create_run` runs the REAL `_load_and_authorize` gate.
+        # It used to be monkey-patched to a function that returned the letter
+        # unconditionally, because the fabricated principal could not have
+        # passed it. With the real actor there is nothing to bypass, and an
+        # actor who has lost access between queueing and execution must be
+        # refused here rather than waved through by a patched gate.
+        principal = await self.initiating_principal(run)
         generated = await legacy.create_run(
             run.letter_id,
             request,
-            worker_principal,
+            principal,
             engine_metadata={"engine": "v2", "engine_version": "v2-domain-adapter", "parent_run_id": run.run_id},
             stop_after_generation=True,
         )
@@ -690,11 +708,7 @@ class LangGraphDraftingEngine:
         )
         request = DraftRunCreateRequest(**request_payload)
         generator = DraftGenerator(legacy.prompt_registry)
-        worker_principal = SimpleNamespace(
-            id=target.created_by,
-            organization_id=getattr(letter, "organization_id", None),
-            project_id=getattr(letter, "project_id", None),
-        )
+        principal = await self.initiating_principal(target)
         (
             artifact,
             sources,
@@ -706,7 +720,7 @@ class LangGraphDraftingEngine:
         ) = await legacy._run_cyclic_draft(
             letter=letter,
             request=request,
-            current_user=worker_principal,
+            current_user=principal,
             role=target.role,
             recipient_focus=target.recipient_focus,
             context=domain.context_bundle,

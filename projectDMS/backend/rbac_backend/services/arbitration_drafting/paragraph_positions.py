@@ -13,6 +13,8 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, Iterable, Optional
 
+from .approval_policy import material_contributors
+
 
 PARAGRAPH_POSITION_MATRICES = {"defence-matrix", "rejoinder-matrix"}
 
@@ -98,13 +100,22 @@ def _projection_content(matrix_slug: str, response: Dict[str, Any]) -> Dict[str,
                 "permission_source_id": response.get("permission_source_id"),
                 "permission_approved_by": response.get("permission_approved_by"),
                 "permission_approved_at": response.get("permission_approved_at"),
+                # The grant is copied with the receipt that backs it, so a
+                # resave never leaves a row granted without one.
+                "permission_approval_receipt_id": response.get("permission_approval_receipt_id"),
             }
         )
     return common
 
 
 def _projection_hash(content: Dict[str, Any]) -> str:
-    excluded = {"permission_approved_at", "permission_approved_by", "permission_obtained", "permission_source_id"}
+    excluded = {
+        "permission_approved_at",
+        "permission_approved_by",
+        "permission_obtained",
+        "permission_source_id",
+        "permission_approval_receipt_id",
+    }
     stable = {key: value for key, value in content.items() if key not in excluded}
     return hashlib.sha256(
         json.dumps(stable, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
@@ -139,17 +150,29 @@ async def sync_paragraph_position_projection(
     update = {
         **content,
         "projection_hash": content_hash,
-        "last_material_editor_id": actor_id,
+        # The response revision this projection shows; a permission decision on
+        # it writes the response only while the response is still at it.
+        "source_response_revision": response.get("response_revision"),
         "updated_by": actor_id,
         "updated_at": now,
     }
-    if not existing or existing.get("projection_hash") != content_hash:
+    changed = not existing or existing.get("projection_hash") != content_hash
+    if changed:
+        # Only a content change makes the actor a material contributor; a
+        # no-op sync must not displace the people who actually wrote it.
         update.update(_review_defaults())
+        update["last_material_editor_id"] = actor_id
+        update["material_contributor_ids"] = material_contributors(existing or {}, actor_id)
 
     if existing:
+        # A content change invalidates any review computed before it (see
+        # `edit_revision` in case_workspace).
+        operations: Dict[str, Any] = {"$set": update}
+        if changed:
+            operations["$inc"] = {"edit_revision": 1}
         return await collection.find_one_and_update(
             {"_id": existing["_id"], "case_id": str(draft["case_id"])},
-            {"$set": update},
+            operations,
             return_document=True,
         )
 

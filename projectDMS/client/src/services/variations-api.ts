@@ -31,7 +31,9 @@ export interface VariationDTO {
   approval_date?: string | null;
   remarks?: string | null;
   contract_id?: string | null;
+  organization_id?: string | null;
   project_id?: string | null;
+  /** Read-only: canonical + legacy ids the viewer may see. Link through the relationship API. */
   linked_document_ids: string[];
   created_at?: string | null;
 }
@@ -80,6 +82,11 @@ export async function getVariationSummary(params?: {
 }): Promise<VariationSummaryDTO> {
   const { data } = await api.get("/variations/summary", { params });
   return data as VariationSummaryDTO;
+}
+
+export async function getVariation(id: string): Promise<VariationDTO> {
+  const { data } = await api.get(`/variations/${encodeURIComponent(id)}`);
+  return norm(data);
 }
 
 export async function createVariation(payload: VariationPayload): Promise<VariationDTO> {

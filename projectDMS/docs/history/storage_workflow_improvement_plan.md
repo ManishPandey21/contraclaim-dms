@@ -146,7 +146,7 @@ Remaining gaps (per analysis):
 
 ---
 
-Following this plan will close the gaps identified in `storage-workflow-complete.md` while building on the recent FalkorDB integration work. 
+Following this plan will close the gaps identified in `storage-workflow-complete.md` while building on the recent FalkorDB integration work.
 
 ---
 
@@ -245,50 +245,50 @@ Following this plan will close the gaps identified in `storage-workflow-complete
 
 ### 2. Frontend files involved
 
-- Pages:  
-  - `client/src/pages/LetterWorkflowPage.tsx`  
-  - `client/src/pages/LetterInputPage.tsx`  
-  - `client/src/pages/LetterStrategicPlanPage.tsx`  
-  - `client/src/pages/LetterDraftPage.tsx`  
-  - `client/src/pages/LetterReviewPage.tsx`  
-  - `client/src/pages/LetterApprovalPage.tsx`  
+- Pages:
+  - `client/src/pages/LetterWorkflowPage.tsx`
+  - `client/src/pages/LetterInputPage.tsx`
+  - `client/src/pages/LetterStrategicPlanPage.tsx`
+  - `client/src/pages/LetterDraftPage.tsx`
+  - `client/src/pages/LetterReviewPage.tsx`
+  - `client/src/pages/LetterApprovalPage.tsx`
   - `client/src/pages/LetterCompletedPage.tsx`
-- Hooks / services:  
-  - `client/src/hooks/useLetterWorkflow.ts`  
-  - `client/src/hooks/useLetterGraphRuns.ts`  
-  - `client/src/hooks/useLanggraphDraft.ts`  
-  - `client/src/services/letter-workflow-api.ts`  
+- Hooks / services:
+  - `client/src/hooks/useLetterWorkflow.ts`
+  - `client/src/hooks/useLetterGraphRuns.ts`
+  - `client/src/hooks/useLanggraphDraft.ts`
+  - `client/src/services/letter-workflow-api.ts`
   - `client/src/services/documents-api.ts`
-- Components:  
-  - `client/src/components/letter-workflow/LinkedDocumentSelector.tsx`  
-  - `client/src/components/letter-workflow/BackgroundSummary.tsx`  
-  - `client/src/components/langgraph/PlanViewer.tsx`  
-  - `client/src/components/langgraph/GraphStatusBadge.tsx`  
+- Components:
+  - `client/src/components/letter-workflow/LinkedDocumentSelector.tsx`
+  - `client/src/components/letter-workflow/BackgroundSummary.tsx`
+  - `client/src/components/langgraph/PlanViewer.tsx`
+  - `client/src/components/langgraph/GraphStatusBadge.tsx`
   - `client/src/components/letter-workflow/LetterDraftEditor.tsx`
-- Types & utilities:  
-  - `client/src/types/langgraph.ts`  
-  - `client/src/utils/letterWorkflowMapping.ts`  
+- Types & utilities:
+  - `client/src/types/langgraph.ts`
+  - `client/src/utils/letterWorkflowMapping.ts`
   - `client/src/utils/dateFormat.ts`
 
 ### 3. Backend files involved
 
-- Routers / controllers:  
-  - `backend/rbac_backend/routers/letters.py`  
+- Routers / controllers:
+  - `backend/rbac_backend/routers/letters.py`
   - `backend/rbac_backend/routers/ai_assistant.py`
-- Services & core logic:  
-  - `backend/rbac_backend/services/letter_service.py`  
-  - `backend/rbac_backend/services/ai_service.py`  
-  - `backend/rbac_backend/services/document_service.py` (context hydration)  
-  - `backend/rbac_backend/services/conversation_service.py`  
-  - `backend/rbac_backend/services/workflow.py` (status transitions)  
-  - `backend/rbac_backend/ai_workflows/langgraph/letter_pipeline.py`  
+- Services & core logic:
+  - `backend/rbac_backend/services/letter_service.py`
+  - `backend/rbac_backend/services/ai_service.py`
+  - `backend/rbac_backend/services/document_service.py` (context hydration)
+  - `backend/rbac_backend/services/conversation_service.py`
+  - `backend/rbac_backend/services/workflow.py` (status transitions)
+  - `backend/rbac_backend/ai_workflows/langgraph/letter_pipeline.py`
   - `backend/rbac_backend/services/falkor_graph_service.py`
-- Models & schemas:  
-  - `backend/rbac_backend/models/letter.py`  
-  - `backend/rbac_backend/models/ai_models.py`  
+- Models & schemas:
+  - `backend/rbac_backend/models/letter.py`
+  - `backend/rbac_backend/models/ai_models.py`
   - `backend/rbac_backend/models/document.py`
-- Supporting utilities:  
-  - `backend/rbac_backend/utils/validation.py`, `error_handler.py`  
+- Supporting utilities:
+  - `backend/rbac_backend/utils/validation.py`, `error_handler.py`
   - `backend/rbac_backend/core/database.py`, `core/security.py`
 
 ### 4. Step-by-step request lifecycle (example: strategic plan regeneration)
@@ -349,5 +349,3 @@ To exercise the full document processing pipeline with Qdrant and Falkor enabled
    - `redis-cli -h $FALKORDB_HOST -p $FALKORDB_PORT -a $FALKORDB_PASSWORD GRAPH.QUERY contraclaim "MATCH (l:Letter {normCode:'<normCode>'}) RETURN l"`.
 
 This playbook provides a repeatable staging check that Qdrant and Falkor stay in lockstep after metadata extraction.
-
-

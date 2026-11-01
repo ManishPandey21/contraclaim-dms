@@ -47,4 +47,3 @@ def configure_pipeline_logger(logger: logging.Logger, level: int = logging.INFO,
 
 
 __all__ = ["configure_pipeline_logger"]
-

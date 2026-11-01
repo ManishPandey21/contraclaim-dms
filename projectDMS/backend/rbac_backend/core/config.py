@@ -31,7 +31,7 @@ class Settings(BaseSettings):
         "SMTP_USERNAME",
         "SMTP_PASSWORD",
     )
-    
+
     # FIX: Use ClassVar for LOGGING_CONFIG since it's not a model field
     LOGGING_CONFIG: ClassVar[Dict[str, Any]] = {
         'version': 1,
@@ -81,7 +81,7 @@ class Settings(BaseSettings):
             'handlers': ['console'],
         }
     }
-    
+
     DATABASE_URL: str = Field(
         default="mongodb://localhost:27017/contraclaim",
         validation_alias="DATABASE_URL",
@@ -99,7 +99,7 @@ class Settings(BaseSettings):
     LOCAL_MONGODB_URI: Optional[str] = Field(default=None, validation_alias="LOCAL_MONGODB_URI")
     APP_REDIS_URL: Optional[str] = Field(default=None, validation_alias="APP_REDIS_URL")
     RUNTIME_STATE_REDIS_URL: Optional[str] = Field(default=None, validation_alias="RUNTIME_STATE_REDIS_URL")
-    
+
     # Authentication
     ENVIRONMENT: str = Field(default="development", validation_alias="ENVIRONMENT")
     ENABLE_API_DOCS: bool = Field(default=True, validation_alias="ENABLE_API_DOCS")
@@ -117,7 +117,7 @@ class Settings(BaseSettings):
     # Setting this false is an explicit availability-over-revocation tradeoff;
     # deployments without a Redis URL configured are unaffected either way.
     AUTH_SESSION_FAIL_CLOSED: bool = Field(default=True, validation_alias="AUTH_SESSION_FAIL_CLOSED")
-    
+
     # CORS Configuration
     CORS_ORIGINS: list[str] = Field(
         default=[
@@ -130,57 +130,125 @@ class Settings(BaseSettings):
             "https://127.0.0.1:5173",
         ]
     )
-    
+
     # Raw env override to avoid JSON decoding at source layer for list[str]
     CORS_ORIGINS_RAW: str | None = Field(default=None, validation_alias="CORS_ORIGINS")
-    
+
     # AWS Configuration
     AWS_ACCESS_KEY_ID: str = Field(default="", validation_alias="AWS_ACCESS_KEY_ID")
     AWS_SECRET_ACCESS_KEY: str = Field(default="", validation_alias="AWS_SECRET_ACCESS_KEY")
     AWS_REGION: str = Field(default="ap-south-1", validation_alias="AWS_REGION")
     AWS_BUCKET_NAME: str = Field(default="", validation_alias="AWS_BUCKET_NAME")
-    
+
     # Local uploads directory (absolute path in production recommended)
     UPLOADS_DIR: str = Field(default="uploads", validation_alias="UPLOADS_DIR")
-    
+
     # Secure uploads directory used by file service
     SECURE_UPLOADS_DIR: str = Field(default="backend/uploads", validation_alias="SECURE_UPLOADS_DIR")
-    
+
     # Bulk upload configuration
     BULK_UPLOAD_MAX_FILES: int = Field(default=100, validation_alias="BULK_UPLOAD_MAX_FILES")
     BULK_UPLOAD_MAX_SIZE_MB: int = Field(default=500, validation_alias="BULK_UPLOAD_MAX_SIZE_MB")
     UPLOAD_STREAM_CHUNK_SIZE_MB: int = Field(default=1, validation_alias="UPLOAD_STREAM_CHUNK_SIZE_MB")
     UPLOAD_VALIDATION_SAMPLE_BYTES: int = Field(default=8192, validation_alias="UPLOAD_VALIDATION_SAMPLE_BYTES")
     GENERAL_UPLOAD_MAX_FILE_SIZE_MB: int = Field(default=100, validation_alias="GENERAL_UPLOAD_MAX_FILE_SIZE_MB")
+    # The one upload channel that carries no `UploadFile`. `POST
+    # /api/billing/webhooks/{provider}` is intentionally unauthenticated and
+    # read the whole request body before anything could object to its size;
+    # a provider webhook payload is a few kilobytes of JSON, so 256 KB is
+    # generous and still four hundred times tighter than the gateway's 200 MB.
+    # 1 MB, not 256 KB. A Razorpay `subscription.charged` or a Stripe
+    # `invoice.*` with many line items or large `metadata` can exceed 256 KB,
+    # and a refused webhook is a **lost billing event**: the provider retries,
+    # the retries are refused identically, and after the retry window the event
+    # is gone. `ge=1` because `WEBHOOK_MAX_BODY_SIZE_KB=0` - the natural
+    # spelling for "no limit" - became `max(1, 0)` = one byte downstream, which
+    # 413s every webhook there is.
+    WEBHOOK_MAX_BODY_SIZE_KB: int = Field(default=1024, ge=1, validation_alias="WEBHOOK_MAX_BODY_SIZE_KB")
+    # The other endpoints an unauthenticated caller can reach. FastAPI
+    # materialises and parses a declared body model before the handler runs, so
+    # a per-field `max_length` and an IP rate limiter both decide after the
+    # memory has been held; `core/public_body_limit.py` decides before.
+    # Telemetry: `ClientErrorReport`'s own field caps total about 21 KB.
+    PUBLIC_TELEMETRY_MAX_BODY_SIZE_KB: int = Field(default=64, ge=1, validation_alias="PUBLIC_TELEMETRY_MAX_BODY_SIZE_KB")
+    # Credentials: an email and a password.
+    PUBLIC_AUTH_MAX_BODY_SIZE_KB: int = Field(default=16, ge=1, validation_alias="PUBLIC_AUTH_MAX_BODY_SIZE_KB")
+    # 0 means "no attempt boundary". A positive value bounds the OCR pages one
+    # attempt will run; the remainder is DEFERRED and re-claimed, never dropped.
+    DOCUMENT_OCR_MAX_PAGES_PER_ATTEMPT: int = Field(
+        default=0, validation_alias="DOCUMENT_OCR_MAX_PAGES_PER_ATTEMPT"
+    )
+
+    # The LLM/Vision extraction fallback. Off by default: it is the only part
+    # of the ingestion pipeline that spends money at runtime, and the
+    # deterministic quality gate must be measured on real traffic before it is
+    # trusted to decide what escalates.
+    EXTRACTION_FALLBACK_ENABLED: bool = Field(
+        default=False, validation_alias="EXTRACTION_FALLBACK_ENABLED"
+    )
+    # A finite default on purpose. An unbounded cap would let one pathological
+    # upload escalate every page with no ceiling on what it costs.
+    EXTRACTION_FALLBACK_MAX_PAGES_PER_DOCUMENT: int = Field(
+        default=5, validation_alias="EXTRACTION_FALLBACK_MAX_PAGES_PER_DOCUMENT"
+    )
+    EXTRACTION_FALLBACK_DPI: int = Field(
+        default=150, validation_alias="EXTRACTION_FALLBACK_DPI"
+    )
+
+    # Unified extraction rollout. Off globally; organisations are opted in one
+    # at a time through the canary allowlist. The decision is recorded on each
+    # job at creation, so changing these values never reclassifies work that is
+    # already queued.
+    UNIFIED_EXTRACTION_ENABLED: bool = Field(
+        default=False, validation_alias="UNIFIED_EXTRACTION_ENABLED"
+    )
+    UNIFIED_EXTRACTION_CANARY_ORG_IDS: str = Field(
+        default="", validation_alias="UNIFIED_EXTRACTION_CANARY_ORG_IDS"
+    )
+    # Restricts which pipeline versions this worker may claim. Empty means
+    # "claim anything", the single-worker default. Setting it to one version is
+    # what lets a canary run a second worker without it draining every tenant's
+    # queue. Comma-separated: legacy_v0, unified_v1.
+    DOCUMENT_WORKER_PIPELINE_VERSIONS: str = Field(
+        default="", validation_alias="DOCUMENT_WORKER_PIPELINE_VERSIONS"
+    )
     UPLOAD_MAX_CONCURRENT_PER_USER: int = Field(default=3, validation_alias="UPLOAD_MAX_CONCURRENT_PER_USER")
     UPLOAD_MAX_CONCURRENT_PER_ORG: int = Field(default=20, validation_alias="UPLOAD_MAX_CONCURRENT_PER_ORG")
-    
+
     # Allowed MIME types for documents and enclosures
+    # Set true only when the deployed clamd has been shown to scan *inside* a
+    # RAR - an EICAR-in-RAR detection, not a config line or a linked library.
+    # Phase 0 proved archive recursion with a ZIP; RAR itself is unproven.
+    RAR_UPLOAD_ENABLED: bool = Field(default=False, validation_alias="RAR_UPLOAD_ENABLED")
+
     ALLOWED_DOCUMENT_MIMES: set[str] = Field(
         default={
             "application/pdf",
             "image/png",
             "image/jpeg",
             "text/plain",
+            # Archives are stored intact and never unpacked or processed.
+            "application/zip",
         }
     )
-    
+
     ALLOWED_CONTRACT_MIMES: set[str] = Field(
         default={
             "application/pdf",
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         }
     )
-    
+
     ALLOWED_ENCLOSURE_MIMES: set[str] = Field(
         default={
             "application/pdf",
             "image/png",
             "image/jpeg",
             "text/plain",
+            "application/zip",
         }
     )
-    
+
     # Antivirus Configuration
     ANTIVIRUS_ENABLED: bool = Field(default=False, validation_alias="ANTIVIRUS_ENABLED")
     # P0-005: production launch requires upload antivirus to be enabled and
@@ -193,11 +261,11 @@ class Settings(BaseSettings):
     CLAMAV_PORT: int = Field(default=3310, validation_alias="CLAMAV_PORT")
     CLAMAV_TIMEOUT: int = Field(default=30, validation_alias="CLAMAV_TIMEOUT")
     CLAMAV_FAIL_OPEN: bool = Field(default=True, validation_alias="CLAMAV_FAIL_OPEN")
-    
+
     # Vector storage toggles
     VECTOR_DUAL_WRITE_ENABLED: bool = Field(default=True, validation_alias="VECTOR_DUAL_WRITE_ENABLED")
     VECTOR_VERIFY_AFTER_WRITE: bool = Field(default=False, validation_alias="VECTOR_VERIFY_AFTER_WRITE")
-    
+
     # OpenAI Configuration for AI Assistant
     OPENAI_API_KEY: str = Field(default="", validation_alias="OPENAI_API_KEY")
     ASSISTANT_ID: str = Field(default="", validation_alias="ASSISTANT_ID")
@@ -286,7 +354,7 @@ class Settings(BaseSettings):
     ARBITRATION_ENGINE_MAX_FALLBACK_RATE_PERCENT: float = Field(default=5.0, ge=0, le=100, validation_alias="ARBITRATION_ENGINE_MAX_FALLBACK_RATE_PERCENT")
     ARBITRATION_ENGINE_MAX_PAUSE_HOURS: float = Field(default=72.0, ge=1, le=8760, validation_alias="ARBITRATION_ENGINE_MAX_PAUSE_HOURS")
     ARBITRATION_REVIEWER_ROLE_MATRIX: str = Field(default="", validation_alias="ARBITRATION_REVIEWER_ROLE_MATRIX")
-    
+
     # FalkorDB / RedisGraph configuration
     FALKORDB_URL: str = Field(default="redis://localhost:6380", validation_alias="FALKORDB_URL")
     FALKORDB_ENABLED: bool = Field(default=True, validation_alias="FALKORDB_ENABLED")
@@ -306,7 +374,7 @@ class Settings(BaseSettings):
     GRAPHITI_BASE_URL: Optional[str] = Field(default=None, validation_alias="GRAPHITI_BASE_URL")
     GRAPHITI_API_KEY: Optional[str] = Field(default=None, validation_alias="GRAPHITI_API_KEY")
     GRAPHITI_WORKSPACE: Optional[str] = Field(default="ContraClaim", validation_alias="GRAPHITI_WORKSPACE")
-    
+
     # SMTP Configuration for Email Sharing
     SMTP_HOST: str = Field(default="smtp.gmail.com", validation_alias="SMTP_HOST")
     SMTP_PORT: int = Field(default=587, validation_alias="SMTP_PORT")
@@ -317,7 +385,7 @@ class Settings(BaseSettings):
         default="",
         validation_alias="CONTACT_RECIPIENT_EMAIL",
     )
-    
+
     # Payment gateway configuration
     PAYMENT_PROVIDER: str = Field(default="noop", validation_alias="PAYMENT_PROVIDER")
     RAZORPAY_KEY_ID: str = Field(default="", validation_alias="RAZORPAY_KEY_ID")
@@ -367,6 +435,35 @@ class Settings(BaseSettings):
         validation_alias="LOGIN_EMAIL_RATE_LIMIT_WINDOW",
         description="Login email rate-limit window in seconds",
     )
+    # Tags keeps separate read and write budgets: browsing (list, search,
+    # subtag expansion, the Documents page tag dropdown) must never exhaust the
+    # budget that creating or renaming a tag needs, or the other way round.
+    TAGS_READ_RATE_LIMIT_REQUESTS: int = Field(
+        default=300,
+        gt=0,
+        validation_alias="TAGS_READ_RATE_LIMIT_REQUESTS",
+        description="Max Tags read requests per user in the read window",
+    )
+    TAGS_READ_RATE_LIMIT_WINDOW: int = Field(
+        default=600,
+        gt=0,
+        validation_alias="TAGS_READ_RATE_LIMIT_WINDOW",
+        description="Tags read rate-limit window in seconds",
+    )
+    TAGS_WRITE_RATE_LIMIT_REQUESTS: int = Field(
+        default=120,
+        # Must cover the dearest single write (delete tag costs 5), or that
+        # operation could never succeed; tests pin the costs to this floor.
+        ge=5,
+        validation_alias="TAGS_WRITE_RATE_LIMIT_REQUESTS",
+        description="Max Tags write cost units per user in the write window",
+    )
+    TAGS_WRITE_RATE_LIMIT_WINDOW: int = Field(
+        default=3600,
+        gt=0,
+        validation_alias="TAGS_WRITE_RATE_LIMIT_WINDOW",
+        description="Tags write rate-limit window in seconds",
+    )
 
     # Explicit toggle for legacy dev header authentication (disabled by default)
     ALLOW_DEV_HEADERS: bool = Field(default=False, validation_alias="ALLOW_DEV_HEADERS")
@@ -391,7 +488,24 @@ class Settings(BaseSettings):
     CONTRACT_QUEUE_VISIBILITY_TIMEOUT_SECONDS: int = Field(default=1800, ge=60, validation_alias="CONTRACT_QUEUE_VISIBILITY_TIMEOUT_SECONDS")
     CONTRACT_QUEUE_HEARTBEAT_SECONDS: int = Field(default=30, ge=5, validation_alias="CONTRACT_QUEUE_HEARTBEAT_SECONDS")
     START_BACKGROUND_SERVICES: bool = Field(default=True, validation_alias="START_BACKGROUND_SERVICES")
+    # The durable document extraction loop runs in a dedicated worker process,
+    # not the request-serving web tier. Deliberately separate from
+    # START_BACKGROUND_SERVICES: that flag also gates cleanup, assignment
+    # alerts, and subscription lifecycle, so flipping it off on the web tier to
+    # move OCR would silently stop billing-relevant work.
+    START_DOCUMENT_EXTRACTION_WORKERS: bool = Field(
+        default=False, validation_alias="START_DOCUMENT_EXTRACTION_WORKERS"
+    )
     START_CONTRACT_QUEUE_WORKERS: bool = Field(default=True, validation_alias="START_CONTRACT_QUEUE_WORKERS")
+    # Contract Master reprojection (promotion/correction -> CURRENT projection).
+    # Read only by rbac_backend.worker; set it on exactly one service - the
+    # contract-worker. The web process never starts it, whatever this says.
+    START_CONTRACT_REPROJECTION_WORKERS: bool = Field(
+        default=False, validation_alias="START_CONTRACT_REPROJECTION_WORKERS"
+    )
+    CONTRACT_REPROJECTION_POLL_SECONDS: float = Field(
+        default=15.0, ge=1.0, validation_alias="CONTRACT_REPROJECTION_POLL_SECONDS"
+    )
     START_DRAFTING_QUEUE_WORKERS: bool = Field(default=False, validation_alias="START_DRAFTING_QUEUE_WORKERS")
     DRAFTING_QUEUE_ENABLED: bool = Field(default=False, validation_alias="DRAFTING_QUEUE_ENABLED")
     DRAFTING_QUEUE_REDIS_URL: Optional[str] = Field(default=None, validation_alias="DRAFTING_QUEUE_REDIS_URL")
@@ -471,7 +585,7 @@ class Settings(BaseSettings):
     )
     BACKUP_S3_BUCKET: str = Field(default="", validation_alias="BACKUP_S3_BUCKET")
     BACKUP_S3_PREFIX: str = Field(default="contraclaim/backups", validation_alias="BACKUP_S3_PREFIX")
-    
+
     @field_validator('CORS_ORIGINS', 'ALLOWED_DOCUMENT_MIMES', 'ALLOWED_CONTRACT_MIMES', 'ALLOWED_ENCLOSURE_MIMES', mode='before')
     @classmethod
     def parse_json_strings(cls, v):
@@ -490,7 +604,7 @@ class Settings(BaseSettings):
                     return [s.strip().strip('"\'')]
                 return []
         return v
-    
+
     @field_validator('ALLOWED_DOCUMENT_MIMES', 'ALLOWED_CONTRACT_MIMES', 'ALLOWED_ENCLOSURE_MIMES', mode='after')
     @classmethod
     def convert_to_set(cls, v):
@@ -498,7 +612,7 @@ class Settings(BaseSettings):
         if isinstance(v, list):
             return set(v)
         return v
-    
+
     @field_validator(*CRITICAL_FIELDS, mode="before")
     @classmethod
     def _ensure_not_blank(cls, value: str, info: ValidationInfo) -> str:
@@ -507,10 +621,10 @@ class Settings(BaseSettings):
             if stripped:
                 return stripped
         raise ValueError(f"{info.field_name} cannot be empty")
-    
+
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)
-        
+
         # Apply env override for CORS_ORIGINS via string to avoid JSON decode in settings source
         raw = getattr(self, "CORS_ORIGINS_RAW", None)
         if isinstance(raw, str):
@@ -528,9 +642,42 @@ class Settings(BaseSettings):
                     parsed = [p.strip().strip('"').strip("'") for p in parts if p.strip()]
             if parsed:
                 object.__setattr__(self, "CORS_ORIGINS", parsed)
-        
+
+        self._apply_rar_upload_gate()
         self._log_default_usage()
-    
+
+    def canary_org_id_set(self) -> set[str]:
+        """Parse the canary allowlist into exact organisation ids."""
+        raw = self.UNIFIED_EXTRACTION_CANARY_ORG_IDS or ""
+        return {part.strip() for part in raw.split(",") if part.strip()}
+
+    def worker_pipeline_versions(self) -> set[str]:
+        """Which pipeline versions this worker may claim. Empty means all."""
+        raw = self.DOCUMENT_WORKER_PIPELINE_VERSIONS or ""
+        return {part.strip() for part in raw.split(",") if part.strip()}
+
+    def _apply_rar_upload_gate(self) -> None:
+        """RAR is admitted only behind an explicit, proof-backed flag.
+
+        Configuring the MIME directly in an allowlist must not bypass the gate:
+        Phase 0 proved ClamAV recurses into a ZIP but never proved it scans
+        inside a RAR, so admitting one is a deliberate, reviewed decision.
+        """
+        rar_mime = "application/vnd.rar"
+        explicit_rar = (
+            rar_mime in self.ALLOWED_DOCUMENT_MIMES
+            or rar_mime in self.ALLOWED_ENCLOSURE_MIMES
+        )
+        if explicit_rar and not self.RAR_UPLOAD_ENABLED:
+            raise ValueError(
+                "RAR MIME configured while RAR_UPLOAD_ENABLED=false. Enable the "
+                "flag in the same reviewed change that attaches EICAR-in-RAR "
+                "detection evidence for the deployed clamd."
+            )
+        if self.RAR_UPLOAD_ENABLED:
+            self.ALLOWED_DOCUMENT_MIMES.add(rar_mime)
+            self.ALLOWED_ENCLOSURE_MIMES.add(rar_mime)
+
     def _log_default_usage(self) -> None:
         missing = [field for field in self.CRITICAL_FIELDS if field not in self.model_fields_set]
         if missing:
@@ -716,6 +863,19 @@ class Settings(BaseSettings):
                     production_errors.append(
                         "OIDC is enabled but missing: " + ", ".join(missing_oidc)
                     )
+                # Provisioned SSO users are stored with this role, and Super Admin
+                # authority is name-based (ADR 0001). Provisioning re-checks the role
+                # document; this refuses the unsafe spellings before startup.
+                from .role_reference import SYSTEM_ROLE_KEYS, normalize_role_key
+
+                default_role = str(getattr(self, "OIDC_DEFAULT_ROLE", "") or "")
+                if default_role and (
+                    normalize_role_key(default_role) != default_role
+                    or normalize_role_key(default_role) in SYSTEM_ROLE_KEYS
+                ):
+                    production_errors.append(
+                        "OIDC_DEFAULT_ROLE must be a canonical, non-system role key"
+                    )
             # Payments: with PAYMENT_PROVIDER=razorpay, an empty webhook secret is
             # the worst kind of misconfiguration — checkout works and customers
             # PAY, but every webhook fails signature verification (deny-by-
@@ -764,7 +924,7 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "Invalid production configuration: " + "; ".join(production_errors)
                 )
-    
+
     # Pydantic v2 configuration
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -782,12 +942,12 @@ settings = Settings()
 def configure_logging():
     """Configure logging using the LOGGING_CONFIG from settings."""
     import logging.config
-    
+
     # Create logs directory if it doesn't exist
     log_dir = os.path.dirname(Settings.LOGGING_CONFIG['handlers']['file']['filename'])
     if log_dir and not os.path.exists(log_dir):
         os.makedirs(log_dir, exist_ok=True)
-    
+
     # LOG_LEVEL is set in every deployed environment; honour it instead of
     # leaving it as a setting that looks configured but is never read.
     requested_level = str(os.getenv("LOG_LEVEL", "INFO")).upper()

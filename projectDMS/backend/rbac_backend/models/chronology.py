@@ -326,4 +326,3 @@ class AttachChronologyRequest(BaseModel):
     chronology_id: str
     include_unverified: bool = False
     limit: int = Field(default=200, ge=1, le=500)
-

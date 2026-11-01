@@ -17,10 +17,47 @@ from typing import Any, Dict, Optional
 from urllib.parse import urlencode
 
 from ..core.config import settings
+from ..core.role_reference import (
+    CANONICAL,
+    SYSTEM_ROLE_KEYS,
+    normalize_role_key,
+    reference_text,
+    resolve_role_reference,
+    role_is_system,
+)
 
 
 class OidcError(Exception):
     """Raised for any recoverable OIDC failure (denied login, bad config)."""
+
+
+async def resolve_default_role(db: Any, default_role: Any) -> Optional[str]:
+    """The role a newly provisioned SSO user may be stored with, or a refusal (R-A9D).
+
+    The stored string becomes authority on the principal, and ADR 0001 makes Super
+    Admin name-based, so `OIDC_DEFAULT_ROLE=super-admin` would mint a Super Admin on
+    every first SSO login. The setting must be a canonical key (no alias, case or
+    spacing variant), not a system role key, and name exactly one active role
+    document that is not system-scoped. Anything else refuses provisioning.
+    """
+    from .permission_service import fetch_role_documents
+
+    text = reference_text(default_role)
+    if not text:
+        return None
+    refusal = OidcError("SSO provisioning is misconfigured: OIDC_DEFAULT_ROLE is not a usable default role")
+    key = normalize_role_key(text)
+    if key != text or key in SYSTEM_ROLE_KEYS:
+        raise refusal
+    documents = await fetch_role_documents(db, [text])
+    resolution = resolve_role_reference(text, documents)
+    if resolution.status != CANONICAL or resolution.document is None:
+        raise refusal
+    if role_is_system(resolution.document):
+        raise refusal
+    if any(str(document.get("_id")) != resolution.role_id for document in documents):
+        raise refusal  # another document carries the same name: ambiguous
+    return resolution.role_id
 
 
 # --- Pure helpers (unit-tested) ------------------------------------------------
@@ -133,13 +170,14 @@ async def resolve_or_provision_user(
     if not auto_provision:
         raise OidcError("No account exists for this user and auto-provisioning is disabled")
 
+    role = await resolve_default_role(db, default_role)
     given = claims.get("given_name") or claims.get("name") or email.split("@")[0]
     doc = {
         "email": email,
         "username": email,
         "first_name": str(given)[:50],
         "last_name": str(claims.get("family_name") or "")[:50],
-        "roles": [default_role] if default_role else [],
+        "roles": [role] if role else [],
         "organization_id": default_org_id or None,
         "organizations": [default_org_id] if default_org_id else [],
         "account_type": "client_user",

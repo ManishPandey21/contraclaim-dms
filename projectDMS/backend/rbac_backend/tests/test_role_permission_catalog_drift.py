@@ -30,14 +30,20 @@ class _Collection:
     def __init__(self, docs: List[Dict[str, Any]]):
         self.docs = [dict(doc) for doc in docs]
 
-    async def find_one(self, query: Dict[str, Any]):
+    async def find_one(self, query: Dict[str, Any], *_args: Any, **_kwargs: Any):
         expected_id = query.get("_id")
         for doc in self.docs:
             if doc.get("_id") == expected_id:
                 return dict(doc)
         return None
 
-    def find(self, query: Dict[str, Any]):
+    def find(self, query: Dict[str, Any], *_args: Any, **_kwargs: Any):
+        # Motor takes a projection as a second positional argument, and
+        # `RoleService._holders_of_role` passes one. A fake that refuses it made
+        # the fail-closed authority-change announcement (R-A9D) refuse the
+        # mutation, which is what this fake is meant to let through.
+        if not query:
+            return _Cursor([dict(doc) for doc in self.docs])
         ors = query.get("$or") or []
         names: set[str] = set()
         ids: set[Any] = set()

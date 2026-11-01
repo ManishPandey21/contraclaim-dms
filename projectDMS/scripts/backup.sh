@@ -28,14 +28,14 @@ done
 backup_volume() {
   local volume=$1
   local archive=$2
-  docker run --rm -v "${volume}:/source" -v "$BACKUP_DIR:/backup" busybox \
-    sh -c "cd /source && tar czf /backup/${archive}.tar.gz ."
+  shift 2
+  bash "$PROJECT_DIR/scripts/backup_volume.sh" "$volume" "$BACKUP_DIR/${archive}.tar.gz" "$@"
 }
 
-backup_volume "${PROJECT_NAME}_qdrant_data" qdrant_data
-backup_volume "${PROJECT_NAME}_qdrant_snapshots" qdrant_snapshots
-backup_volume "${PROJECT_NAME}_falkordb_data" falkordb_data
-backup_volume "${PROJECT_NAME}_redis_data" redis_data
+backup_volume "${PROJECT_NAME}_qdrant_data" qdrant_data --any-of "*/collections/*" --any-of "*raft_state*"
+backup_volume "${PROJECT_NAME}_qdrant_snapshots" qdrant_snapshots --profile application-volume
+backup_volume "${PROJECT_NAME}_falkordb_data" falkordb_data --profile redis-persistence
+backup_volume "${PROJECT_NAME}_redis_data" redis_data --profile redis-persistence
 
 for svc in "${SERVICES[@]}"; do
   "${COMPOSE_CMD[@]}" unpause "$svc" || true

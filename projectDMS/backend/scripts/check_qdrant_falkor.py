@@ -178,4 +178,3 @@ if __name__ == "__main__":
     cli_args = parse_args(sys.argv[1:])
     exit_code = asyncio.run(main(cli_args))
     sys.exit(exit_code)
-

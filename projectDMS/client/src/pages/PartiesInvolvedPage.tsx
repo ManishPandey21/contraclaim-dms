@@ -58,7 +58,11 @@ const emailSchema = z
   .min(1, "Email is required");
 
 const partyFormSchema = z.object({
-  name: z.string().min(2, "Name must be at least 2 characters").max(50),
+  // Zod 3's default text, spelled out: Zod 4 words the default differently.
+  name: z
+    .string()
+    .min(2, "Name must be at least 2 characters")
+    .max(50, "String must contain at most 50 character(s)"),
   type: z.enum(["Organization", "Individual"]),
   contactEmail: z
     .string()
@@ -110,7 +114,11 @@ const PartiesInvolvedPage: React.FC = () => {
     },
   });
 
-  const representativeForm = useForm<RepresentativeFormValues>({
+  const representativeForm = useForm<
+    z.input<typeof representativeFormSchema>,
+    unknown,
+    RepresentativeFormValues
+  >({
     resolver: zodResolver(representativeFormSchema),
     defaultValues: {
       name: "",

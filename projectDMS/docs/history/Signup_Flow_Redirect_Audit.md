@@ -59,4 +59,3 @@ Added/updated tests:
   - Verifies expired user creation redirects through the login-session-expiry path instead of the public landing page.
 - `client/src/pages/__tests__/ProjectsPage.organization-filter.test.tsx`
   - Mocks `/me` so route tests do not make live backend calls.
-

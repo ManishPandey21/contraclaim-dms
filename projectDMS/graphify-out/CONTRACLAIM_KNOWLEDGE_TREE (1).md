@@ -1,7 +1,7 @@
 # ContraClaim DMS — Knowledge Tree
 
-> Generated via Graphify AST extraction (683 code files parsed) + deep manual analysis.  
-> Repository: `ManishPandey21/contraclaim-dms`  
+> Generated via Graphify AST extraction (683 code files parsed) + deep manual analysis.
+> Repository: `ManishPandey21/contraclaim-dms`
 > Stack: **FastAPI (Python 3.10+) + React/Vite (TypeScript) + MongoDB + Qdrant + FalkorDB + Redis**
 
 ---

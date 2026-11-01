@@ -28,6 +28,7 @@ class ClaimService:
     async def create(self, payload: ClaimCreate, current_user: Any) -> Dict[str, Any]:
         db = await self._get_db()
         doc = Claim(**payload.model_dump()).model_dump(by_alias=True)
+        doc.pop("linked_document_ids", None)
         if not doc.get("organization_id"):
             doc["organization_id"] = getattr(current_user, "organization_id", None)
         now = datetime.utcnow()
@@ -75,6 +76,7 @@ class ClaimService:
         self, claim_id: str, update: Dict[str, Any], current_user: Any, *, before: Optional[Dict[str, Any]] = None
     ) -> Optional[Dict[str, Any]]:
         db = await self._get_db()
+        update.pop("linked_document_ids", None)
         update = {k: v for k, v in update.items() if v is not None}
         update["updated_at"] = datetime.utcnow()
         update["updated_by"] = getattr(current_user, "id", None)
@@ -92,6 +94,12 @@ class ClaimService:
             after=updated,
         )
         return updated
+
+    async def clear_legacy_document_ids(self, claim_id: str) -> None:
+        db = await self._get_db()
+        await db.claims.update_one(
+            {"_id": claim_id}, {"$unset": {"linked_document_ids": ""}}
+        )
 
     async def delete(self, claim_id: str, current_user: Any, *, before: Optional[Dict[str, Any]] = None) -> bool:
         db = await self._get_db()

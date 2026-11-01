@@ -4,9 +4,21 @@ Date: 2026-06-29
 
 ## Executive Verdict
 
-Current verdict: **Not Ready for production**.
+**This audit is the record of 2026-06-29 and every figure in it is that day's.
+It is not the current state.** Gate 9's "Current score evidence" block names
+this file as the final audit record, so a reader following that pointer used to
+land on a verdict and a score three months out of date - found in release
+programme R-A8T's adversarial review. The live figures are computed by
+`scripts/production_readiness_score.py` and rendered in
+[PRODUCTION_READINESS_RELEASE_GATE.md](PRODUCTION_READINESS_RELEASE_GATE.md);
+[READINESS_CONVERGENCE.md](READINESS_CONVERGENCE.md) carries the arithmetic and
+the route to the target. Read those for the current state; read this for what
+was true when the audit was taken.
 
-Current production launch-readiness score: **32/100**.
+Verdict **as at 2026-06-29**: **Not Ready for production**.
+
+Launch-readiness score **as at 2026-06-29**: **32/100**. (Superseded - re-derive
+it with the scorer rather than quoting this line.)
 
 Target production score: **85/100**.
 

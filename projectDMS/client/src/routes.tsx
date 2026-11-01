@@ -12,6 +12,7 @@ const Overview = lazyWithRetry(() => import("./pages/Overview"));
 const OrganizationsPage = lazyWithRetry(() => import("./pages/OrganizationsPage"));
 const ProjectsPage = lazyWithRetry(() => import("./pages/ProjectsPage"));
 const DocumentsPage = lazyWithRetry(() => import("./pages/DocumentsPage"));
+const ExtractionReviewQueuePage = lazyWithRetry(() => import("./pages/ExtractionReviewQueuePage"));
 const EnhancedDocumentsPage = lazyWithRetry(
   () => import("./pages/EnhancedDocumentsPage"),
 );
@@ -57,6 +58,9 @@ const ClaimDetailPage = lazyWithRetry(() => import("./pages/ClaimDetailPage"));
 const SLATrackerPage = lazyWithRetry(() => import("./pages/SLATrackerPage"));
 const KeyDateRegisterPage = lazyWithRetry(() => import("./pages/KeyDateRegisterPage"));
 const KeyDateDetailPage = lazyWithRetry(() => import("./pages/KeyDateDetailPage"));
+const HindranceRegisterPage = lazyWithRetry(() => import("./pages/HindranceRegisterPage"));
+const HindranceDetailPage = lazyWithRetry(() => import("./pages/HindranceDetailPage"));
+const ProgrammeMilestoneDetailPage = lazyWithRetry(() => import("./pages/ProgrammeMilestoneDetailPage"));
 const VariationRegisterPage = lazyWithRetry(() => import("./pages/VariationRegisterPage"));
 const BankGuaranteeRegisterPage = lazyWithRetry(() => import("./pages/BankGuaranteeRegisterPage"));
 const InsuranceRegisterPage = lazyWithRetry(() => import("./pages/InsuranceRegisterPage"));
@@ -77,6 +81,13 @@ const ContractQAPage = lazyWithRetry(() => import("./pages/ContractQAPage"));
 const ContractViewerPage = lazyWithRetry(() => import("./pages/ContractViewerPage"));
 const ContractAppraisalPage = lazyWithRetry(() => import("./pages/ContractAppraisalPage"));
 const ContractMasterPage = lazyWithRetry(() => import("./pages/ContractMasterPage"));
+const ContractMasterWorkspacePage = lazyWithRetry(
+  () => import("./pages/ContractMasterWorkspacePage"),
+);
+// HITL layout prototype for Contract Master v1 (BRIDGE phase). Not T26-T30.
+const ContractMasterPrototypePage = lazyWithRetry(
+  () => import("./pages/ContractMasterPrototypePage"),
+);
 const ContractTimelinePage = lazyWithRetry(() => import("./pages/ContractTimelinePage"));
 const LegalWordsPage = lazyWithRetry(() => import("./pages/LegalWordsPage"));
 const AdminLegalWordsPage = lazyWithRetry(() => import("./pages/AdminLegalWordsPage"));
@@ -128,6 +139,7 @@ const AppRoutes = () => (
         <Route path="projects" element={<ProjectsPage />} />
         <Route path="documents" element={<DocumentsPage />} />
         <Route path="documentsearch" element={<EnhancedDocumentsPage />} />
+        <Route path="extraction-reviews" element={<ExtractionReviewQueuePage />} />
         <Route path="tags" element={<TagsPage />} />
         <Route path="profile" element={<ProfilePage />} />
         <Route path="users" element={<UsersPage />} />
@@ -235,6 +247,30 @@ const AppRoutes = () => (
           element={
             <RoleGuard path="/key-dates" fallback="/overview">
               <KeyDateDetailPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="hindrances"
+          element={
+            <RoleGuard path="/hindrances" fallback="/overview">
+              <HindranceRegisterPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="hindrances/:id"
+          element={
+            <RoleGuard path="/hindrances" fallback="/overview">
+              <HindranceDetailPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="programme-milestones/:id"
+          element={
+            <RoleGuard path="/programme-milestones" fallback="/overview">
+              <ProgrammeMilestoneDetailPage />
             </RoleGuard>
           }
         />
@@ -502,6 +538,38 @@ const AppRoutes = () => (
         />
       </Route>
 
+      {/* Contract Master surfaces. Both sit behind the session boundary and
+          carry the same permission mapping as /contracts/master.
+
+          The workspace is a T26-T30 product surface: it reads
+          /api/contract-master/* on every instrument open. The prototype is
+          fixture-driven and makes no server calls, but "renders no server data"
+          is not a reason to serve a page anonymously — a route is public only
+          when PUBLIC_ROUTES says so. Both therefore fail closed.
+
+          They are declared here rather than inside MainLayout because each page
+          renders its own full-page chrome; ProtectedRoute + RoleGuard is the
+          same authorisation pair the layout applies, without the layout. */}
+      <Route
+        path="/contract-master/workspace"
+        element={
+          <ProtectedRoute>
+            <RoleGuard path="/contract-master/workspace" fallback="/overview">
+              <ContractMasterWorkspacePage />
+            </RoleGuard>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/contract-master/prototype"
+        element={
+          <ProtectedRoute>
+            <RoleGuard path="/contract-master/prototype" fallback="/overview">
+              <ContractMasterPrototypePage />
+            </RoleGuard>
+          </ProtectedRoute>
+        }
+      />
       <Route path="/login" element={<LoginPage />} />
       <Route path="*" element={<NotFound />} />
     </Routes>

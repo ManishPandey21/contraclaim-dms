@@ -580,7 +580,7 @@ def create_ai_filled_letter(project_id: str, user: dict, subject: str, refs: lis
     return generate_and_store_letter(payload)
 
 3. Pipeline Flow
-Incoming Letter (OCR / Reference) 
+Incoming Letter (OCR / Reference)
       ↓
 AI Assistant (generates draft body)
       ↓
@@ -870,7 +870,7 @@ POST /api/letters/finalize/{id}	Generate DOCX + PDF using project template and s
 Would you like me to now generate the complete Python code folder structure (/app/routers, /app/services, /app/models, /app/repositories) with all files ready for deployment (FastAPI + Mongo + S3 + LibreOffice), so you can directly integrate this into your repo?
 
 You said:
-how to incorporate above in codex repo. write a prompt to tell codex to implement 
+how to incorporate above in codex repo. write a prompt to tell codex to implement
 ChatGPT said:
 
 Here’s a clear, production-ready Codex prompt you can paste directly into your codex or AI-coder workflow.
@@ -1114,7 +1114,7 @@ Show PDF preview using `react-pdf` with the presigned PDF URL if available.
 ### 3. REUSABLE COMPONENTS
 
 #### (a) LetterStatusBadge.tsx
-- Displays colored status:  
+- Displays colored status:
   - draft (gray), under_review (blue), approved (green), finalized (purple)
 
 #### (b) LetterActionsMenu.tsx
@@ -1239,10 +1239,10 @@ Generate finalized DOCX/PDF stored in S3
 ---
 
 ### ✅ How to use
-Paste this prompt into **Codex** (or your AI Coder command interface) at the **frontend repo root**, and run it.  
+Paste this prompt into **Codex** (or your AI Coder command interface) at the **frontend repo root**, and run it.
 Codex will automatically:
-- Scaffold the new pages/components/hooks  
-- Wire Axios + React Query  
+- Scaffold the new pages/components/hooks
+- Wire Axios + React Query
 - Build the full letter approval workflow with project-level template support.
 
 ---
@@ -1459,8 +1459,8 @@ The user must be able to ask and answer custom questions before generating the A
 
 ---
 
-✅ **Usage**  
-Paste this prompt into **Codex / AI Developer prompt input** at the **frontend repo root**, then run it.  
+✅ **Usage**
+Paste this prompt into **Codex / AI Developer prompt input** at the **frontend repo root**, then run it.
 It will automatically scaffold the **Pre-Draft Q&A** interface, link it to the AI draft generator, and update the workflow.
 
 ---
@@ -1694,8 +1694,8 @@ Enable precise monitoring of how long each stage of AI-assisted letter drafting 
 
 ---
 
-✅ **Usage:**  
-Paste this prompt into **Codex / AI Developer CLI** in the **backend repo root**, then run it.  
+✅ **Usage:**
+Paste this prompt into **Codex / AI Developer CLI** in the **backend repo root**, then run it.
 It will automatically modify the model, add timestamps to each transition, compute durations, and optionally generate an `/analytics` endpoint.
 
 ---
@@ -1703,7 +1703,7 @@ It will automatically modify the model, add timestamps to each transition, compu
 Would you like me to also create the **frontend Codex prompt** to visualize these metrics — e.g., a **Letter Timeline** (Gantt-like progress bar per stage + average turnaround report)?
 
 You said:
-Write a separate setting page for uploading the template and updating the following data           from_name="Sukumar Kolli", 
+Write a separate setting page for uploading the template and updating the following data           from_name="Sukumar Kolli",
         from_designation="Authorized Signatory",
         organisation="TYPSA-ITALFERR JV",
 ChatGPT said:
@@ -1739,7 +1739,7 @@ Add a new Settings Page for each project that allows:
 ### 1. ROUTE & FILE
 Create new route and page:
 
-**Route:** `/settings/:projectId`  
+**Route:** `/settings/:projectId`
 **File:** `src/pages/settings/LetterSettingsPage.tsx`
 
 ---
@@ -1971,12 +1971,12 @@ Improve consistency and automate final letter formatting.
 
 ---
 
-✅ **Usage:**  
-Paste this prompt into **Codex** at the **frontend repo root**, then run it.  
+✅ **Usage:**
+Paste this prompt into **Codex** at the **frontend repo root**, then run it.
 Codex will automatically generate:
-- The `LetterSettingsPage` UI  
-- Upload + save hooks  
-- Settings components  
+- The `LetterSettingsPage` UI
+- Upload + save hooks
+- Settings components
 - Integrated routes.
 
 ---

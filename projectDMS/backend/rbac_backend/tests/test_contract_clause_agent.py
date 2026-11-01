@@ -30,6 +30,13 @@ class FakeCollection:
         return None
 
     async def find_one(self, filt):
+        if "_id" in filt:
+            # `documents` is keyed by `_id`, and the agent resolves canonical
+            # publication authority through it immediately before the graph
+            # write. Answering only `clause_uid` made every lookup miss, which
+            # a fail-closed guard correctly reads as "no canonical record".
+            doc = self.docs.get(filt["_id"])
+            return dict(doc) if doc is not None else None
         uid = filt.get("clause_uid")
         doc = self.docs.get(uid)
         return dict(doc) if doc is not None else None
@@ -89,6 +96,25 @@ SCOPE = DocumentScope(
 
 def _agent(db=None, policy=None, max_chars=4000):
     return ClauseChunkingAgent(db or FakeDB(), policy_service=policy, max_clause_chars=max_chars)
+
+
+def _seed_canonical(db, document_id: str) -> None:
+    """Give the run a publishable canonical document.
+
+    `process()` re-resolves publication authority from `documents` immediately
+    before the FalkorDB clause-graph write (G31), and fails closed when there is
+    no canonical record - a hard-deleted contract must not acquire graph support
+    on the strength of a verdict taken minutes earlier. A wiring test therefore
+    has to supply the record the production path always has.
+    """
+    db["documents"].docs[document_id] = {
+        "_id": document_id,
+        "organization_id": "org-A",
+        "project_id": "proj-A",
+        "processing_status": "completed",
+        "duplicate_status": "unique",
+        "lifecycle_state": "active",
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -272,6 +298,7 @@ SCC_SCOPE = DocumentScope(
 @pytest.mark.asyncio
 async def test_process_wires_embedding_and_graph():
     db = FakeDB()
+    _seed_canonical(db, SCOPE.document_id)
     embed, graph = FakeEmbeddingService(), FakeGraphService()
     agent = ClauseChunkingAgent(db, policy_service=AllowPolicy(), embedding_service=embed, graph_service=graph)
     clauses = [DetectedClause(clause_no="8.4", clause_title="EOT", text="clause body")]
@@ -286,6 +313,7 @@ async def test_process_wires_embedding_and_graph():
 @pytest.mark.asyncio
 async def test_process_detects_scc_modification():
     db = FakeDB()
+    _seed_canonical(db, SCC_SCOPE.document_id)
     graph = FakeGraphService()
     agent = ClauseChunkingAgent(db, policy_service=AllowPolicy(), graph_service=graph)
     clauses = [

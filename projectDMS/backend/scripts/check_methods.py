@@ -15,15 +15,15 @@ from rbac_backend.services.falkor_graph_service import FalkorGraphService
 def check_methods():
     print("=== FalkorGraphService Methods ===")
     service = FalkorGraphService()
-    
+
     # List all public methods
     methods = [method for method in dir(service) if not method.startswith('_')]
     print("Public methods:", methods)
-    
+
     # List all private methods
     private_methods = [method for method in dir(service) if method.startswith('_') and not method.startswith('__')]
     print("Private methods:", private_methods)
-    
+
     # Check if get_letter exists
     if 'get_letter' in methods:
         print("\nget_letter method exists!")

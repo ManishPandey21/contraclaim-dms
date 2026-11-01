@@ -14,7 +14,7 @@ FILES = [
 ]
 EXPECTED = {
     "langgraph": "langgraph==1.2.9",
-    "langgraph-checkpoint-mongodb": "langgraph-checkpoint-mongodb==0.4.0",
+    "langgraph-checkpoint-mongodb": "langgraph-checkpoint-mongodb==0.5.1",
 }
 
 

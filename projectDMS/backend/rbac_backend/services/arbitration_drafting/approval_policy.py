@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, Mapping, Sequence
+import uuid
+from datetime import datetime
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from fastapi import HTTPException, status
 
@@ -11,6 +13,75 @@ def _actor_id(user: Any) -> Any:
     if isinstance(user, dict):
         return user.get("id") or user.get("_id") or user.get("email")
     return getattr(user, "id", None) or getattr(user, "email", None)
+
+
+#: A rejoinder permission covers the content it was granted on; any change to
+#: that content withdraws it.
+REVOKED_REJOINDER_PERMISSION: Dict[str, Any] = {
+    "permission_obtained": False,
+    "permission_approved_by": None,
+    "permission_approved_at": None,
+    "permission_approval_receipt_id": None,
+}
+
+
+def material_contributors(existing: Mapping[str, Any], actor: Optional[str]) -> List[str]:
+    """Everyone who changed a row's reviewed content since its last full approval.
+
+    A full approval empties the list; partial approvals, rejections and change
+    requests keep it, because the content is still unapproved. A row written
+    before the list existed falls back to its single recorded material editor.
+    """
+    if "material_contributor_ids" in existing:
+        contributors = {str(value) for value in existing.get("material_contributor_ids") or [] if value}
+    else:
+        contributors = {str(existing["last_material_editor_id"])} if existing.get("last_material_editor_id") else set()
+    if actor:
+        contributors.add(str(actor))
+    return sorted(contributors)
+
+
+def approval_barred_actors(row: Mapping[str, Any]) -> List[Any]:
+    """Who may not approve this row's current content, or grant permission on it."""
+    return [row.get("created_by"), *material_contributors(row, row.get("last_material_editor_id"))]
+
+
+def material_change_review_reset(
+    review_defaults: Mapping[str, Any],
+    existing: Mapping[str, Any],
+    changed: List[str],
+    actor: Optional[str],
+    now: datetime,
+) -> Dict[str, Any]:
+    """Fields that return a matrix row to review after its reviewed content changed.
+
+    Shared by the user edit path and every server-side writer that rewrites a
+    row's content. It discards the prior approval, every completed reviewer
+    role and any rejoinder permission granted for the old content, and records
+    the actor as material editor so approver separation bars them from
+    approving it. The caller also increments `edit_revision` in the same write.
+    """
+    reset: Dict[str, Any] = {
+        **review_defaults,
+        "approved_by": None,
+        "approved_at": None,
+        "last_material_editor_id": actor,
+        "material_contributor_ids": material_contributors(existing, actor),
+        "approval_log": [
+            *(existing.get("approval_log") or []),
+            {
+                "_id": str(uuid.uuid4()),
+                "action": "material_edit",
+                "changed_fields": changed,
+                "previous_review_status": existing.get("review_status"),
+                "actor_id": actor,
+                "created_at": now,
+            },
+        ],
+    }
+    if existing.get("permission_obtained"):
+        reset.update(REVOKED_REJOINDER_PERMISSION)
+    return reset
 
 
 DEFAULT_GATE_ROLES: Dict[str, frozenset[str]] = {
@@ -100,6 +171,7 @@ def enforce_matrix_reviewer_role(
         str(item.get("reviewer_role") or "").strip().lower()
         for item in assignments or []
         if str(item.get("reviewer_user_id") or "") == actor
+        and str(item.get("assigned_by") or "") != actor
         and str(item.get("status") or "assigned") in {"assigned", "in_review"}
     }
     if actor and claimed in assigned_roles:

@@ -24,6 +24,7 @@ The guard test `client/src/config/__tests__/routeInventory.test.ts` fails when a
 | `/projects` | ProjectsPage | `projects:read` | Yes | |
 | `/documents` | DocumentsPage | `dms.document.view` | Yes | Letters library. |
 | `/documentsearch` | EnhancedDocumentsPage | `dms.document.view` | Yes | |
+| `/extraction-reviews` | ExtractionReviewQueuePage | `dms.document.view` | Yes (`dms.document.review_extraction`) | Release 1.1.1 review queue; page decisions are server-gated by `dms.document.review_extraction`. |
 | `/tags` | TagsPage | `tags:read` | No | |
 | `/profile` | ProfilePage | Open | Footer | |
 | `/users` | UsersPage | `users:read` | Yes | |

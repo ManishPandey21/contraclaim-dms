@@ -62,6 +62,11 @@ export interface MilestoneDTO {
   delay_days?: number | null;
   early_completion_days?: number | null;
   achievement_remarks?: string | null;
+  // Written onto the milestone by record_achievement
+  // (services/key_date_service.py) and declared on KeyDateMilestone
+  // (models/key_date.py); the detail page reads both.
+  client_notification_ref?: string | null;
+  client_notification_date?: string | null;
   final_status?: string | null;
   status?: MilestoneStatus | null;
   days_remaining?: number | null;

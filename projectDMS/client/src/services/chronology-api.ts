@@ -174,4 +174,3 @@ export async function attachChronologyToDraft(draftId: string, chronologyId: str
 export function chronologyExportUrl(chronologyId: string, format: "docx" | "xlsx" | "pdf" | "evidence-index"): string {
   return `/api/chronologies/${chronologyId}/export/${format}`;
 }
-

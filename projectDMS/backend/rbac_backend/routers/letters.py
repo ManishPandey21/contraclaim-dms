@@ -54,7 +54,7 @@ from ..core.database import get_db
 
 
 
-from ..services.letter_service import LetterService
+from ..services.letter_service import CorruptLetterError, InvalidLetterIdError, LetterService
 from ..services.letter_drafting.service import DraftRunService
 
 
@@ -63,7 +63,7 @@ from ..dependencies import get_notification_service
 
 
 
-from ..services.conversation_service import ConversationService  
+from ..services.conversation_service import DEPENDENT_LETTER_BLOCKS_MOVE, PARENT_ANCESTRY_BLOCKS_MOVE, ConversationService
 from ..services.strategy_context_service import StrategyContextService
 
 
@@ -80,7 +80,7 @@ from ..models.letter import (
 
 
 
-    Letter, LetterCreate, LetterUpdate, ConversationTree, 
+    Letter, LetterCreate, LetterUpdate, ConversationTree,
 
 
 
@@ -95,7 +95,7 @@ from ..utils.validation import validate_input, sanitize_text
 
 
 
-from ..utils.error_handler import handle_exceptions, LetterError
+from ..utils.error_handler import BaseDomainError, handle_exceptions, LetterError
 
 
 
@@ -172,7 +172,7 @@ class LetterController:
 
 
 
-    
+
 
 
 
@@ -264,7 +264,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -284,7 +284,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -330,7 +330,7 @@ class LetterController:
 
             return letters
 
-        except HTTPException:
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
 
@@ -376,43 +376,19 @@ class LetterController:
 
 
 
-            # Get letter
+            # A letter the caller may not read is reported exactly like a missing
 
 
 
-            letter = await self.letter_service.get_letter_by_id(letter_id)
+            # one (docs/AUTHZ.md: another organisation's record is 404, not 403).
 
 
 
-            if not letter:
+            letter = await self._readable_letter_or_404(letter_id, current_user)
 
 
 
-                raise LetterError("Letter not found", status.HTTP_404_NOT_FOUND)
 
-
-
-            
-
-
-
-            # Authorization check
-
-
-
-            await self.auth_service.check_letter_access(
-
-
-
-                current_user, letter, "read"
-
-
-
-            )
-
-
-
-            
 
 
 
@@ -420,11 +396,11 @@ class LetterController:
 
 
 
-            
 
 
 
-        except (LetterError, HTTPException):
+
+        except (BaseDomainError, HTTPException):
 
 
 
@@ -496,7 +472,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -508,7 +484,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -528,7 +504,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -556,7 +532,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -576,7 +552,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -584,11 +560,11 @@ class LetterController:
 
 
 
-            
 
 
 
-        except (LetterError, HTTPException):
+
+        except (BaseDomainError, HTTPException):
 
 
 
@@ -672,7 +648,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -692,7 +668,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -704,7 +680,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -724,7 +700,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -732,11 +708,11 @@ class LetterController:
 
 
 
-            
 
 
 
-        except (LetterError, HTTPException):
+
+        except (BaseDomainError, HTTPException):
 
 
 
@@ -772,6 +748,130 @@ class LetterController:
 
 
 
+    async def _readable_letter_or_404(self, letter_id: str, current_user: CurrentUser) -> Letter:
+
+
+
+        """The letter, or 404 when it is missing, malformed, corrupt or not readable by the caller."""
+
+
+
+        try:
+
+
+
+            letter = await self.letter_service.get_letter(letter_id)
+
+
+
+        except InvalidLetterIdError:
+
+
+
+            letter = None
+
+
+
+        except CorruptLetterError:
+
+
+
+            # A row that does not validate cannot be authorised or shown; it is
+
+
+
+            # answered like a missing letter and logged by id only.
+
+
+
+            logger.warning("Letter %s is unreadable (stored row failed validation)", letter_id)
+
+
+
+            letter = None
+
+
+
+        if not letter or not await self._member_readable(current_user, letter):
+
+
+
+            raise LetterError("Letter not found", status.HTTP_404_NOT_FOUND)
+
+
+
+        return letter
+
+
+
+
+
+
+
+
+
+
+
+    async def _member_readable(self, current_user: CurrentUser, member: Letter, action: str = "read") -> bool:
+
+
+
+        """Apply the seed's per-letter read rule (scope, drafter assignment, permission) to a thread member."""
+
+
+
+        try:
+
+
+
+            await self.auth_service.check_letter_access(current_user, member, action)
+
+
+
+        except BaseDomainError as exc:
+
+
+
+            if exc.http_status in (status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND):
+
+
+
+                return False
+
+
+
+            raise
+
+
+
+        except HTTPException as exc:
+
+
+
+            if exc.status_code in (status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND):
+
+
+
+                return False
+
+
+
+            raise
+
+
+
+        return True
+
+
+
+
+
+
+
+
+
+
+
     async def get_conversation_chain(
 
 
@@ -800,7 +900,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -808,35 +908,19 @@ class LetterController:
 
 
 
-            letter = await self.letter_service.get_letter_by_id(letter_id)
+            letter = await self._readable_letter_or_404(letter_id, current_user)
 
 
 
-            if not letter:
 
 
 
-                raise LetterError("Letter not found", status.HTTP_404_NOT_FOUND)
+
+            # Every member, not only the seed, is bounded by the caller's scope
 
 
 
-            
-
-
-
-            await self.auth_service.check_letter_access(current_user, letter, "read")
-
-
-
-            
-
-
-
-            # Get chain efficiently
-
-
-
-            chain = await self.conversation_service.get_conversation_chain(
+            chain = await self.conversation_service.get_authorized_conversation_chain(
 
 
 
@@ -848,7 +932,31 @@ class LetterController:
 
 
 
-            
+            chain = [
+
+
+
+                member for member in chain
+
+
+
+                if str(member.id) == str(letter.id) or await self._member_readable(current_user, member)
+
+
+
+            ]
+
+
+
+            visible = await self.conversation_service.with_visible_threading({str(member.id): member for member in chain})
+
+
+
+            chain = list(visible.values())
+
+
+
+
 
 
 
@@ -856,11 +964,11 @@ class LetterController:
 
 
 
-            
 
 
 
-        except (LetterError, HTTPException):
+
+        except (BaseDomainError, HTTPException):
 
 
 
@@ -924,7 +1032,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -932,39 +1040,31 @@ class LetterController:
 
 
 
-            letter = await self.letter_service.get_letter_by_id(letter_id)
+            await self._readable_letter_or_404(letter_id, current_user)
 
 
 
-            if not letter:
 
 
 
-                raise LetterError("Letter not found", status.HTTP_404_NOT_FOUND)
+
+            # Build the tree from the letters the caller may see
 
 
 
-            
+            tree = await self.conversation_service.build_authorized_conversation_tree(
 
 
 
-            await self.auth_service.check_letter_access(current_user, letter, "read")
+                letter_id,
 
 
 
-            
+                current_user,
 
 
 
-            # Build tree efficiently
-
-
-
-            tree = await self.conversation_service.build_conversation_tree(
-
-
-
-                letter.conversation_id, current_user
+                include=lambda member: self._member_readable(current_user, member),
 
 
 
@@ -972,7 +1072,15 @@ class LetterController:
 
 
 
-            
+            if tree is None:
+
+
+
+                raise LetterError("Letter not found", status.HTTP_404_NOT_FOUND)
+
+
+
+
 
 
 
@@ -980,11 +1088,11 @@ class LetterController:
 
 
 
-            
 
 
 
-        except (LetterError, HTTPException):
+
+        except (BaseDomainError, HTTPException):
 
 
 
@@ -1060,39 +1168,19 @@ class LetterController:
 
 
 
-            
 
 
 
-            # Validate both letters exist and user has access
+
+            # A letter the caller may not read is reported exactly like a missing
 
 
 
-            letter = await self.letter_service.get_letter(letter_id)
+            # one, so neither id can be probed for existence.
 
 
 
-            new_parent = await self.letter_service.get_letter(new_parent_id)
-
-
-
-            
-
-
-
-            if not letter or not new_parent:
-
-
-
-                raise LetterError("Letter not found", status.HTTP_404_NOT_FOUND)
-
-
-
-            
-
-
-
-            # Authorization checks
+            letter = await self._readable_letter_or_404(letter_id, current_user)
 
 
 
@@ -1100,11 +1188,11 @@ class LetterController:
 
 
 
-            await self.auth_service.check_letter_access(current_user, new_parent, "read")
+            new_parent = await self._readable_letter_or_404(new_parent_id, current_user)
 
 
 
-            
+
 
 
 
@@ -1114,13 +1202,68 @@ class LetterController:
 
             await self._validate_reparenting(letter, new_parent)
 
+            # The parent's ancestry is copied into the moved letter and every
+            # descendant, so it must be a same-scope chain of existing letters.
+            if not await self.conversation_service.ancestry_in_scope(
+                new_parent.ancestors, letter.organization_id, letter.project_id
+            ):
+                raise LetterError(PARENT_ANCESTRY_BLOCKS_MOVE, status.HTTP_409_CONFLICT)
 
 
-            
 
 
 
-            # Perform reparenting with transaction
+
+
+            # Every descendant's ancestry is rewritten. A descendant the caller may
+
+
+
+            # not edit, or one filed in another organisation or project, blocks the
+
+
+
+            # move; all of them get the same answer, so a hidden reply is not revealed.
+
+
+
+            descendants = await self.conversation_service.get_descendants(letter_id)
+
+
+
+            moved_scope = (str(letter.organization_id or ""), str(letter.project_id or ""))
+
+
+
+            for descendant in descendants:
+
+
+
+                in_scope = (str(descendant.organization_id or ""), str(descendant.project_id or "")) == moved_scope
+
+
+
+                if not in_scope or not await self._member_readable(current_user, descendant, action="update"):
+
+
+
+                    raise LetterError(DEPENDENT_LETTER_BLOCKS_MOVE, status.HTTP_409_CONFLICT)
+
+
+
+
+
+
+
+            # Write the move: the letter, then each authorised descendant, as
+
+
+
+            # separate writes. This is NOT transactional - concurrent reparents
+
+
+
+            # can race, and a failure part-way leaves mixed ancestry (open defect).
 
 
 
@@ -1128,7 +1271,11 @@ class LetterController:
 
 
 
-                letter_id, new_parent_id, current_user
+                letter_id, new_parent_id, current_user,
+
+
+
+                descendant_ids=[descendant.id for descendant in descendants],
 
 
 
@@ -1136,7 +1283,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -1144,11 +1291,11 @@ class LetterController:
 
 
 
-            
 
 
 
-        except (LetterError, HTTPException):
+
+        except (BaseDomainError, HTTPException):
 
 
 
@@ -1272,7 +1419,7 @@ class LetterController:
 
 
 
-        
+
 
 
 
@@ -1292,7 +1439,7 @@ class LetterController:
 
 
 
-        
+
 
 
 
@@ -1312,7 +1459,7 @@ class LetterController:
 
 
 
-        
+
 
 
 
@@ -1616,7 +1763,7 @@ class LetterController:
 
 
 
-        
+
 
 
 
@@ -1644,7 +1791,7 @@ class LetterController:
 
 
 
-        
+
 
 
 
@@ -1684,7 +1831,7 @@ class LetterController:
 
 
 
-                "Previous letter not found", 
+                "Previous letter not found",
 
 
 
@@ -1696,7 +1843,7 @@ class LetterController:
 
 
 
-        
+
 
 
 
@@ -1708,7 +1855,7 @@ class LetterController:
 
 
 
-        
+
 
 
 
@@ -1724,7 +1871,7 @@ class LetterController:
 
 
 
-        
+
 
 
 
@@ -1752,7 +1899,7 @@ class LetterController:
 
 
 
-        
+
 
 
 
@@ -1824,7 +1971,43 @@ class LetterController:
 
 
 
-        
+
+
+
+
+        # A reparent never links letters across organisations or projects
+
+
+
+        if (str(letter.organization_id or ""), str(letter.project_id or "")) != (
+
+
+
+            str(new_parent.organization_id or ""), str(new_parent.project_id or "")
+
+
+
+        ):
+
+
+
+            raise LetterError(
+
+
+
+                "Letters must belong to the same project",
+
+
+
+                status.HTTP_400_BAD_REQUEST
+
+
+
+            )
+
+
+
+
 
 
 
@@ -1852,7 +2035,7 @@ class LetterController:
 
 
 
-        
+
 
 
 
@@ -1860,7 +2043,7 @@ class LetterController:
 
 
 
-        if str(new_parent.id) in (letter.ancestors or []):
+        if str(letter.id) in [str(ancestor) for ancestor in (new_parent.ancestors or [])]:
 
 
 
@@ -2020,7 +2203,7 @@ async def get_letters(
 
 
 
-    
+
 
 
 
@@ -2318,7 +2501,7 @@ async def get_conversation_tree(
 
 
 
-    return await controller.conversation_service.build_conversation_tree(letter_id, current_user)
+    return await controller.get_conversation_tree(letter_id, current_user)
 
 
 
@@ -2390,11 +2573,11 @@ async def reparent_letter(
 
 
 
-    
 
 
 
-    await controller.conversation_service.reparent_letter_atomic(letter_id, new_parent_id, current_user)
+
+    await controller.reparent_letter(letter_id, new_parent_id, current_user)
 
 
 
@@ -2414,7 +2597,7 @@ async def get_letter_context_documents(
 ):
     """Return curated context documents for the specified letter."""
     await controller.get_letter(letter_id, current_user)
-    return await controller.letter_service.get_context_documents(letter_id)
+    return await controller.letter_service.get_context_documents(letter_id, current_user)
 
 
 @router.put("/letters/{letter_id}/context-documents")
@@ -2449,16 +2632,26 @@ async def generate_letter_strategy_context(
         letter_service=controller.letter_service,
         conversation_service=controller.conversation_service,
     )
-    result = await context_service.generate_context(letter_id)
-    await controller.letter_service.update_letter(
-        letter_id,
-        {
-            "contractor_context": result.contractor_context,
-            "engineer_context": result.engineer_context,
-            "employer_context": result.employer_context,
-            "thread_letters": result.thread_letters,
-        },
-    )
+    result = await context_service.generate_context(letter_id, current_user)
+    if result.thread_letters:
+        # Empty strings, not None. `update_letter` drops None values from a
+        # dict payload, so a role whose only sources were filtered out would
+        # silently KEEP the text an earlier, unbounded run stored -
+        # contamination that outlives the fix. A regeneration overwrites every
+        # role it computed.
+        #
+        # Guarded on an actually-computed thread: a caller whose entitlement
+        # resolves to nothing produced no view of this letter, and their empty
+        # view must not overwrite what other readers legitimately stored.
+        await controller.letter_service.update_letter(
+            letter_id,
+            {
+                "contractor_context": result.contractor_context or "",
+                "engineer_context": result.engineer_context or "",
+                "employer_context": result.employer_context or "",
+                "thread_letters": result.thread_letters,
+            },
+        )
     return result
 
 
@@ -2771,4 +2964,3 @@ async def complete_letter(
 
 
     )
-

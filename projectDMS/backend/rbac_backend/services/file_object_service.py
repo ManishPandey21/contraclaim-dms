@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional
 
 from bson import ObjectId
+from pymongo.errors import DuplicateKeyError
 
 from ..config.document_processing_config import DocumentProcessingConfig
 from ..core.config import settings
@@ -104,6 +105,7 @@ class FileObjectService:
             }
         )
         if existing:
+            await self._record_dedupe_owner(db, existing, document_id)
             return self._result_from_file_object(existing, deduped=True)
 
         mime_type = content_type or sniff_mime_from_bytes(content or b"", original_filename)
@@ -232,6 +234,7 @@ class FileObjectService:
             }
         )
         if existing:
+            await self._record_dedupe_owner(db, existing, document_id)
             return self._result_from_file_object(existing, deduped=True)
 
         source = Path(source_path).expanduser().resolve()
@@ -336,6 +339,15 @@ class FileObjectService:
         result["filepath_s3"] = filepath_s3
         return result
 
+    @staticmethod
+    async def _record_dedupe_owner(db: Any, existing: Dict[str, Any], document_id: Optional[str]) -> None:
+        """A dedupe hit is a new owner of the same bytes. Record it, or
+        `document_ids` under-counts and can never gate a purge."""
+        if document_id:
+            await db.file_objects.update_one(
+                {"_id": existing["_id"]}, {"$addToSet": {"document_ids": document_id}}
+            )
+
     def _result_from_file_object(self, file_object: Dict[str, Any], *, deduped: bool) -> Dict[str, Any]:
         locations = file_object.get("locations") or []
         filepath_local = None
@@ -376,14 +388,26 @@ class FileObjectService:
         metadata_snapshot: Optional[Dict[str, Any]] = None,
         current_user: Any = None,
         reason: str = "upload",
+        version_id: Optional[str] = None,
     ) -> Optional[str]:
+        """Add the document's next version and make it current.
+
+        With ``version_id`` the call is idempotent: the version is inserted
+        under that ``_id`` once, and a repeat, or a concurrent duplicate, returns
+        it unchanged instead of adding another version.
+        """
         if not document_id:
             return None
         db = await self._get_db()
-        await db.document_versions.update_many(
-            {"document_id": document_id, "is_current": True},
-            {"$set": {"is_current": False}},
-        )
+        if version_id is not None and await db.document_versions.find_one(
+            {"_id": version_id}, {"_id": 1}
+        ):
+            return version_id
+        if version_id is None:
+            await db.document_versions.update_many(
+                {"document_id": document_id, "is_current": True},
+                {"$set": {"is_current": False}},
+            )
         previous = await db.document_versions.find_one(
             {"document_id": document_id},
             sort=[("version_number", -1)],
@@ -396,8 +420,22 @@ class FileObjectService:
             metadata_snapshot=metadata_snapshot or {},
             reason=reason,
             created_by=self._actor_id(current_user),
+            **({"_id": version_id} if version_id is not None else {}),
         )
-        result = await db.document_versions.insert_one(version.model_dump(by_alias=True))
+        try:
+            result = await db.document_versions.insert_one(version.model_dump(by_alias=True))
+        except DuplicateKeyError:
+            if version_id is None:
+                raise
+            # A concurrent duplicate won the insert; its row is the version.
+            return version_id
+        if version_id is not None:
+            # Demote only after winning the insert, so a losing duplicate can
+            # never demote the version that won.
+            await db.document_versions.update_many(
+                {"document_id": document_id, "is_current": True, "_id": {"$ne": version_id}},
+                {"$set": {"is_current": False}},
+            )
         version_id = str(result.inserted_id)
         await db.documents.update_one(
             {"_id": self._lookup_id(document_id)},

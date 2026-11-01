@@ -60,4 +60,3 @@ This enables replica scaling and resource limits for Graphiti and LangGraph.
 - Store secrets outside the repository. The Compose file reads the Qdrant API key from config/secrets/qdrant_api_key.
 - Set strong passwords for Redis and FalkorDB in .env.
 - Configure HTTPS by replacing nginx with a TLS-enabled proxy (e.g., using Let's Encrypt certbot sidecar).
-

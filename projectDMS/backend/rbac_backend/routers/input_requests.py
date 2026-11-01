@@ -18,7 +18,7 @@ from ..services.letter_service import LetterService
 from ..dependencies import get_notification_service
 from ..services.authorization_service import AuthorizationService
 from ..models.input_request import (
-    InputRequest, InputRequestCreate, InputRequestUpdate, 
+    InputRequest, InputRequestCreate, InputRequestUpdate,
     InputRequestResponse, InputRequestListResponse, SuggestedKeyPoints
 )
 from ..utils.validation import validate_input, sanitize_text, validate_object_id
@@ -33,7 +33,7 @@ router = APIRouter(tags=["input_requests"])
 
 class InputRequestController:
     """Secure input request controller with comprehensive validation and authorization."""
-    
+
     def __init__(
         self,
         input_request_service: InputRequestService,
@@ -60,13 +60,13 @@ class InputRequestController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id)
-            
+
             # Authorization check
             await self.auth_service.require_permission(current_user, "input_requests:read")
-            
+
             # Validate and normalize letter ID
             validated_letter_id = validate_object_id(letter_id)
-            
+
             # Get letter and verify access
             letter = await self.letter_service.get_letter_by_id(validated_letter_id)
             if not letter:
@@ -74,22 +74,22 @@ class InputRequestController:
                     "Letter not found",
                     status.HTTP_404_NOT_FOUND
                 )
-            
+
             # Check authorization for this specific letter
             await self.auth_service.check_letter_access(current_user, letter, "read")
-            
+
             # Get input requests with pagination
             requests, total_count = await self.input_request_service.get_requests_for_letter_paginated(
                 validated_letter_id, pagination
             )
-            
+
             return InputRequestListResponse(
                 requests=requests,
                 total=total_count,
                 page=pagination["skip"] // pagination["limit"] + 1,
                 limit=pagination["limit"]
             )
-            
+
         except (BaseDomainError, HTTPException):
             raise
         except ValueError:
@@ -111,14 +111,14 @@ class InputRequestController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id, cost=3)
-            
+
             # Authorization check
             await self.auth_service.require_permission(current_user, "input_requests:create")
-            
+
             # Validate inputs
             validated_letter_id = validate_object_id(letter_id)
             validated_data = await self._validate_request_input(request_data)
-            
+
             # Get letter and verify access
             letter = await self.letter_service.get_letter_by_id(validated_letter_id)
             if not letter:
@@ -126,19 +126,19 @@ class InputRequestController:
                     "Letter not found",
                     status.HTTP_404_NOT_FOUND
                 )
-            
+
             # Check authorization for creating requests on this letter
             await self.auth_service.check_letter_access(
                 current_user, letter, "create_input_request"
             )
-            
+
             # Create input request
             input_request = await self.input_request_service.create_request(
                 validated_letter_id, validated_data, current_user
             )
 
             await self._move_letter_to_input_status(validated_letter_id, letter, current_user)
-            
+
             # Audit log
             await self.audit_logger.log_input_request_created(
                 current_user.id, input_request.id, validated_letter_id
@@ -157,9 +157,9 @@ class InputRequestController:
                     validated_letter_id,
                     exc_info=True,
                 )
-            
+
             return input_request
-            
+
         except (BaseDomainError, HTTPException):
             raise
         except ValueError:
@@ -181,14 +181,14 @@ class InputRequestController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id, cost=2)
-            
+
             # Authorization check
             await self.auth_service.require_permission(current_user, "input_requests:respond")
-            
+
             # Validate inputs
             validated_request_id = validate_object_id(request_id)
             validated_response = await self._validate_response_input(response_data)
-            
+
             # Get input request
             input_request = await self.input_request_service.get_request_by_id(
                 validated_request_id
@@ -198,7 +198,7 @@ class InputRequestController:
                     "Input request not found",
                     status.HTTP_404_NOT_FOUND
                 )
-            
+
             # Get associated letter for authorization
             letter = await self.letter_service.get_letter_by_id(input_request.letter_id)
             if not letter:
@@ -206,24 +206,24 @@ class InputRequestController:
                     "Associated letter not found",
                     status.HTTP_404_NOT_FOUND
                 )
-            
+
             # Check authorization for responding to requests on this letter
             await self.auth_service.check_letter_access(
                 current_user, letter, "respond_to_input_request"
             )
-            
+
             # Update request with response
             updated_request = await self.input_request_service.add_response(
                 validated_request_id, validated_response, current_user
             )
-            
+
             # Audit log
             await self.audit_logger.log_input_request_responded(
                 current_user.id, validated_request_id
             )
-            
+
             return updated_request
-            
+
         except (BaseDomainError, HTTPException):
             raise
         except ValueError:
@@ -244,13 +244,13 @@ class InputRequestController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id)
-            
+
             # Authorization check
             await self.auth_service.require_permission(current_user, "input_requests:update")
-            
+
             # Validate request ID
             validated_request_id = validate_object_id(request_id)
-            
+
             # Get input request
             input_request = await self.input_request_service.get_request_by_id(
                 validated_request_id
@@ -260,7 +260,7 @@ class InputRequestController:
                     "Input request not found",
                     status.HTTP_404_NOT_FOUND
                 )
-            
+
             # Authorization check - only request creator or admin can close
             if (input_request.requested_by != current_user.id and
                 not await self.auth_service.has_permission(current_user, "input_requests:admin")):
@@ -268,19 +268,19 @@ class InputRequestController:
                     "Not authorized to close this request",
                     status.HTTP_403_FORBIDDEN
                 )
-            
+
             # Close request
             closed_request = await self.input_request_service.close_request(
                 validated_request_id, current_user
             )
-            
+
             # Audit log
             await self.audit_logger.log_input_request_closed(
                 current_user.id, validated_request_id
             )
-            
+
             return closed_request
-            
+
         except (BaseDomainError, HTTPException):
             raise
         except ValueError:
@@ -301,13 +301,13 @@ class InputRequestController:
         try:
             # Rate limiting for AI operations
             await self.rate_limiter.check_user_limit(current_user.id, cost=5)
-            
+
             # Authorization check
             await self.auth_service.require_permission(current_user, "input_requests:read")
-            
+
             # Validate letter ID
             validated_letter_id = validate_object_id(letter_id)
-            
+
             # Get letter and verify access
             letter = await self.letter_service.get_letter_by_id(validated_letter_id)
             if not letter:
@@ -315,21 +315,21 @@ class InputRequestController:
                     "Letter not found",
                     status.HTTP_404_NOT_FOUND
                 )
-            
+
             # Check authorization for this letter
             await self.auth_service.check_letter_access(current_user, letter, "read")
-            
+
             # Get suggested key points (with caching)
             generated = await self.input_request_service.generate_key_points(
                 validated_letter_id
             )
-            
+
             return SuggestedKeyPoints(
                 letter_id=validated_letter_id,
                 key_points=generated.key_points,
                 generated_at=datetime.utcnow()
             )
-            
+
         except (BaseDomainError, HTTPException):
             raise
         except ValueError:
@@ -539,7 +539,7 @@ async def get_input_request_controller() -> InputRequestController:
     auth_service = AuthorizationService()
     rate_limiter = RateLimiter(scope="input_requests")
     audit_logger = AuditLogger()
-    
+
     return InputRequestController(
         input_request_service, letter_service, auth_service,
         rate_limiter, audit_logger, notification_service

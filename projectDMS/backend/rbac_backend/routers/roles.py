@@ -17,6 +17,7 @@ from ..services.step_up_service import require_step_up
 from ..models.role import Role, RoleCreate, RoleUpdate
 from ..models.permission import Permission
 from ..utils.rate_limiter import RateLimiter
+from ..utils.error_handler import BaseDomainError
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -100,11 +101,11 @@ async def get_roles(
         elif "projectadmin" in role_names:
             filters["scope"] = "project"
         pagination = {'skip': skip, 'limit': limit}
-        
+
         roles, total_count = await role_service.get_roles_paginated(filters, pagination)
         return await role_service.filter_roles_for_user(current_user, roles)
-        
-    except HTTPException:
+
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error(f"Failed to get roles: {str(e)}")
@@ -131,8 +132,8 @@ async def get_role(
         if not await role_service.can_view_role(current_user, role):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to view this role")
         return role
-        
-    except HTTPException:
+
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error(f"Failed to get role {role_id}: {str(e)}")
@@ -171,10 +172,10 @@ async def create_role(
             after=role.model_dump(mode="json") if hasattr(role, "model_dump") else None,
         )
         return role
-        
+
     except RoleServiceError as e:
         raise HTTPException(status_code=e.status_code, detail=str(e))
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error(f"Failed to create role: {str(e)}")
@@ -219,10 +220,10 @@ async def update_role(
             after=role.model_dump(mode="json") if hasattr(role, "model_dump") else None,
         )
         return role
-        
+
     except RoleServiceError as e:
         raise HTTPException(status_code=e.status_code, detail=str(e))
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error(f"Failed to update role {role_id}: {str(e)}")
@@ -270,8 +271,8 @@ async def delete_role(
             before=before.model_dump(mode="json") if hasattr(before, "model_dump") else None,
         )
         return {"message": "Role deleted successfully"}
-        
-    except HTTPException:
+
+    except (BaseDomainError, HTTPException):
         raise
     except RoleServiceError as e:
         raise HTTPException(status_code=e.status_code, detail=str(e))
@@ -301,8 +302,8 @@ async def get_role_permissions(
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to view this role")
         permissions = await role_service.get_role_permissions(role_id)
         return permissions
-        
-    except HTTPException:
+
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error(f"Failed to get role permissions for {role_id}: {str(e)}")
@@ -348,10 +349,10 @@ async def add_role_permission(
             metadata={"permission_id": permission_id},
         )
         return role
-        
+
     except RoleServiceError as e:
         raise HTTPException(status_code=e.status_code, detail=str(e))
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error(f"Failed to add permission to role: {str(e)}")
@@ -397,10 +398,10 @@ async def remove_role_permission(
             metadata={"permission_id": permission_id},
         )
         return role
-        
+
     except RoleServiceError as e:
         raise HTTPException(status_code=e.status_code, detail=str(e))
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error(f"Failed to remove permission from role: {str(e)}")

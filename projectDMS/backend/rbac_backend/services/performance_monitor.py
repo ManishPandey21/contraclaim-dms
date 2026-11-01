@@ -80,20 +80,20 @@ class PerformanceMonitor:
 
     def __init__(self, config: Optional[PerformanceConfig] = None):
         self.config = config or PerformanceConfig()
-        
+
         # Thread-safe collections with size limits
         self.metrics: Deque[PerformanceMetric] = deque(maxlen=self.config.max_metrics)
         self.slow_queries: Deque[PerformanceMetric] = deque(maxlen=self.config.max_slow_queries)
-        
+
         # Statistics tracking
         self.error_count: Dict[str, int] = {}
         self.endpoint_stats: Dict[str, Dict[str, Any]] = {}
-        
+
         # Background task management
         self._monitoring_task: Optional[asyncio.Task] = None
         self._cleanup_task: Optional[asyncio.Task] = None
         self._running = False
-        
+
         # Lock for thread safety
         self._lock = asyncio.Lock()
 
@@ -105,13 +105,13 @@ class PerformanceMonitor:
 
         try:
             self._running = True
-            
+
             # Start monitoring tasks
             self._monitoring_task = asyncio.create_task(self._monitor_system())
             self._cleanup_task = asyncio.create_task(self._cleanup_old_metrics())
-            
+
             logger.info("Performance monitoring started successfully")
-            
+
         except Exception as e:
             self._running = False
             logger.error(f"Failed to start performance monitoring: {e}")
@@ -144,42 +144,42 @@ class PerformanceMonitor:
 
             self._monitoring_task = None
             self._cleanup_task = None
-            
+
             logger.info("Performance monitoring stopped")
-            
+
         except Exception as e:
             logger.error(f"Error stopping performance monitoring: {e}")
 
     async def _monitor_system(self) -> None:
         """Background task to monitor system metrics"""
         logger.info("System monitoring task started")
-        
+
         while self._running:
             try:
                 await asyncio.sleep(self.config.monitoring_interval)
-                
+
                 if not PSUTIL_AVAILABLE:
                     continue
-                
+
                 # Get system metrics
                 try:
                     memory = psutil.virtual_memory()
                     cpu = psutil.cpu_percent(interval=1)
-                    
+
                     # Check for high resource usage
-                    if (memory.percent > self.config.memory_critical_threshold or 
+                    if (memory.percent > self.config.memory_critical_threshold or
                         cpu > self.config.cpu_critical_threshold):
                         logger.critical(
                             f"CRITICAL resource usage - Memory: {memory.percent:.1f}%, "
                             f"CPU: {cpu:.1f}%"
                         )
-                    elif (memory.percent > self.config.memory_warning_threshold or 
+                    elif (memory.percent > self.config.memory_warning_threshold or
                           cpu > self.config.cpu_warning_threshold):
                         logger.warning(
                             f"High resource usage - Memory: {memory.percent:.1f}%, "
                             f"CPU: {cpu:.1f}%"
                         )
-                
+
                 except Exception as e:
                     logger.error(f"Failed to collect system metrics: {e}")
 
@@ -194,12 +194,12 @@ class PerformanceMonitor:
     async def _cleanup_old_metrics(self) -> None:
         """Background task to clean up old metrics"""
         logger.info("Cleanup task started")
-        
+
         while self._running:
             try:
                 await asyncio.sleep(self.config.cleanup_interval)
                 await self._perform_cleanup()
-                
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -213,21 +213,21 @@ class PerformanceMonitor:
         try:
             async with self._lock:
                 cutoff_time = datetime.utcnow() - timedelta(hours=24)
-                
+
                 # Clean metrics older than 24 hours
                 original_metrics_count = len(self.metrics)
                 # Since we're using deque with maxlen, just remove from left
                 while self.metrics and self.metrics[0].timestamp < cutoff_time:
                     self.metrics.popleft()
-                
+
                 # Clean slow queries
                 original_slow_count = len(self.slow_queries)
                 while self.slow_queries and self.slow_queries[0].timestamp < cutoff_time:
                     self.slow_queries.popleft()
-                
+
                 metrics_cleaned = original_metrics_count - len(self.metrics)
                 slow_cleaned = original_slow_count - len(self.slow_queries)
-                
+
                 if metrics_cleaned > 0 or slow_cleaned > 0:
                     logger.info(
                         f"Cleaned up {metrics_cleaned} old metrics and "
@@ -247,7 +247,7 @@ class PerformanceMonitor:
     ) -> None:
         """
         Record a request metric with proper validation and error handling.
-        
+
         Args:
             endpoint: API endpoint path
             method: HTTP method
@@ -259,20 +259,20 @@ class PerformanceMonitor:
             # Validate inputs
             if not endpoint or not isinstance(endpoint, str):
                 raise ValueError("endpoint must be a non-empty string")
-            
+
             if not method or not isinstance(method, str):
                 raise ValueError("method must be a non-empty string")
-            
+
             if not isinstance(response_time, (int, float)) or response_time < 0:
                 raise ValueError("response_time must be a non-negative number")
-            
+
             if not isinstance(status_code, int) or status_code < 100 or status_code > 599:
                 raise ValueError("status_code must be a valid HTTP status code")
 
             # Get system metrics safely
             memory_usage = 0.0
             cpu_usage = 0.0
-            
+
             if PSUTIL_AVAILABLE:
                 try:
                     memory = psutil.virtual_memory()
@@ -320,16 +320,16 @@ class PerformanceMonitor:
             # Don't raise here to avoid breaking the application
 
     def _update_endpoint_stats(
-        self, 
-        endpoint: str, 
-        method: str, 
-        response_time: float, 
+        self,
+        endpoint: str,
+        method: str,
+        response_time: float,
         status_code: int
     ) -> None:
         """Update endpoint statistics (called within lock)"""
         try:
             key = f"{method}:{endpoint}"
-            
+
             if key not in self.endpoint_stats:
                 self.endpoint_stats[key] = {
                     'total_requests': 0,
@@ -356,10 +356,10 @@ class PerformanceMonitor:
     async def get_performance_summary(self, hours: int = 1) -> Dict[str, Any]:
         """
         Get performance summary for the specified time period.
-        
+
         Args:
             hours: Number of hours to look back
-            
+
         Returns:
             Dictionary with performance summary
         """
@@ -368,7 +368,7 @@ class PerformanceMonitor:
                 raise ValueError("hours must be positive")
 
             cutoff_time = datetime.utcnow() - timedelta(hours=hours)
-            
+
             async with self._lock:
                 recent_metrics = [m for m in self.metrics if m.timestamp >= cutoff_time]
 
@@ -388,10 +388,10 @@ class PerformanceMonitor:
             # Calculate statistics
             total_requests = len(recent_metrics)
             response_times = [m.response_time for m in recent_metrics]
-            
+
             avg_response_time = statistics.mean(response_times)
             p50 = statistics.median(response_times)
-            
+
             # Calculate percentiles safely
             sorted_times = sorted(response_times)
             p95_idx = max(0, int(0.95 * len(sorted_times)) - 1)
@@ -406,7 +406,7 @@ class PerformanceMonitor:
             # System metrics
             memory_usages = [m.memory_usage for m in recent_metrics if m.memory_usage > 0]
             cpu_usages = [m.cpu_usage for m in recent_metrics if m.cpu_usage > 0]
-            
+
             avg_memory = statistics.mean(memory_usages) if memory_usages else 0
             avg_cpu = statistics.mean(cpu_usages) if cpu_usages else 0
 
@@ -431,10 +431,10 @@ class PerformanceMonitor:
     async def get_endpoint_stats(self, limit: int = 10) -> List[Dict[str, Any]]:
         """
         Get top endpoint statistics.
-        
+
         Args:
             limit: Maximum number of endpoints to return
-            
+
         Returns:
             List of endpoint statistics
         """
@@ -444,7 +444,7 @@ class PerformanceMonitor:
 
             async with self._lock:
                 stats_list = []
-                
+
                 for endpoint, stats in self.endpoint_stats.items():
                     if stats['total_requests'] > 0:
                         avg_time = stats['total_time'] / stats['total_requests']
@@ -482,10 +482,10 @@ class PerformanceMonitor:
     async def get_slow_queries(self, limit: int = 20) -> List[Dict[str, Any]]:
         """
         Get recent slow queries.
-        
+
         Args:
             limit: Maximum number of slow queries to return
-            
+
         Returns:
             List of slow query information
         """
@@ -531,9 +531,9 @@ class PerformanceMonitor:
                 self.slow_queries.clear()
                 self.error_count.clear()
                 self.endpoint_stats.clear()
-            
+
             logger.info("Performance statistics reset")
-            
+
         except Exception as e:
             logger.error(f"Failed to reset stats: {e}")
             raise PerformanceMonitorError(f"Stats reset failed: {str(e)}")
@@ -553,12 +553,12 @@ class PerformanceMonitor:
 
             # Determine health status
             health_status = "healthy"
-            if (memory.percent > self.config.memory_critical_threshold or 
-                cpu > self.config.cpu_critical_threshold or 
+            if (memory.percent > self.config.memory_critical_threshold or
+                cpu > self.config.cpu_critical_threshold or
                 disk.percent > 90):
                 health_status = "critical"
-            elif (memory.percent > self.config.memory_warning_threshold or 
-                  cpu > self.config.cpu_warning_threshold or 
+            elif (memory.percent > self.config.memory_warning_threshold or
+                  cpu > self.config.cpu_warning_threshold or
                   disk.percent > 80):
                 health_status = "warning"
 

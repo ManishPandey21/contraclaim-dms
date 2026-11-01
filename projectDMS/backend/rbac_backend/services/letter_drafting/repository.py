@@ -306,19 +306,19 @@ class DraftRunRepository:
     async def create_context_pack(self, pack: DraftContextPack) -> DraftContextPack:
         payload = pack.model_dump(by_alias=True, exclude_none=True)
         payload.pop("_id", None)
-        
+
         # Compress data fields to save disk space
         meta_keys = {"context_pack_id", "letter_id", "run_id", "created_at"}
         data_to_compress = {k: v for k, v in payload.items() if k not in meta_keys}
-        
+
         for k in list(payload.keys()):
             if k not in meta_keys:
                 payload.pop(k)
-                
+
         json_bytes = json.dumps(data_to_compress, default=str).encode("utf-8")
         compressed = gzip.compress(json_bytes)
         payload["compressed_data"] = Binary(compressed)
-        
+
         await self.context_packs.insert_one(payload)
         return pack
 
@@ -329,13 +329,13 @@ class DraftRunRepository:
         )
         if not doc:
             return None
-            
+
         if "compressed_data" in doc:
             compressed_bytes = doc.pop("compressed_data")
             decompressed_bytes = gzip.decompress(bytes(compressed_bytes))
             data = json.loads(decompressed_bytes.decode("utf-8"))
             doc.update(data)
-            
+
         return DraftContextPack(**doc)
 
     async def upsert_assignment(self, assignment: DraftReviewAssignment) -> DraftReviewAssignment:

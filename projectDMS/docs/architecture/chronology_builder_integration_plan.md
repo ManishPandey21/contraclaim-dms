@@ -505,4 +505,3 @@ Graph tests:
 - Tenant leakage: enforce org/project scope on every query and test it.
 - Graph drift: treat graph records as derived and reconcile them against Mongo chronology records.
 - Legal overreach: mark new claims or unsupported legal inferences for legal review.
-

@@ -26,25 +26,33 @@ def setup_tracing(app: Any) -> bool:
         return False
     try:
         from opentelemetry import trace
-        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+            OTLPSpanExporter,
+        )
         from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
         from opentelemetry.sdk.resources import Resource
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import BatchSpanProcessor
     except ImportError as exc:  # pragma: no cover - optional dependency
-        logger.warning("OTEL_ENABLED but OpenTelemetry libraries are not installed: %s", exc)
+        logger.warning(
+            "OTEL_ENABLED but OpenTelemetry libraries are not installed: %s", exc
+        )
         return False
 
     try:
         resource = Resource.create({"service.name": settings.OTEL_SERVICE_NAME})
         provider = TracerProvider(resource=resource)
         endpoint = str(settings.OTEL_EXPORTER_OTLP_ENDPOINT or "").strip()
-        exporter = OTLPSpanExporter(endpoint=endpoint) if endpoint else OTLPSpanExporter()
+        exporter = (
+            OTLPSpanExporter(endpoint=endpoint) if endpoint else OTLPSpanExporter()
+        )
         provider.add_span_processor(BatchSpanProcessor(exporter))
         trace.set_tracer_provider(provider)
         FastAPIInstrumentor.instrument_app(app)
         _TRACING_READY = True
-        logger.info("OpenTelemetry tracing enabled (service=%s)", settings.OTEL_SERVICE_NAME)
+        logger.info(
+            "OpenTelemetry tracing enabled (service=%s)", settings.OTEL_SERVICE_NAME
+        )
         return True
     except Exception as exc:  # pragma: no cover - defensive
         logger.error("Failed to initialize OpenTelemetry tracing: %s", exc)
