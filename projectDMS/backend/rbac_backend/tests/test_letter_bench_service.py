@@ -260,6 +260,31 @@ async def test_open_needs_no_form_and_is_idempotent(monkeypatch) -> None:
     assert any(permission == "drafting.request.create" for permission, _, _ in authorized)
 
 
+async def test_two_opens_racing_for_one_document_leave_one_letter(monkeypatch) -> None:
+    from pymongo.errors import DuplicateKeyError
+
+    service, db, _ = _bench(monkeypatch, StubLLM(down=True))
+    winner = await service.open(BenchOpenRequest(incoming_document_id=DOC_ID), _user())
+    boards = db[bench_module.BOARDS]
+    real_find_one, real_insert = boards.find_one, boards.insert_one
+    calls = {"find": 0}
+
+    async def find_one(query, *args, **kwargs):
+        calls["find"] += 1
+        # The loser's existence check ran before the winner's insert landed.
+        return None if calls["find"] == 1 else await real_find_one(query, *args, **kwargs)
+
+    async def insert_one(doc):
+        raise DuplicateKeyError("bench_board_document_unique")
+
+    monkeypatch.setattr(boards, "find_one", find_one)
+    monkeypatch.setattr(boards, "insert_one", insert_one)
+    loser = await service.open(BenchOpenRequest(incoming_document_id=DOC_ID), _user("user2"))
+    monkeypatch.setattr(boards, "insert_one", real_insert)
+    assert loser.created is False and loser.letter_id == winner.letter_id
+    assert len(db.letters.docs) == 1 and len(boards.docs) == 1
+
+
 async def test_open_drafts_as_the_party_the_project_last_drafted_as(monkeypatch) -> None:
     service, db, _ = _bench(monkeypatch, StubLLM(down=True))
     db.letters.docs.append(

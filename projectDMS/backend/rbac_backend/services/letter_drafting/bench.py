@@ -29,6 +29,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from bson import ObjectId
 from fastapi import HTTPException
+from pymongo.errors import DuplicateKeyError
 
 from ...core.config import settings
 from ...models.letter import Letter
@@ -393,7 +394,18 @@ class LetterBenchService:
             created_by=user_id,
             updated_by=user_id,
         )
-        await self.boards.insert_one(board.model_dump(by_alias=True, exclude={"id"}))
+        try:
+            await self.boards.insert_one(board.model_dump(by_alias=True, exclude={"id"}))
+        except DuplicateKeyError:
+            # Two opens raced for the same document; the unique index let one win.
+            # Drop the letter this request created and hand back the winner's.
+            await self.db.letters.delete_one({"_id": ObjectId(str(letter.id))})
+            winner = await self.boards.find_one({"organization_id": organization_id, **origin_key})
+            if not winner:
+                raise
+            return BenchOpenResponse(
+                letter_id=winner["letter_id"], created=False, board_version=winner.get("board_version", 0)
+            )
         return BenchOpenResponse(letter_id=board.letter_id, created=True, board_version=0)
 
     async def _default_role(self, organization_id: str, project_id: Optional[str]) -> str:
