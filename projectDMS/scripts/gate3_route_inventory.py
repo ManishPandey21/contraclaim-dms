@@ -59,6 +59,9 @@ WRAPPERS = {
     "Route",
     "Routes",
     "RouteSkeleton",
+    # Letter Bench: renders its child (an earlier letter screen) unless the
+    # server says that letter has a Bench, then redirects. Not a page itself.
+    "LegacyOrBench",
 }
 
 #: The session boundary. A route is authenticated when it, or any ancestor
@@ -194,6 +197,12 @@ PAGE_STATES: Dict[str, PageStates] = {
         empty=False,
         error="client/src/pages/__tests__/LetterDraftPage.basic-render.test.tsx",
     ),
+    # Letter Bench (behind LETTER_BENCH_ROLLOUT_MODE, default off). No test
+    # yet injects a failed first load into any of the three, so the error
+    # location is declared missing rather than pointed at a nearby test.
+    "BenchOpenRoute": _fetching(empty=False),
+    "LetterBenchPage": _fetching(empty=False),
+    "SkillAdminPage": _fetching(),
     "LetterReviewPage": _fetching(empty=False),
     "LetterApprovalPage": _fetching(empty=False),
     "LetterCompletedPage": _fetching(empty=False),

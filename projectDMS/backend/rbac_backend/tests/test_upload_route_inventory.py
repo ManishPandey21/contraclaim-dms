@@ -59,6 +59,7 @@ KNOWN_UPLOAD_ROUTES = frozenset(
         ("POST", "/key-dates/eot-determinations/{determination_id}/import/preview"),
         ("POST", "/key-dates/eot-determinations/{determination_id}/import"),
         ("POST", "/profiles/photo"),
+        ("POST", "/skills/import"),
         ("POST", "/upload-file"),
     }
 )

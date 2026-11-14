@@ -383,3 +383,172 @@ class IncomingLetterAnalyzer:
         if clauses:
             return "medium"
         return "low"
+
+
+# --------------------------------------------------------------------------- #
+# Assertion extraction with text spans (Letter Bench)
+# --------------------------------------------------------------------------- #
+# Deterministic on purpose: instant, testable and never invents text. Every
+# assertion is a verbatim slice of the cleaned letter, addressed by offsets.
+
+BENCH_CLAUSE_PATTERN = re.compile(
+    r"\b(?:(?:GCC|SCC|PCC|COPA|GC|PC)\s*(?:sub-?clause|clause)?|sub-?clause|clause|article)\s*"
+    r"(\d+[A-Za-z]?(?:\.\d+[A-Za-z]?)*(?:\s?\([a-z0-9]{1,3}\))*)",
+    re.IGNORECASE,
+)
+_NOISE_LINE = re.compile(
+    r"(?:\b(?:tel|telephone|phone|fax|mob|mobile|e-?mail|website|web|cin|gstin?|pan|"
+    r"regd\.?\s*office|registered\s+office|corporate\s+office|head\s+office)\b\s*[:.\-]"
+    r"|www\.|https?://|@[a-z0-9-]+\.[a-z]{2,}|^\s*page\s+\d+(\s+of\s+\d+)?\s*$|^\s*\d+\s*$)",
+    re.IGNORECASE,
+)
+_BODY_START = re.compile(
+    r"^\s*(?:dear\s+(?:sir|madam|sirs|mr|ms)\b.*|sir\s*,|madam\s*,|respected\s+sir.*)$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_SUBJECT_LINE = re.compile(r"^\s*(?:sub(?:ject)?|re)\s*[:.\-].*$", re.IGNORECASE | re.MULTILINE)
+_BODY_END = re.compile(
+    r"^\s*(?:yours\s+(?:faithfully|sincerely|truly)|thanking\s+you|with\s+regards|"
+    r"for\s+and\s+on\s+behalf\s+of|encl(?:osure|s)?\s*[:.]|copy\s+to\s*[:.]|c\.?c\.?\s*:)",
+    re.IGNORECASE | re.MULTILINE,
+)
+_ABBREVIATIONS = (
+    "no", "nos", "rs", "ref", "dt", "dtd", "m/s", "cl", "sub", "dr", "mr", "mrs", "ms",
+    "ltd", "pvt", "viz", "i.e", "e.g", "vs", "st", "co", "inc", "para", "sr", "jr", "fig",
+)
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?;])[\"')\]]?\s+(?=[\"'(\[]?[A-Z0-9])|\n\s*\n")
+_ASSERTION_MARKERS = (
+    "claim", "entitle", "notice", "notify", "hereby", "request", "require", "demand",
+    "constitute", "variation", "extension of time", "eot", "delay", "handed over",
+    "hand over", "failed", "failure", "breach", "default", "instruct", "payment",
+    "compensat", "cost", "damages", "liable", "liability", "invok", "arbitrat",
+    "dispute", "reject", "withh", "deduct", "terminate", "suspend", "obstruct",
+    "hindrance", "additional", "reserve", "refer the", "appoint", "within ",
+)
+_COURTESY = re.compile(
+    r"^\s*(?:we\s+(?:refer|write\s+with\s+reference)\s+to\s+(?:the\s+)?(?:above|your\s+letter)\b[^.]{0,80}\.?"
+    r"|kindly\s+acknowledge.*|this\s+is\s+for\s+your\s+(?:kind\s+)?information.*)\s*$",
+    re.IGNORECASE,
+)
+MAX_ASSERTIONS = 14
+MIN_ASSERTION_CHARS = 30
+MAX_BENCH_TEXT_CHARS = 30000
+
+
+def clean_incoming_text(raw: Optional[str]) -> str:
+    """Strip letterhead / OCR noise so analysis runs on the letter, not its stationery."""
+    if not raw:
+        return ""
+    lines: list[str] = []
+    for line in str(raw).replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        stripped = re.sub(r"[ \t ]+", " ", line).strip()
+        if not stripped:
+            lines.append("")
+            continue
+        if _NOISE_LINE.search(stripped):
+            continue
+        # Rule lines, stamps and scanner artefacts carry almost no letters or digits.
+        # Figures are content: amounts, quantities and date ranges must survive.
+        alphanumeric = sum(1 for ch in stripped if ch.isalnum())
+        if len(stripped) >= 3 and alphanumeric / len(stripped) < 0.3:
+            continue
+        if len(stripped) <= 3 and not stripped[0].isalnum():
+            continue
+        lines.append(stripped)
+    text = "\n".join(lines)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text[:MAX_BENCH_TEXT_CHARS]
+
+
+def extract_clause_refs(text: str) -> list[str]:
+    refs: list[str] = []
+    for match in BENCH_CLAUSE_PATTERN.finditer(text or ""):
+        value = re.sub(r"\s+", "", match.group(1)).strip(".")
+        if value and value not in refs:
+            refs.append(value)
+    return refs[:8]
+
+
+def _body_bounds(text: str) -> tuple[int, int]:
+    start = 0
+    salutation = _BODY_START.search(text)
+    if salutation:
+        start = salutation.end()
+    else:
+        subject = _SUBJECT_LINE.search(text)
+        if subject:
+            start = subject.end()
+    end_match = _BODY_END.search(text, start)
+    end = end_match.start() if end_match else len(text)
+    return (start, end) if end - start > 40 else (0, len(text))
+
+
+def _sentence_spans(text: str, start: int, end: int) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    cursor = start
+    for match in _SENTENCE_BREAK.finditer(text, start, end):
+        candidate = text[cursor:match.start()].rstrip()
+        last_word = candidate.rsplit(None, 1)[-1].rstrip(".").lower() if candidate.strip() else ""
+        if "\n\n" not in match.group(0) and (
+            last_word in _ABBREVIATIONS or re.fullmatch(r"\(?[a-z0-9]{1,3}\)?", last_word or "x" * 9)
+        ):
+            continue  # "Ref. No. 12" / list markers are not sentence ends
+        spans.append((cursor, match.start()))
+        cursor = match.end()
+    spans.append((cursor, end))
+    trimmed: list[tuple[int, int]] = []
+    for span_start, span_end in spans:
+        chunk = text[span_start:span_end]
+        left = len(chunk) - len(chunk.lstrip())
+        right = len(chunk.rstrip())
+        if right - left > 0:
+            trimmed.append((span_start + left, span_start + right))
+    return trimmed
+
+
+def extract_assertions(text: str, *, limit: int = MAX_ASSERTIONS) -> list[dict]:
+    """Return the letter's assertions as verbatim spans of ``text``.
+
+    Each item: ``{"quoted_text", "start", "end", "clause_refs"}``. A sentence is
+    an assertion when it carries a demand, notice, claim or clause reliance.
+    """
+    if not text:
+        return []
+    start, end = _body_bounds(text)
+    found: list[dict] = []
+    for span_start, span_end in _sentence_spans(text, start, end):
+        sentence = text[span_start:span_end]
+        if len(sentence) < MIN_ASSERTION_CHARS or _COURTESY.match(sentence):
+            continue
+        lowered = sentence.lower()
+        clause_refs = extract_clause_refs(sentence)
+        if not clause_refs and not any(marker in lowered for marker in _ASSERTION_MARKERS):
+            continue
+        found.append(
+            {
+                "quoted_text": sentence,
+                "start": span_start,
+                "end": span_end,
+                "clause_refs": clause_refs,
+            }
+        )
+        if len(found) >= limit:
+            break
+    return found
+
+
+def locate_quote(text: str, quote: str) -> Optional[tuple[int, int]]:
+    """Find a model-quoted assertion in the letter, tolerating whitespace drift.
+
+    Returns None when the quote is not in the letter: a quote we cannot place is
+    not shown as the sender's words.
+    """
+    quote = (quote or "").strip().strip("\"'")
+    if len(quote) < 12 or not text:
+        return None
+    index = text.find(quote)
+    if index != -1:
+        return index, index + len(quote)
+    pattern = r"\s+".join(re.escape(token) for token in quote.split())
+    match = re.search(pattern, text, re.IGNORECASE)
+    return (match.start(), match.end()) if match else None
