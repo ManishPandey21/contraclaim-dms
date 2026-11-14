@@ -1576,6 +1576,13 @@ class LetterBenchService:
                 extra_findings=[finding.as_validation_finding() for finding in findings],
             ),
         )
+        if run.draft_artifact and run.draft_artifact.draft_letter:
+            # "Submit for review" binds the letter to the governed artifact by
+            # hash, so the letter body must be exactly what the run recorded.
+            await self.db.letters.update_one(
+                {"_id": ObjectId(str(letter_id))},
+                {"$set": {"content": run.draft_artifact.draft_letter, "updated_at": _now()}},
+            )
         clause_sources: Dict[str, List[str]] = {}
         for source in run.sources:
             if source.clause_number:

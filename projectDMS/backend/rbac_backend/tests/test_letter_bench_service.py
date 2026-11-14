@@ -550,6 +550,8 @@ async def test_compose_writes_one_paragraph_per_assertion_into_a_governed_run(mo
     assert not any("Chief Contract Expert" in (s.text or "") for s in run.sources)
     assert board.assertions[0].source_ids == ["S-clause-20.2"]
     assert await bench_approval_blockers(db, run) == []
+    # Submit-for-review binds by hash: the letter body is exactly the governed artifact.
+    assert db.letters.docs[0]["content"] == letter
 
 
 async def test_offline_compose_is_saved_as_needs_attention_not_completed(monkeypatch) -> None:
