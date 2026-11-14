@@ -149,13 +149,9 @@ export async function submitBenchDraftForReview(letterId: string, draftRunId: st
 }
 
 // ---------------------------------------------------------------- skills
-export async function fetchSkills(params: {
-  organization_id?: string;
-  project_id?: string | null;
-}): Promise<EffectiveSkill[]> {
-  const { data } = await api.get<EffectiveSkill[]>("/skills", {
-    params: { organization_id: params.organization_id, project_id: params.project_id ?? undefined },
-  });
+/** Skills that can be applied on this letter. Authorised by access to the letter, like the board. */
+export async function fetchBenchSkills(letterId: string): Promise<EffectiveSkill[]> {
+  const { data } = await api.get<EffectiveSkill[]>(`${bench(letterId)}/skills`);
   return data;
 }
 

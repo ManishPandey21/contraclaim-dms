@@ -8,13 +8,14 @@ URL and run in the background; the board shows their progress.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends
 from fastapi.responses import JSONResponse
 
 from ..core.database import get_database
 from ..core.security import CurrentUser, get_current_user
+from ..models.skill import EffectiveSkill
 from ..models.letter_bench import (
     AssertionCreateRequest,
     AssertionPatchRequest,
@@ -78,7 +79,8 @@ async def open_bench(
     await bench_run_limiter.check_user_limit(_user_id(current_user))
     opened = await service.open(payload, current_user)
     if opened.created:
-        await service.begin_dissect(opened.letter_id, current_user)
+        # The first analysis is part of opening: `open` already authorised it.
+        await service.begin_first_dissect(opened.letter_id, current_user)
         background.add_task(service.run_dissect, opened.letter_id, current_user)
     return opened
 
@@ -92,6 +94,17 @@ async def get_bench(
 ):
     """Board, chain, step summaries, staleness, gate and deadline."""
     return await service.get(letter_id, current_user)
+
+
+@router.get("/{letter_id}/bench/skills", response_model=List[EffectiveSkill])
+@handle_exceptions
+async def list_bench_skills(
+    letter_id: str,
+    service: LetterBenchService = Depends(get_bench_service),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Skills that can be applied on this letter (names, versions, availability; no skill text)."""
+    return await service.list_skills(letter_id, current_user)
 
 
 @router.post("/{letter_id}/bench/dissect", response_model=BenchAccepted, status_code=202)

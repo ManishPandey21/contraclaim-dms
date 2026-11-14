@@ -95,7 +95,12 @@ async def get_skill_version(
     policy: PolicyService = Depends(get_policy_service),
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    """Full text, references, manifest and hash of one version."""
+    """Full text, references, manifest and hash of one version.
+
+    Skill text is the method itself, so this needs an explicit
+    `drafting.skill.read` grant. Drafters see only names and versions, through
+    `GET /letters/{id}/bench/skills`.
+    """
     organization_id = organization_id or getattr(current_user, "organization_id", None)
     await policy.authorize(
         current_user,

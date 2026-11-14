@@ -441,6 +441,17 @@ class LetterBenchService:
             read_only=status.lower() in READ_ONLY_STATUSES,
         )
 
+    async def list_skills(self, letter_id: str, current_user: Any) -> List[Any]:
+        """Skills in force for this letter's organisation and project.
+
+        Authorised by access to the letter itself, like the board: a drafter
+        who can see the chain on a letter can see which skills could be added
+        to it. Names, versions and availability only; never skill text.
+        """
+        await self._authorize(letter_id, current_user)
+        board = await self._load_board(letter_id)
+        return await self.registry.list_effective(board.organization_id, board.project_id)
+
     async def get_step(self, letter_id: str, step_id: str, current_user: Any) -> SkillStep:
         await self._authorize(letter_id, current_user)
         doc = await self.steps.find_one({"letter_id": str(letter_id), "step_id": step_id})
@@ -474,6 +485,18 @@ class LetterBenchService:
     # ---------------------------------------------------------------- dissect
     async def begin_dissect(self, letter_id: str, current_user: Any) -> BenchAccepted:
         await self._authorize(letter_id, current_user, "drafting.draft.create")
+        return await self.begin_first_dissect(letter_id, current_user)
+
+    async def begin_first_dissect(self, letter_id: str, current_user: Any) -> BenchAccepted:
+        """Mark the analysis as running WITHOUT a further permission check.
+
+        Only for the request that has just created the board through ``open``:
+        that call already authorised reading the document and starting a
+        drafting request in its scope, and the first analysis is part of
+        opening. Requiring ``drafting.draft.create`` here would let a user who
+        may request a draft create a board that can never be analysed. Running
+        the analysis again goes through ``begin_dissect`` and its own check.
+        """
 
         def _running(board: PositionBoard) -> None:
             board.stage = "dissecting" if not board.assertions else board.stage

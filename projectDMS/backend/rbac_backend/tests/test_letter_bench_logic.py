@@ -281,6 +281,14 @@ class _FakeService:
         self.calls.append(("begin_dissect", letter_id))
         return BenchAccepted(letter_id=letter_id, operation="dissect", poll_url=f"/api/letters/{letter_id}/bench")
 
+    async def begin_first_dissect(self, letter_id, current_user):
+        self.calls.append(("begin_first_dissect", letter_id))
+        return BenchAccepted(letter_id=letter_id, operation="dissect", poll_url=f"/api/letters/{letter_id}/bench")
+
+    async def list_skills(self, letter_id, current_user):
+        self.calls.append(("list_skills", letter_id))
+        return []
+
     async def run_dissect(self, letter_id, current_user):
         self.calls.append(("run_dissect", letter_id))
 
@@ -313,7 +321,8 @@ def test_open_route_dissects_in_the_background(monkeypatch) -> None:
     client, service = _client(monkeypatch)
     response = client.post("/api/letters/bench/open", json={"incoming_document_id": "doc1"})
     assert response.status_code == 200 and response.json()["letter_id"] == "L1"
-    assert service.calls == [("open", "doc1"), ("begin_dissect", "L1"), ("run_dissect", "L1")]
+    # The first analysis rides on the open's own authorisation.
+    assert service.calls == [("open", "doc1"), ("begin_first_dissect", "L1"), ("run_dissect", "L1")]
     assert client.post("/api/letters/bench/open", json={}).status_code == 422
 
 
@@ -336,12 +345,13 @@ def test_refusals_keep_their_status_and_do_not_start_work(monkeypatch) -> None:
     assert ("run_compose", "L1") not in service.calls
     service.error = HTTPException(status_code=403, detail="Not authorized for this project")
     assert client.post("/api/letters/bench/open", json={"incoming_document_id": "d"}).status_code == 403
-    assert ("begin_dissect", "L1") not in service.calls
+    assert ("begin_first_dissect", "L1") not in service.calls
 
 
 def test_availability_route_is_not_shadowed_and_reveals_only_the_flag(monkeypatch) -> None:
     client, _ = _client(monkeypatch)
     assert client.get("/api/letters/bench/availability").json() == {"enabled": True, "rollout_mode": "canary"}
     assert client.get("/api/letters/bench/availability?organization_id=org2").json()["enabled"] is False
+    assert client.get("/api/letters/L1/bench/skills").json() == []
     assert client.patch("/api/letters/L1/bench/assertions/A1", json={"verdict": "maybe", "board_version": 1}).status_code == 422
     assert client.patch("/api/letters/L1/bench/assertions/A1", json={"verdict": "none"}).status_code == 422

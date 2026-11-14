@@ -152,7 +152,7 @@ async function mockApi(page: Page, state: State) {
     if (path === "/letters/bench/open" && method === "POST") {
       return json(route, { letter_id: LETTER_ID, created: false, board_version: state.board.board_version });
     }
-    if (path === "/skills") {
+    if (path === `/letters/${LETTER_ID}/bench/skills`) {
       return json(route, [
         { skill_key: VARIATIONS, name: "Variations", description: "Variation evaluation", kind: "evaluation", use_when: "Deciding whether something is a variation and how it should be valued.", version: "1.0.0", roles_supported: ["contractor", "engineer", "employer"], contract_forms: [], chains_to: [], required_inputs: [], enabled: true, pinned: false, available: true },
         { skill_key: "indian-infra-eot-claims", name: "Extension of time review", description: "", kind: "evaluation", roles_supported: [], contract_forms: [], chains_to: [], required_inputs: [], enabled: true, pinned: false, available: false, unavailable_reason: "Not installed" },

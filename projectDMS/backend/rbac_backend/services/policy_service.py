@@ -15,8 +15,10 @@ from ..services.usage_metering_service import QuotaExceededError, UsageMeteringS
 class PolicyService:
     """Central deny-by-default authorization policy."""
 
-    # Reading which skills are in force is needed by every drafter on the
-    # Letter Bench, so it follows client scope like starting a request does.
+    # A holder of drafting.skill.read may read the skill registry within their
+    # own client scope, like starting a request. The role must still hold the
+    # permission: has_permission() is checked before this rule. Drafters do not
+    # need it; the Letter Bench lists skills through a letter-scoped route.
     CLIENT_DRAFTING_PERMISSIONS = {
         Permissions.DRAFTING_REQUEST_CREATE,
         Permissions.DRAFTING_SKILL_READ,

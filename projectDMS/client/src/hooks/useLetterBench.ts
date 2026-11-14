@@ -11,8 +11,8 @@ import {
   dissectLetter,
   fetchBench,
   fetchBenchAvailability,
+  fetchBenchSkills,
   fetchSkillStep,
-  fetchSkills,
   lockPositions,
   openBench,
   patchAssertion,
@@ -34,8 +34,7 @@ export const benchKeys = {
   availability: ["letter-bench", "availability"] as const,
   bench: (letterId: string) => ["letter-bench", "board", letterId] as const,
   step: (letterId: string, stepId: string) => ["letter-bench", "step", letterId, stepId] as const,
-  skills: (organizationId?: string, projectId?: string | null) =>
-    ["letter-bench", "skills", organizationId ?? "", projectId ?? ""] as const,
+  skills: (letterId: string) => ["letter-bench", "skills", letterId] as const,
 };
 
 const CLIENT_FLAG_OFF = String(import.meta.env?.VITE_LETTER_BENCH_ENABLED ?? "").toLowerCase() === "false";
@@ -80,11 +79,11 @@ export function useBench(letterId: string | undefined, options: { enabled?: bool
   });
 }
 
-export function useSkills(organizationId?: string, projectId?: string | null) {
+export function useSkills(letterId: string | undefined, options: { enabled?: boolean } = {}) {
   return useQuery({
-    queryKey: benchKeys.skills(organizationId, projectId),
-    queryFn: () => fetchSkills({ organization_id: organizationId, project_id: projectId }),
-    enabled: Boolean(organizationId),
+    queryKey: benchKeys.skills(letterId ?? ""),
+    queryFn: () => fetchBenchSkills(letterId as string),
+    enabled: Boolean(letterId) && (options.enabled ?? true),
     staleTime: 5 * 60_000,
   });
 }

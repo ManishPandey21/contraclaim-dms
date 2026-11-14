@@ -296,6 +296,43 @@ async def test_open_drafts_as_the_party_the_project_last_drafted_as(monkeypatch)
     assert opened.created
 
 
+async def test_a_user_who_may_only_request_drafts_still_gets_the_first_analysis(monkeypatch) -> None:
+    """Opening must not create a board that can never be analysed."""
+    service, db, _ = _bench(monkeypatch, StubLLM(down=True))
+
+    async def requester_only(current_user, permission, **kwargs):
+        if permission != "drafting.request.create":
+            raise HTTPException(status_code=403, detail="Missing expert allocation")
+
+    monkeypatch.setattr(service.drafts.policy_service, "authorize", requester_only)
+    opened = await service.open(BenchOpenRequest(incoming_document_id=DOC_ID), _user())
+    await service.begin_first_dissect(opened.letter_id, _user())
+    await service.run_dissect(opened.letter_id, _user())
+    bench = await service.get(opened.letter_id, _user())
+    assert bench.board.stage == "positions" and len(bench.board.assertions) == 4
+    # Everything after opening still needs its own permission.
+    with pytest.raises(HTTPException) as denied:
+        await service.begin_dissect(opened.letter_id, _user())
+    assert denied.value.status_code == 403
+    with pytest.raises(HTTPException) as edit_denied:
+        await service.patch_assertion(
+            opened.letter_id, "A1", AssertionPatchRequest(board_version=bench.board.board_version, verdict="none"), _user()
+        )
+    assert edit_denied.value.status_code == 403
+    assert (await service.get(opened.letter_id, _user())).board.assertions[0].verdict is None
+
+
+async def test_skills_for_a_letter_need_only_access_to_that_letter(monkeypatch) -> None:
+    service, _, authorized = _bench(monkeypatch, StubLLM(down=True))
+    letter_id = await _opened(service)
+    authorized.clear()
+    skills = {skill.skill_key: skill for skill in await service.list_skills(letter_id, _user("reviewer"))}
+    assert authorized == [("letter:read", ORG, None)]
+    assert skills[VARIATIONS_SKILL_KEY].available and skills[VARIATIONS_SKILL_KEY].version == "1.0.0"
+    assert skills[EOT_SKILL_KEY].available is False
+    assert not hasattr(skills[VARIATIONS_SKILL_KEY], "skill_md")  # names and versions, never the method text
+
+
 async def test_open_rejects_unknown_document_and_ambiguous_origin(monkeypatch) -> None:
     service, _, _ = _bench(monkeypatch, StubLLM(down=True))
     with pytest.raises(HTTPException) as missing:

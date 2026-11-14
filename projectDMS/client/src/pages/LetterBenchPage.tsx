@@ -103,7 +103,7 @@ const LetterBenchPage: React.FC = () => {
   const navigate = useNavigate();
   const { data: bench, isLoading, error } = useBench(id);
   const actions = useBenchActions(id);
-  const { data: skills = [] } = useSkills(bench?.board.organization_id, bench?.board.project_id);
+  const { data: skills = [] } = useSkills(id, { enabled: Boolean(bench) });
 
   const store = useLetterBenchStore();
   const reset = useLetterBenchStore((state) => state.reset);

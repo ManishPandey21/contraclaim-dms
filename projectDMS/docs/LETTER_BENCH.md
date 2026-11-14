@@ -67,11 +67,21 @@ version changes without a version bump it reports a warning, which fails
 
 | Permission | Who | Used for |
 | --- | --- | --- |
-| `drafting.skill.read` | any drafter in scope (client-scope rule) | listing skills in force |
+| `drafting.skill.read` | roles granted it, within their own scope | the registry routes, including full skill text |
 | `drafting.skill.publish` | holders of `drafting.admin` | import, publish, deprecate |
 | `drafting.skill.bind` | holders of `drafting.admin` | pin or disable per organisation or project |
 
-Bench routes use the existing letter permissions: letter read access to view,
+Drafters do not need `drafting.skill.read`. The Bench lists the skills that can
+be applied on a letter through `GET /api/letters/{id}/bench/skills`, which is
+authorised by access to that letter and returns names, versions and
+availability only, never skill text.
+
+Opening the Bench needs read access to the document and
+`drafting.request.create` in its scope. The first analysis is part of opening
+and runs under that authorisation; running it again needs
+`drafting.draft.create`.
+
+Other Bench routes use the existing letter permissions: letter read access to view,
 `drafting.draft.create` to edit and run skills, `drafting.request.accept` to
 lock positions (the same permission as accepting a plan), `drafting.draft.edit`
 to edit a reply paragraph.
