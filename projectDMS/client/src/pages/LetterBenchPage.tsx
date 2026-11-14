@@ -112,8 +112,10 @@ const LetterBenchPage: React.FC = () => {
   const frame = useBenchFrame(Boolean(bench));
   const wide = frame.wide;
   const busy = isBenchBusy(bench);
-  const readOnly = Boolean(bench?.read_only);
   const board = bench?.board;
+  // While the reply is being composed the server refuses edits, so the UI does
+  // not offer them: an edit made then would be overwritten when it finishes.
+  const readOnly = Boolean(bench?.read_only) || Boolean(board?.composing);
 
   // "/" opens the skill palette for the selected assertion; Ctrl/Cmd+K does the same.
   useEffect(() => {
@@ -251,7 +253,7 @@ const LetterBenchPage: React.FC = () => {
           }
         />
       </div>
-      <BenchErrorBanner message={board.last_error} />
+      <BenchErrorBanner message={board.last_error} standing={board.model_blocked_reason} />
 
       {/* In a narrow container the three zones become tabs; the gate bar stays fixed. */}
       <div role="tablist" aria-label="Bench views" className={cn("border-b", wide ? "hidden" : "flex")}>
@@ -263,7 +265,17 @@ const LetterBenchPage: React.FC = () => {
             id={`bench-tab-${pane.id}`}
             aria-selected={store.pane === pane.id}
             aria-controls={`bench-pane-${pane.id}`}
+            tabIndex={store.pane === pane.id ? 0 : -1}
             onClick={() => store.setPane(pane.id)}
+            onKeyDown={(event) => {
+              const step = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
+              if (!step) return;
+              event.preventDefault();
+              const index = PANES.findIndex((item) => item.id === pane.id);
+              const next = PANES[(index + step + PANES.length) % PANES.length];
+              store.setPane(next.id);
+              document.getElementById(`bench-tab-${next.id}`)?.focus();
+            }}
             className={cn(
               "min-h-11 flex-1 border-b-2 px-3 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
               store.pane === pane.id
@@ -284,7 +296,8 @@ const LetterBenchPage: React.FC = () => {
       <div className={cn("grid min-h-0 flex-1", wide && "grid-cols-2")}>
         <section
           id="bench-pane-letter"
-          aria-labelledby="bench-letter-heading"
+          role={wide ? undefined : "tabpanel"}
+          aria-labelledby={wide ? "bench-letter-heading" : "bench-tab-letter"}
           className={cn("min-h-0 flex-col border-r", wide || store.pane === "letter" ? "flex" : "hidden")}
         >
           <div className="flex items-center justify-between border-b px-4 py-2">
@@ -319,7 +332,8 @@ const LetterBenchPage: React.FC = () => {
         <div className={cn("min-h-0 flex-col", !wide && store.pane === "letter" ? "hidden" : "flex")}>
           <section
             id="bench-pane-positions"
-            aria-labelledby="bench-positions-heading"
+            role={wide ? undefined : "tabpanel"}
+            aria-labelledby={wide ? "bench-positions-heading" : "bench-tab-positions"}
             className={cn(
               "min-h-0 flex-1 flex-col",
               !wide && store.pane === "reply" ? "hidden" : "flex",
@@ -404,7 +418,8 @@ const LetterBenchPage: React.FC = () => {
           {showReply && (
             <section
               id="bench-pane-reply"
-              aria-labelledby="bench-reply-heading"
+              role={wide ? undefined : "tabpanel"}
+              aria-labelledby={wide ? "bench-reply-heading" : "bench-tab-reply"}
               className={cn(
                 "min-h-0 flex-1 flex-col border-t",
                 wide || store.pane === "reply" ? "flex" : "hidden"

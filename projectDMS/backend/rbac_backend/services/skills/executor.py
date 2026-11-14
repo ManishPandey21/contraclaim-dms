@@ -130,7 +130,10 @@ class SkillExecutor:
         schema_key: Optional[str] = None,
         overlay_text: Optional[str] = None,
         max_tokens: int = 1600,
+        skip_llm: Optional[str] = None,
     ) -> ExecutionResult:
+        """``skip_llm`` (a reason) runs the deterministic fallback without calling
+        the model at all, and records the reason on the degraded step."""
         schema_key = schema_key or version.manifest.output_schema_key
         schema = OUTPUT_SCHEMAS.get(schema_key)
         if schema is None:
@@ -141,6 +144,8 @@ class SkillExecutor:
         error: Optional[str] = None
         output: Optional[BaseModel] = None
         try:
+            if skip_llm:
+                raise SkillStepError(skip_llm)
             prompt = attach_skill_block(render_prompt(record, payload), compiled)
             raw = await self.llm(prompt, max_tokens)
             output = schema.model_validate(parse_json_object(raw))

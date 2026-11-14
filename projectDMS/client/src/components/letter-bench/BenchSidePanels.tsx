@@ -74,7 +74,13 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({ item, readOnly, onAn
   );
 };
 
-export const BenchErrorBanner: React.FC<{ message?: string | null }> = ({ message }) => {
+export const BenchErrorBanner: React.FC<{ message?: string | null; standing?: string | null }> = ({
+  message,
+  standing,
+}) => {
+  // `standing` is a condition that holds until the analysis is run again (the
+  // letter was kept away from the model); `message` is the latest problem.
+  message = [standing, message !== standing ? message : null].filter(Boolean).join(" ") || null;
   if (!message) return null;
   return (
     <div role="alert" className="flex gap-2 border-b border-amber-600 bg-amber-50 px-4 py-2 text-sm text-amber-950 dark:bg-amber-950 dark:text-amber-100">

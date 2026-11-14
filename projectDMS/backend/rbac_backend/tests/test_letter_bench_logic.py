@@ -44,6 +44,18 @@ def test_cleaning_drops_letterhead_noise_and_keeps_the_letter() -> None:
     assert clean_incoming_text(None) == "" and clean_incoming_text("   ") == ""
 
 
+def test_cleaning_keeps_lines_that_are_mostly_figures() -> None:
+    raw = (
+        "Dear Sir,\nAmount claimed: Rs. 12,34,56,789.00\nItem 4.12: 250 m3 @ 4,500 = 11,25,000\n"
+        "12-08-2026 to 27-09-2026 (46 days)\n- - - - - - - - - -\n***\nWe claim payment."
+    )
+    cleaned = clean_incoming_text(raw)
+    assert "Amount claimed: Rs. 12,34,56,789.00" in cleaned
+    assert "Item 4.12: 250 m3 @ 4,500 = 11,25,000" in cleaned
+    assert "12-08-2026 to 27-09-2026 (46 days)" in cleaned
+    assert "- - -" not in cleaned and "***" not in cleaned
+
+
 def test_clause_refs_cover_prefixed_and_lettered_forms() -> None:
     text = "arbitration under GCC 17.5(b), read with Sub-Clause 20.2 and clause 13; see Clause 20.2 again"
     assert extract_clause_refs(text) == ["17.5(b)", "20.2", "13"]

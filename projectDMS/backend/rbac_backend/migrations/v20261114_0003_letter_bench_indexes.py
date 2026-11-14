@@ -32,6 +32,14 @@ INDEXES = [
         "partialFilterExpression": {"incoming_document_id": {"$type": "string"}},
     },
     {
+        # ...and one board per trigger record (a letter started from a variation).
+        "collection": "letter_position_boards",
+        "keys": [("organization_id", 1), ("trigger.type", 1), ("trigger.id", 1)],
+        "name": "bench_board_trigger_unique",
+        "unique": True,
+        "partialFilterExpression": {"trigger.id": {"$type": "string"}},
+    },
+    {
         "collection": "letter_skill_steps",
         "keys": [("letter_id", 1), ("created_at", 1)],
         "name": "bench_step_letter_time",

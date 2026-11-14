@@ -164,6 +164,9 @@ class PositionBoard(BaseModel):
     draft_run_id: Optional[str] = None
     composing: bool = False
     last_error: Optional[str] = None
+    # Set when the incoming text tripped the injection scan: no step on this
+    # board calls the language model until the analysis is run again cleanly.
+    model_blocked_reason: Optional[str] = None
     created_by: Optional[str] = None
     created_at: datetime = Field(default_factory=now_utc)
     updated_by: Optional[str] = None

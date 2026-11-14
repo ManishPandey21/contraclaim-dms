@@ -22,6 +22,7 @@ a ``run_*`` (the work). Routers schedule ``run_*`` in the background and answer
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -78,6 +79,7 @@ from . import bench_logic as logic
 from .clause_checker import normalize_cited_clause
 from .context import condense_text
 from .incoming_analyzer import (
+    MAX_BENCH_TEXT_CHARS,
     clean_incoming_text,
     extract_assertions,
     extract_clause_refs,
@@ -91,10 +93,18 @@ logger = logging.getLogger(__name__)
 BOARDS = "letter_position_boards"
 STEPS = "letter_skill_steps"
 VALID_BENCH_MODES = {"off", "canary", "primary"}
-READ_ONLY_STATUSES = {"review", "approval", "completed"}
+READ_ONLY_STATUSES = {"review", "approval", "completed", "rejected"}
 # Run-level questions the per-assertion verdicts already answer.
 _QUESTIONS_REPLACED_BY_VERDICTS = {"position", "scope"}
-MAX_MATERIAL_CHARS = 12000
+# The whole cleaned letter goes to the analysis; a letter cut short would lose
+# its closing demands without anyone being told.
+MAX_MATERIAL_CHARS = MAX_BENCH_TEXT_CHARS
+_CLOSING_TAGS = re.compile(r"</\s*(incoming_material|assertion|prior_step_output)\s*>", re.IGNORECASE)
+
+
+def _untrusted(text: Optional[str], limit: int = MAX_MATERIAL_CHARS) -> str:
+    """Letter text bound for a prompt: capped, and unable to close the tag that fences it."""
+    return _CLOSING_TAGS.sub("[tag removed]", str(text or ""))[:limit]
 
 
 def bench_rollout(tenant_id: Optional[str], config: Any = settings) -> BenchAvailability:
@@ -181,14 +191,34 @@ class LetterBenchService:
     async def _authorize(
         self, letter_id: str, current_user: Any, permission: Optional[str] = None
     ) -> Letter:
+        """Authorise, then load. Reads need what reading a drafting run needs in the
+        earlier screens (``drafting.request.view``), so the Bench is visible to
+        exactly the people who can see the run it produces. A write names its own
+        permission and is refused once the letter has left drafting: the read-only
+        flag in the response is a courtesy to the UI, this is the rule."""
         letter = await self.drafts._load_and_authorize(
             letter_id,
             current_user,
             "write" if permission else "read",
-            drafting_permission=permission,
+            drafting_permission=permission or "drafting.request.view",
         )
         self.ensure_enabled(str(getattr(letter, "organization_id", "") or ""))
+        if permission and str(getattr(letter, "status", "") or "").lower() in READ_ONLY_STATUSES:
+            raise HTTPException(
+                status_code=409,
+                detail="This letter is no longer in drafting, so its positions and reply cannot be changed.",
+            )
         return letter
+
+    @staticmethod
+    def _ensure_idle(board: PositionBoard) -> None:
+        """An edit made while the reply is being written would be accepted and then
+        overwritten when composing finishes. Refuse it instead."""
+        if board.composing:
+            raise HTTPException(
+                status_code=409,
+                detail="The reply is being composed. Make this change when it has finished.",
+            )
 
     # ---------------------------------------------------------------- storage
     async def _load_board(self, letter_id: str) -> PositionBoard:
@@ -231,8 +261,10 @@ class LetterBenchService:
                 last = exc
         raise last or HTTPException(status_code=409, detail="Could not update the Bench")
 
-    @staticmethod
-    def _check_version(board: PositionBoard, client_version: int) -> None:
+    @classmethod
+    def _check_version(cls, board: PositionBoard, client_version: int, *, allow_composing: bool = False) -> None:
+        if not allow_composing:
+            cls._ensure_idle(board)
         if board.board_version != client_version:
             raise HTTPException(
                 status_code=409,
@@ -328,7 +360,7 @@ class LetterBenchService:
             number = record.get("variation_number") or str(request.trigger_id)
             title = f"Letter on variation {number}"
             subject = f"Variation {number}"
-            recipient = ""
+            recipient = "[CONFIRM: addressee]"
             trigger = {
                 "type": "variation",
                 "id": str(request.trigger_id),
@@ -361,6 +393,12 @@ class LetterBenchService:
         )
 
         existing = await self.boards.find_one({"organization_id": organization_id, **origin_key})
+        if existing and not await self._letter_exists(existing["letter_id"]):
+            # The letter was deleted through the letters screen. Its board would
+            # otherwise answer every future open with a letter that is gone.
+            await self.steps.delete_many({"letter_id": existing["letter_id"]})
+            await self.boards.delete_one({"letter_id": existing["letter_id"]})
+            existing = None
         if existing:
             return BenchOpenResponse(
                 letter_id=existing["letter_id"], created=False, board_version=existing.get("board_version", 0)
@@ -407,6 +445,12 @@ class LetterBenchService:
                 letter_id=winner["letter_id"], created=False, board_version=winner.get("board_version", 0)
             )
         return BenchOpenResponse(letter_id=board.letter_id, created=True, board_version=0)
+
+    async def _letter_exists(self, letter_id: str) -> bool:
+        try:
+            return bool(await self.db.letters.find_one({"_id": ObjectId(str(letter_id))}))
+        except Exception:
+            return True  # never delete a board because a lookup failed
 
     async def _default_role(self, organization_id: str, project_id: Optional[str]) -> str:
         """Draft as the party this project last drafted as; contractor when unknown."""
@@ -485,6 +529,7 @@ class LetterBenchService:
     # ---------------------------------------------------------------- dissect
     async def begin_dissect(self, letter_id: str, current_user: Any) -> BenchAccepted:
         await self._authorize(letter_id, current_user, "drafting.draft.create")
+        self._ensure_idle(await self._load_board(letter_id))
         return await self.begin_first_dissect(letter_id, current_user)
 
     async def begin_first_dissect(self, letter_id: str, current_user: Any) -> BenchAccepted:
@@ -568,6 +613,25 @@ class LetterBenchService:
                 clauses_cited=extract_clause_refs(text),
             )
 
+        # The incoming letter is the most adversarial input in the product. Scan it
+        # BEFORE any skill step: text that tries to instruct the model is not sent
+        # to the model at all, here or in any later step on this board.
+        injection = self.drafts.guardrails.scan_evidence([text])
+        model_blocked = (
+            "This letter contains instruction-like text"
+            + (f" (\"{injection[0].evidence}\")" if getattr(injection[0], "evidence", None) else "")
+            + ", so it was not sent to the language model. Rule-based analysis and template wording "
+            "are used instead. Read the letter and every reply paragraph yourself."
+            if injection
+            else None
+        )
+        notices = [model_blocked] if model_blocked else []
+        if len(text) >= MAX_BENCH_TEXT_CHARS:
+            notices.append(
+                f"Only the first {MAX_BENCH_TEXT_CHARS:,} characters of this document were read. "
+                "Check the end of the letter for points that are missing here."
+            )
+
         extracted = extract_assertions(text)
         if not extracted and board.trigger and text.strip():
             extracted = [{"quoted_text": text, "start": 0, "end": len(text), "clause_refs": extract_clause_refs(text)}]
@@ -593,9 +657,9 @@ class LetterBenchService:
                         "the clauses it relies on, a proposed verdict (entitlement, partial, none or "
                         "need_information) from the drafting party's side, and a one-sentence reason."
                     ),
-                    "subject": str(analysis.subject or getattr(letter, "subject", "") or "Not identified"),
+                    "subject": _untrusted(analysis.subject or getattr(letter, "subject", "") or "Not identified", 500),
                     "contract_form": "Not resolved for this project. Do not assume an edition.",
-                    "material": text[:MAX_MATERIAL_CHARS],
+                    "material": _untrusted(text),
                     "sources": self._clause_sources_text(analysis),
                     "inputs": "None.",
                 },
@@ -603,6 +667,7 @@ class LetterBenchService:
                 parents=[],
                 user_id=user_id,
                 force=True,
+                skip_llm=model_blocked,
             )
             output = LetterAnalysisOutput(**step.output)
 
@@ -661,7 +726,11 @@ class LetterBenchService:
             if step is not None:
                 analysis_link.status, analysis_link.step_id = "done", step.step_id
                 if step.degraded:
-                    analysis_link.reason = "Language model unavailable. Rule-based extraction was used."
+                    analysis_link.reason = (
+                        "Not sent to the language model. Rule-based extraction was used."
+                        if model_blocked
+                        else "Language model unavailable. Rule-based extraction was used."
+                    )
             elif version is None:
                 analysis_link.status, analysis_link.reason = "unavailable", reason
             answers = {item.question.question_id: item.answer for item in fresh.questions}
@@ -690,7 +759,8 @@ class LetterBenchService:
                 paragraph.stale = True
             fresh.stage = "positions"
             fresh.locked_strategy_version = None
-            fresh.last_error = None
+            fresh.model_blocked_reason = model_blocked
+            fresh.last_error = " ".join(notices) or None
             if not text.strip():
                 fresh.last_error = (
                     "No text could be read from this document. Check that it has been processed, "
@@ -756,8 +826,12 @@ class LetterBenchService:
                     "reason": item.reason,
                 }
             )
-        if not located:
-            return [dict(item) for item in extracted]
+        # A model can miss a point. "Never leave an assertion unanswered" starts with
+        # finding them all, so rule-based finds the model did not cover are kept;
+        # a surplus card is removed in one click, a missed demand is not noticed.
+        for item in extracted:
+            if not any(item["start"] < other["end"] and other["start"] < item["end"] for other in located):
+                located.append(dict(item))
         return sorted(located, key=lambda item: item["start"])
 
     # -------------------------------------------------------- step execution
@@ -776,6 +850,7 @@ class LetterBenchService:
         user_id: Optional[str],
         force: bool = False,
         schema_key: Optional[str] = None,
+        skip_llm: Optional[str] = None,
     ) -> SkillStep:
         schema_key = schema_key or version.manifest.output_schema_key
         input_hash = step_input_hash(
@@ -798,6 +873,7 @@ class LetterBenchService:
                 payload=payload,
                 fallback=fallback,
                 schema_key=schema_key,
+                skip_llm=skip_llm,
             )
         except SkillRoleNotSupported as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -829,6 +905,7 @@ class LetterBenchService:
         if request.skill_key == ANALYSIS_SKILL_KEY:
             return await self.begin_dissect(letter_id, current_user)
         board = await self._load_board(letter_id)
+        self._ensure_idle(board)
         version, _binding, reason = await self.registry.resolve(
             request.skill_key, board.organization_id, board.project_id
         )
@@ -930,9 +1007,9 @@ class LetterBenchService:
                         "entitlement, partial, none or need_information from the drafting party's side. "
                         "If data is insufficient, classify accordingly and list exactly what is missing."
                     ),
-                    "subject": str(meta.get("subject") or "Not identified"),
+                    "subject": _untrusted(meta.get("subject") or "Not identified", 500),
                     "contract_form": "Not resolved for this project. Do not assume an edition.",
-                    "material": assertion.quoted_text[:MAX_MATERIAL_CHARS],
+                    "material": _untrusted(assertion.quoted_text),
                     "sources": "\n".join(
                         f"- Clause {check.clause_number}: {check.label}"
                         + (f" ({check.title})" if check.title else "")
@@ -948,6 +1025,7 @@ class LetterBenchService:
                 parents=[board.analysis_step_id] if board.analysis_step_id else [],
                 user_id=user_id,
                 force=force,
+                skip_llm=board.model_blocked_reason,
             )
 
         steps = await self._steps(letter_id)
@@ -985,7 +1063,7 @@ class LetterBenchService:
                 link.skill_version = version.version
                 link.step_id = next(iter(produced.values())).step_id if len(produced) == 1 else None
                 link.reason = (
-                    "Language model unavailable. The skill's 'insufficient information' outcome was recorded."
+                    "No language model result. The skill's 'insufficient information' outcome was recorded."
                     if degraded
                     else None
                 )
@@ -1040,9 +1118,11 @@ class LetterBenchService:
                     for ref in item.clause_refs
                 ]
             logic.propose_verdict(second)
+            # The evaluation was made on the whole text; neither half inherits it.
+            assertion.needs = []
             board.assertions.append(second)
             _reorder(board.assertions)
-            position_changed = True
+            position_changed = routing_changed = True
         elif request.merge_with:
             other = _find(board, request.merge_with)
             if other.assertion_id == assertion.assertion_id:
@@ -1292,7 +1372,10 @@ class LetterBenchService:
         board = await self._load_board(letter_id)
         self._check_version(board, request.board_version)
         if request.deadline_date:
-            board.deadline = logic.manual_deadline(request.deadline_date, request.deadline_basis)
+            try:
+                board.deadline = logic.manual_deadline(request.deadline_date, request.deadline_basis)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail="That is not a valid date") from exc
         if request.role and request.role != board.role:
             # The role overlay is part of every step's input: everything is out of date.
             board.role = request.role
@@ -1340,12 +1423,21 @@ class LetterBenchService:
         if gate.blockers:
             raise HTTPException(status_code=409, detail="; ".join(gate.blockers))
         user_id = _user_id(current_user)
+        now = _now()
+        # Claim the board first. If someone else changed it, this is a 409 and
+        # nothing has been accepted. Only the winner goes on to write a strategy.
+        for assertion in board.assertions:
+            assertion.state = "locked"
+        board.stage = "locked"
+        board.locked_strategy_version = None
+        board.locked_at, board.locked_by = now, user_id
+        board = await self._save(board, request.board_version, user_id)
+
         rows = logic.build_reply_matrix(board)
         analysis = (board.incoming_meta or {}).get("analysis")
         sheet = logic.build_planning_sheet(board, analysis)
         plan = logic.build_plan_text(board, rows)
         skill_chain = self._skill_chain(board, steps)
-        now = _now()
         run = DraftRun(
             run_id=str(uuid.uuid4()),
             letter_id=str(letter_id),
@@ -1363,7 +1455,7 @@ class LetterBenchService:
             reply_matrix=rows,
             plan=plan,
             skill_chain=skill_chain,
-            board_version=request.board_version + 1,
+            board_version=board.board_version,
             skill_manifest_hash=canonical_hash(skill_chain),
             started_at=now,
             completed_at=now,
@@ -1382,7 +1474,7 @@ class LetterBenchService:
             detail="Positions locked on the Letter Bench and accepted as the strategic plan.",
             payload={
                 "strategy_version": strategy_version,
-                "board_version": request.board_version + 1,
+                "board_version": board.board_version,
                 "verdicts": {a.assertion_id: a.verdict for a in board.assertions},
             },
         )
@@ -1390,14 +1482,17 @@ class LetterBenchService:
             await self.db.letters.update_one(
                 {"_id": ObjectId(str(letter_id))}, {"$set": {"strategy_role": board.role}}
             )
-        for assertion in board.assertions:
-            assertion.state = "locked"
-        board.stage = "locked"
-        board.locked_strategy_version = strategy_version
-        board.locked_board_version = request.board_version + 1
-        board.locked_at, board.locked_by = now, user_id
-        board.strategy_run_id = stored.run_id
-        await self._save(board, request.board_version, user_id)
+        locked_board_version = board.board_version
+
+        def _accepted(fresh: PositionBoard) -> None:
+            # If the board moved on since the claim, its positions are no longer
+            # "locked" and the gate will ask for a fresh lock; recording the
+            # version here is then harmless.
+            fresh.locked_strategy_version = strategy_version
+            fresh.locked_board_version = locked_board_version
+            fresh.strategy_run_id = stored.run_id
+
+        await self._mutate(letter_id, _accepted, user_id)
         return await self.get(letter_id, current_user)
 
     @staticmethod
@@ -1464,6 +1559,7 @@ class LetterBenchService:
     ) -> None:
         user_id = _user_id(current_user)
         board = await self._load_board(letter_id)
+        letter = await self.drafts.letter_service.get_letter(letter_id)
         version, _binding, reason = await self.registry.resolve(
             LETTERS_SKILL_KEY, board.organization_id, board.project_id
         )
@@ -1474,6 +1570,7 @@ class LetterBenchService:
         new_points: Dict[str, ReplyParagraph] = {}
         notes: List[str] = []
         degraded: List[str] = []
+        left_stale: List[str] = []
 
         for assertion in sorted(board.assertions, key=lambda item: item.order):
             current = by_assertion.get(assertion.assertion_id)
@@ -1482,7 +1579,10 @@ class LetterBenchService:
                 new_points[assertion.assertion_id] = current  # frozen: reused verbatim
                 continue
             if current is not None and not wanted:
+                # Not asked for in this run: it stays exactly as it is, stale flag included.
                 new_points[assertion.assertion_id] = current
+                if current.stale:
+                    left_stale.append(assertion.assertion_id)
                 continue
             evaluations = [
                 step
@@ -1504,19 +1604,22 @@ class LetterBenchService:
                     "assertion": assertion.quoted_text,
                     "verdict": assertion.verdict,
                     "direction": assertion.user_direction,
-                    "evaluations": [item.step_id for item in evaluations],
+                    # Outputs, not ids: a re-run evaluation keeps its id, and a paragraph
+                    # written from the old result must not be served from the cache.
+                    "evaluations": [canonical_hash(item.output) for item in evaluations],
                     "clause_checks": [check.model_dump() for check in assertion.clause_checks],
                 },
                 payload={
                     "verdict_label": VERDICT_LABELS.get(assertion.verdict or "", "Undecided"),
                     "direction": assertion.user_direction or "None given.",
-                    "assertion": assertion.quoted_text[:MAX_MATERIAL_CHARS],
+                    "assertion": _untrusted(assertion.quoted_text),
                     "clause_check": "; ".join(
                         f"Clause {check.clause_number}: {check.label}" for check in assertion.clause_checks
                     )
                     or "No clause cited by the sender.",
                     "evaluation": "\n".join(
-                        f"- {item.skill_name}: {condense_text(str(item.output), 1200)}" for item in evaluations
+                        f"- {item.skill_name}: {_untrusted(condense_text(str(item.output), 1200))}"
+                        for item in evaluations
                     )
                     or "None.",
                     "sources": "\n".join(
@@ -1530,6 +1633,7 @@ class LetterBenchService:
                 parents=[item.step_id for item in evaluations],
                 user_id=user_id,
                 force=force and wanted,
+                skip_llm=board.model_blocked_reason,
             )
             output = step.output or {}
             if step.degraded:
@@ -1550,6 +1654,22 @@ class LetterBenchService:
 
         framing = logic.framing_paragraphs(board, board.reply_paragraphs)
         board.reply_paragraphs = logic.ordered_paragraphs(board, [*framing.values(), *new_points.values()])
+        if left_stale:
+            # Some paragraphs are still out of date, so this is not yet a reply
+            # that can be saved as a draft. Keep what was written and say so.
+            kept = board.reply_paragraphs
+
+            def _partial(fresh: PositionBoard) -> None:
+                fresh.reply_paragraphs = kept
+                fresh.composing = False
+                for link in fresh.chain:
+                    if link.kind == "drafting" and link.status == "running":
+                        link.status = "stale"
+                        link.reason = f"Still out of date: {', '.join(left_stale)}"
+
+            await self._mutate(letter_id, _partial, user_id)
+            return
+
         steps = await self._steps(letter_id)
         enabled = {
             name
@@ -1576,12 +1696,38 @@ class LetterBenchService:
         plan = logic.build_plan_text(board, rows)
         skill_chain = self._skill_chain(board, steps)
         note_text = "\n".join(notes) or "No residual risks were recorded by the drafting skill."
+        meta = board.incoming_meta or {}
+        stored_analysis = meta.get("analysis") or {}
+        origin = (board.trigger or {}).get("label") or meta.get("letter_no") or "the incoming letter"
+        # The run pipeline refuses a request with no stated basis. On the Bench the
+        # basis is the board itself: the sender's points and the positions on them.
+        positions_text = "\n".join(
+            f"{a.assertion_id}: {VERDICT_LABELS.get(a.verdict or '', 'Undecided')}."
+            + (f" {a.user_direction}" if a.user_direction else "")
+            for a in sorted(board.assertions, key=lambda item: item.order)
+        )
         run = await self.drafts.create_run(
             str(letter_id),
             DraftRunCreateRequest(
                 mode="draft",
                 draft_type="reply" if board.incoming_document_id else "fresh",
                 role=board.role,
+                subject=(meta.get("subject") or getattr(letter, "subject", None) or f"Letter on {origin}")[:500],
+                recipient=(
+                    meta.get("sender") or getattr(letter, "recipient", None) or "[CONFIRM: addressee]"
+                )[:500],
+                purpose=f"Point-by-point letter on {origin}, as decided on the Letter Bench."[:2000],
+                points=positions_text[:8000],
+                trigger_event=(
+                    condense_text(stored_analysis.get("main_request"), 1500) or f"Letter on {origin}"
+                )[:2000],
+                background_facts="\n".join(
+                    f"{a.assertion_id}: {condense_text(a.quoted_text, 500)}"
+                    for a in sorted(board.assertions, key=lambda item: item.order)
+                )[:8000],
+                required_action=next(
+                    (p.text for p in board.reply_paragraphs if p.part == "request"), None
+                ),
                 incoming_document_id=board.incoming_document_id,
                 plan_override=plan[:12000],
                 response_deadline=board.deadline.due_date or board.deadline.raw,
@@ -1611,6 +1757,25 @@ class LetterBenchService:
                 extra_findings=[finding.as_validation_finding() for finding in findings],
             ),
         )
+        if run.status in {"blocked", "failed"} or not (
+            run.draft_artifact and (run.draft_artifact.draft_letter or "").strip()
+        ):
+            # No governed draft exists. Never present this as a composed reply.
+            reasons = [f.message for f in run.validation_report.findings if f.level == "error"]
+            reasons = reasons or [str(w) for w in run.warnings[-2:]] or ["The drafting pipeline returned no draft."]
+            failure = "The reply could not be saved as a draft: " + " ".join(dict.fromkeys(reasons))
+            kept = board.reply_paragraphs
+
+            def _refused(fresh: PositionBoard) -> None:
+                fresh.reply_paragraphs = kept
+                fresh.composing = False
+                fresh.last_error = failure
+                for link in fresh.chain:
+                    if link.kind == "drafting" and link.status != "unavailable":
+                        link.status, link.reason = "failed", failure
+
+            await self._mutate(letter_id, _refused, user_id)
+            return
         if run.draft_artifact and run.draft_artifact.draft_letter:
             # "Submit for review" binds the letter to the governed artifact by
             # hash, so the letter body must be exactly what the run recorded.
@@ -1625,7 +1790,7 @@ class LetterBenchService:
                 clause_sources.setdefault(key, []).append(source.source_id)
 
         def _done(fresh: PositionBoard) -> None:
-            fresh.reply_paragraphs = [p.model_copy(update={"stale": False}) for p in paragraphs]
+            fresh.reply_paragraphs = list(paragraphs)
             fresh.internal_note = note_text
             fresh.draft_run_id = run.run_id
             fresh.composing = False
@@ -1633,7 +1798,7 @@ class LetterBenchService:
             fresh.last_error = (
                 None
                 if run.status in {"completed"}
-                else "The draft was saved but needs attention. Open the checks below the reply."
+                else "The draft was saved but needs attention. Open its checks before submitting."
             )
             for assertion in fresh.assertions:
                 paragraph = next((p for p in paragraphs if p.assertion_id == assertion.assertion_id), None)

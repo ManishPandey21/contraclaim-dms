@@ -28,18 +28,21 @@ describe("VerdictChips", () => {
     expect(within(group).getByRole("radio", { name: /^Partial.*\(proposed\)/ })).toHaveAttribute("aria-checked", "false");
   });
 
-  it("keeps one tab stop and moves with the arrow keys, wrapping at the ends", () => {
+  it("keeps one tab stop; arrows move focus without deciding, a press decides", () => {
     const onChange = vi.fn();
     render(<VerdictChips assertionId="A1" value="entitlement" onChange={onChange} />);
     const radios = screen.getAllByRole("radio");
     expect(radios.map((radio) => radio.tabIndex)).toEqual([0, -1, -1, -1]);
     fireEvent.keyDown(radios[0], { key: "ArrowLeft" });
-    expect(onChange).toHaveBeenLastCalledWith("need_information");
-    expect(radios[3]).toHaveFocus();
+    expect(radios[3]).toHaveFocus(); // wraps
     fireEvent.keyDown(radios[3], { key: "ArrowRight" });
-    expect(onChange).toHaveBeenLastCalledWith("entitlement");
-    fireEvent.keyDown(radios[0], { key: "a" });
-    expect(onChange).toHaveBeenCalledTimes(2);
+    expect(radios[0]).toHaveFocus();
+    // Moving through the options is not a decision: nothing was saved.
+    expect(onChange).not.toHaveBeenCalled();
+    fireEvent.click(radios[2]); // Enter or Space on a button is a click
+    expect(onChange).toHaveBeenCalledWith("none");
+    fireEvent.click(radios[0]); // already chosen: no redundant save
+    expect(onChange).toHaveBeenCalledTimes(1);
   });
 
   it("does not change anything when read-only", () => {
@@ -155,6 +158,18 @@ describe("AssertionCard", () => {
     render(<AssertionCard {...p} />);
     fireEvent.click(screen.getByRole("radio", { name: /^None/ }));
     expect(p.onVerdict).toHaveBeenCalledWith("none");
+  });
+
+  it("shows the current evaluation, not an older superseded one", () => {
+    const step = (id: string, stale: boolean) => ({
+      step_id: id, skill_key: "indian-infra-variations", skill_version: "1.0.0", skill_hash: "h", skill_name: "Variations",
+      target_assertion_ids: ["A1"], output_schema_key: "variation_evaluation.v1", status: "completed" as const, stale, degraded: false,
+    });
+    const p = props({ routedLink: link({ target_assertion_ids: ["A1"] }), steps: [step("old", true), step("current", false)] });
+    render(<AssertionCard {...p} />);
+    expect(screen.getByTestId("assertion-card-A1")).not.toHaveTextContent("out of date");
+    fireEvent.click(screen.getByRole("button", { name: "View evaluation" }));
+    expect(p.onOpenStep).toHaveBeenCalledWith("current");
   });
 
   it("links to the evaluation a routed skill produced and flags it when out of date", () => {

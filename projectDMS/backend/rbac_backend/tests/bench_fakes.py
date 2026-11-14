@@ -121,6 +121,11 @@ class FakeCollection:
                 return _Result(1, 1)
         return _Result(0, 0)
 
+    async def delete_many(self, query: Dict[str, Any]) -> _Result:
+        before = len(self.docs)
+        self.docs[:] = [doc for doc in self.docs if not _match(doc, query)]
+        return _Result(before - len(self.docs), before - len(self.docs))
+
     async def create_index(self, *args: Any, **kwargs: Any) -> str:
         return kwargs.get("name", "index")
 

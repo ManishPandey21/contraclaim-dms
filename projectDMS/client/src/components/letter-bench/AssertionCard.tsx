@@ -75,12 +75,15 @@ export const AssertionCard: React.FC<AssertionCardProps> = ({
     if (direction.trim() !== (assertion.user_direction ?? "")) onDirection(direction);
   };
 
-  const evaluation = steps.find(
+  // The current evaluation: prefer one that is up to date, then the most recent.
+  const evaluations = steps.filter(
     (step) =>
       step.target_assertion_ids.includes(id) &&
       step.output_schema_key !== "reply_paragraph.v1" &&
-      step.output_schema_key !== "letter_analysis.v1"
+      step.output_schema_key !== "letter_analysis.v1" &&
+      (!routedLink || step.skill_key === routedLink.skill_key)
   );
+  const evaluation = [...evaluations].reverse().find((step) => !step.stale) ?? evaluations.at(-1);
   const long = assertion.quoted_text.length > 220;
   const overridden =
     assertion.verdict &&

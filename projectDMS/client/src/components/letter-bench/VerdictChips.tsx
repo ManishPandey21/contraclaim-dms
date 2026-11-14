@@ -27,9 +27,12 @@ interface VerdictChipsProps {
 }
 
 /**
- * The letters skill's four-way classification as a radio group.
- * Arrow keys move and select (standard radio behaviour); each option carries
- * its name in text, so the choice never depends on colour.
+ * The letters skill's four-way classification as a radio group. Each option
+ * carries its name in text, so the choice never depends on colour.
+ *
+ * Arrow keys move focus only; Enter or Space chooses. Choosing is a saved
+ * decision that can unlock positions and put a paragraph out of date, so it
+ * must not happen as a side effect of moving through the options.
  */
 export const VerdictChips: React.FC<VerdictChipsProps> = ({
   assertionId,
@@ -55,7 +58,6 @@ export const VerdictChips: React.FC<VerdictChipsProps> = ({
     event.preventDefault();
     const next = (index + step + VERDICT_ORDER.length) % VERDICT_ORDER.length;
     refs.current[next]?.focus();
-    if (!disabled) onChange(VERDICT_ORDER[next]);
   };
 
   return (
@@ -83,7 +85,9 @@ export const VerdictChips: React.FC<VerdictChipsProps> = ({
             title={VERDICT_DESCRIPTIONS[verdict]}
             tabIndex={index === focusIndex ? 0 : -1}
             disabled={disabled}
-            onClick={() => onChange(verdict)}
+            onClick={() => {
+              if (!checked) onChange(verdict);
+            }}
             onKeyDown={(event) => onKeyDown(event, index)}
             className={cn(
               "inline-flex min-h-9 items-center gap-1.5 rounded-full border px-3 text-sm font-medium transition-colors",

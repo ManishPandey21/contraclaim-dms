@@ -138,6 +138,8 @@ export interface PositionBoard {
   draft_run_id?: string | null;
   composing: boolean;
   last_error?: string | null;
+  /** Set when the letter tripped the injection scan: no step on this board calls the model. */
+  model_blocked_reason?: string | null;
 }
 
 export interface SkillStepSummary {

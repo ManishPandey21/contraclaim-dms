@@ -81,10 +81,30 @@ Opening the Bench needs read access to the document and
 and runs under that authorisation; running it again needs
 `drafting.draft.create`.
 
-Other Bench routes use the existing letter permissions: letter read access to view,
-`drafting.draft.create` to edit and run skills, `drafting.request.accept` to
-lock positions (the same permission as accepting a plan), `drafting.draft.edit`
-to edit a reply paragraph.
+Other Bench routes use the existing drafting permissions, each checked against
+the letter's organisation and project:
+
+| Action | Permission |
+| --- | --- |
+| View the Bench, a step's output, the skills for a letter | `drafting.request.view` (the same as reading a drafting run) |
+| Set positions, edit the chain, run a skill, compose | `drafting.draft.create` |
+| Lock positions | `drafting.request.accept` (the same as accepting a plan) |
+| Edit a reply paragraph | `drafting.draft.edit` |
+
+Two server-side rules apply to every change, whatever the UI shows:
+
+- Once a letter is in Review, Approval, Completed or Rejected the Bench is
+  read-only. Changes are refused with 409.
+- While the reply is being composed, edits are refused with 409, because they
+  would be overwritten when composing finishes.
+
+**To check before switching on.** `PolicyService` requires the role to hold the
+permission and, for drafting permissions other than `drafting.request.create`,
+an expert allocation covering the letter. A client user who may only request
+drafts can therefore open a Bench but not view or decide it, exactly as they
+cannot view a drafting run today. Confirm against production role and
+allocation data that the people meant to work on the Bench hold
+`drafting.request.view` and `drafting.draft.create` for their letters.
 
 ## Publishing a skill version
 
@@ -110,6 +130,13 @@ it used, so publishing never changes what a past run records.
   `needs_attention`, never `completed`.
 - **A step is interrupted.** A board left "running" for 15 minutes is marked
   failed with a visible message the next time it is read.
+- **Instruction-like text in the letter.** The incoming text is scanned before
+  any skill step. If it trips the scan, no step on that board calls the model:
+  analysis is rule-based and paragraphs use template wording, with a standing
+  notice on the Bench, until the analysis is run again on clean text.
+- **The run pipeline refuses the draft.** If composing ends in a blocked or
+  failed run, the board stays at "locked", shows the reason, and the letter
+  body is not written. It is never shown as a composed draft.
 - **Sources.** Skill text is method, not evidence. It never enters the source
   ledger, and the existing unsupported-clause validator still decides whether
   a clause citation is allowed.

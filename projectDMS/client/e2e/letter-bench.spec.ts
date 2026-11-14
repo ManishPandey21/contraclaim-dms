@@ -371,8 +371,12 @@ test.describe("Letter Bench", () => {
     const group = page.getByRole("radiogroup", { name: "Position on A1" });
     await group.getByRole("radio", { name: /^None/ }).focus();
     await page.keyboard.press("ArrowLeft");
-    await expect(group.getByRole("radio", { name: /^Partial/ })).toHaveAttribute("aria-checked", "true");
     await expect(group.getByRole("radio", { name: /^Partial/ })).toBeFocused();
+    // Moving focus is not a decision; Space is.
+    await expect(group.getByRole("radio", { name: /^Partial/ })).toHaveAttribute("aria-checked", "false");
+    expect(state.patchVersions).toEqual([]);
+    await page.keyboard.press("Space");
+    await expect(group.getByRole("radio", { name: /^Partial/ })).toHaveAttribute("aria-checked", "true");
     // The chosen verdict is a solid chip with white text, not a tint.
     await expect(group.getByRole("radio", { name: /^Partial/ })).toHaveCSS("color", "rgb(255, 255, 255)");
     await expect(group.getByRole("radio", { name: /^Partial/ })).toHaveCSS("background-color", "rgb(180, 83, 9)");

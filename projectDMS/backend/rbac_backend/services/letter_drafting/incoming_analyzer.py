@@ -429,11 +429,11 @@ def clean_incoming_text(raw: Optional[str]) -> str:
             continue
         if _NOISE_LINE.search(stripped):
             continue
-        letters = sum(1 for ch in stripped if ch.isalpha())
-        if len(stripped) >= 6 and letters / len(stripped) < 0.45 and not re.search(
-            r"\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}", stripped
-        ):
-            continue  # rule lines, stamps, scanner artefacts
+        # Rule lines, stamps and scanner artefacts carry almost no letters or digits.
+        # Figures are content: amounts, quantities and date ranges must survive.
+        alphanumeric = sum(1 for ch in stripped if ch.isalnum())
+        if len(stripped) >= 3 and alphanumeric / len(stripped) < 0.3:
+            continue
         if len(stripped) <= 3 and not stripped[0].isalnum():
             continue
         lines.append(stripped)
