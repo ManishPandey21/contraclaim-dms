@@ -28,15 +28,12 @@ pass() { printf 'PASS: %s\n' "$1"; }
 warn() { printf 'WARN: %s\n' "$1"; warnings=$((warnings + 1)); }
 fail() { printf 'FAIL: %s\n' "$1"; failures=$((failures + 1)); }
 
-load_env_file() {
-  local file=$1
-  if [[ -f "$file" ]]; then
-    set -a
-    # shellcheck disable=SC1090
-    source "$file"
-    set +a
-  fi
-}
+# The environment file is data, never a program. `source` executed it, and one
+# unquoted `&` in a URI backgrounded the assignment so the variable never
+# arrived - F-A8M-2. See scripts/lib/env_file.sh.
+# shellcheck source=scripts/lib/env_file.sh
+. "$ROOT_DIR/scripts/lib/env_file.sh"
+
 
 get_env() {
   local key=$1
@@ -58,8 +55,8 @@ cd "$ROOT_DIR"
 # Compose injects the root .env into the running services. Load the legacy
 # backend file first only as a fallback; otherwise a stale backend/.env can
 # make readiness checks authenticate with a token that is not deployed.
-load_env_file "$BACKEND_ENV_FILE"
-load_env_file "$ENV_FILE"
+env_file_load "$BACKEND_ENV_FILE"
+env_file_load "$ENV_FILE"
 
 command -v docker >/dev/null 2>&1 && pass "docker is installed" || fail "docker is not installed"
 docker compose version >/dev/null 2>&1 && pass "docker compose is installed" || fail "docker compose plugin is not installed"
@@ -121,10 +118,27 @@ else
   fail "APP_REDIS_URL or RUNTIME_STATE_REDIS_URL is required"
 fi
 
-if [[ -f "$ROOT_DIR/config/secrets/qdrant_api_key" && -s "$ROOT_DIR/config/secrets/qdrant_api_key" ]]; then
-  pass "Qdrant secret file exists"
+# The Qdrant credential, from the place the deployment actually reads it.
+#
+# This used to FAIL unless `config/secrets/qdrant_api_key` existed in the
+# checkout. Two things were wrong with that. `docker-compose.prod.yml`
+# interpolates `${QDRANT_API_KEY}` from the environment and opens no such file, so
+# the check said nothing about whether the stack could start. And the Gate 2
+# staging harness classifies that same file as an INVALID SOURCE and refuses any
+# run that would read it (backend/rbac_backend/tests/staging_gate.py), so one
+# checkout could not satisfy both gates - R-A8I F5.
+qdrant_api_key=$(get_env QDRANT_API_KEY)
+if [[ -n "$qdrant_api_key" ]]; then
+  pass "QDRANT_API_KEY is configured"
 else
-  fail "config/secrets/qdrant_api_key is missing or empty"
+  fail "QDRANT_API_KEY is required; the production compose render cannot resolve without it"
+fi
+
+# The file is still worth naming, as something to remove rather than something to
+# provide: a plaintext credential in the working tree that nothing in the
+# deployment reads is a hazard with no purpose.
+if [[ -f "$ROOT_DIR/config/secrets/qdrant_api_key" ]]; then
+  warn "config/secrets/qdrant_api_key exists in the checkout; nothing in the deployment reads it and the staging gate refuses runs that would. Remove it."
 fi
 
 compose_output=$(mktemp)
@@ -159,13 +173,20 @@ if [[ -n "$backup_bucket" ]]; then
 else
   fail "BACKUP_S3_BUCKET is required for offsite production backups"
 fi
-if [[ -n "$PYTHON_BIN" ]] && "$PYTHON_BIN" "$ROOT_DIR/scripts/backup_status.py" --root "${backup_root:-/var/backups/contractdms}" --max-age-hours "${backup_max_age:-26}"; then
-  pass "Fresh local backup is present"
+# No interpreter means the backups were never examined, and an unexamined
+# backup is not a fresh one. `[[ -n "$PYTHON_BIN" ]] && ...` folded that case
+# into the soft warning branch - the same fail-open shape post_deploy_verify.sh
+# carried. backup_status.py validates archive content as well as age now, so
+# this line claims a usable recovery artefact or it claims nothing.
+if [[ -z "$PYTHON_BIN" ]]; then
+  fail "No Python interpreter was available to check the local backups"
+elif "$PYTHON_BIN" "$ROOT_DIR/scripts/backup_status.py" --root "${backup_root:-/var/backups/contractdms}" --max-age-hours "${backup_max_age:-26}"; then
+  pass "Local backups are fresh, and every archive with a content contract is a valid recovery artefact"
 else
   if [[ "$REQUIRE_FRESH_BACKUP" == "true" || "$REQUIRE_FRESH_BACKUP" == "True" ]]; then
-    fail "Fresh local backup is required before deploy"
+    fail "A fresh, valid local backup is required before deploy"
   else
-    warn "Fresh local backup not found; set REQUIRE_FRESH_BACKUP=true to make this a hard gate"
+    warn "Local backup check failed (freshness, or archive content that will not restore); set REQUIRE_FRESH_BACKUP=true to make this a hard gate"
   fi
 fi
 
@@ -173,6 +194,26 @@ if [[ -f "$ROOT_DIR/docs/OPERATIONS.md" && -f "$ROOT_DIR/docs/PRODUCTION_READINE
   pass "Operations runbook and release gate exist"
 else
   fail "Operations runbook or release gate is missing"
+fi
+
+# System roles (docs/adr/0001, owner decisions Q9/Q14/Q15, 2026-09-15). Super Admin
+# authority attaches to the role name, so who holds it is the control. The audit
+# reads the live role store through the running backend container (the host has
+# none of the app's dependencies) and is fed on stdin, so it also runs against the
+# currently deployed image, which does not ship it. It fails the deploy on a Super
+# User holder, a missing or deactivated superadmin document, a Super Admin holder
+# count other than the approved EXPECTED_SUPERADMIN_HOLDERS, or a role reference
+# that is unresolvable, ambiguous or resolves to an unexpected role. Exit 2 means
+# it could not read the store, which is a failure too.
+expected_superadmin_holders=$(get_env EXPECTED_SUPERADMIN_HOLDERS)
+if [[ ! "$expected_superadmin_holders" =~ ^[0-9]+$ ]]; then
+  fail "EXPECTED_SUPERADMIN_HOLDERS must be set to the approved Super Admin holder count"
+elif docker compose --env-file "$ENV_FILE" $COMPOSE_FILES exec -T backend \
+    python - --expected-superadmin-holders "$expected_superadmin_holders" \
+    <"$ROOT_DIR/scripts/system_role_audit.py"; then
+  pass "System-role audit passed (approved Super Admin holders: $expected_superadmin_holders)"
+else
+  fail "System-role audit failed or could not read the role store; see its FAIL lines above"
 fi
 
 if [[ -f "$ROOT_DIR/backend/rbac_backend/scripts/migrate_database.py" ]]; then

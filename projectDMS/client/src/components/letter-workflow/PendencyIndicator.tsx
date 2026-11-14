@@ -1,7 +1,7 @@
 
 import React from 'react';
 import { Clock, AlertTriangle, History } from 'lucide-react';
-import { 
+import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
@@ -13,26 +13,26 @@ interface PendencyIndicatorProps {
   status: string;
 }
 
-export const PendencyIndicator: React.FC<PendencyIndicatorProps> = ({ 
-  date, 
+export const PendencyIndicator: React.FC<PendencyIndicatorProps> = ({
+  date,
   status
 }) => {
   // Calculate days in current status
   const calculateDaysInStatus = () => {
     const statusDate = new Date(date);
     const currentDate = new Date();
-    
+
     // Calculate difference in milliseconds
     const diffTime = Math.abs(currentDate.getTime() - statusDate.getTime());
-    
+
     // Convert to days
     const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
-    
+
     return diffDays;
   };
 
   const daysInStatus = calculateDaysInStatus();
-  
+
   // Determine urgency levels based on status and days
   const getUrgencyLevel = () => {
     // Completed and Rejected statuses don't need urgency levels
@@ -53,9 +53,9 @@ export const PendencyIndicator: React.FC<PendencyIndicatorProps> = ({
         return 'normal';
     }
   };
-  
+
   const urgency = getUrgencyLevel();
-  
+
   // Get appropriate styling based on urgency
   const getUrgencyStyles = () => {
     switch (urgency) {
@@ -79,14 +79,14 @@ export const PendencyIndicator: React.FC<PendencyIndicatorProps> = ({
         };
     }
   };
-  
+
   const { icon, textColor, label } = getUrgencyStyles();
-  
+
   // Don't show pendency for completed or rejected letters
   if (status === 'Completed' || status === 'Rejected') {
     return <span className="text-gray-500">-</span>;
   }
-  
+
   return (
     <TooltipProvider>
       <Tooltip>

@@ -6,7 +6,11 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ...models.letter import Letter
 from ...models.letter_drafting import DraftContextBundle, DraftRunCreateRequest, SourceEvidence
-from ...models.contract_models import ContractSearchRequest
+from ...models.contract_document import CurrentState
+from ...services.contract_scope_resolver import (
+    ProjectEvidenceUniverse,
+    resolve_authorized_project_universe,
+)
 from ...services.contract_service import ContractService
 from ...services.conversation_service import ConversationService
 from ...services.document_service import DocumentService
@@ -24,6 +28,9 @@ def condense_text(value: Optional[str], width: int = 600) -> Optional[str]:
     return shorten(normalized, width=width, placeholder="...")
 
 
+from ..publication_policy import consumable_fact_text, consumable_summary
+
+
 class DraftContextBuilder:
     """Builds a scoped v2 context bundle and deterministic source ledger."""
 
@@ -37,6 +44,11 @@ class DraftContextBuilder:
     ) -> None:
         self.document_service = document_service
         self.conversation_service = conversation_service
+        # Retained for injection compatibility only. It is NOT an evidence
+        # path: generic contract search resolves no applicability, no
+        # projection currency and no positive publication authority, so it may
+        # not feed a DraftRun. Contract evidence comes from the canonical
+        # universe resolved in `_contract_evidence_universe`.
         self.contract_service = contract_service or ContractService()
         self.graph_service = graph_service or FalkorGraphService()
         # Raw handle for structured clause records + register evidence.
@@ -73,17 +85,20 @@ class DraftContextBuilder:
         )
         sources.extend(document_sources)
 
-        # Structured clause records first (clause-first evidence), then the
-        # legacy contract-search chunks as supplement.
+        # Contract evidence. ONE canonical eligible universe, resolved once and
+        # shared, so no clause source can end up searching a wider population
+        # than another. The legacy `ContractService.search_contracts` supplement
+        # was REMOVED rather than fenced: generic search resolves no
+        # applicability, no projection currency and no positive publication
+        # authority, and it spends its candidate limit before any of them
+        # exist, so there is no point in its pipeline where a fence would work.
+        contract_universe = await self._contract_evidence_universe(
+            org_id, project_id, current_user, warnings
+        )
         clause_record_sources = await self._clause_record_sources(
-            letter, request, org_id, project_id, warnings
+            letter, request, org_id, project_id, contract_universe, warnings
         )
         sources.extend(clause_record_sources)
-
-        clause_sources = await self._contract_clause_sources(
-            letter, request, org_id, project_id, current_user, warnings
-        )
-        sources.extend(clause_sources)
 
         register_sources = await self._register_sources(org_id, project_id, warnings)
         sources.extend(register_sources)
@@ -94,7 +109,7 @@ class DraftContextBuilder:
         sources.extend(prior_sources)
         sources.extend(self._previous_position_sources(prior_sources, org_id, project_id))
 
-        graph_codes, graph_sources = self._graph_sources(letter, request, org_id, project_id, warnings)
+        graph_codes, graph_sources = await self._graph_sources(letter, request, org_id, project_id, warnings)
         sources.extend(graph_sources)
 
         threshold_inputs = {
@@ -165,13 +180,21 @@ class DraftContextBuilder:
                 warnings.append(f"Skipped out-of-workspace document {doc_id}")
                 continue
             selected_ids.append(doc_id)
+            # Extraction-controlled content, so it goes through the
+            # publication policy. This package never imported the policy at
+            # all, so a document in human review or a confirmed duplicate had
+            # its unverified OCR text injected straight into the drafting
+            # prompt. `subject` stays ungated - it is filing metadata, not
+            # extracted body text, so a blocked document remains identifiable.
+            # A fact slot: the document's own text, never the LLM summary
+            # ahead of it. The summary travels beside it as context.
             text = condense_text(
-                getattr(doc, "summary", None)
-                or getattr(doc, "full_text", None)
-                or getattr(doc, "ocrText", None)
+                consumable_fact_text(doc)
+                or consumable_summary(doc)
                 or getattr(doc, "subject", None),
                 1000,
             )
+            summary = condense_text(consumable_summary(doc), 600)
             sources.append(
                 SourceEvidence(
                     source_id=f"document:{doc_id}",
@@ -186,6 +209,7 @@ class DraftContextBuilder:
                     metadata={
                         "letter_no": getattr(doc, "letterNo", None),
                         "upload_type": getattr(doc, "uploadType", None),
+                        **({"summary": summary} if summary else {}),
                     },
                 )
             )
@@ -211,72 +235,43 @@ class DraftContextBuilder:
                 warnings.append(f"Unable to load comments for {doc_id}: {exc}")
         return selected_ids, sources, comments
 
-    async def _contract_clause_sources(
+    async def _contract_evidence_universe(
         self,
-        letter: Letter,
-        request: DraftRunCreateRequest,
         org_id: str,
         project_id: str,
         current_user: Any,
         warnings: List[str],
-    ) -> List[SourceEvidence]:
-        if not org_id or not project_id:
-            return []
-        query = " ".join(
-            part
-            for part in [
-                request.subject or letter.subject,
-                request.purpose,
-                request.requirements,
-                request.points,
-                request.background_facts,
-                request.trigger_event,
-                " ".join(request.clauses_to_consider),
-                letter.content,
-            ]
-            if part
-        )[:800]
-        if not query:
-            return []
+    ) -> Optional[ProjectEvidenceUniverse]:
+        """Resolve the canonical eligible universe once, for every clause source.
+
+        Drafting does not decide what governs a contract; it asks. The answer is
+        positive (applicable at the query mode, canonical Document positively
+        resolvable, publication-consumable, projection-current) and it is
+        resolved for THIS ACTOR, not for the anchor letter's workspace.
+
+        ``None`` means the question could not be answered, which is different
+        from "nothing applies". Both produce zero contract evidence, and neither
+        is allowed to widen into generic search - falling back is exactly the
+        door the Contract Master model closes.
+
+        Query mode is ``CurrentState``: a drafting run is written now and cites
+        what governs now. ``Historical`` is deliberately not inferred from a
+        letter date, because an implicit "as at" would manufacture legal
+        evidence for a date nobody asked about.
+        """
+        if self.db is None or not org_id or not project_id:
+            return None
         try:
-            response = await self.contract_service.search_contracts(
-                ContractSearchRequest(
-                    query=query,
-                    organization_id=org_id,
-                    project_id=project_id,
-                    limit=5,
-                    top_docs=3,
-                    chunks_per_doc=2,
-                    summarize=False,
-                ),
+            return await resolve_authorized_project_universe(
+                self.db,
                 current_user,
+                organization_id=org_id,
+                project_id=project_id,
+                mode=CurrentState(),
             )
         except Exception as exc:
-            warnings.append(f"Contract clause retrieval skipped: {exc}")
-            return []
-        sources: List[SourceEvidence] = []
-        for idx, chunk in enumerate(response.results, start=1):
-            clause_number = chunk.clause_number
-            text = condense_text(chunk.text, 1000)
-            sources.append(
-                SourceEvidence(
-                    source_id=f"clause:{chunk.document_id or chunk.upload_id}:{clause_number or idx}:{chunk.chunk_index or 0}",
-                    source_type="contract_clause",
-                    allowed_use="clause",
-                    organization_id=org_id,
-                    project_id=project_id,
-                    label=f"{clause_number or 'Clause'} {chunk.clause_title or ''}".strip(),
-                    text=text,
-                    snippet=condense_text(text, 300),
-                    document_id=str(chunk.document_id or chunk.upload_id or "") or None,
-                    clause_number=clause_number,
-                    clause_title=chunk.clause_title,
-                    page_numbers=[int(p) for p in (chunk.page_numbers or ([chunk.page] if chunk.page else [])) if p],
-                    score=chunk.score,
-                    metadata={"file_name": chunk.file_name or chunk.source_filename},
-                )
-            )
-        return sources
+            warnings.append(f"Contract evidence unavailable: {exc}")
+            return None
 
     async def _clause_record_sources(
         self,
@@ -284,11 +279,38 @@ class DraftContextBuilder:
         request: DraftRunCreateRequest,
         org_id: str,
         project_id: str,
+        universe: Optional[ProjectEvidenceUniverse],
         warnings: List[str],
     ) -> List[SourceEvidence]:
-        """Structured clause records (contract_clauses) — the primary clause
-        evidence; verified, page-grounded and hierarchy-aware."""
+        """Structured clause records (contract_clauses) - the clause evidence.
+
+        A clause row's ``org_id``/``project_id`` are INGEST PROVENANCE: they say
+        where the row came from, never that the instrument legally governs
+        anything. They used to be the whole filter, so a mis-stamped row
+        authorised itself, and ``is_authorised_for_ai`` did not help - it is
+        written once at clause-index time from clause quality and is never
+        revisited when the parent document's authority changes.
+
+        The canonical eligible set is therefore part of the QUERY, not a filter
+        applied to its result. That ordering is the point: the previous code
+        took the first sixty rows and only then subtracted blocked documents, so
+        sixty ineligible rows could starve the applicable one before authority
+        was ever consulted.
+
+        ``blocked_document_ids`` is gone from this path rather than kept beside
+        the universe. It fails OPEN on an identifier it cannot resolve, and a
+        second predicate that looks like authority is how the real one stops
+        being read.
+        """
         if self.db is None or not org_id or not project_id:
+            return []
+        if universe is None:
+            # Eligibility could not be resolved. There is no partial answer to
+            # give and no broader query that would be safer.
+            return []
+        eligible = sorted(universe.eligible_document_ids)
+        if not eligible:
+            # Valid empty. Nothing applies to this contract, which is an answer.
             return []
         query_text = " ".join(
             part
@@ -308,12 +330,14 @@ class DraftContextBuilder:
                     "project_id": project_id,
                     "is_current": True,
                     "is_authorised_for_ai": True,
+                    "document_id": {"$in": eligible},
                 }
             ).limit(60)
             records = [doc async for doc in cursor]
         except Exception as exc:
             warnings.append(f"Clause record retrieval skipped: {exc}")
             return []
+
         scored: List[tuple[float, dict]] = []
         for record in records:
             haystack = " ".join(
@@ -490,9 +514,27 @@ class DraftContextBuilder:
         project_id: str,
         warnings: List[str],
     ) -> Tuple[List[str], List[SourceEvidence]]:
+        # The conversation family is assembled from ASSOCIATION - a shared
+        # `conversation_id` or a `previous_letter_id` edge - and a reply chain
+        # may cross projects and organisations. Authorisation to the anchor
+        # letter is therefore not authorisation to its thread, so every member
+        # is re-authorised against the ACTOR's canonical row visibility before
+        # any of it becomes drafting material. This must happen here, before the
+        # source ledger, the prompt, the model call and the DraftRun write.
+        #
+        # `get_conversation_chain` accepts `current_user` and never reads it;
+        # the previous filter compared each entry against the anchor LETTER's
+        # organisation/project, which is a workspace-consistency check, not
+        # authority - and it skipped the project axis entirely whenever the
+        # anchor was organisation-level, because `project_id` is optional on a
+        # Letter. That hand-rolled predicate is removed rather than kept beside
+        # the real gate: a second thing that looks like authority is how the
+        # real one stops being read. The anchor's organisation and project
+        # narrow INSIDE the entitlement within the canonical seam, and are
+        # never the authority source.
         try:
-            chain = await self.conversation_service.get_conversation_chain(
-                str(letter.id), current_user=current_user
+            chain = await self.conversation_service.get_authorized_conversation_chain(
+                str(letter.id), current_user
             )
         except Exception as exc:
             warnings.append(f"Prior correspondence unavailable: {exc}")
@@ -504,10 +546,6 @@ class DraftContextBuilder:
             if not getattr(entry, "id", None) or str(entry.id) == str(letter.id):
                 continue
             if normalize_letter_code(str(getattr(entry, "letter_no", "") or "")) in exclude_codes:
-                continue
-            if str(getattr(entry, "organization_id", "") or "") != org_id:
-                continue
-            if project_id and str(getattr(entry, "project_id", "") or "") != project_id:
                 continue
             prior_ids.append(str(entry.id))
             text = condense_text(
@@ -535,7 +573,7 @@ class DraftContextBuilder:
             )
         return prior_ids, sources
 
-    def _graph_sources(
+    async def _graph_sources(
         self,
         letter: Letter,
         request: DraftRunCreateRequest,
@@ -554,10 +592,25 @@ class DraftContextBuilder:
                 warnings.append(f"Graph thread unavailable: {exc}")
         include_codes = {normalize_letter_code(str(code)) for code in request.include_letter_codes or [] if code}
         exclude_codes = {normalize_letter_code(str(code)) for code in request.exclude_letter_codes or [] if code}
+        # G30: a graph node is identity + topology only (G32). Whether its
+        # support may be used is decided by the CANONICAL documents behind the
+        # code, resolved through the certified foundation - never by the node.
+        # Unresolvable provenance fails closed. `build` is async, so this is a
+        # real await, not a nested-loop workaround.
+        from ...services.publication_policy import graph_codes_denied
+
+        candidate_codes = [
+            node.get("normCode") or normalize_letter_code(str(node.get("code") or ""))
+            for node in nodes
+        ]
+        denied_codes = await graph_codes_denied(
+            self.db, [code for code in candidate_codes if code] + sorted(include_codes)
+        )
+
         seen: set[str] = set()
         for node in nodes:
             code = node.get("normCode") or normalize_letter_code(str(node.get("code") or ""))
-            if not code or code in exclude_codes or code in seen:
+            if not code or code in exclude_codes or code in seen or code in denied_codes:
                 continue
             seen.add(code)
             codes.append(code)
@@ -568,12 +621,19 @@ class DraftContextBuilder:
                     allowed_use="history_only",
                     organization_id=org_id,
                     project_id=project_id,
-                    label=node.get("subject") or "Graph-linked letter",
-                    snippet=node.get("subject"),
-                    metadata=dict(node),
+                    # The shared Letter node is identity + topology ONLY (G32):
+                    # it is global across documents and tenants, so any `subject`
+                    # still on it is legacy contamination owned by whichever
+                    # document wrote last - possibly a blocked one, possibly
+                    # another tenant's. Allowing the CODE is not permission to
+                    # serve the NODE's text, so no node value becomes content and
+                    # the raw node never enters metadata.
+                    label="Graph-linked letter",
+                    snippet=None,
+                    metadata={"normCode": code},
                 )
             )
-        for code in include_codes - seen - exclude_codes:
+        for code in include_codes - seen - exclude_codes - denied_codes:
             codes.append(code)
             sources.append(
                 SourceEvidence(

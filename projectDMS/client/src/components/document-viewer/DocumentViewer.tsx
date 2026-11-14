@@ -4,15 +4,17 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { AlertTriangle, ExternalLink, FileText, Loader2 } from "lucide-react";
 import { useParams } from "react-router-dom";
 import { joinApiUrl } from "@/config/api";
-import { authenticatedFetch } from "@/services/http";
+import { fetchApiFileBlob } from "@/services/http";
 
 import type { LocalDocument as Document } from "../../pages/DocumentViewerPage";
 
 interface DocumentViewerProps {
   document: Document;
+  /** Open the PDF at this page (the native viewer honours `#page=`). */
+  page?: number | null;
 }
 
-const DocumentViewer: React.FC<DocumentViewerProps> = ({ document }) => {
+const DocumentViewer: React.FC<DocumentViewerProps> = ({ document, page }) => {
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
@@ -88,18 +90,7 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ document }) => {
           return;
         }
 
-        const fileResp = await authenticatedFetch(
-          joinApiUrl(`/documents/${documentId}/download`),
-        );
-        if (!fileResp.ok) {
-          const errorText = await fileResp.text().catch(() => "");
-          throw new Error(
-            errorText ||
-            `Failed to fetch PDF bytes (${fileResp.status} ${fileResp.statusText})`,
-          );
-        }
-
-        const blob = await fileResp.blob();
+        const blob = await fetchApiFileBlob(joinApiUrl(`/documents/${documentId}/download`));
         if (blob.size === 0) {
           throw new Error("The downloaded PDF file is empty");
         }
@@ -137,8 +128,9 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ document }) => {
 
   const iframeUrl = useMemo(() => {
     if (!pdfUrl) return null;
-    return `${pdfUrl}#toolbar=1&navpanes=0&view=FitH`;
-  }, [pdfUrl]);
+    const pageFragment = page && page > 0 ? `page=${Math.floor(page)}&` : "";
+    return `${pdfUrl}#${pageFragment}toolbar=1&navpanes=0&view=FitH`;
+  }, [pdfUrl, page]);
 
   const openPdf = useCallback(() => {
     if (!pdfUrl) return;
@@ -205,6 +197,9 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ document }) => {
               </div>
             ) : iframeUrl ? (
               <iframe
+                // A fragment-only change does not re-navigate every native
+                // viewer, so a new page remounts the frame.
+                key={iframeUrl}
                 title={document.filename || "PDF document"}
                 src={iframeUrl}
                 className="h-full w-full border-0 bg-white"

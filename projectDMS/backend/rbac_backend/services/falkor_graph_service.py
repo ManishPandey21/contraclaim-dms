@@ -46,6 +46,18 @@ def normalize_letter_code(code: str) -> str:
     return slug or "unknown"
 
 
+#: The ONLY properties that may live on a globally-shared `(:Letter {normCode})`
+#: node. A Letter node is shared across every document (and every tenant) that
+#: cites the same code - the MERGE key is `normCode` alone - so any property that
+#: is document-, tenant-, project-, or perspective-specific must NOT be written
+#: onto it, or the last writer overwrites everyone else's (proven cross-tenant in
+#: `test_graph_letter_ownership_falkor`). `subject`, `date`, `code`, `direction`,
+#: `organization_id`, `project_id`, `project` are all owned by the citing
+#: document and live canonically in Mongo (`letters`); consumers must resolve
+#: them there through the certified authority foundation, not off this node.
+GLOBAL_LETTER_PROPERTIES = frozenset({"normCode", "createdAt", "lastUpdated"})
+
+
 @dataclass(slots=True)
 class FalkorGraphConfig:
     host: str
@@ -91,11 +103,15 @@ class FalkorGraphService:
 
         try:
             # Try to create indexes, but ignore if they already exist
+            # Index ONLY what the shared node still carries. Indexes on
+            # date/direction/organization_id/project_id were left behind after
+            # G32 stripped those properties, and an index is a standing
+            # declaration that a reader exists - it is what made a tenant filter
+            # reading `node.organization_id` look plausible long after nothing
+            # wrote it, turning that filter into a tautology.
             index_queries = [
-                "CREATE INDEX FOR (n:Letter) ON (n.date)",
-                "CREATE INDEX FOR (n:Letter) ON (n.direction)",
-                "CREATE INDEX FOR (n:Letter) ON (n.organization_id)",
-                "CREATE INDEX FOR (n:Letter) ON (n.project_id)",
+                f"CREATE INDEX FOR (n:Letter) ON (n.{prop})"
+                for prop in sorted(GLOBAL_LETTER_PROPERTIES)
             ]
 
             for cypher in index_queries:
@@ -121,12 +137,38 @@ class FalkorGraphService:
         references: Sequence[Dict[str, Any]],
         *,
         cleanup: Optional[bool] = None,
+        owner_document_id: Optional[str] = None,
     ) -> None:
-        """Create/Update a letter node and its reference edges."""
+        """Create/Update a letter node and its reference edges.
+
+        `owner_document_id` attributes every edge this call writes to the
+        document that asserted it. An edge, like the node, is MERGEd on a
+        globally-shared key, so without attribution one tenant's routine sync
+        could not tell its own edges from another tenant's - and the cleanup
+        pass deleted the peer's. Ownership makes cleanup scoped instead of
+        global.
+        """
         if not self.enabled:
             logger.debug("FalkorDB disabled; skipping letter upsert for %s", letter.get("code"))
             return
 
+        owner_document_id = str(
+            owner_document_id or letter.get("owner_document_id") or letter.get("document_id") or ""
+        )
+        # An edge written without an owner is UNRETRACTABLE, permanently: the
+        # reconcile pass matches `e.owner_document_id = $ownerDocumentId` and is
+        # skipped entirely for a blank owner (a blank is a wildcard, not an
+        # identity). Refusing the write is the only way to keep the G31 promise
+        # that anything written can be retracted - previously this produced
+        # edges with owner_document_id='' that no code path could ever remove.
+        # A node-only upsert stays allowed: a bare Letter node is pure shared
+        # identity and carries no owned assertion.
+        if references and not owner_document_id:
+            raise FalkorGraphError(
+                f"Refusing to write {len(references)} reference edge(s) for "
+                f"{letter.get('code')!r} without an owner_document_id: such edges "
+                "cannot be retracted by any cleanup path."
+            )
         norm_code = normalize_letter_code(letter.get("normCode") or letter.get("code", ""))
         if not norm_code:
             logger.debug("Skipping Falkor upsert without valid normCode: %s", letter)
@@ -135,7 +177,7 @@ class FalkorGraphService:
         # Prepare letter payload with proper null handling
         current_time = datetime.now().isoformat()
         formatted_date = self._format_date(letter.get("date"))
-        
+
         # Build payload with explicit None handling for FalkorDB
         payload = {
             "normCode": norm_code,
@@ -173,27 +215,19 @@ class FalkorGraphService:
             except Exception as e:
                 logger.debug("Schema creation had issues but continuing: %s", str(e))
 
-            # Use a simpler upsert query with explicit NULL handling
+            # A shared node carries ONLY globally-canonical properties (G32). The
+            # document/tenant/perspective data (subject/date/direction/org/project/
+            # code) is owned by the citing document and lives in Mongo, so it is
+            # NOT written here - writing it let the last document to sync overwrite
+            # every other document's (and tenant's) representation on the one node
+            # they share. Consumers resolve those fields from Mongo through the
+            # certified authority foundation.
             upsert_query = """
             MERGE (src:Letter {normCode: $normCode})
-            ON CREATE SET 
-                src.code = $code,
-                src.direction = $direction,
-                src.subject = $subject,
-                src.date = $date,
-                src.organization_id = $organization_id,
-                src.project_id = $project_id,
-                src.project = $project,
+            ON CREATE SET
                 src.createdAt = $createdAt,
                 src.lastUpdated = $lastUpdated
-            ON MATCH SET 
-                src.code = $code,
-                src.direction = $direction, 
-                src.subject = $subject,
-                src.date = COALESCE($date, src.date),
-                src.organization_id = COALESCE($organization_id, src.organization_id),
-                src.project_id = COALESCE($project_id, src.project_id),
-                src.project = $project,
+            ON MATCH SET
                 src.lastUpdated = $lastUpdated
             """
 
@@ -211,44 +245,45 @@ class FalkorGraphService:
                             "createdAt": current_time,
                             "lastUpdated": current_time
                         }
-                        
+
+                        # Target Letter node: identity + write metadata only (G32).
+                        # The cited letter's own code/direction/subject belong to
+                        # whatever document authored it, not to this citation.
                         target_query = """
                         MERGE (dst:Letter {normCode: $normCode})
-                        ON CREATE SET 
-                            dst.code = $code,
-                            dst.direction = 'unknown',
+                        ON CREATE SET
                             dst.createdAt = $createdAt,
                             dst.lastUpdated = $lastUpdated
-                        ON MATCH SET 
-                            dst.code = $code,
+                        ON MATCH SET
                             dst.lastUpdated = $lastUpdated
                         """
                         self._execute(target_query, target_payload)
 
                         # Create the relationship with current timestamp
                         rel_payload = {
+                            "ownerDocumentId": owner_document_id,
                             "srcNorm": norm_code,
                             "dstNorm": ref["normCode"],
                             "source": ref["source"],
                             "createdAt": current_time,
                             "updatedAt": current_time
                         }
-                        
+
                         if ref["type"] == "REPLIES_TO":
                             rel_query = """
                             MATCH (src:Letter {normCode: $srcNorm}), (dst:Letter {normCode: $dstNorm})
-                            MERGE (src)-[e:REPLIES_TO]->(dst)
+                            MERGE (src)-[e:REPLIES_TO {owner_document_id: $ownerDocumentId}]->(dst)
                             ON CREATE SET e.source = $source, e.createdAt = $createdAt
                             SET e.updatedAt = $updatedAt
                             """
                         else:
                             rel_query = """
                             MATCH (src:Letter {normCode: $srcNorm}), (dst:Letter {normCode: $dstNorm})
-                            MERGE (src)-[e:CITES]->(dst)
+                            MERGE (src)-[e:CITES {owner_document_id: $ownerDocumentId}]->(dst)
                             ON CREATE SET e.source = $source, e.createdAt = $createdAt
                             SET e.updatedAt = $updatedAt
                             """
-                        
+
                         self._execute(rel_query, rel_payload)
                     except FalkorGraphError as e:
                         logger.warning("Failed to process reference %s: %s", ref["normCode"], str(e))
@@ -257,7 +292,16 @@ class FalkorGraphService:
             # Reconcile only stale Mongo-owned relationships. Keeping desired
             # edges in place makes repeated syncs idempotent and preserves their
             # original creation metadata instead of deleting/recreating them.
-            if (cleanup if cleanup is not None else self.cleanup_enabled):
+            # Reconciliation is scoped to the writing document, so it cannot run
+            # without one: a blank owner is a wildcard, not an identity, and
+            # would delete every other document's edges parked under it.
+            if not owner_document_id and (cleanup if cleanup is not None else self.cleanup_enabled):
+                logger.warning(
+                    "Skipping reference cleanup for %s: no owner_document_id, "
+                    "so this document's own edges cannot be distinguished",
+                    norm_code,
+                )
+            if owner_document_id and (cleanup if cleanup is not None else self.cleanup_enabled):
                 desired_cites = [
                     ref["normCode"] for ref in ref_list if ref["type"] != "REPLIES_TO"
                 ]
@@ -273,12 +317,24 @@ class FalkorGraphService:
                             (
                                 f"MATCH (src:Letter {{normCode: $normCode}})-[e:{relationship}]->"
                                 "(dst:Letter) "
-                                "WHERE (e.source IS NULL OR e.source IN ['parser', 'manual']) "
+                                # Retraction authority is OWNERSHIP, not the
+                                # `source` tag. The tag is an open set - callers
+                                # supply arbitrary `ref["source"]` values and the
+                                # ingestion service emits 'system' for
+                                # previous_letter_id - so an allow-list of tags
+                                # leaves every unlisted tag written-but-never-
+                                # retractable, i.e. a permanent stale graph fact.
+                                # The edge is already keyed by owner_document_id,
+                                # and this block only runs for a non-empty owner,
+                                # so scoping by owner alone is both sufficient and
+                                # complete.
+                                "WHERE e.owner_document_id = $ownerDocumentId "
                                 "AND NOT (dst.normCode IN $desiredNormCodes) DELETE e"
                             ),
                             {
                                 "normCode": norm_code,
                                 "desiredNormCodes": desired,
+                                "ownerDocumentId": owner_document_id,
                             },
                         )
                     except FalkorGraphError as e:
@@ -317,6 +373,43 @@ class FalkorGraphService:
             logger.debug("Skipping Falkor deletion without valid normCode: %r", code)
             return False
 
+        # A peer that merely CITES this code is invisible to the Mongo guards -
+        # they count OWNERS of the code, not dependents - so a blind DETACH
+        # DELETE destroyed another tenant's citation as collateral. Ask the
+        # graph itself whether anyone still depends on the node: if an edge
+        # owned by a different document touches it, keep the node and remove
+        # only this code's own outgoing assertions. Preserving a bare identity
+        # node is safe; serving eligibility is the containment boundary.
+        dependents = self._execute(
+            "MATCH (l:Letter {normCode: $normCode})<-[e]-(:Letter) "
+            "RETURN count(e)",
+            {"normCode": norm_code},
+        )
+        # Defensive parse: a driver/test double may return None or a shape
+        # without result rows. Unknown dependency count means we cannot prove the
+        # node is unreferenced, so fall through to 0 only when the query
+        # genuinely reported none - never crash the containment path.
+        incoming = 0
+        try:
+            rows = dependents[1] if dependents and len(dependents) > 1 else []
+            if rows and rows[0] and rows[0][0]:
+                cell = rows[0][0]
+                incoming = int(cell[1] if isinstance(cell, (list, tuple)) else cell)
+        except (TypeError, ValueError, IndexError):
+            incoming = 0
+        if incoming:
+            logger.info(
+                "Preserving Letter %s: %s incoming citation(s) from other "
+                "documents; removing only its own outgoing references",
+                norm_code,
+                incoming,
+            )
+            self._execute(
+                "MATCH (l:Letter {normCode: $normCode})-[e]->(:Letter) DELETE e",
+                {"normCode": norm_code},
+            )
+            return True
+
         self._execute(
             "MATCH (l:Letter {normCode: $normCode}) DETACH DELETE l",
             {"normCode": norm_code},
@@ -333,8 +426,17 @@ class FalkorGraphService:
 
     def get_thread(self, norm_code: str, depth: int = 4) -> List[Dict[str, Any]]:
         """
-        Return all letters within `depth` hops of the given letter, ordered by date.
-        
+        Return all letters within `depth` hops of the given letter, ordered by
+        creation time.
+
+        IDENTITY ONLY. This projection used to return `code`, `direction`,
+        `subject`, `date` and `project`, which G32 removed from the shared
+        `(:Letter {normCode})` node - so every one of them read NULL on any node
+        the current writer produced, and a stale non-NULL value belonged to
+        whichever document (in whichever tenant) last wrote it. Callers resolve
+        those fields from the canonical Mongo document; `ORDER BY` uses
+        `createdAt`, which the node does carry, rather than the removed `date`.
+
         FIXED: Handle depth=0 case separately to avoid invalid path expressions.
         FalkorDB requires: minimum_hops <= maximum_hops in path expressions.
         When depth=0, we only want the root node with no neighbors.
@@ -347,11 +449,11 @@ class FalkorGraphService:
             return []
 
         depth = max(depth, 0)
-        
+
         # FIXED: Special case for depth=0 - only return the root node
         if depth == 0:
             result = self._execute(
-                "MATCH (letter:Letter {normCode:$norm}) RETURN DISTINCT letter.normCode AS normCode, letter.code AS code, letter.direction AS direction, letter.subject AS subject, toString(letter.date) AS date, letter.project AS project, toString(letter.createdAt) AS createdAt",
+                "MATCH (letter:Letter {normCode:$norm}) RETURN DISTINCT letter.normCode AS normCode, toString(letter.createdAt) AS createdAt",
                 {"norm": norm},
             )
         else:
@@ -364,13 +466,8 @@ class FalkorGraphService:
                 UNWIND ([root] + neighbors) AS letter
                 RETURN DISTINCT
                     letter.normCode AS normCode,
-                    letter.code AS code,
-                    letter.direction AS direction,
-                    letter.subject AS subject,
-                    toString(letter.date) AS date,
-                    letter.project AS project,
                     toString(letter.createdAt) AS createdAt
-                ORDER BY date ASC
+                ORDER BY createdAt ASC
                 """,
                 {"norm": norm},
             )
@@ -387,9 +484,9 @@ class FalkorGraphService:
             return []
 
         if direction == "outgoing":
-            query = "MATCH (:Letter {normCode:$norm})-[:CITES|REPLIES_TO]->(dst:Letter) RETURN DISTINCT dst.normCode AS normCode, dst.code AS code, dst.direction AS direction, toString(dst.date) AS date ORDER BY date ASC"
+            query = "MATCH (:Letter {normCode:$norm})-[:CITES|REPLIES_TO]->(dst:Letter) RETURN DISTINCT dst.normCode AS normCode ORDER BY normCode ASC"
         else:
-            query = "MATCH (src:Letter)-[:CITES|REPLIES_TO]->(:Letter {normCode:$norm}) RETURN DISTINCT src.normCode AS normCode, src.code AS code, src.direction AS direction, toString(src.date) AS date ORDER BY date ASC"
+            query = "MATCH (src:Letter)-[:CITES|REPLIES_TO]->(:Letter {normCode:$norm}) RETURN DISTINCT src.normCode AS normCode ORDER BY normCode ASC"
 
         return self._parse_rows(self._execute(query, {"norm": norm}))
 
@@ -414,7 +511,7 @@ class FalkorGraphService:
         rows = self._parse_rows(result)
         if not rows:
             return None
-        
+
         row = rows[0]
         if "letter" in row:
             return row["letter"]
@@ -437,7 +534,7 @@ class FalkorGraphService:
             return []
 
         result = self._execute(
-            f"MATCH (letter:Letter) RETURN letter.normCode AS normCode, letter.code AS code, letter.subject AS subject LIMIT {limit}"
+            f"MATCH (letter:Letter) RETURN letter.normCode AS normCode LIMIT {limit}"
         )
 
         return self._parse_rows(result)
@@ -472,7 +569,7 @@ class FalkorGraphService:
     ) -> Any:
         """
         Execute a Cypher query against FalkorDB.
-        
+
         CRITICAL CONSTRAINTS:
         - Only ONE Cypher statement per call (no multiple statements with ;)
         - FalkorDB does not support parameterized variable-length paths

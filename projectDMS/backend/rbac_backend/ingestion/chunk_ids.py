@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 
 
-def deterministic_chunk_id(document_id: str, index: int, page_start: int | None = None, text: str | None = None) -> str:
+def deterministic_chunk_id(
+    document_id: str, index: int, page_start: int | None = None, text: str | None = None
+) -> str:
     """
     Build a deterministic chunk identifier that can be reused across Mongo + Qdrant.
 
@@ -16,4 +18,3 @@ def deterministic_chunk_id(document_id: str, index: int, page_start: int | None 
     seed = f"{document_id}:{index}:{page_start or 0}:{text or ''}"
     digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
     return f"{document_id}-{digest}"
-

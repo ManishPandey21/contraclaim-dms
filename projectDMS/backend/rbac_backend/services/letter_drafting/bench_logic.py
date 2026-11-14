@@ -182,7 +182,7 @@ def fallback_analysis(
         f"Response deadline: {analysis.response_deadline or 'not identified'}.",
     ]
     return LetterAnalysisOutput(
-        short_summary=short,
+        summary_lines=short,
         basic_particulars={
             "from": analysis.sender,
             "to": analysis.recipient,

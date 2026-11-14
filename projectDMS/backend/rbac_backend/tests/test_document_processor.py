@@ -3,16 +3,58 @@ from types import SimpleNamespace
 import pytest
 
 from rbac_backend.services.document_processor import DocumentProcessor
+from rbac_backend.services.extraction.models import (
+    Completeness,
+    ExtractedPage,
+    PageClass,
+    PageClassification,
+    PageExtractionResult,
+    PageSource,
+    PageStatus,
+)
+from rbac_backend.services.extraction.quality.gate import ExtractionQualityGate
 from rbac_backend.services.text_processing_service import TextProcessingService
 from rbac_backend.utils.exceptions import DocumentProcessingError
 
 
 class FakeOCRService:
+    """Stands in for OCRService's page-wise extraction seam.
+
+    The processor consumes a PageExtractionResult now rather than a
+    (path, text) tuple, so this fake returns one carrying the same text.
+    """
+
     def __init__(self, text: str):
         self.text = text
 
     async def process_pdf(self, input_path):
+        """The legacy path's seam. Both pipelines reach the same downstream."""
         return input_path, self.text
+
+    async def process_pdf_pagewise(self, input_path, *, store, document_id, **_kwargs):
+        page = ExtractedPage(
+            number=1,
+            text=self.text,
+            source=PageSource.OCR,
+            status=PageStatus.OCR_COMPLETED,
+            classification=PageClassification(
+                page_class=PageClass.SCANNED_IMAGE,
+                char_count=len(self.text),
+                image_count=1,
+                image_coverage=1.0,
+                table_count=0,
+                width=595.0,
+                height=842.0,
+                rotation=0,
+            ),
+        )
+        await store.record_pages([page])
+        return PageExtractionResult(
+            pages=[page],
+            combined_text=self.text,
+            ocr_pages_total=1,
+            completeness=Completeness.COMPLETE,
+        )
 
 
 class FakeOpenAIService:
@@ -22,7 +64,7 @@ class FakeOpenAIService:
         self.process_text_calls = 0
         self.upload_file_calls = 0
 
-    async def process_text(self, document_text: str, *, filename=None):
+    async def process_text(self, document_text: str, *, filename=None, include_full_content=True):
         self.process_text_calls += 1
         if self.fail_text:
             raise DocumentProcessingError("OpenAI unavailable")
@@ -43,12 +85,37 @@ def make_processor(ocr_text: str, openai_service: FakeOpenAIService):
     async def close_connection():
         return None
 
+    from rbac_backend.tests.retry_harness import FakeDb
+
+    # The page store is exercised by its own suite. Here it needs a store that
+    # keeps what it is given: publishing canonical evidence reads the run's
+    # rows back and verifies them before the head moves.
+    page_db = FakeDb()
+
+    async def get_database():
+        return page_db
+
+    from rbac_backend.services.extraction.source_kind import SourceKindRouter
+
     processor = DocumentProcessor.__new__(DocumentProcessor)
-    processor.config = SimpleNamespace(max_file_size_mb=100, chunk_size=3000, chunk_overlap=200)
+    processor.config = SimpleNamespace(
+        max_file_size_mb=100, chunk_size=3000, chunk_overlap=200, ocr_language="eng"
+    )
+    # __new__ skips __init__, so the dispatch seams must be supplied here.
+    processor.source_kind_router = SourceKindRouter
+    processor.image_ocr_runner = object()
+    processor._image_extractor = None
+    processor._text_extractor = None
+    processor.quality_gate = ExtractionQualityGate()
+    processor.fallback_ladder = None  # off by default; this test spends nothing
     processor.ocr_service = FakeOCRService(ocr_text)
     processor.openai_service = openai_service
     processor.text_service = TextProcessingService(processor.config)
-    processor.database_service = SimpleNamespace(partial_failures={}, close_connection=close_connection)
+    processor.database_service = SimpleNamespace(
+        partial_failures={},
+        close_connection=close_connection,
+        get_database=get_database,
+    )
     processor.file_service = SimpleNamespace()
     processor.pydantic_ai_service = SimpleNamespace(is_enabled=False)
     return processor
@@ -114,7 +181,10 @@ async def test_processor_saves_ocr_fallback_when_ai_text_extraction_fails(tmp_pa
 
     assert result.success is True
     assert result.metadata_source == "ocr_fallback_regex"
-    assert result.metadata.letter_no == "AFC-PM-KNPCC-06-4930"
+    # The OCR text has no labelled letter number, so there is none. The
+    # filename is not source metadata (DI-H6): it used to be stored here as
+    # the extracted letter number, producing false reference links.
+    assert result.metadata.letter_no is None
     assert result.metadata.subject == "Borewell execution delay Body text from OCR"
     assert captured["raw_ocr_text"] == ocr_text
     assert "ai_extraction" in result.partial_failures

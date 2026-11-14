@@ -134,23 +134,23 @@ async def test_pydantic_ai_enabled():
 async def test_openai_service():
     """Test that OpenAI service can access the embedding model correctly."""
     print("\n🧪 Testing OpenAI Service...")
-    
+
     try:
         from rbac_backend.config.document_processing_config import DocumentProcessingConfig
         from rbac_backend.services.openai_service import OpenAIService
-        
+
         config = DocumentProcessingConfig()
-        
+
         # This should not raise an AttributeError anymore
         service = OpenAIService(config)
         print("✅ OpenAI service initialized successfully")
-        
+
         # Test that the service can access the model name
         model_name = config.openai_embedding_model
         print(f"✅ OpenAI service can access embedding model: {model_name}")
-        
+
         return True
-        
+
     except AttributeError as e:
         print(f"❌ OpenAI service test failed with AttributeError: {e}")
         return False
@@ -161,19 +161,19 @@ async def test_openai_service():
 async def test_metadata_processor():
     """Test that metadata processor service works correctly."""
     print("\n🧪 Testing Metadata Processor Service...")
-    
+
     try:
         from rbac_backend.config.document_processing_config import DocumentProcessingConfig
         from rbac_backend.services.metadata_processor_service import MetadataProcessorService
-        
+
         config = DocumentProcessingConfig()
-        
+
         # This should not raise an AttributeError anymore
         service = MetadataProcessorService(config)
         print("✅ Metadata processor service initialized successfully")
-        
+
         return True
-        
+
     except AttributeError as e:
         print(f"❌ Metadata processor test failed with AttributeError: {e}")
         return False
@@ -184,19 +184,19 @@ async def test_metadata_processor():
 async def test_document_processor():
     """Test that document processor works correctly."""
     print("\n🧪 Testing Document Processor...")
-    
+
     try:
         from rbac_backend.config.document_processing_config import DocumentProcessingConfig
         from rbac_backend.services.document_processor import DocumentProcessor
-        
+
         config = DocumentProcessingConfig()
-        
+
         # This should not raise an AttributeError anymore
         processor = DocumentProcessor(config)
         print("✅ Document processor initialized successfully")
-        
+
         return True
-        
+
     except AttributeError as e:
         print(f"❌ Document processor test failed with AttributeError: {e}")
         return False
@@ -213,7 +213,7 @@ async def test_llamaindex_vector_service():
         from motor.motor_asyncio import AsyncIOMotorClient
 
         config = DocumentProcessingConfig()
-        
+
         if not config.openai_api_key:
             print("⚠️ Skipping LlamaIndex test (no OPENAI_API_KEY)")
             return True
@@ -276,7 +276,7 @@ async def test_llamaindex_vector_service():
 async def main():
     """Run all tests."""
     print("🚀 Starting Embedding Fix Tests\n")
-    
+
     tests = [
         test_config_attributes,
         test_vector_store_config,
@@ -286,7 +286,7 @@ async def main():
         test_document_processor,
         test_llamaindex_vector_service,
     ]
-    
+
     results = []
     for test in tests:
         try:
@@ -295,11 +295,11 @@ async def main():
         except Exception as e:
             print(f"❌ Test {test.__name__} failed with exception: {e}")
             results.append(False)
-    
+
     print(f"\n📊 Test Results:")
     print(f"✅ Passed: {sum(results)}/{len(results)}")
     print(f"❌ Failed: {len(results) - sum(results)}/{len(results)}")
-    
+
     if all(results):
         print("\n🎉 All tests passed! The embedding fix and services are working correctly.")
         return True

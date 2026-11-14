@@ -1,18 +1,18 @@
 
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { 
-  Card, CardHeader, CardTitle, CardDescription, CardContent 
+import {
+  Card, CardHeader, CardTitle, CardDescription, CardContent
 } from "@/components/ui/card";
-import { 
-  Tabs, TabsContent, TabsList, TabsTrigger 
+import {
+  Tabs, TabsContent, TabsList, TabsTrigger
 } from "@/components/ui/tabs";
-import { 
-  Table, TableBody, TableCell, TableHead, TableHeader, TableRow 
+import {
+  Table, TableBody, TableCell, TableHead, TableHeader, TableRow
 } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
-import { 
-  MessageCircleQuestion, AlertCircle, Clock, ArrowUpRight 
+import {
+  MessageCircleQuestion, AlertCircle, Clock, ArrowUpRight
 } from 'lucide-react';
 
 export interface Letter {
@@ -32,10 +32,10 @@ interface ActionableItemsProps {
   getStatusIcon: (status: string) => React.ReactNode;
 }
 
-const ActionableItems: React.FC<ActionableItemsProps> = ({ 
-  letters, 
-  formatDate, 
-  getStatusIcon 
+const ActionableItems: React.FC<ActionableItemsProps> = ({
+  letters,
+  formatDate,
+  getStatusIcon
 }) => {
   return (
     <Card className="glass-card">
@@ -59,26 +59,26 @@ const ActionableItems: React.FC<ActionableItemsProps> = ({
               Under Review
             </TabsTrigger>
           </TabsList>
-          
+
           <TabsContent value="input-required" className="pt-4">
-            <LetterTable 
-              letters={letters.filter(letter => letter.status === 'Input Required')} 
+            <LetterTable
+              letters={letters.filter(letter => letter.status === 'Input Required')}
               formatDate={formatDate}
               getStatusIcon={getStatusIcon}
             />
           </TabsContent>
-          
+
           <TabsContent value="reply-overdue" className="pt-4">
-            <LetterTable 
-              letters={letters.filter(letter => letter.status === 'Reply Overdue')} 
+            <LetterTable
+              letters={letters.filter(letter => letter.status === 'Reply Overdue')}
               formatDate={formatDate}
               getStatusIcon={getStatusIcon}
             />
           </TabsContent>
-          
+
           <TabsContent value="under-review" className="pt-4">
-            <LetterTable 
-              letters={letters.filter(letter => letter.status === 'Under Review')} 
+            <LetterTable
+              letters={letters.filter(letter => letter.status === 'Under Review')}
               formatDate={formatDate}
               getStatusIcon={getStatusIcon}
             />

@@ -45,13 +45,13 @@ Update `client/src/components/letter-workflow/types.ts`:
 
 ```typescript
 // types.ts
-export type LetterStatus = 
-  | "Input" 
-  | "Strategy" 
-  | "Draft" 
-  | "Review" 
-  | "Approval" 
-  | "Completed" 
+export type LetterStatus =
+  | "Input"
+  | "Strategy"
+  | "Draft"
+  | "Review"
+  | "Approval"
+  | "Completed"
   | "Rejected";
 ```
 
@@ -79,47 +79,47 @@ class LetterStatusEnum(str, Enum):
 class LetterRecord(BaseModel):
     """MongoDB Letter Document"""
     _id: Optional[str] = None
-    
+
     # Basic metadata
     letter_no: str
     title: str
     subject: str
     recipient: str
     status: LetterStatusEnum = LetterStatusEnum.INPUT
-    
+
     # Organization & Project
     organization_id: str
     project_id: str
-    
+
     # User tracking
     created_by: str
     assigned_to: str
     created_at: datetime
     updated_at: datetime
     status_start_date: datetime
-    
+
     # Content fields
     content: str  # Initial requirements/context
     draft_body: Optional[str] = None
     comments: List[str] = []
-    
+
     # ========== STRATEGY STAGE FIELDS ==========
     strategy_plan: Optional[str] = None           # ← NEW: Full plan text
     strategic_outline: Optional[Dict[str, Any]] = None  # ← NEW: Structured plan
     summary_points: List[str] = []                # ← NEW: Key points
     strategy_plan_approved_by: Optional[str] = None  # ← NEW: Approval user
     strategy_plan_approved_at: Optional[datetime] = None  # ← NEW: Approval time
-    
+
     # Context documents for strategy
     context_document_ids: List[str] = []
     background_summary: List[Dict[str, Any]] = []
     background_annotations: Optional[Dict[str, Any]] = None
-    
+
     # LangGraph strategy run
     strategy_run_id: Optional[str] = None         # ← NEW
     strategy_graph_status: Optional[str] = None   # ← NEW: "success", "needs_input", "failed"
     strategy_graph_trace: List[Dict[str, Any]] = []  # ← NEW
-    
+
     # ========== EXISTING DRAFT STAGE FIELDS ==========
     draft_plan: Optional[str] = None
     draft_trace: List[Dict[str, Any]] = []
@@ -127,7 +127,7 @@ class LetterRecord(BaseModel):
     graph_started_at: Optional[datetime] = None
     graph_completed_at: Optional[datetime] = None
     graph_thread: List[Dict[str, Any]] = []
-    
+
     # Time tracking
     draft_requested_at: Optional[datetime] = None
     input_received_at: Optional[datetime] = None
@@ -136,7 +136,7 @@ class LetterRecord(BaseModel):
     review_started_at: Optional[datetime] = None
     approved_at: Optional[datetime] = None
     finalized_at: Optional[datetime] = None
-    
+
     # Duration tracking
     duration_input_received: Optional[float] = None
     duration_strategy: Optional[float] = None            # ← NEW (in hours)
@@ -144,7 +144,7 @@ class LetterRecord(BaseModel):
     duration_review: Optional[float] = None
     duration_approval: Optional[float] = None
     duration_total: Optional[float] = None
-    
+
     # File references
     s3_key_docx: Optional[str] = None
     s3_key_pdf: Optional[str] = None
@@ -164,14 +164,14 @@ Update `client/src/components/letter-workflow/LetterWorkflowTabs.tsx`:
 import React, { useMemo } from 'react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { 
-  ListChecks, 
-  MessageCircleQuestion, 
+import {
+  ListChecks,
+  MessageCircleQuestion,
   Lightbulb,           // ← NEW for Strategy
-  Mail, 
-  Clock, 
+  Mail,
+  Clock,
   CheckCircle,
-  XCircle 
+  XCircle
 } from 'lucide-react';
 
 import type { LetterStatus } from './types';
@@ -248,8 +248,8 @@ export const LetterWorkflowTabs: React.FC<LetterWorkflowTabsProps> = ({
     <div className="space-y-4">
       <Card>
         <CardHeader>
-          <Tabs 
-            value={activeTab} 
+          <Tabs
+            value={activeTab}
             onValueChange={(value) => setActiveTab(value as LetterStatus | "All")}
             className="w-full"
           >
@@ -729,16 +729,16 @@ async def move_letter_to_strategy(
     current_user: dict = Depends(verify_auth)
 ):
     """Move letter from Input to Strategy stage"""
-    
+
     try:
         letter = await LetterService.get_letter(letter_id, current_user)
-        
+
         if letter["status"] != "Input":
             raise HTTPException(
                 status_code=400,
                 detail=f"Cannot move to Strategy from {letter['status']} stage"
             )
-        
+
         # Update status
         await LetterService.update_letter(
             letter_id,
@@ -748,9 +748,9 @@ async def move_letter_to_strategy(
             },
             current_user
         )
-        
+
         return {"status": "moved_to_strategy", "letter_id": letter_id}
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 ```
@@ -863,7 +863,7 @@ Add to `backend/rbac_backend/utils/workflow_engine.py`:
 ```python
 class WorkflowEngine:
     """Validates letter status transitions"""
-    
+
     VALID_TRANSITIONS = {
         "Input": ["Strategy", "Rejected"],           # ← NEW: Strategy option
         "Strategy": ["Draft", "Input", "Rejected"],  # ← NEW: Can go back to Input
@@ -873,7 +873,7 @@ class WorkflowEngine:
         "Completed": [],  # Terminal state
         "Rejected": [],   # Terminal state
     }
-    
+
     @staticmethod
     def is_valid_transition(
         current_status: str,
@@ -882,7 +882,7 @@ class WorkflowEngine:
         """Check if transition is allowed"""
         allowed = WorkflowEngine.VALID_TRANSITIONS.get(current_status, [])
         return target_status in allowed
-    
+
     @staticmethod
     def validate_transition(
         current_status: str,
@@ -906,51 +906,51 @@ Update `backend/rbac_backend/services/time_tracker.py`:
 ```python
 def calculate_durations(letter: dict) -> dict:
     """Calculate time spent in each stage"""
-    
+
     durations = {}
-    
+
     # Input stage
     if letter.get("input_received_at") and letter.get("draft_requested_at"):
         durations["duration_input"] = compute_hours(
             letter["draft_requested_at"],
             letter["input_received_at"]
         )
-    
+
     # NEW: Strategy stage
     if letter.get("strategy_completed_at") and letter.get("input_received_at"):
         durations["duration_strategy"] = compute_hours(
             letter["input_received_at"],
             letter["strategy_completed_at"]
         )
-    
+
     # Draft stage
     if letter.get("review_started_at") and letter.get("strategy_completed_at"):
         durations["duration_draft"] = compute_hours(
             letter["strategy_completed_at"],
             letter["review_started_at"]
         )
-    
+
     # Review stage
     if letter.get("approved_at") and letter.get("review_started_at"):
         durations["duration_review"] = compute_hours(
             letter["review_started_at"],
             letter["approved_at"]
         )
-    
+
     # Approval stage
     if letter.get("finalized_at") and letter.get("approved_at"):
         durations["duration_approval"] = compute_hours(
             letter["approved_at"],
             letter["finalized_at"]
         )
-    
+
     # Total
     if letter.get("finalized_at") and letter.get("draft_requested_at"):
         durations["duration_total"] = compute_hours(
             letter["draft_requested_at"],
             letter["finalized_at"]
         )
-    
+
     return durations
 ```
 
@@ -966,7 +966,7 @@ Update analytics in `backend/rbac_backend/routers/analytics.py`:
 @router.get("/analytics/{project_id}")
 async def get_project_analytics(project_id: str):
     """Get project-level analytics including new Strategy stage"""
-    
+
     analytics = {
         "project_id": project_id,
         "letters": [],
@@ -995,7 +995,7 @@ async def get_project_analytics(project_id: str):
             "in_approval": 0,
         },
     }
-    
+
     # ... calculate metrics
     return analytics
 ```
@@ -1046,31 +1046,31 @@ async def get_project_analytics(project_id: str):
 ## 11. Summary of Changes
 
 ### New Components
-✅ `LetterStrategyPage.tsx` - Strategy stage page  
-✅ `StrategyPlanDisplay.tsx` - Displays structured plan  
-✅ `useLanggraphStrategyPlan.ts` - Hook for strategy generation  
+✅ `LetterStrategyPage.tsx` - Strategy stage page
+✅ `StrategyPlanDisplay.tsx` - Displays structured plan
+✅ `useLanggraphStrategyPlan.ts` - Hook for strategy generation
 
 ### Updated Components
-✅ `LetterWorkflowTabs.tsx` - Added Strategy tab  
-✅ `LettersTable.tsx` - Updated navigation routes  
-✅ `LetterInputPage.tsx` - Transition to Strategy  
-✅ `types.ts` - Added "Strategy" status  
+✅ `LetterWorkflowTabs.tsx` - Added Strategy tab
+✅ `LettersTable.tsx` - Updated navigation routes
+✅ `LetterInputPage.tsx` - Transition to Strategy
+✅ `types.ts` - Added "Strategy" status
 
 ### New Database Fields
-✅ `strategy_plan` - Full strategic plan text  
-✅ `strategy_completed_at` - Completion timestamp  
-✅ `duration_strategy` - Time in strategy stage  
-✅ `strategy_graph_status` - AI pipeline status  
-✅ `strategy_run_id` - LangGraph run identifier  
+✅ `strategy_plan` - Full strategic plan text
+✅ `strategy_completed_at` - Completion timestamp
+✅ `duration_strategy` - Time in strategy stage
+✅ `strategy_graph_status` - AI pipeline status
+✅ `strategy_run_id` - LangGraph run identifier
 
 ### New Workflow States
-✅ **Input** → **Strategy** (new transition)  
-✅ **Strategy** → **Draft** (new transition)  
-✅ Allow backward transitions for iteration  
+✅ **Input** → **Strategy** (new transition)
+✅ **Strategy** → **Draft** (new transition)
+✅ Allow backward transitions for iteration
 
 ### New API Endpoints
-✅ `POST /api/ai-assistant/langgraph/strategy-plan` - Generate plan  
-✅ `POST /api/letters/{id}/move-to-strategy` - State transition  
+✅ `POST /api/ai-assistant/langgraph/strategy-plan` - Generate plan
+✅ `POST /api/letters/{id}/move-to-strategy` - State transition
 
 ---
 
@@ -1102,10 +1102,10 @@ async def get_project_analytics(project_id: str):
 
 This integration adds a **structured strategic planning stage** to the letter workflow, positioned between **Input** and **Draft** stages. It provides:
 
-✅ **Clear Strategic Phase** - Separate concerns between requirements gathering and drafting  
-✅ **AI-Powered Planning** - LangGraph generates structured plans with 5 key sections  
-✅ **Document Context** - Users select relevant documents to inform strategy  
-✅ **Time Tracking** - New duration metrics for strategy development  
-✅ **Flexible Workflows** - Can iterate back to Input or move forward to Draft  
+✅ **Clear Strategic Phase** - Separate concerns between requirements gathering and drafting
+✅ **AI-Powered Planning** - LangGraph generates structured plans with 5 key sections
+✅ **Document Context** - Users select relevant documents to inform strategy
+✅ **Time Tracking** - New duration metrics for strategy development
+✅ **Flexible Workflows** - Can iterate back to Input or move forward to Draft
 
 Ready to implement! 🚀

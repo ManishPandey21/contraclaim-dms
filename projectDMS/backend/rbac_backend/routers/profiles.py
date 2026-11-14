@@ -1,10 +1,18 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
 
 from ..core.database import get_db
 from ..core.security import get_current_user, CurrentUser
 from ..schemas.profile import ProfileRead, ProfileUpdate, ChangePassword
-from ..services.user_service import UserService
+from ..services.authentication_service import AuthenticationService, SessionRevocationUnavailableError
+from ..services.user_service import CredentialChangedConcurrentlyError, UserService
+from ..services.upload_streaming import read_upload_within_limit
+from ..utils.file_validation import sniff_mime_from_bytes
+from ..utils.error_handler import BaseDomainError
+from ..utils.validation import validate_password_strength
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["profiles"])
 
 ALLOWED_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
@@ -126,7 +134,9 @@ async def upload_profile_photo(
             detail="Only image files are allowed (jpeg, png, webp, gif).",
         )
 
-    content = await file.read()
+    # Capped while reading. The 5 MB rule below used to run *after* the whole
+    # body was resident, so it bounded what was stored and not what was held.
+    content = await read_upload_within_limit(file, MAX_PROFILE_PHOTO_SIZE_BYTES)
     if not content:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -139,9 +149,21 @@ async def upload_profile_photo(
             detail="Profile photo must be 5MB or less.",
         )
 
+    # The check above the read is on the client's DECLARED `Content-Type`, which
+    # is a claim and not a measurement - the same trust this repository refuses
+    # to place in a file extension. This one is sniffed from the bytes, and it
+    # is also the type that goes into the stored data URL, so the record cannot
+    # assert a type the content does not have.
+    sniffed = sniff_mime_from_bytes(content, file.filename)
+    if sniffed not in ALLOWED_IMAGE_MIME_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail="Only image files are allowed (jpeg, png, webp, gif).",
+        )
+
     import base64
 
-    data_url = f"data:{file.content_type};base64,{base64.b64encode(content).decode('utf-8')}"
+    data_url = f"data:{sniffed};base64,{base64.b64encode(content).decode('utf-8')}"
     if len(data_url.encode("utf-8")) > 7 * 1024 * 1024:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
@@ -187,8 +209,19 @@ async def change_my_password(
     db = Depends(get_db),
 ):
     """Change password for the authenticated user."""
+    # Same policy as the admin reset (routers/users.py::_validate_user_update).
+    policy = validate_password_strength(payload.new_password)
+    if not policy.is_valid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Password requirements not met: {policy.error}",
+        )
     user_service = UserService(db)
     try:
+        # One atomic write replaces the hash and advances the credential
+        # generation (routers/users.py::update_user does the same), so every
+        # token minted under the old password - this session's included - is
+        # stale from that moment. The client signs the user out.
         success = await user_service.change_password(
             user_id=current_user.id,
             old_password=payload.current_password,
@@ -196,10 +229,23 @@ async def change_my_password(
         )
         if not success:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password change failed")
+        try:
+            await AuthenticationService().revoke_all_sessions(current_user.id)
+        except SessionRevocationUnavailableError as exc:
+            # Defence in depth only: recorded, never reported as a failed change.
+            logger.error(
+                f"Password change for user {current_user.id} applied; session-store cleanup failed "
+                f"(old tokens are already stale by credential generation): {exc}"
+            )
         return {"message": "Password changed successfully"}
+    except CredentialChangedConcurrentlyError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Your password was changed by another request, so this change was not applied. Sign in again.",
+        )
     except ValueError as ve:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal error changing password")

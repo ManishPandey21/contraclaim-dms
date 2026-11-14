@@ -192,7 +192,9 @@ class AnalysedAssertion(BaseModel):
 class LetterAnalysisOutput(BaseModel):
     """`indian-infra-letter-analysis`: short summary, parts A-H, immediate action."""
 
-    short_summary: List[str] = Field(default_factory=list)
+    # The skill's "Short Summary (3-6 lines)". Not named short_summary: that name
+    # belongs to the document grounded summary, which drafting must never read.
+    summary_lines: List[str] = Field(default_factory=list)
     basic_particulars: Dict[str, Optional[str]] = Field(default_factory=dict)  # A
     purpose_and_nature: Optional[str] = None  # B
     key_facts_asserted: List[str] = Field(default_factory=list)  # C

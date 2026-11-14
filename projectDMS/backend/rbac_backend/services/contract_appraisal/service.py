@@ -553,9 +553,19 @@ class AppraisalService:
         seen: set = set()
         try:
             cursor = db.document_vectors.find(query).limit(limit * 3)
-            async for doc in cursor:
+            rows = [doc async for doc in cursor]
+            # Publication containment: document_vectors carries no authority of
+            # its own (G34), so a clause whose canonical document is blocked or
+            # quarantined must not be listed. The shared filter across every
+            # retrieval stack - RetrievalService, ContractService, this endpoint.
+            from ..publication_policy import blocked_document_ids
+
+            blocked = await blocked_document_ids(db, [doc.get("document_id") for doc in rows])
+            for doc in rows:
                 clause = doc.get("clause_number")
                 doc_id = doc.get("document_id")
+                if doc_id is not None and str(doc_id) in blocked:
+                    continue
                 dedupe = (doc_id, clause)
                 if clause in (None, "") or dedupe in seen:
                     continue

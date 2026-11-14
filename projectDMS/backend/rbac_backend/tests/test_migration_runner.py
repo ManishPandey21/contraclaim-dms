@@ -370,3 +370,120 @@ async def test_langgraph_ttl_migration_rejects_incompatible_ttl():
 
     with pytest.raises(RuntimeError, match="Incompatible checkpoint TTL index"):
         await upgrade_langgraph_ttl(_TTLDb(), dry_run=False)
+
+
+# --------------------------------------------------------------------------- #
+# R-A8V / F-A8V-2 - a ledger row whose migration no longer exists was invisible
+# --------------------------------------------------------------------------- #
+#
+# Measured on the live production database on 2026-09-13, read-only:
+# `schema_migrations` carries **18** rows, two of which - `20260730_0001`
+# (`tenant_context_active_flags`) and `20260806_0001`
+# (`subscription_current_scope_unique`) - name migrations that exist in neither
+# the release branch nor `contraclaim/main`. They were applied by an earlier
+# deployment and their code has since left the deployed line.
+#
+# `plan()` iterates the CATALOGUE and asks the ledger only whether each entry is
+# present, so those two rows appear nowhere in `--list`. On a production copy the
+# command reports 16 applied and 3 pending against a ledger holding 18 rows, and
+# the two extra are not mentioned, not counted and not explained.
+#
+# That is precisely the signal Gate 6 bullet 3 exists to surface: this database
+# carries schema effects from code this deployment does not have, and nothing
+# forward-only will ever re-derive them. The runner's behaviour is unchanged -
+# an unknown version is still ignored for ordering and execution, which is
+# correct for a forward-only runner. What changes is that it is now *reported*.
+
+
+@pytest.mark.asyncio
+async def test_a_ledger_row_with_no_migration_in_the_catalogue_is_reported():
+    db = _DB()
+    db[LEDGER_COLLECTION].docs["20260730_0001"] = {
+        "_id": "20260730_0001",
+        "version": "20260730_0001",
+        "name": "tenant_context_active_flags",
+        "description": "applied by a deployment whose code this tree does not carry",
+    }
+    runner = MigrationRunner(
+        db,
+        [Migration("20260906_0001", "permission_name_unique", "Collapse duplicates", _noop_upgrade)],
+    )
+
+    rows = await runner.plan()
+
+    by_version = {row["version"]: row for row in rows}
+    assert set(by_version) == {"20260730_0001", "20260906_0001"}
+    assert by_version["20260906_0001"]["status"] == "pending"
+
+    orphan = by_version["20260730_0001"]
+    assert orphan["status"] == "applied_not_in_catalogue"
+    assert orphan["name"] == "tenant_context_active_flags"
+    assert [row["version"] for row in rows] == sorted(row["version"] for row in rows), (
+        "the plan is read as an ordered history; an orphan appended at the end "
+        "would read as the most recent migration"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_orphan_ledger_row_changes_nothing_about_what_runs():
+    """Reporting it is the whole change. A forward-only runner has no code for
+    an absent migration and must not invent one - the risk of this diagnostic is
+    that it grows into a re-run or a failure, so that is pinned here."""
+    db = _DB()
+    db[LEDGER_COLLECTION].docs["20260730_0001"] = {
+        "_id": "20260730_0001",
+        "version": "20260730_0001",
+        "name": "tenant_context_active_flags",
+    }
+    runner = MigrationRunner(
+        db,
+        [Migration("20260629_9999", "noop", "No-op test migration", _noop_upgrade)],
+    )
+
+    results = await runner.run(apply=True)
+
+    assert [result.version for result in results] == ["20260629_9999"]
+    assert [result.status for result in results] == ["applied"]
+    assert db["example"].docs["applied"]["applied"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_clean_ledger_reports_no_orphan():
+    """The negative control. Without it this diagnostic could be firing on every
+    database and the test above would still pass."""
+    db = _DB()
+    runner = MigrationRunner(
+        db,
+        [Migration("20260629_9999", "noop", "No-op test migration", _noop_upgrade)],
+    )
+
+    await runner.run(apply=True)
+    rows = await runner.plan()
+
+    assert [row["status"] for row in rows] == ["applied"]
+    assert all(row["status"] != "applied_not_in_catalogue" for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_a_target_does_not_hide_an_orphan_below_it():
+    """`--target` bounds what may RUN. It must not bound what is reported about
+    the database, or the narrowest target would be the quietest report."""
+    db = _DB()
+    db[LEDGER_COLLECTION].docs["20260806_0001"] = {
+        "_id": "20260806_0001",
+        "version": "20260806_0001",
+        "name": "subscription_current_scope_unique",
+    }
+    runner = MigrationRunner(
+        db,
+        [
+            Migration("20260629_9999", "noop", "No-op test migration", _noop_upgrade),
+            Migration("20260906_0001", "later", "A later migration", _noop_upgrade),
+        ],
+    )
+
+    rows = await runner.plan(target="20260629_9999")
+
+    versions = [row["version"] for row in rows]
+    assert "20260806_0001" in versions
+    assert "20260906_0001" not in versions

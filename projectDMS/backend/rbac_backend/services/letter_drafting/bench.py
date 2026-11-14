@@ -745,7 +745,7 @@ class LetterBenchService:
                 "recipient": analysis.recipient,
                 "subject": analysis.subject,
                 "analysis": analysis.model_dump(mode="json"),
-                "summary": output.short_summary,
+                "summary": output.summary_lines,
                 "immediate_action": output.immediate_action,
             }
             fresh.questions = [

@@ -74,11 +74,11 @@ BG_SAMPLE_ROW = {
     "bg_amount": "1000000",
     "currency": "INR",
     "conversion_rate": "1",
-    "submission_date": "2026-01-10",
+    "submission_date": "",
     "contractual_required_up_to": "2026-12-31",
     "bg_expiry_date": "2026-11-30",
     "claim_expiry_date": "2026-12-15",
-    "bg_status": "valid",
+    "bg_status": "draft",
     "remarks": "Performance security",
 }
 
@@ -375,6 +375,12 @@ async def preview_key_dates_csv(
         if week is None:
             errors.append("contractual_week_number is required")
 
+        legacy_document_ids = _csv_list(raw.get("linked_document_ids"))
+        if legacy_document_ids:
+            errors.append(
+                "linked_document_ids has ambiguous event/role ownership and requires manual review"
+            )
+
         start = _date(raw.get("project_start_date"), "project_start_date", errors)
         original = _date(raw.get("original_planned_key_date"), "original_planned_key_date", errors)
         calculated: Optional[datetime] = None
@@ -421,7 +427,7 @@ async def preview_key_dates_csv(
                     description=data["description"],
                     responsible_party_id=data["responsible_party_id"],
                     remarks=data["remarks"],
-                    linked_document_ids=_csv_list(raw.get("linked_document_ids")),
+                    linked_document_ids=[],
                     linked_letter_ids=_csv_list(raw.get("linked_letter_ids")),
                     organization_id=org,
                 )
@@ -475,6 +481,7 @@ async def preview_bank_guarantees_csv(
     payloads: List[Tuple[int, BankGuaranteeCreate]] = []
     valid_types = {item.value for item in BGType}
     valid_statuses = {item.value for item in BGStatus}
+    initial_statuses = {"draft"}
 
     for raw in raw_rows:
         errors: List[str] = []
@@ -486,15 +493,27 @@ async def preview_bank_guarantees_csv(
         bg_type = _blank_to_none(raw.get("bg_type")) or "performance"
         if bg_type not in valid_types:
             errors.append(f"bg_type must be one of: {', '.join(sorted(valid_types))}")
-        bg_status = _blank_to_none(raw.get("bg_status")) or "valid"
+        bg_status = _blank_to_none(raw.get("bg_status")) or "draft"
         if bg_status not in valid_statuses:
             errors.append(f"bg_status must be one of: {', '.join(sorted(valid_statuses))}")
+        elif bg_status not in initial_statuses:
+            errors.append(
+                "bg_status requires lifecycle history; CSV creation allows only: "
+                + ", ".join(sorted(initial_statuses))
+            )
         amount = _float(raw.get("bg_amount"), "bg_amount", errors, minimum=0)
         rate = _float(raw.get("conversion_rate"), "conversion_rate", errors, minimum=0)
         submission = _date(raw.get("submission_date"), "submission_date", errors)
+        if submission is not None:
+            errors.append("submission_date requires the explicit submission transition")
         required_up_to = _date(raw.get("contractual_required_up_to"), "contractual_required_up_to", errors)
         expiry = _date(raw.get("bg_expiry_date"), "bg_expiry_date", errors)
         claim_expiry = _date(raw.get("claim_expiry_date"), "claim_expiry_date", errors)
+        legacy_document_ids = _csv_list(raw.get("linked_document_ids"))
+        if legacy_document_ids:
+            errors.append(
+                "linked_document_ids has ambiguous event/role ownership and requires manual review"
+            )
         duplicate_key = (selected_project_id, _norm_text(bg_number))
         duplicate = False
         if bg_number:
@@ -536,13 +555,13 @@ async def preview_bank_guarantees_csv(
                     bg_amount=amount,
                     currency=data["currency"],
                     conversion_rate=rate,
-                    submission_date=submission,
+                    submission_date=None,
                     contractual_required_up_to=required_up_to,
                     bg_expiry_date=expiry,
                     claim_expiry_date=claim_expiry,
                     bg_status=bg_status,
                     remarks=data["remarks"],
-                    linked_document_ids=_csv_list(raw.get("linked_document_ids")),
+                    linked_document_ids=[],
                     organization_id=org,
                 )
             except ValidationError as exc:

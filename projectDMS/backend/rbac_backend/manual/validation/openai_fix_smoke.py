@@ -26,10 +26,10 @@ def test_openai_service_instantiation():
     try:
         from rbac_backend.services.openai_service import OpenAIService
         from rbac_backend.config.document_processing_config import DocumentProcessingConfig
-        
+
         # Create a basic config
         config = DocumentProcessingConfig()
-        
+
         # Try to create service (this will fail without API key, but that's expected)
         try:
             service = OpenAIService(config)
@@ -52,10 +52,10 @@ def test_openai_service_method_structure():
     try:
         from rbac_backend.services.openai_service import OpenAIService
         import inspect
-        
+
         # Get the source code of the process_document method
         source = inspect.getsource(OpenAIService.process_document)
-        
+
         # Check if the fix is present
         if '{"type": "file", "file": {"file_id": file_id}}' in source:
             print("✅ OpenAI API call format is correct (new format)")
@@ -76,10 +76,10 @@ def test_logging_improvements():
     try:
         from rbac_backend.services.openai_service import OpenAIService
         import inspect
-        
+
         # Get the source code of the process_document method
         source = inspect.getsource(OpenAIService.process_document)
-        
+
         # Check if logging is present
         if 'logger.error' in source and 'OpenAI API call failed' in source:
             print("✅ Enhanced error logging is present")
@@ -96,33 +96,33 @@ def main():
     print("=" * 60)
     print("OPENAI SERVICE FIX VALIDATION TEST")
     print("=" * 60)
-    
+
     tests = [
         test_openai_service_import,
         test_openai_service_instantiation,
         test_openai_service_method_structure,
         test_logging_improvements,
     ]
-    
+
     results = []
     for test in tests:
         result = test()
         results.append(result)
         print()
-    
+
     # Summary
     print("=" * 60)
     print("TEST SUMMARY")
     print("=" * 60)
-    
+
     passed = sum(results)
     total = len(results)
-    
+
     print(f"Total tests: {total}")
     print(f"Passed: {passed}")
     print(f"Failed: {total - passed}")
     print(f"Success rate: {(passed/total)*100:.1f}%")
-    
+
     if passed == total:
         print("\n🎉 ALL TESTS PASSED! OpenAI service fix is working correctly.")
         return 0

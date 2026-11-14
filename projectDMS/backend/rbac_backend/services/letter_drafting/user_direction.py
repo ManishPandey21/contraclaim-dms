@@ -48,7 +48,12 @@ class UserDirectionAgent:
             )
             _add(
                 "position",
-                f"What position should the reply take on: {focus}?",
+                (
+                    f"What position should the reply take on this AI-suggested reply "
+                    f"consideration: {focus}?"
+                    if analysis.key_reply_points
+                    else f"What position should the reply take on: {focus}?"
+                ),
                 "position",
                 "No desired position was provided; the draft cannot commit to accept/reject/reserve without it.",
             )
@@ -99,7 +104,8 @@ class UserDirectionAgent:
         if analysis and len(analysis.key_reply_points or []) > 1:
             _add(
                 "scope",
-                f"The incoming letter has {len(analysis.key_reply_points)} extracted reply points. "
+                f"AI analysis of the incoming letter suggested {len(analysis.key_reply_points)} "
+                "reply considerations (advisory, not statements in the letter). "
                 "Confirm the reply should address all of them, or state which to exclude.",
                 "scope",
                 "Locks the reply agenda before planning.",

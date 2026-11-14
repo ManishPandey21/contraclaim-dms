@@ -37,6 +37,13 @@ class BGStatus(str, Enum):
     ENCASHED = "encashed"
 
 
+class BGEventType(str, Enum):
+    ORIGINAL = "original"
+    SUBMISSION = "submission"
+    EXTENSION = "extension"
+    RELEASE = "release"
+
+
 class BankGuaranteeBase(BaseModel):
     bg_type: BGType = BGType.PERFORMANCE
     bg_number: Optional[str] = None
@@ -62,6 +69,7 @@ class BankGuaranteeBase(BaseModel):
 
 class BankGuaranteeCreate(BankGuaranteeBase):
     project_id: str = Field(..., min_length=1)
+    bg_status: BGStatus = BGStatus.DRAFT
 
 
 class BankGuaranteeUpdate(BaseModel):
@@ -98,9 +106,42 @@ class BGReleaseRequest(BaseModel):
     remarks: Optional[str] = None
 
 
+class BGStatusTransitionRequest(BaseModel):
+    target_status: BGStatus
+    submission_date: Optional[datetime] = None
+    reference: Optional[str] = None
+    remarks: Optional[str] = None
+
+
+class BankGuaranteeEvent(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), alias="_id")
+    bank_guarantee_id: str
+    organization_id: str
+    project_id: str
+    event_type: BGEventType
+    event_date: Optional[datetime] = None
+    sequence: int = Field(..., ge=1)
+    revision_number: Optional[int] = Field(default=None, ge=1)
+    amount_before: Optional[float] = None
+    amount_after: Optional[float] = None
+    expiry_before: Optional[datetime] = None
+    expiry_after: Optional[datetime] = None
+    claim_expiry_before: Optional[datetime] = None
+    claim_expiry_after: Optional[datetime] = None
+    required_up_to_before: Optional[datetime] = None
+    required_up_to_after: Optional[datetime] = None
+    reference: Optional[str] = None
+    remarks: Optional[str] = None
+    created_by: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class BankGuarantee(BankGuaranteeBase):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), alias="_id")
     current_revision: int = 0
+    event_sequence: int = 0
     # Derived for responses.
     extension_required: Optional[bool] = None
     days_to_expiry: Optional[int] = None

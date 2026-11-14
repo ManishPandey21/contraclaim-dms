@@ -1,6 +1,6 @@
 # R2R (SciPhi-AI) implementation review → What to copy into ContraClaim DMS
 
-_Date:_ 2025-12-24  
+_Date:_ 2025-12-24
 _Target product:_ **ContraClaim DMS** (React + FastAPI + MongoDB + S3 + VectorDB (Qdrant) + FalkorDB GraphDB)
 
 ---
@@ -13,12 +13,12 @@ Key patterns visible in R2R docs and repo structure:
 
 ### A. Config-first, runtime-tunable system
 
-R2R exposes many retrieval behaviors as **configurable knobs** and (importantly) allows **runtime overrides** (e.g., advanced RAG technique selection, search settings, agent settings).  
+R2R exposes many retrieval behaviors as **configurable knobs** and (importantly) allows **runtime overrides** (e.g., advanced RAG technique selection, search settings, agent settings).
 **What to copy:** Treat retrieval like an “engine” with a stable API surface and a configurable internal pipeline.
 
 ### B. Ingestion as an orchestrated pipeline (not a single endpoint)
 
-R2R emphasizes ingestion orchestration and multimodal ingestion as a first-class system capability.  
+R2R emphasizes ingestion orchestration and multimodal ingestion as a first-class system capability.
 **What to copy:** A job-based ingestion pipeline with clear states and logs (queued → processing → chunked → embedded → indexed → enriched → ready).
 
 ### C. Chunk contextual enrichment during ingestion
@@ -33,7 +33,7 @@ R2R adds an ingestion-time feature called **contextual enrichment** that rewrite
 
 ### D. Advanced RAG techniques are toggles
 
-R2R supports advanced retrieval strategies like **HyDE** and **RAG-Fusion** as selectable strategies.  
+R2R supports advanced retrieval strategies like **HyDE** and **RAG-Fusion** as selectable strategies.
 **What to copy:** Make “search strategy” a request parameter and/or per-project default (vanilla vs HyDE vs fusion).
 
 ### E. Agent layer that composes tools + maintains conversation state
@@ -164,7 +164,7 @@ Below is a “translation table” from R2R patterns → ContraClaim modules.
 }
 ```
 
-**HyDE:** generate a hypothetical “ideal answer doc”, embed it, retrieve with that embedding.  
+**HyDE:** generate a hypothetical “ideal answer doc”, embed it, retrieve with that embedding.
 **RAG-Fusion:** generate multiple query rewrites, retrieve each, fuse results.
 
 **UI:**

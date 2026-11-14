@@ -77,9 +77,3 @@ def test_update_vector_sync_status_upserts_payload():
     assert payload["details"] == "verification_ok"
     assert "$setOnInsert" in fake_collection.last_update
     assert fake_collection.upsert_count == 1
-
-
-
-
-
-

@@ -295,6 +295,8 @@ class _FakeDb:
         # project actually belongs to the request's organization via db.projects
         # (fail-closed when the collection/rows are missing). Seed real ownership
         # rows so same-tenant access resolves and the guard stays exercised.
+        # `get_current_user` looks up soft-deleted role references (R-A9B); none here.
+        self.roles = _FakeCollection([])
         self.projects = _FakeCollection(
             [
                 {"_id": "proj-a1", "organization_id": "org-A", "name": "Org A project"},

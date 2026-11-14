@@ -106,6 +106,7 @@ class _DB:
         self.projects = _Coll()
         self.contract_master = _Coll()
         self.bank_guarantees = _Coll()
+        self.bank_guarantee_events = _Coll()
         self.bg_extension_history = _Coll()
         self.bg_notifications = _Coll()
 
@@ -256,6 +257,26 @@ async def test_key_date_preview_reports_row_errors_and_csv_duplicates():
 
 
 @pytest.mark.asyncio
+async def test_key_date_preview_rejects_ambiguous_legacy_document_membership():
+    content = _csv(
+        """
+        title,contractual_week_number,project_start_date,linked_document_ids
+        Basement Structure Complete,5,2026-01-05,doc-legacy
+        """
+    )
+
+    preview = (
+        await preview_key_dates_csv(
+            _DB(), content, _user(), organization_id="org-A", project_id="proj-A"
+        )
+    ).response
+
+    assert preview.can_import is False
+    assert preview.invalid_rows == 1
+    assert "manual review" in " ".join(preview.rows[0].errors).lower()
+
+
+@pytest.mark.asyncio
 async def test_key_date_import_creates_existing_milestone_records():
     db = _DB()
     content = _csv(
@@ -315,12 +336,84 @@ async def test_bank_guarantee_preview_reports_existing_duplicate_and_invalid_row
 
 
 @pytest.mark.asyncio
+async def test_bank_guarantee_preview_classifies_legacy_document_intent_for_manual_review():
+    preview = (
+        await preview_bank_guarantees_csv(
+            _DB(),
+            _csv(
+                """
+                bg_number,bg_type,linked_document_ids
+                BG-LEGACY,performance,doc-1
+                """
+            ),
+            _user(),
+            organization_id="org-A",
+            project_id="proj-A",
+        )
+    ).response
+
+    assert preview.can_import is False
+    assert preview.invalid_rows == 1
+    assert "manual review" in preview.rows[0].errors[0].lower()
+
+
+@pytest.mark.asyncio
+async def test_bank_guarantee_preview_rejects_status_that_requires_event_history():
+    preview = (
+        await preview_bank_guarantees_csv(
+            _DB(),
+            _csv(
+                """
+                bg_number,bg_type,bg_status
+                BG-RELEASED,performance,released
+                """
+            ),
+            _user(),
+            organization_id="org-A",
+            project_id="proj-A",
+        )
+    ).response
+
+    assert preview.can_import is False
+    assert preview.invalid_rows == 1
+    assert "lifecycle history" in preview.rows[0].errors[0].lower()
+
+
+@pytest.mark.asyncio
+async def test_bank_guarantee_preview_requires_draft_without_submission_date():
+    preview = (
+        await preview_bank_guarantees_csv(
+            _DB(),
+            _csv(
+                """
+                bg_number,bg_type,bg_status,submission_date
+                BG-DRAFT,performance,draft,
+                BG-SUBMITTED,performance,submitted,
+                BG-VALID,performance,valid,
+                BG-DATED,performance,draft,2026-08-22
+                """
+            ),
+            _user(),
+            organization_id="org-A",
+            project_id="proj-A",
+        )
+    ).response
+
+    assert preview.total_rows == 4
+    assert preview.valid_rows == 1
+    assert preview.rows[0].errors == []
+    assert "lifecycle history" in " ".join(preview.rows[1].errors).lower()
+    assert "lifecycle history" in " ".join(preview.rows[2].errors).lower()
+    assert "explicit submission transition" in " ".join(preview.rows[3].errors).lower()
+
+
+@pytest.mark.asyncio
 async def test_bank_guarantee_import_creates_existing_bg_records():
     db = _DB()
     content = _csv(
         """
         contract_id,bg_number,bg_type,issuing_bank,bg_amount,currency,conversion_rate,contractual_required_up_to,bg_expiry_date,bg_status
-        primary,BG-2026-001,performance,Sample Bank,1000000,INR,1,2026-12-31,2026-11-30,valid
+        primary,BG-2026-001,performance,Sample Bank,1000000,INR,1,2026-12-31,2026-11-30,draft
         """
     )
 
@@ -335,3 +428,4 @@ async def test_bank_guarantee_import_creates_existing_bg_records():
     assert stored[0]["bg_number"] == "BG-2026-001"
     assert stored[0]["organization_id"] == "org-A"
     assert stored[0]["project_id"] == "proj-A"
+    assert stored[0]["bg_status"] == "draft"

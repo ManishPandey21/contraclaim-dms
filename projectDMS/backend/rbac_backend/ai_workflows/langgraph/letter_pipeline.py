@@ -25,11 +25,14 @@ from ...models.ai_models import (
 from ...services.document_service import DocumentService
 from ...models.document import Document
 from ...services.letter_service import LetterService
-from ...services.contract_service import ContractService
 from ...services.conversation_service import ConversationService
 from ...services.workflow import workflow_engine
 from ...services.falkor_graph_service import FalkorGraphService, normalize_letter_code
-from ...models.contract_models import ContractSearchRequest
+from ...models.contract_document import CurrentState
+from ...services.contract_scope_resolver import (
+    ProjectEvidenceUniverse,
+    resolve_authorized_project_universe,
+)
 from ...retrieval.dependencies import get_embedding_client, get_llm_generator, get_vector_client
 from ...retrieval.models import SearchFilters, SearchRequest, SearchStrategy
 from ...retrieval.service import RetrievalService
@@ -180,7 +183,6 @@ class LetterDraftGraph:
         source_context_lines: List[str] = []
         source_items: List[Dict[str, Any]] = []
         retrieval_service: Optional[RetrievalService] = None
-        contract_service = ContractService()
         plan_context_text: str = ""
         requirements_text: str = ""
         selected_graph_nodes: List[Dict[str, Any]] = []
@@ -297,92 +299,121 @@ class LetterDraftGraph:
                 except Exception as exc:
                     warnings.append(f"semantic_context: {exc}")
 
-            if not preferred_ids:
-                fallback_documents = await self._fetch_related_documents(
-                    document_service, letter.letter_no
+            # Every drafting source is authorised against the ACTOR's
+            # entitlement, resolved through the canonical seams. The letter's
+            # own organisation/project NARROW inside that entitlement - a value
+            # outside it denies every row - and are never the authority source.
+            #
+            # They used to be. A hand-rolled `in_scope()` compared each row
+            # against the LETTER's organisation/project, which is a
+            # workspace-consistency check wearing an authority costume: it says
+            # nothing about the caller, and `project_id` is optional on a
+            # letter, so an organisation-level letter silently widened the
+            # project axis to the whole tenant. It has been removed rather than
+            # kept alongside the real gate, because a second predicate that
+            # looks like authority is how the real one stops being read.
+            scope_org = letter_org or None
+            scope_project = letter_project or None
+
+            async def authorised_ids_sharing_the_letter_no() -> List[str]:
+                """Documents citing this letter number that the actor may consume.
+
+                `letterNo` is a GLOBAL string: it collides across projects and
+                across organisations, so matching it is an association and
+                never tenant authority. This used to be
+                `db.documents.find({"letterNo": letter_no})` with no actor at
+                all - the same defect closed for the letter context-document
+                path - so it now goes through the seam that applies canonical
+                scope AND publication authority in one place.
+                """
+                letter_no = letter.letter_no
+                if not letter_no:
+                    # Nothing shares a letter number that does not exist. Passed
+                    # through, `None` reached `{"letterNo": None}` and matched
+                    # every document whose letterNo is null or missing - an
+                    # association this letter never had. Scope and publication
+                    # authority still applied, so this narrows the fallback
+                    # rather than widening anything.
+                    return []
+                authorised = await document_service.list_documents_by_letter_no(
+                    letter_no,
+                    current_user,
+                    limit=5,
+                    organization_id=scope_org,
+                    project_id=scope_project,
                 )
-                for record in fallback_documents:
-                    doc_id = str(record.get("_id") or record.get("id") or "")
-                    if doc_id:
-                        add_preferred(doc_id)
-                if fallback_documents:
+                return [str(doc.id) for doc in authorised if doc.id]
+
+            if not preferred_ids:
+                fallback_ids = await authorised_ids_sharing_the_letter_no()
+                for doc_id in fallback_ids:
+                    add_preferred(doc_id)
+                if fallback_ids:
                     warnings.append(
                         "No curated context documents supplied; used linked documents matching the letter number."
                     )
 
             selected_document_ids = preferred_ids
 
-            documents = await document_service.get_documents_by_ids(selected_document_ids)
-            document_index: Dict[str, Document] = {
-                str(doc.id): doc for doc in documents
-            }
-
-            missing_ids = [doc_id for doc_id in selected_document_ids if doc_id not in document_index]
-            if missing_ids:
-                warnings.append(
-                    "Missing documents were skipped: " + ", ".join(missing_ids)
+            # A curated id list is a bookmark, not an entitlement: whoever
+            # stored it is not necessarily the caller reading it, and a
+            # document's publication state can turn adverse after curation.
+            filtered_documents: List[Document] = (
+                await document_service.get_documents_by_ids_in_scope(
+                    selected_document_ids,
+                    current_user,
+                    organization_id=scope_org,
+                    project_id=scope_project,
                 )
-            selected_document_ids = [
-                doc_id for doc_id in selected_document_ids if doc_id in document_index
+            )
+            resolved_ids = {str(doc.id) for doc in filtered_documents}
+            unavailable_ids = [
+                doc_id for doc_id in selected_document_ids if doc_id not in resolved_ids
             ]
-
-            def in_scope(document: Document) -> bool:
-                same_org = not letter_org or str(document.organization_id) == letter_org
-                same_project = (
-                    not letter_project
-                    or str(getattr(document, "project_id", "") or "") == letter_project
-                )
-                return same_org and same_project
-
-            filtered_documents: List[Document] = []
-            scope_invalid: List[str] = []
-            for doc_id in selected_document_ids:
-                doc = document_index.get(doc_id)
-                if not doc:
-                    continue
-                if in_scope(doc):
-                    filtered_documents.append(doc)
-                else:
-                    scope_invalid.append(doc_id)
-
-            if scope_invalid:
+            if unavailable_ids:
+                # Deliberately one message for "missing" and "not available to
+                # you". Distinguishing them would confirm the existence of a
+                # document the caller may not see.
                 warnings.append(
-                    "Context documents outside the letter scope were ignored: "
-                    + ", ".join(scope_invalid)
+                    "Context documents unavailable to this request were skipped: "
+                    + ", ".join(unavailable_ids)
                 )
 
             if not filtered_documents:
-                fallback_documents = await self._fetch_related_documents(
-                    document_service, letter.letter_no
-                )
-                fallback_ids: List[str] = []
-                for record in fallback_documents:
-                    doc_id = str(record.get("_id") or record.get("id") or "")
-                    if doc_id:
-                        fallback_ids.append(doc_id)
+                fallback_ids = await authorised_ids_sharing_the_letter_no()
                 if fallback_ids:
-                    documents = await document_service.get_documents_by_ids(fallback_ids)
-                    document_index = {str(doc.id): doc for doc in documents}
-                    filtered_documents = [doc for doc in documents if in_scope(doc)]
+                    filtered_documents = await document_service.get_documents_by_ids_in_scope(
+                        fallback_ids,
+                        current_user,
+                        organization_id=scope_org,
+                        project_id=scope_project,
+                    )
                     if filtered_documents:
                         warnings.append(
                             "Fell back to documents sharing the letter number because validated context was unavailable."
                         )
-                        selected_document_ids = [str(doc.id) for doc in filtered_documents]
-                    else:
-                        selected_document_ids = []
-                        document_index = {}
-                else:
-                    selected_document_ids = []
-                    document_index = {}
-            else:
-                selected_document_ids = [str(doc.id) for doc in filtered_documents]
-                document_index = {str(doc.id): doc for doc in filtered_documents}
+
+            document_index: Dict[str, Document] = {
+                str(doc.id): doc for doc in filtered_documents
+            }
+            selected_document_ids = list(document_index)
 
             related_documents = []
             document_comments = {}
+            # Gate on the CANONICAL document, before projection. A later
+            # `is_consumable` on the 7-key projection below is vacuous: the
+            # projection cannot carry processing_status/duplicate_status/
+            # lifecycle_state, so the predicate takes its "absent state is
+            # allowed" branch and returns True for everything. A guard that
+            # reads the wrong record is equivalent to no guard (G34).
+            from ...services.publication_policy import consumable_fact_text, is_consumable
+
             for doc in filtered_documents:
                 doc_id = str(doc.id)
+                if not is_consumable(
+                    doc if isinstance(doc, dict) else getattr(doc, "__dict__", {}) or {}
+                ):
+                    continue
                 try:
                     comments = await document_service.get_comments(doc_id)
                 except Exception as exc:
@@ -397,14 +428,33 @@ class LetterDraftGraph:
                         "subject": doc.subject,
                         "uploadType": doc.uploadType,
                         "summary": doc.summary,
+                        # The drafting-source snippet: the document's own text
+                        # (never the LLM summary ahead of it). Condensed here so
+                        # the persisted context row does not carry the letter.
+                        "fact_snippet": _condense_text(consumable_fact_text(doc), 280),
                         "keywords": doc.keywords or [],
                         "date": doc.date.isoformat() if doc.date else None,
+                        # Carried so a downstream is_consumable() is a real
+                        # check rather than a vacuous one.
+                        "processing_status": getattr(doc, "processing_status", None),
+                        "duplicate_status": getattr(doc, "duplicate_status", None),
+                        "lifecycle_state": getattr(doc, "lifecycle_state", None),
                     }
                 )
             selected_documents = related_documents
+            # Provenance is what CONTRIBUTED, not what was asked for. Persisting
+            # an id whose content was withheld still records an unauthorised
+            # document as a contributor to this draft, forever, in
+            # `context_document_ids` and in the pushed `draft_versions` entry.
+            selected_document_ids = [entry["id"] for entry in related_documents]
 
-            conversation_chain = await conversation_service.get_conversation_chain(
-                request.letter_id, current_user=current_user
+            # Association is not authority. `get_conversation_chain` accepts
+            # `current_user` and never reads it, and the family it assembles
+            # comes from `previous_letter_id` edges that may cross projects and
+            # organisations - every member's `content` and `subject` flow into
+            # the prompt and into the persisted draft.
+            conversation_chain = await conversation_service.get_authorized_conversation_chain(
+                request.letter_id, current_user
             )
 
             if falkor_service.enabled:
@@ -415,6 +465,14 @@ class LetterDraftGraph:
                 if target_code:
                     try:
                         graph_thread = falkor_service.get_thread(target_code, depth=6)
+                        # Logical denial, and the primary containment: a node
+                        # whose last consumable supporter is blocked must not
+                        # reach drafting context even if physical cleanup was
+                        # skipped or failed. The graph carries no document_id,
+                        # so eligibility is resolved from Mongo by normCode.
+                        graph_thread = await _filter_consumable_graph_entries(
+                            db, graph_thread
+                        )
                     except Exception as exc:
                         warnings.append(f"graph_context: {exc}")
                         graph_thread = []
@@ -434,18 +492,31 @@ class LetterDraftGraph:
                 if code in seen_norms:
                     continue
                 seen_norms.add(code)
-                filtered_thread.append(node)
+                # Serve IDENTITY ONLY. The shared `(:Letter {normCode})` node is
+                # MERGEd on normCode alone across documents and tenants, so any
+                # `subject`/`date`/`direction`/`project` still sitting on it is
+                # legacy contamination owned by whichever document wrote last
+                # (37 of 215 live nodes still carry a subject). Appending the
+                # whole node dict published those straight through
+                # LetterGraphResult.graph_thread to the API and the persisted
+                # letter. Every sibling consumer strips them; this one did not.
+                filtered_thread.append({"normCode": code})
 
+            # The manual include list is not an authority bypass: a
+            # user-supplied code still has to resolve to a consumable supporter.
+            from ...services.publication_policy import graph_codes_denied
+
+            try:
+                denied_includes = await graph_codes_denied(db, [c for c in include_codes if c])
+            except Exception:
+                denied_includes = {c for c in include_codes if c}  # fail closed
             for code in include_codes:
-                if code and code not in seen_norms:
-                    filtered_thread.append(
-                        {
-                            "code": code,
-                            "normCode": code,
-                            "subject": "Linked letter (manual)",
-                            "direction": "unknown",
-                        }
-                    )
+                if code and code not in seen_norms and code not in denied_includes:
+                    # Identity only, exactly like every other published entry.
+                    # A manual include is still a graph fact about a shared
+                    # node; giving it a different shape is what lets a
+                    # property-bearing entry look normal again.
+                    filtered_thread.append({"normCode": code})
                     seen_norms.add(code)
 
             graph_thread = filtered_thread
@@ -501,69 +572,80 @@ class LetterDraftGraph:
 
                 retrieval_query = _build_retrieval_query()
 
-                # Contract clause retrieval
+                # Contract clause evidence. ONE canonical eligible universe,
+                # resolved for THIS ACTOR and fenced INTO the clause query.
+                #
+                # The generic `ContractService.search_contracts` supplement that
+                # used to sit here was REMOVED rather than filtered. Generic
+                # search resolves no applicability, no projection currency and
+                # no positive per-document publication authority - its
+                # subtractive helper fails OPEN on an id it cannot resolve - and
+                # it spends its candidate limit before any of them exist, so
+                # there is no point in its pipeline at which a fence would work.
+                # Everything it produced reached the prompt AND the persisted
+                # `draft_sources` / `draft_versions` on the letter.
                 clause_count = 0
                 if request.use_vector_store and letter_org and letter_project:
-                    try:
-                        contract_req = ContractSearchRequest(
-                            query=retrieval_query,
-                            organization_id=letter_org,
-                            project_id=letter_project,
-                            limit=6,
-                            top_docs=4,
-                            chunks_per_doc=2,
-                            summarize=False,
+                    contract_universe = await _authorized_contract_evidence_universe(
+                        db,
+                        current_user,
+                        organization_id=letter_org,
+                        project_id=letter_project,
+                        warnings=warnings,
+                    )
+                    clause_records = await _eligible_contract_clause_records(
+                        db,
+                        organization_id=letter_org,
+                        project_id=letter_project,
+                        universe=contract_universe,
+                        query_text=retrieval_query,
+                        warnings=warnings,
+                    )
+                    for score, record in clause_records:
+                        clause_number = record.get("clause_no") or "Clause"
+                        clause_title = record.get("clause_title") or ""
+                        label = f"{clause_number} {clause_title}".strip()
+                        snippet = _condense_text(record.get("cleaned_text"), 280)
+                        doc_id = record.get("document_id")
+                        page_numbers = [
+                            page
+                            for page in (record.get("page_start"), record.get("page_end"))
+                            if page
+                        ]
+                        source_id = (
+                            f"{doc_id or 'contract'}::{clause_number}::"
+                            f"{record.get('clause_uid') or 0}"
                         )
-                        contract_resp = await contract_service.search_contracts(
-                            contract_req, current_user
+                        draft_sources.append(
+                            DraftSource(
+                                id=source_id,
+                                source_type="contract_clause",
+                                label=label or "Contract clause",
+                                snippet=snippet,
+                                document_id=str(doc_id) if doc_id else None,
+                                clause_number=record.get("clause_no"),
+                                clause_title=record.get("clause_title"),
+                                page_numbers=[int(p) for p in page_numbers if p],
+                                score=score,
+                                metadata={
+                                    "clause_uid": record.get("clause_uid"),
+                                    "document_type": record.get("document_type"),
+                                },
+                            )
                         )
-                        for chunk in contract_resp.results:
-                            clause_number = chunk.clause_number or "Clause"
-                            clause_title = chunk.clause_title or ""
-                            label = f"{clause_number} {clause_title}".strip()
-                            snippet = _condense_text(chunk.text, 280)
-                            doc_id = chunk.document_id or chunk.upload_id
-                            page_numbers = (
-                                chunk.page_numbers
-                                if chunk.page_numbers
-                                else ([chunk.page] if chunk.page else [])
-                            )
-                            source_id = (
-                                f"{doc_id or 'contract'}::{clause_number}::{chunk.chunk_index or 0}"
-                            )
-                            draft_sources.append(
-                                DraftSource(
-                                    id=source_id,
-                                    source_type="contract_clause",
-                                    label=label or "Contract clause",
-                                    snippet=snippet,
-                                    document_id=str(doc_id) if doc_id else None,
-                                    clause_number=chunk.clause_number,
-                                    clause_title=chunk.clause_title,
-                                    page_numbers=[int(p) for p in page_numbers if p],
-                                    score=chunk.score,
-                                    metadata={
-                                        "upload_id": chunk.upload_id,
-                                        "file_name": chunk.file_name or chunk.source_filename,
-                                        "file_path": chunk.file_path or chunk.source_file,
-                                    },
-                                )
-                            )
-                            context_line = f"{label}: {snippet}" if snippet else label
-                            if context_line:
-                                source_context_lines.append(context_line)
-                            source_items.append(
-                                {
-                                    "id": source_id,
-                                    "text": context_line or label or "Contract clause",
-                                    "documents": [],
-                                    "type": "clause",
-                                    "generated_at": now_iso,
-                                }
-                            )
-                        clause_count = len(contract_resp.results)
-                    except Exception as exc:
-                        warnings.append(f"contract_retrieval: {exc}")
+                        context_line = f"{label}: {snippet}" if snippet else label
+                        if context_line:
+                            source_context_lines.append(context_line)
+                        source_items.append(
+                            {
+                                "id": source_id,
+                                "text": context_line or label or "Contract clause",
+                                "documents": [str(doc_id)] if doc_id else [],
+                                "type": "clause",
+                                "generated_at": now_iso,
+                            }
+                        )
+                    clause_count = len(clause_records)
 
                 # Correspondence sources from vector/keyword retrieval, conversation chain, and related letters
                 letter_sources = []
@@ -686,10 +768,26 @@ class LetterDraftGraph:
                             },
                             search_query=request.subject or getattr(letter, "subject", ""),
                         )
+                        # `get_letters` takes no actor and drops a falsy
+                        # project filter entirely, so this "related
+                        # correspondence" lookup widens to the whole
+                        # organisation for any letter without a project. These
+                        # snippets are concatenated into the prompt AND
+                        # persisted as `draft_sources` on the letter and inside
+                        # the pushed draft version, so they are authorised
+                        # before either happens.
+                        authorized_ids = await letter_service.authorized_letter_ids(
+                            [str(entry.id) for entry in related if entry is not None and getattr(entry, "id", None)],
+                            current_user,
+                            organization_id=letter_org or None,
+                            project_id=letter_project or None,
+                        )
                         for entry in related:
                             if not entry or not getattr(entry, "id", None):
                                 continue
                             entry_id = str(entry.id)
+                            if entry_id not in authorized_ids:
+                                continue
                             if entry_id in seen_ids:
                                 continue
                             seen_ids.add(entry_id)
@@ -737,7 +835,7 @@ class LetterDraftGraph:
                     if not doc_id:
                         continue
                     label = pick_non_empty([doc.get("subject"), doc.get("letterNo")]) or "Context document"
-                    snippet = _condense_text(doc.get("summary"), 280)
+                    snippet = doc.get("fact_snippet") or _condense_text(doc.get("summary"), 280)
                     source_id = f"{doc_id}::context"
                     draft_sources.append(
                         DraftSource(
@@ -955,9 +1053,12 @@ class LetterDraftGraph:
 
             contractual_references: List[str] = []
             for doc in selected_documents:
-                summary = doc.get("summary") or ""
-                if "clause" in summary.lower():
-                    snippet = _condense_text(summary, 160) or summary.strip()
+                # A contractual reference is cited to drafting, so it comes
+                # from the letter's own text; a clause that only the LLM
+                # summary mentions may be the model's own.
+                fact = doc.get("fact_snippet") or ""
+                if "clause" in fact.lower():
+                    snippet = _condense_text(fact, 160) or fact.strip()
                     if snippet:
                         contractual_references.append(snippet)
                 elif doc.get("letterNo"):
@@ -1130,7 +1231,12 @@ class LetterDraftGraph:
             document_items: List[Dict[str, Any]] = []
             now_iso = datetime.now(timezone.utc).isoformat()
             for doc in selected_documents:
-                doc_text = doc.get("summary") or doc.get("subject") or doc.get("letterNo")
+                doc_text = (
+                    doc.get("fact_snippet")
+                    or doc.get("summary")
+                    or doc.get("subject")
+                    or doc.get("letterNo")
+                )
                 if not doc_text:
                     continue
                 document_items.append(
@@ -1180,7 +1286,12 @@ class LetterDraftGraph:
             thread_items: List[Dict[str, Any]] = []
             for node in graph_thread or []:
                 code = node.get("normCode") or node.get("code")
-                subject_label = node.get("subject") or "Linked letter"
+                # The shared Letter node is identity + topology only: any
+                # `subject` still on it is legacy contamination owned by
+                # whichever document wrote last, possibly another tenant's.
+                # Allowing the CODE is not permission to serve the NODE's text -
+                # the same rule already applied in _graph_sources.
+                subject_label = "Linked letter"
                 text = f"{code}: {subject_label}" if code else subject_label
                 thread_items.append(
                     {
@@ -1562,26 +1673,49 @@ class LetterDraftGraph:
         status = validation_payload.get("status", "ready_for_review")
 
         if falkor_service.enabled and letter:
-            agent_refs: List[Dict[str, Any]] = []
-            seen_norms: Set[str] = set()
+            authority_refs: List[tuple[str, Dict[str, Any]]] = []
+            seen_supports: Set[tuple[str, str]] = set()
+            # G31: this writes to FalkorDB through the LOW-LEVEL service, so it
+            # bypasses the authority gate on `sync_document_to_falkor`. A blocked,
+            # quarantined or deleted document must not have its citation written
+            # here - doing so also silently undid the containment purge, because
+            # the next drafting run put the node straight back.
+            from ...services.publication_policy import (
+                is_consumable,
+                resolve_document_authority,
+            )
+
             for doc in selected_documents:
-                code = doc.get("letterNo") or doc.get("letter_no") or doc.get("reference_number")
+                if not is_consumable(doc):
+                    continue
+                context_document_id = str(doc.get("id") or "")
+                if not context_document_id:
+                    continue
+                code = (
+                    doc.get("letterNo")
+                    or doc.get("letter_no")
+                    or doc.get("reference_number")
+                )
                 if code:
                     norm_code = normalize_letter_code(str(code))
-                    if norm_code in seen_norms:
+                    support_key = (context_document_id, norm_code)
+                    if support_key in seen_supports:
                         continue
-                    seen_norms.add(norm_code)
-                    agent_refs.append(
-                        {
-                            "code": str(code),
-                            "normCode": norm_code,
-                            "type": "CITES",
-                            "source": "agent",
-                            "metadata": {
-                                "context_document_id": doc.get("id"),
-                                "generated_by": "langgraph_letter_pipeline",
+                    seen_supports.add(support_key)
+                    authority_refs.append(
+                        (
+                            context_document_id,
+                            {
+                                "code": str(code),
+                                "normCode": norm_code,
+                                "type": "CITES",
+                                "source": "agent",
+                                "metadata": {
+                                    "context_document_id": context_document_id,
+                                    "generated_by": "langgraph_letter_pipeline",
+                                },
                             },
-                        }
+                        )
                     )
 
             primary_code = (
@@ -1599,11 +1733,36 @@ class LetterDraftGraph:
                     "project": letter.project_id,
                 }
                 try:
-                    if agent_refs:
-                        falkor_service.upsert_letter_with_refs(base_letter, agent_refs, cleanup=False)
+                    for context_document_id, agent_ref in authority_refs:
+                        # This is the final publication authority decision. The
+                        # workflow snapshot above remains useful for drafting,
+                        # but only the current canonical document can authorize
+                        # a new graph assertion at this low-level write boundary.
+                        authority = await resolve_document_authority(
+                            db, context_document_id
+                        )
+                        if not authority.consumable:
+                            continue
+                        # Ownership is mandatory: an edge with no owner cannot
+                        # be retracted by any cleanup path, so it would be a
+                        # permanent stale graph fact. Each assertion is owned by
+                        # the context document whose current authority permitted
+                        # it, rather than by the output letter register record.
+                        falkor_service.upsert_letter_with_refs(
+                            base_letter,
+                            [agent_ref],
+                            cleanup=False,
+                            owner_document_id=str(authority.document_id or ""),
+                        )
                     refreshed = falkor_service.get_thread(primary_code, depth=6)
                     if refreshed:
-                        graph_thread = refreshed
+                        # Re-filter. An earlier revision assigned the raw
+                        # refresh here and silently undid the containment
+                        # applied above - the last write wins, so the filter
+                        # has to be applied to it too.
+                        graph_thread = await _filter_consumable_graph_entries(
+                            db, refreshed
+                        )
                 except Exception as exc:
                     warnings.append(f"falkor_sync: {exc}")
 
@@ -1666,21 +1825,190 @@ class LetterDraftGraph:
             )
         return payload
 
-    async def _fetch_related_documents(
-        self,
-        document_service: DocumentService,
-        letter_no: Optional[str],
-        limit: int = 5,
-    ) -> List[Dict[str, Any]]:
-        """Retrieve documents bearing the same letter number for quick context."""
-        if not letter_no:
-            return []
+
+#: How many clause rows the fenced query may return before scoring, and how
+#: many scored rows may become sources. Both bounds are applied to a population
+#: that is ALREADY canonically eligible - which is the whole point. Bounding
+#: first and authorising afterwards lets ineligible rows spend the window and
+#: starve a lawful clause out of the draft entirely: a leak that presents as an
+#: outage.
+CONTRACT_CLAUSE_CANDIDATE_LIMIT = 60
+CONTRACT_CLAUSE_SOURCE_LIMIT = 6
+
+
+async def _authorized_contract_evidence_universe(
+    db,
+    current_user,
+    *,
+    organization_id: str,
+    project_id: str,
+    warnings: List[str],
+) -> Optional["ProjectEvidenceUniverse"]:
+    """The canonical eligible universe for this drafting run.
+
+    Drafting does not decide what governs a contract; it asks. The answer is
+    POSITIVE - applicable at the query mode, canonical Document positively
+    resolvable, publication-consumable, projection-current - and it is resolved
+    for THIS ACTOR, not for the anchor letter's workspace.
+
+    ``None`` means the question could not be ANSWERED, which is a different
+    thing from "nothing applies". Both produce zero contract evidence, and
+    neither may widen into generic search: falling back is exactly the door the
+    Contract Master model closes.
+
+    Query mode is ``CurrentState``, chosen rather than defaulted. A draft is
+    written now and cites what governs now; ``Historical`` is deliberately not
+    inferred from the letter's date, because an implicit "as at" would
+    manufacture legal evidence for a date nobody asked about.
+
+    Scope note, carried from G-A7 and not narrowed silently: neither ``Letter``
+    nor ``LangGraphDraftRequest`` carries a contract identifier, so this is
+    PROJECT-EVIDENCE containment - the union over the contracts that have
+    applicability in the authorised project. Sibling contracts inside one
+    project are not separable until contract identity reaches the request, which
+    is an owner decision.
+    """
+    if db is None or not organization_id or not project_id:
+        return None
+    try:
+        return await resolve_authorized_project_universe(
+            db,
+            current_user,
+            organization_id=organization_id,
+            project_id=project_id,
+            mode=CurrentState(),
+        )
+    except Exception as exc:
+        warnings.append(f"contract_retrieval: contract evidence unavailable: {exc}")
+        return None
+
+
+async def _eligible_contract_clause_records(
+    db,
+    *,
+    organization_id: str,
+    project_id: str,
+    universe: Optional["ProjectEvidenceUniverse"],
+    query_text: str,
+    warnings: List[str],
+) -> List[tuple]:
+    """Clause rows fenced by the canonical universe BEFORE any bound applies.
+
+    A clause row's ``org_id`` / ``project_id`` / ``contract_id`` are INGEST
+    PROVENANCE: they record where the row came from, never that the instrument
+    legally governs anything. They narrow the query; they do not authorise it.
+    ``is_authorised_for_ai`` does not help either - it is written once at
+    clause-index time from clause quality and is never revisited when the parent
+    document's authority changes.
+
+    So ``document_id: {"$in": eligible}`` is part of the QUERY, not a filter
+    over its result, and the subtractive ``blocked_document_ids`` is absent from
+    this path rather than kept beside the universe: it fails OPEN on an id it
+    cannot resolve, and a second predicate that looks like authority is how the
+    real one stops being read.
+    """
+    if db is None or universe is None:
+        # Either there is nothing to resolve against, or eligibility could not
+        # be resolved. There is no partial answer to give and no broader query
+        # that would be safer, so nothing is queried at all.
+        return []
+    eligible = sorted(universe.eligible_document_ids)
+    if not eligible:
+        # Valid empty. Nothing applicable governs this project, which is an
+        # answer a caller may act on - never a reason to search wider.
+        return []
+    terms = {token for token in (query_text or "").lower().split() if len(token) > 3}
+    try:
+        cursor = db.contract_clauses.find(
+            {
+                "org_id": organization_id,
+                "project_id": project_id,
+                "is_current": True,
+                "is_authorised_for_ai": True,
+                "document_id": {"$in": eligible},
+            }
+        ).limit(CONTRACT_CLAUSE_CANDIDATE_LIMIT)
+        records = [record async for record in cursor]
+    except Exception as exc:
+        warnings.append(f"contract_retrieval: clause record retrieval skipped: {exc}")
+        return []
+
+    scored: List[tuple] = []
+    for record in records:
+        haystack = " ".join(
+            str(part or "")
+            for part in (
+                record.get("cleaned_text"),
+                record.get("clause_title"),
+                record.get("clause_no"),
+            )
+        ).lower()
+        hits = sum(1 for term in terms if term in haystack)
+        score = hits / max(len(terms), 1)
+        if score > 0:
+            scored.append((score, record))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return scored[:CONTRACT_CLAUSE_SOURCE_LIMIT]
+
+
+def _identity_only_graph_entry(entry) -> Dict[str, Any]:
+    """Reduce a graph entry to the identity the shared node may carry.
+
+    `(:Letter {normCode})` is MERGEd on `normCode` alone, so it is shared by
+    every document - in every tenant - citing that code. Only
+    `GLOBAL_LETTER_PROPERTIES` are the node's own; `subject`, `date`,
+    `direction`, `code` and `project` belong to the citing document and are
+    legacy contamination owned by whichever writer went last. Publishing an
+    entry is publishing identity, and everything else is resolved from Mongo.
+    """
+    code = (entry or {}).get("normCode") or (entry or {}).get("code") or ""
+    return {"normCode": normalize_letter_code(str(code))}
+
+
+async def _filter_consumable_graph_entries(db, entries):
+    """Consumable graph entries, reduced to identity.
+
+    Two containments, and they are applied together because applying only one
+    is how this regressed: an entry whose code has no consumable supporting
+    document is DROPPED, and every surviving entry is STRIPPED to its normCode.
+
+    FalkorDB merges letter nodes on normCode alone and stores no document_id,
+    so a stale node from a document that has since been blocked is
+    indistinguishable in the graph from a live one. Attribution comes from
+    Mongo, which is also how the letter-deletion cascade already decides
+    ownership. The strip lives here rather than at each call site because a
+    caller that re-reads the graph and reassigns the result - as the post-sync
+    refresh does - silently undid a strip performed anywhere else.
+    """
+    if not entries:
+        return []
+    if db is None:
+        # Fail CLOSED, in line with this helper's serving contract: with no
+        # database there is nothing to resolve authority against, and returning
+        # the raw entries published unattributable - and unstripped - graph
+        # facts.
+        return []
+
+    # `graph_codes_denied` is the SERVING predicate: it fails CLOSED on an
+    # unresolvable code. `has_consumable_supporter` is the DELETION-safety
+    # predicate and deliberately fails OPEN (preserve rather than destroy);
+    # using it to decide what to serve inverted the safe direction.
+    from ...services.publication_policy import graph_codes_denied
+
+    kept = []
+    for entry in entries:
+        code = (entry or {}).get("normCode") or (entry or {}).get("code")
+        if not code:
+            # Fail CLOSED. This helper's whole contract is that an entry must
+            # resolve to a consumable supporter; an entry with no code cannot
+            # be resolved, so keeping it served an unattributable graph fact
+            # through the one path documented as fail-closed.
+            continue
         try:
-            db = await document_service._get_db()  # type: ignore[attr-defined]
-        except AttributeError:
-            # Fallback to accessing the internal db attribute for older service signatures.
-            db = document_service.db  # type: ignore[attr-defined]
-        if db is None:
-            return []
-        cursor = db.documents.find({"letterNo": letter_no}).limit(limit)
-        return await cursor.to_list(length=limit)
+            if str(code) not in await graph_codes_denied(db, [str(code)]):
+                kept.append(_identity_only_graph_entry(entry))
+        except Exception:
+            # Serving uncertainty fails closed: an unresolvable code must not
+            # reach a drafting prompt just because the lookup broke.
+            continue
+    return kept

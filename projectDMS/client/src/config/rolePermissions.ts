@@ -183,17 +183,19 @@ export const PERMISSION_ALIASES: Record<string, string[]> = {
   "dms.chronology.admin": ["projects:update"],
   "dms.arbitration.approve": ["projects:update"],
   "dms.arbitration.admin": ["projects:update"],
-  "dms.admin": ["system:admin"],
+  // `system:admin` is nobody's legacy alias (backend F-A9B-2, R-A9D): organisation,
+  // billing and subscription administration never reach system administration.
+  "dms.admin": [],
   "billing.plan.view": ["organizations:read"],
-  "billing.plan.manage": ["system:admin"],
+  "billing.plan.manage": [],
   "billing.invoice.view": ["organizations:read"],
   "billing.invoice.download": ["organizations:read"],
-  "subscription.entitlement.manage": ["system:admin"],
-  "subscription.upgrade": ["system:admin"],
-  "subscription.downgrade": ["system:admin"],
-  "subscription.cancel": ["system:admin"],
-  "subscription.trial.manage": ["system:admin"],
-  "subscription.addon.manage": ["system:admin"],
+  "subscription.entitlement.manage": [],
+  "subscription.upgrade": [],
+  "subscription.downgrade": [],
+  "subscription.cancel": [],
+  "subscription.trial.manage": [],
+  "subscription.addon.manage": [],
   "subscription.history.view": ["organizations:read"],
   "subscription.usage.view": ["reports:view"],
   "subscription.archive_access": [],
@@ -269,6 +271,9 @@ export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   "/documents": ["dms.document.view"],
   "/documentsearch": ["dms.document.view"],
   "/documentviewer": ["dms.document.view"],
+  // Release 1.1.1: the queue is readable with view; deciding a page needs
+  // dms.document.review_extraction, which the server enforces per request.
+  "/extraction-reviews": ["dms.document.view"],
   "/reference": ["dms.document.view"],
   "/share": ["dms.document.share"],
   // C3: canonical backend permission is `drafting.request.view` (default_roles.py,
@@ -295,6 +300,11 @@ export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   "/claims": ["dms.claim.view", "dms.document.view"],
   "/sla": ["dms.claim.view", "dms.document.view"],
   "/key-dates": ["dms.keydate.view", "dms.document.view"],
+  // Deliberately the register's own permission only: document or evidence-graph
+  // access does not open it (backend gates every route on dms.hindrance.*).
+  "/hindrances": ["dms.hindrance.view"],
+  // CL-3B: the register's own view permission (the backend gates the milestone on it).
+  "/programme-milestones": ["dms.evidence_graph.view"],
   "/variations": ["dms.variation.view", "dms.document.view"],
   "/bank-guarantees": ["dms.bankguarantee.view", "dms.document.view"],
   "/insurance": ["dms.insurance.view", "dms.document.view"],
@@ -306,6 +316,14 @@ export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   // Contract Master (backend dms.contract.master.view aliased to projects:read).
   // Explicit so it wins over the /contracts prefix mapping.
   "/contracts/master": ["dms.contract.master.view", "dms.document.view"],
+  // The Contract Master workspace and the HITL layout prototype are the same
+  // domain surface as /contracts/master and carry the same audience. The
+  // workspace reads /api/contract-master/* on every instrument open; the
+  // prototype renders fixtures. Neither is a public page, so both are mapped
+  // rather than left unclassified — an unmapped route is a route no reviewer
+  // has decided about.
+  "/contract-master/workspace": ["dms.contract.master.view", "dms.document.view"],
+  "/contract-master/prototype": ["dms.contract.master.view", "dms.document.view"],
   // C3: no `dms.folder.view` permission exists on the backend; folders organize
   // documents, so gate on `dms.document.view` (matches /documents and /contracts).
   "/folders": ["dms.document.view"],

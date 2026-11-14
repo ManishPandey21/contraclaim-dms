@@ -738,7 +738,7 @@ const LandingPage = () => {
         </div>
       </div>
     </div>
-	
+
 
 
             <Card className="rounded-2xl border-ink/10 bg-white shadow-[0_30px_70px_-40px_rgba(13,27,46,.4)]">

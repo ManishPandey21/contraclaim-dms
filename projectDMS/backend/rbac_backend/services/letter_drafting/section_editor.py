@@ -57,11 +57,16 @@ class ScopedSectionEditor:
         warnings: List[str] = []
         for index, source_text in sections.items():
             try:
+                # No `strict=True` here: LLMGenerator.generate does not take
+                # it in this tree, and passing it made every edit raise
+                # TypeError into the `except` below - the feature reported
+                # itself degraded on every section instead of running. The
+                # deterministic fallback this method already provides (keep the
+                # source text, warn) is what strict mode would have required.
                 raw = await self.generator.generate(
                     build_section_edit_prompt(source_text, action),
                     max_tokens=1200,
                     model=self.model_name,
-                    strict=True,
                 )
                 replacement = sanitize_section_replacement(raw)
                 if not replacement:

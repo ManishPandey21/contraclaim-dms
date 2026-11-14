@@ -1,0 +1,80 @@
+# Secret scanning for this repository.
+#
+# The `secret-scan` job runs gitleaks/gitleaks-action@v2, which passes no
+# `--config`, so gitleaks loads this file because it sits at the root of the
+# scanned checkout. It must stay there: a copy under `projectDMS/` would be
+# ignored exactly as the pre-commit config once was.
+#
+# The default rule set stays on in full. Everything below allowlists a specific
+# non-secret VALUE that the default rules mistake for a credential; nothing
+# excludes a directory. A real key committed next to any of these is still
+# caught, because each exemption is written to match only the harmless value
+# itself, not the place it lives.
+#
+# Verified 2026-09-04 against gitleaks 8.30.1 (the version the action installs,
+# which tracks the latest release): full-history scan 20 findings -> 0, while
+# synthetic AWS, private-key and generic-token secrets still fail the scan.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = """
+Documentation placeholders that tell the reader to substitute their own value:
+`YOUR_QDRANT_API_KEY` in two curl examples in the deployment guide, and
+`replace-with-32-plus-char-secret` in the production readiness checklist. Safe
+by construction - a value that literally says YOUR_... or replace-with-... is
+not a credential, and a real key pasted over one stops matching.
+"""
+targetRules = ["curl-auth-header", "generic-api-key"]
+regexTarget = "secret"
+regexes = [
+  '''^YOUR_[A-Z0-9_]+$''',
+  '''^replace-with-[a-z0-9-]+$''',
+]
+
+[[allowlists]]
+description = """
+An environment flag captured as if it were a secret. The audit notes document
+`LANGGRAPH_API_TOKEN=<strong-service-token>` - itself a placeholder - and the
+generic rule runs on to the next line and reports `FALKORDB_ENABLED=true` as
+the value. Only a boolean assignment is exempt; a token on such a line is not.
+"""
+targetRules = ["generic-api-key"]
+regexTarget = "secret"
+regexes = ['''^[A-Z][A-Z0-9_]*=(?:true|false)$''']
+
+[[allowlists]]
+description = """
+A Word template filename. The letter-workflow notes show a Mongo document whose
+`template_key` field holds `KNPAGGC-01.docx`; the field name ends in `_key`, so
+the generic rule treats the filename as one.
+
+Matched against the whole line, not the value. Exempting any secret that merely
+ends in `.docx` would have been far too wide: a 32-character hex credential
+written as `qdrant_api_key_doc = "<hex>.docx"` is reported under the default
+rules and was silenced by the earlier value-only form of this entry. Tying the
+exemption to the `template_key` field restores that finding.
+"""
+targetRules = ["generic-api-key"]
+regexTarget = "line"
+regexes = ['''^\s*"template_key":\s*"[A-Za-z0-9._-]+\.docx",?\s*$''']
+
+[[allowlists]]
+description = """
+Two idempotency keys in the arbitration drafting tests. They are request
+de-duplication labels passed to create_workflow, in the same series as
+`idem-1` and `shadow-1` alongside them, and only these two are long enough to
+clear the generic rule's entropy threshold.
+
+Scoped to one rule and these two literal values, and deliberately NOT to their
+file. gitleaks ORs the clauses of an allowlist, so adding `paths` here would
+exempt that whole file from the rule rather than narrowing the exemption: a
+synthetic 32-character token planted in it went unreported while the path
+clause was present, and is reported again now. `matchCondition = "AND"` did not
+change that behaviour in 8.30.1. Two exact strings can hide nothing else - any
+other value, in that file or any other, is still reported.
+"""
+targetRules = ["generic-api-key"]
+regexTarget = "secret"
+regexes = ['''^shadow-(?:failure|artifacts)-1$''']

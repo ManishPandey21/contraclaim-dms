@@ -13,15 +13,15 @@ from rbac_backend.models.storage_settings import (
 async def test_resolve():
     """Test the resolve_settings with project short name"""
     service = StorageSettingsService()
-    
+
     # Setup test data
     test_org_id = "test_org_resolve"
     test_project_id = "test_project_resolve"
-    
+
     print("=" * 60)
     print("Testing resolve_settings with project short name")
     print("=" * 60)
-    
+
     try:
         # 1. Create org settings with short name "KEC"
         org_settings = OrganizationStorageSettings(
@@ -33,7 +33,7 @@ async def test_resolve():
         )
         await service.upsert_org_settings(test_org_id, org_settings)
         print("✓ Created org settings with short name: KEC")
-        
+
         # 2. Create project settings with short name "DC02" and inherit=True
         project_settings = ProjectStorageSettings(
             project_id=test_project_id,
@@ -43,10 +43,10 @@ async def test_resolve():
         )
         await service.upsert_project_settings(test_project_id, test_org_id, project_settings)
         print("✓ Created project settings with short name: DC02, inherit=True")
-        
+
         # 3. Resolve settings
         resolved = await service.resolve_settings(test_org_id, test_project_id)
-        
+
         print("\n" + "=" * 60)
         print("RESOLVED SETTINGS:")
         print("=" * 60)
@@ -56,16 +56,16 @@ async def test_resolve():
         print(f"  Incoming: {resolved.base_paths.incoming}")
         print(f"  Outgoing: {resolved.base_paths.outgoing}")
         print(f"  Contracts: {resolved.base_paths.contracts}")
-        
+
         # 4. Verify the paths contain both org and project short names
         expected_incoming = "/KEC/DC02/incoming"
         actual_incoming = resolved.base_paths.incoming
-        
+
         if actual_incoming == expected_incoming:
             print(f"\n✅ SUCCESS: Path correctly shows {actual_incoming}")
         else:
             print(f"\n❌ FAIL: Expected {expected_incoming}, got {actual_incoming}")
-            
+
     except Exception as e:
         print(f"\n❌ Test failed: {e}")
         import traceback

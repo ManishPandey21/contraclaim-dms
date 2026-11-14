@@ -1,0 +1,130 @@
+# Staging override — the smallest set of differences from production.
+#
+# Used as the THIRD file, never on its own:
+#
+#   docker compose \
+#     -f docker-compose.prod.yml \
+#     -f docker-compose.mongo-replicaset.yml \
+#     -f docker-compose.staging.yml \
+#     --env-file .env.staging up -d
+#
+# Everything not named here is production, by construction. Forking the
+# production compose would give staging its own architecture and staging
+# evidence would then say nothing about the thing that ships. The service set is
+# whatever those two files define: backend, client, contract-worker,
+# document-worker, qdrant, falkordb, redis, clamav, gateway, mongo1/2/3 and the
+# run-once mongo-init. `graphiti` stays out because it sits behind the
+# `graph-experimental` profile; `document-worker-canary` stays at its
+# production default of 0 replicas; LangGraph and Docling appear in no
+# production compose file and are not built.
+#
+# ISOLATION. The project name below is the whole namespace: Docker prefixes
+# every network and volume with it, so this stack owns
+# `contraclaim-stg_data-net`, `contraclaim-stg_mongo1_data` and so on, and one
+# `docker compose -p contraclaim-stg down -v` disposes of all of it. No volume
+# or network here is `external`, so nothing can be attached to the development
+# `contract-ai_*` volumes by name — which is the failure that would put staging
+# writes into the instance holding the business graphs.
+#
+# NOT OVERRIDDEN, DELIBERATELY:
+#
+# * `ENVIRONMENT` stays `production`. The backend's fail-closed behaviour —
+#   entitlement checks, antivirus, secure cookies, the startup config gate — is
+#   keyed on that value, so a staging stack labelled `staging` would exercise a
+#   weaker application than the one being certified. Staging is labelled through
+#   the Docker labels below and through its own credentials, never by relaxing
+#   the application's own hardening. (The Gate-2 *test runner* is a different
+#   process and does set `ENVIRONMENT=staging`; see
+#   `backend/rbac_backend/tests/staging_gate.py`.)
+# * FalkorDB's `REDIS_ARGS`, including the load-bearing `--dir /data`. Overriding
+#   it here would move persistence off the mounted volume and the Gate-8 backup
+#   would archive an empty directory while reporting success.
+# * The gateway's published port, which production already exposes as
+#   `${HTTP_PORT:-127.0.0.1:8080}`. Staging sets `HTTP_PORT=127.0.0.1:18080` in
+#   its env file rather than redeclaring `ports` here: compose APPENDS port
+#   lists across files, so a second declaration would publish both.
+name: contraclaim-stg
+
+x-staging-labels: &staging-labels
+  com.contraclaim.tier: "staging"
+  com.contraclaim.stack: "contraclaim-stg"
+
+services:
+  # --- Mongo replica set: staging name, and a bounded WiredTiger cache ------- #
+  #
+  # 1 GB of internal cache per member, against a 24 GB host with 16 GB given to
+  # the container runtime. Three members therefore hold 3 GB of cache and about
+  # 4.5 GB with process overhead, which leaves room for ClamAV's 3 GB limit,
+  # FalkorDB's 2 GB maxmemory, Qdrant, and the three Python containers inside
+  # the R-A6 estimate of ~13 GB for the whole stack. Unbounded, each member
+  # would size its cache at half of the VM minus 1 GB — roughly 7.5 GB each,
+  # 22.5 GB of intent on a 16 GB budget.
+  #
+  # The hard `deploy.resources.limits.memory` is the backstop, not the policy:
+  # the cache bound is what keeps the members from competing, and the limit is
+  # what turns a mistake into one container failing instead of the host
+  # swapping. Same mechanism ClamAV already uses in production.
+  mongo1:
+    labels: *staging-labels
+    environment:
+      MONGO_REPLICA_SET_NAME: "rsstg"
+      MONGO_WIREDTIGER_CACHE_GB: "${MONGO_WIREDTIGER_CACHE_GB:-1}"
+    deploy:
+      resources:
+        limits:
+          memory: "${MONGO_MEMORY_LIMIT:-2g}"
+
+  mongo2:
+    labels: *staging-labels
+    environment:
+      MONGO_REPLICA_SET_NAME: "rsstg"
+      MONGO_WIREDTIGER_CACHE_GB: "${MONGO_WIREDTIGER_CACHE_GB:-1}"
+    deploy:
+      resources:
+        limits:
+          memory: "${MONGO_MEMORY_LIMIT:-2g}"
+
+  mongo3:
+    labels: *staging-labels
+    environment:
+      MONGO_REPLICA_SET_NAME: "rsstg"
+      MONGO_WIREDTIGER_CACHE_GB: "${MONGO_WIREDTIGER_CACHE_GB:-1}"
+    deploy:
+      resources:
+        limits:
+          memory: "${MONGO_MEMORY_LIMIT:-2g}"
+
+  # The initiator must name the same replica set the members were started
+  # under, or `rs.initiate` writes a config no member accepts.
+  mongo-init:
+    labels: *staging-labels
+    environment:
+      MONGODB_REPLICA_SET: "rsstg"
+
+  # --- Application tier: labelled only ------------------------------------- #
+  backend:
+    labels: *staging-labels
+
+  client:
+    labels: *staging-labels
+
+  contract-worker:
+    labels: *staging-labels
+
+  document-worker:
+    labels: *staging-labels
+
+  qdrant:
+    labels: *staging-labels
+
+  falkordb:
+    labels: *staging-labels
+
+  redis:
+    labels: *staging-labels
+
+  clamav:
+    labels: *staging-labels
+
+  gateway:
+    labels: *staging-labels

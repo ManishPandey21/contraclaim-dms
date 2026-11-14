@@ -47,6 +47,7 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { enhancedApi as api } from "@/services/enhanced-api";
 import useRBAC from "@/hooks/useRBAC";
 import { useStepUp } from "@/hooks/useStepUp";
+import { passwordPolicyError } from "@/utils/passwordPolicy";
 
 interface User {
   // id may be returned as "id" or "_id" depending on endpoint/model
@@ -524,10 +525,12 @@ const UsersPage = () => {
 
   const handleResetPassword = async () => {
     if (!resetTargetUser) return;
-    if (resetPassword.length < 6) {
+    // The server stays authoritative; its message is shown on refusal.
+    const policyError = passwordPolicyError(resetPassword);
+    if (policyError) {
       toast({
         title: "Validation",
-        description: "Password must be at least 6 characters.",
+        description: policyError,
         variant: "destructive",
       });
       return;

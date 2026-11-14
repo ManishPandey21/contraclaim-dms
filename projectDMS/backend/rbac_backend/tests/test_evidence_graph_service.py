@@ -335,3 +335,47 @@ async def test_ingest_document_metadata_is_idempotent_for_same_schema_hash():
     assert len(svc.db.ai_extractions.docs) == 1
     assert len(svc.db.project_events.docs) == 1
     assert len(svc.db.event_links.docs) >= 3
+
+
+@pytest.mark.asyncio
+async def test_ingesting_a_quarantined_document_skips_without_raising():
+    """The containment branch has to return, not blow up.
+
+    `ingest_document_metadata` refuses to build persistent AI-extraction and
+    project-event records from a non-consumable source. That branch logged the
+    refusal through a `logger` the module never defined, so the one path whose
+    whole job is to decline raised NameError instead of declining. Nothing
+    caught it here; the guard held only because the exception aborted the
+    function before any record was written.
+    """
+    svc = _svc()
+    metadata = SimpleNamespace(
+        subject="CPL/2025/0142 Notification of Delay",
+        summary="Late issue of Basement 2 Rev C Drawing under GCC 8.4",
+        full_content="GCC 8.4 DWG-C-014 Rev C IPC 14",
+        letter_no="CPL/2025/0142",
+        from_company="Aurora Engineering",
+        contractual_clauses=["GCC 8.4"],
+    )
+    quarantined = {
+        "_id": "doc-dup",
+        "organization_id": "org-A",
+        "project_id": "proj-A",
+        "date": datetime(2025, 4, 8),
+        "duplicate_status": "duplicate",
+    }
+
+    result = await svc.ingest_document_metadata(
+        document_id="doc-dup",
+        document_data=quarantined,
+        metadata=metadata,
+        metadata_source="test-model",
+        upload_type="incoming",
+        current_user=_user(),
+    )
+
+    assert result is None
+    # Containment: nothing derived from a quarantined source is persisted.
+    assert len(svc.db.ai_extractions.docs) == 0
+    assert len(svc.db.project_events.docs) == 0
+    assert len(svc.db.event_links.docs) == 0

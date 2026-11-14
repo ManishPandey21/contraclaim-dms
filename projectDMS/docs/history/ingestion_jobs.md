@@ -35,4 +35,3 @@ Ingestion is orchestrated as a staged pipeline to keep uploads idempotent and ob
 
 - Failures set `stage=failed` with `error` attached. Jobs remain queryable for audits.
 - Background workers retry transient errors (see `services/background_jobs.py`); persistent failures are logged to `rag_runs` via the observability service.
-

@@ -4,6 +4,7 @@ import {
   getRouteAccessDescriptor,
   isRouteAllowedByPermission,
   OPEN_AUTHENTICATED_ROUTES,
+  PERMISSION_ALIASES,
   ROUTE_PERMISSIONS,
 } from "../rolePermissions";
 
@@ -47,6 +48,7 @@ const SIDEBAR_PATHS = [
   "/claims",
   "/sla",
   "/key-dates",
+  "/hindrances",
   "/contracts/master",
   "/variations",
   "/bank-guarantees",
@@ -168,5 +170,22 @@ describe("SideBar route ↔ permission parity (Phase 1)", () => {
     expect(isRouteAllowedByPermission(canFor([]), "/legal-words")).toBe(true);
     expect(isRouteAllowedByPermission(canFor(["dms.document.view"]), "/admin/legal-words")).toBe(false);
     expect(isRouteAllowedByPermission(canFor(["system:admin"]), "/admin/legal-words")).toBe(true);
+  });
+
+  it("Organisation, billing and subscription administration never reach system administration (F-A9B-2)", () => {
+    for (const held of [
+      "dms.admin",
+      "billing.plan.manage",
+      "subscription.entitlement.manage",
+      "subscription.upgrade",
+      "subscription.downgrade",
+      "subscription.cancel",
+      "subscription.trial.manage",
+      "subscription.addon.manage",
+    ]) {
+      expect(expandPermissionSet([held]).has("system:admin")).toBe(false);
+      expect(expandPermissionSet(["system:admin"]).has(held)).toBe(false);
+    }
+    expect(Object.values(PERMISSION_ALIASES).some((aliases) => aliases.includes("system:admin"))).toBe(false);
   });
 });

@@ -2,8 +2,20 @@ import { api } from "./api";
 
 export interface DocumentItem {
   _id: string;
+  /**
+   * Some list endpoints still serialise the Mongo id as `id`. Callers read
+   * `_id || id`, so the type has to admit the alias or the fallback is a
+   * type error on a chain that resolves correctly at runtime.
+   */
+  id?: string;
   name?: string;
   filename?: string;
+  subject?: string | null;
+  /** Correspondence metadata (Document model: letterNo, date, from, to). */
+  letterNo?: string | null;
+  date?: string | null;
+  from?: string | null;
+  to?: string | null;
   upload_id?: string;
   organization_id?: string;
   project_id?: string | null;
@@ -28,7 +40,7 @@ export type ListDocumentsParams = {
 };
 
 export async function listDocuments(params?: ListDocumentsParams) {
-  const { data } = await api.get("/documents", { params });
+  const { data } = await api.get("/document-search", { params });
   return data as {
     documents: DocumentItem[];
     total?: number;

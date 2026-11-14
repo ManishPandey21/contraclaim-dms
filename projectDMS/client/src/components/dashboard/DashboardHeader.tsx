@@ -1,8 +1,8 @@
 
 import React from 'react';
 import { Input } from "@/components/ui/input";
-import { 
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue 
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue
 } from "@/components/ui/select";
 import { Search, Filter } from 'lucide-react';
 
@@ -30,7 +30,7 @@ const DashboardHeader: React.FC<DashboardHeaderProps> = ({
   return (
     <div className="flex justify-between items-center mb-4">
       <h1 className="text-2xl font-bold">Document Dashboard</h1>
-      
+
       <div className="flex items-center space-x-3">
         <div className="relative w-64">
           <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
@@ -41,7 +41,7 @@ const DashboardHeader: React.FC<DashboardHeaderProps> = ({
             onChange={(e) => setSearchQuery(e.target.value)}
           />
         </div>
-        
+
         <Select value={statusFilter} onValueChange={setStatusFilter}>
           <SelectTrigger className="w-40">
             <div className="flex items-center">

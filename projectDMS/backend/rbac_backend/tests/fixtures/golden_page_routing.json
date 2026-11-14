@@ -1,0 +1,15 @@
+{
+  "_comment": "Fixture #1 golden page-routing contract. Derived from the measured 9-page contractor claim in docs/architecture/mixed_pdf_ingestion_and_summary_plan_2026-08-13.md section 2.2. Do not edit without re-measuring.",
+  "fixture": "build_mixed_pdf",
+  "min_text_chars_per_page": 40,
+  "pages_total": 9,
+  "pages_expected_ocr": [1, 2],
+  "pages_expected_native": [3, 4, 5, 6, 7, 8, 9],
+  "expected_batches": [[1, 2]],
+  "legacy_general_path_behaviour": {
+    "_comment": "What the pre-Phase-3 general path did: is_pdf_textual(max_pages=5) found text on page 3 and skipped OCR for the whole document.",
+    "is_pdf_textual_max_pages": 5,
+    "decision": "skip_ocr_entire_document",
+    "pages_silently_empty": [1, 2]
+  }
+}

@@ -51,7 +51,9 @@ def test_candidate_id_query_matches_objectid_or_string():
     assert any(value.__class__.__name__ == "ObjectId" for value in ids)
 
 
-def test_qdrant_document_filter_matches_native_and_langchain_layouts():
+def test_qdrant_document_filter_counts_only_canonical_correspondence_points():
+    """A legacy-only document must read as out of sync, never as synced (DI-B1)."""
+
     class _Models:
         class MatchValue:
             def __init__(self, value):
@@ -63,16 +65,17 @@ def test_qdrant_document_filter_matches_native_and_langchain_layouts():
                 self.match = match
 
         class Filter:
-            def __init__(self, should=None):
-                self.should = should
+            def __init__(self, must=None):
+                self.must = must
 
     result = _qdrant_document_filter(_Models, "document-1")
 
-    assert [condition.key for condition in result.should] == [
-        "document_id",
-        "metadata.document_id",
-    ]
-    assert all(condition.match.value == "document-1" for condition in result.should)
+    assert {condition.key: condition.match.value for condition in result.must} == {
+        "document_id": "document-1",
+        "payload_schema_version": "correspondence.v1",
+    }
+
+
 def test_warning_only_on_change_then_heartbeat():
     sig = ("qdrant client_init_failed",)
 
