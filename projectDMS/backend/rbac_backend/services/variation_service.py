@@ -136,7 +136,7 @@ class VariationService:
     async def _sync_contract_value(self, org: Optional[str], project_id: Optional[str], contract_id: Optional[str]) -> None:
         """Keep contract_master.current_contract_value = original + cumulative approved."""
         cm = await self._contract_master(org, project_id, contract_id)
-        if not cm:
+        if not cm or not project_id:
             return
         db = await self._get_db()
         query: Dict[str, Any] = {"project_id": project_id}

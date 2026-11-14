@@ -409,5 +409,3 @@ class BenchResponse(BaseModel):
 class BenchAvailability(BaseModel):
     enabled: bool
     rollout_mode: str
-
-
