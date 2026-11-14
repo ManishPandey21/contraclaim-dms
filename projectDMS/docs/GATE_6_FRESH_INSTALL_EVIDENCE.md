@@ -55,3 +55,72 @@ has never been applied to an empty database.
 `backend/rbac_backend/tests/test_gate6_fresh_install_evidence.py` fails when the
 migration count moves away from the number recorded here, which forces the tick
 to be re-earned rather than inherited.
+
+## Pending run: the catalogue is now 22 migrations (opened 2026-11-14)
+
+**Status: PENDING. Nothing in this section is evidence yet.**
+
+Merging the Letter Bench into the release line added three migrations after the
+2026-09-08 run:
+
+- `20261114_0001 skill_registry` — indexes for `skills`, `skill_versions`,
+  `skill_bindings`
+- `20261114_0002 seed_system_skills` — the three bundled skill packs, published
+  at 1.0.0
+- `20261114_0003 letter_bench_indexes` — indexes for `letter_position_boards`
+  and `letter_skill_steps`, two of them partial unique
+
+None of the three has been applied to an empty database, so the mapping above
+covers 19 of the 22 migrations the catalogue now holds and
+`test_gate6_fresh_install_evidence.py` fails, as designed. It stays failing
+until the run below has been executed and its output is recorded here.
+
+### How to run it
+
+```bash
+cd projectDMS && bash scripts/gate6_fresh_install.sh
+```
+
+The script needs bash, docker and git, and takes a few minutes. It:
+
+1. builds the backend image from the checked-out commit;
+2. starts its own `mongo:8.0` on a private docker network, with no published
+   port and no host bind mount, and proves it is empty before anything runs.
+   It reads no `DATABASE_URL`, env file or compose project, so it cannot reach
+   `contraclaim_staging` or any other existing database;
+3. runs `python -m rbac_backend.scripts.migrate_database` inside the backend
+   container: `--list`, a `--fail-on-warning` dry run, `--apply
+   --fail-on-warning`, a second apply, and `--list` again;
+4. reads the three Bench migrations back from the server with `mongosh`:
+   collections, every index with its uniqueness and partial filter, the three
+   skills at 1.0.0 with content hashes equal to the bundled files, and each
+   unique index refusing a real duplicate insert;
+5. prints an evidence block between `BEGIN GATE 6 EVIDENCE` and
+   `END GATE 6 EVIDENCE`, and exits non-zero without one if any step is not
+   exactly as expected.
+
+It removes its container, volume and network on exit and changes no tracked
+file.
+
+### What closes this section
+
+In **one commit**, and only with the script's real output in hand:
+
+1. replace this section with the evidence block, saying where the run was
+   executed and by whom;
+2. set `MIGRATIONS_PROVEN_ON_A_FRESH_DATABASE` to 22 in
+   `backend/rbac_backend/tests/test_gate6_fresh_install_evidence.py`;
+3. update the Gate 6 bullet 2 line in `docs/PRODUCTION_READINESS_RELEASE_GATE.md`
+   to name the new run.
+
+Do not change the number alone, and do not paste output from a run that printed
+`FAILED`.
+
+### What this run will not re-measure
+
+The script exercises the migration path only. It does not start the
+application, so rows 5 and 6 of the mapping (the permission catalogue seeded at
+backend start, and the application serving requests on the installed database)
+keep their 2026-09-08 measurement on the 19-migration catalogue. The three new
+migrations touch neither the `permissions` collection nor any collection the
+Gate 2 and Gate 3 suites read.
