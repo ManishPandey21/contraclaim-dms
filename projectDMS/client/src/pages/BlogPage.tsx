@@ -57,7 +57,22 @@ export function BlogPage() {
   const query = searchParams.get("q") ?? "";
 
   const [searchInput, setSearchInput] = useState(query);
-  useEffect(() => setSearchInput(query), [query]);
+  // The input is the source of truth while the user types; the URL follows it
+  // and can lag. Re-syncing the input from every URL change let a late URL
+  // value overwrite newer keystrokes and drop characters. So values this page
+  // pushed itself are ignored when they come back, and only a change from
+  // elsewhere (back/forward, a link, "clear filters") resets the input.
+  const searchInputRef = useRef(query);
+  const pushedQueries = useRef(new Set<string>());
+  useEffect(() => {
+    if (query === searchInputRef.current) {
+      pushedQueries.current.clear();
+      return;
+    }
+    if (pushedQueries.current.has(query)) return;
+    searchInputRef.current = query;
+    setSearchInput(query);
+  }, [query]);
 
   const allEntries = useMemo(() => getEntries(type), [type]);
   const availableCategories = useMemo(() => getUsedCategories(type), [type]);
@@ -160,6 +175,8 @@ export function BlogPage() {
   };
 
   const changeSearch = (value: string) => {
+    searchInputRef.current = value;
+    pushedQueries.current.add(value);
     setSearchInput(value);
     updateParams({ q: value || null, page: null }, { replace: true });
   };
