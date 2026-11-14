@@ -15,11 +15,18 @@ from ..services.usage_metering_service import QuotaExceededError, UsageMeteringS
 class PolicyService:
     """Central deny-by-default authorization policy."""
 
-    CLIENT_DRAFTING_PERMISSIONS = {Permissions.DRAFTING_REQUEST_CREATE}
+    # Reading which skills are in force is needed by every drafter on the
+    # Letter Bench, so it follows client scope like starting a request does.
+    CLIENT_DRAFTING_PERMISSIONS = {
+        Permissions.DRAFTING_REQUEST_CREATE,
+        Permissions.DRAFTING_SKILL_READ,
+    }
     DRAFTING_ADMIN_PERMISSIONS = {
         Permissions.DRAFTING_REQUEST_ASSIGN,
         Permissions.DRAFTING_WORKFLOW_CHECKPOINTS,
         Permissions.DRAFTING_WORKFLOW_FORCE_V2,
+        Permissions.DRAFTING_SKILL_PUBLISH,
+        Permissions.DRAFTING_SKILL_BIND,
         Permissions.DRAFTING_ADMIN,
     }
 
