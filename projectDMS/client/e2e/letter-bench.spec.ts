@@ -145,7 +145,17 @@ async function mockApi(page: Page, state: State) {
     if (path === "/me") {
       return json(route, { id: "user-1", email: "superadmin@example.com", roles: ["superadmin"], organization_id: org.id, projects: [project.id] });
     }
-    if (path === "/roles" || path === "/users" || path === "/letters") return json(route, []);
+    if (path === "/roles" || path === "/users") return json(route, []);
+    if (path === "/letters") {
+      // The review and approval pages find their letter in this list.
+      return json(route, [
+        {
+          id: LETTER_ID, _id: LETTER_ID, title: "Reply to CTR/2026/118", subject: "Re: Notice of delay and variation",
+          recipient: "ABC Infra Ltd", content: "", status: state.letterStatus, created_by: "user-1", assigned_to: "user-1",
+          organization_id: org.id, project_id: project.id, created_at: "2026-11-14T10:00:00Z", updated_at: "2026-11-14T10:00:00Z",
+        },
+      ]);
+    }
     if (path === "/organizations") return json(route, { organizations: [org] });
     if (path === "/projects") return json(route, [project]);
     if (path === "/letters/bench/availability") return json(route, { enabled: state.enabled, rollout_mode: state.enabled ? "primary" : "off" });
@@ -293,6 +303,10 @@ test.describe("Letter Bench", () => {
 
     await page.getByRole("button", { name: "Submit for review" }).click();
     await expect(page).toHaveURL(new RegExp(`/letters/${LETTER_ID}/review$`));
+    // The reviewer is pointed at the positions the draft was built from.
+    await page.getByRole("button", { name: "Open positions (read-only)" }).click();
+    await expect(page).toHaveURL(new RegExp(`/letters/${LETTER_ID}/bench$`));
+    await expect(page.getByRole("button", { name: "Lock positions" })).toHaveCount(0);
   });
 
   test("change of mind: one flipped verdict stales and rewrites one paragraph", async ({ page }) => {

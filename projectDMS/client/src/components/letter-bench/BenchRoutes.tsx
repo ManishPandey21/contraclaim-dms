@@ -66,3 +66,33 @@ export const BenchOpenRoute: React.FC = () => {
   }
   return <RouteSkeleton />;
 };
+
+/**
+ * Shown on the review and approval pages for a letter that was drafted on the
+ * Bench: one link to the decided positions, sources and the reply tied to them.
+ * Renders nothing when the Bench is off or the letter has none.
+ */
+export const BenchReviewLink: React.FC<{ letterId?: string }> = ({ letterId }) => {
+  const availability = useBenchAvailability();
+  const bench = useBench(letterId, { enabled: availability.enabled });
+  const navigate = useNavigate();
+  if (!letterId || !bench.data) return null;
+  const { assertions } = bench.data.board;
+  return (
+    <aside
+      aria-label="Positions behind this draft"
+      className="flex flex-wrap items-center gap-3 rounded-lg border bg-card p-4"
+    >
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-semibold">Positions behind this draft</p>
+        <p className="text-sm text-muted-foreground">
+          {assertions.length} assertion{assertions.length === 1 ? "" : "s"} from the incoming letter, each with
+          its decided position, clause check and the reply paragraph that answers it.
+        </p>
+      </div>
+      <Button variant="outline" onClick={() => navigate(`/letters/${letterId}/bench`)}>
+        Open positions (read-only)
+      </Button>
+    </aside>
+  );
+};
