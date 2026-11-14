@@ -124,6 +124,9 @@ DRAFTING_PERMISSIONS: List[str] = [
     "drafting.workflow.cancel",
     "drafting.workflow.checkpoints",
     "drafting.workflow.force_v2",
+    "drafting.skill.read",
+    "drafting.skill.publish",
+    "drafting.skill.bind",
     "drafting.admin",
 ]
 
@@ -282,6 +285,9 @@ class Permissions:
     DRAFTING_WORKFLOW_CANCEL = "drafting.workflow.cancel"
     DRAFTING_WORKFLOW_CHECKPOINTS = "drafting.workflow.checkpoints"
     DRAFTING_WORKFLOW_FORCE_V2 = "drafting.workflow.force_v2"
+    DRAFTING_SKILL_READ = "drafting.skill.read"
+    DRAFTING_SKILL_PUBLISH = "drafting.skill.publish"
+    DRAFTING_SKILL_BIND = "drafting.skill.bind"
     DRAFTING_ADMIN = "drafting.admin"
 
     BILLING_PLAN_VIEW = "billing.plan.view"

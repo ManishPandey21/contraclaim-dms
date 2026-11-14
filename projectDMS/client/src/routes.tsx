@@ -38,12 +38,15 @@ const TasksPage = lazyWithRetry(() => import("./pages/TasksPage"));
 const PartiesInvolvedPage = lazyWithRetry(() => import("./pages/PartiesInvolvedPage"));
 const LoginPage = lazyWithRetry(() => import("./pages/LoginPage"));
 const SecurityTermsPage = lazyWithRetry(() => import("./pages/SecurityTermsPage"));
+import { BenchOpenRoute, LegacyOrBench } from "./components/letter-bench/BenchRoutes";
 const LetterWorkflowPage = lazyWithRetry(() => import("./pages/LetterWorkflowPage"));
 const LetterInputPage = lazyWithRetry(() => import("./pages/LetterInputPage"));
 const LetterStrategicPlanPage = lazyWithRetry(
   () => import("./pages/LetterStrategicPlanPage"),
 );
 const LetterDraftPage = lazyWithRetry(() => import("./pages/LetterDraftPage"));
+const LetterBenchPage = lazyWithRetry(() => import("./pages/LetterBenchPage"));
+const SkillAdminPage = lazyWithRetry(() => import("./pages/SkillAdminPage"));
 const LetterReviewPage = lazyWithRetry(() => import("./pages/LetterReviewPage"));
 const LetterApprovalPage = lazyWithRetry(() => import("./pages/LetterApprovalPage"));
 const LetterCompletedPage = lazyWithRetry(() => import("./pages/LetterCompletedPage"));
@@ -183,16 +186,29 @@ const AppRoutes = () => (
           }
         />
         <Route path="documents/summary/:id" element={<LetterSummaryPage />} />
-        <Route path="letters/:id/input" element={<LetterInputPage />} />
+        {/* Letter Bench (skill-based drafting). The earlier input, strategy and
+            draft screens stay as the fallback: LegacyOrBench sends a letter to
+            the Bench only when the server says the Bench is on AND that letter
+            has one. */}
+        <Route path="letters/bench/new" element={<BenchOpenRoute />} />
+        <Route path="letters/skills" element={<SkillAdminPage />} />
+        <Route path="letters/:id/bench" element={<LetterBenchPage />} />
+        <Route
+          path="letters/:id/input"
+          element={<LegacyOrBench><LetterInputPage /></LegacyOrBench>}
+        />
         <Route
           path="letters/:id/strategic-plan"
-          element={<LetterStrategicPlanPage />}
+          element={<LegacyOrBench><LetterStrategicPlanPage /></LegacyOrBench>}
         />
         <Route
           path="letters/:id/strategy"
-          element={<LetterStrategicPlanPage />}
+          element={<LegacyOrBench><LetterStrategicPlanPage /></LegacyOrBench>}
         />
-        <Route path="letters/:id/draft" element={<LetterDraftPage />} />
+        <Route
+          path="letters/:id/draft"
+          element={<LegacyOrBench><LetterDraftPage /></LegacyOrBench>}
+        />
         <Route path="letters/:id/review" element={<LetterReviewPage />} />
         <Route path="letters/:id/approval" element={<LetterApprovalPage />} />
         <Route path="letters/:id/completed" element={<LetterCompletedPage />} />

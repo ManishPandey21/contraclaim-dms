@@ -1,10 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useLetterWorkflow } from '@/hooks/useLetterWorkflow';
 import { LetterWorkflowHeader } from '@/components/letter-workflow/LetterWorkflowHeader';
 import { LetterWorkflowTabs } from '@/components/letter-workflow/LetterWorkflowTabs';
 import { LettersTable } from '@/components/letter-workflow/LettersTable';
 import { Skeleton } from '@/components/ui/skeleton';
+import { ReplyToLetterDialog } from '@/components/letter-bench/ReplyToLetterDialog';
+import { useBenchAvailability } from '@/hooks/useLetterBench';
 import {
   mapLettersToUi,
   UILetter,
@@ -68,8 +70,19 @@ const LetterWorkflowPage = () => {
     }
   }, [selectedLetter]);
 
+  const navigate = useNavigate();
+  const bench = useBenchAvailability();
+
   useEffect(() => {
     const docId = searchParams.get('requestDraftForDocumentId');
+    // Wait for the server's answer on whether the Letter Bench is on, so a
+    // "Request draft" from Documents never flashes the form first.
+    if (docId && bench.isLoading) return;
+    if (docId && bench.enabled) {
+      // No form: the incoming letter is the form.
+      navigate(`/letters/bench/new?documentId=${encodeURIComponent(docId)}`, { replace: true });
+      return;
+    }
     if (docId) {
       setIsInitiateDialogOpen(true);
       setInitiatingDocId(docId);
@@ -78,7 +91,7 @@ const LetterWorkflowPage = () => {
       next.delete('requestDraftForDocumentId');
       setSearchParams(next, { replace: true });
     }
-  }, [searchParams, setSearchParams, setIsInitiateDialogOpen]);
+  }, [searchParams, setSearchParams, setIsInitiateDialogOpen, bench.isLoading, bench.enabled, navigate]);
 
   useEffect(() => {
     if (!initiatingDocId) {
@@ -417,6 +430,31 @@ const LetterWorkflowPage = () => {
 
   return (
     <div className="container mx-auto p-6 space-y-6">
+      {bench.enabled && (
+        <section
+          aria-label="Reply to a letter"
+          className="flex flex-wrap items-center gap-3 rounded-lg border bg-card p-4"
+        >
+          <div className="min-w-0 flex-1">
+            <h2 className="text-sm font-semibold">Reply to a letter</h2>
+            <p className="text-sm text-muted-foreground">
+              Pick the incoming letter. It is read, broken into its assertions and routed to the right skills; you
+              decide each point.
+            </p>
+          </div>
+          <Link
+            to="/letters/skills"
+            className="text-sm font-medium text-primary underline-offset-2 hover:underline"
+          >
+            Skills
+          </Link>
+          <ReplyToLetterDialog
+            onPick={(documentId) =>
+              navigate(`/letters/bench/new?documentId=${encodeURIComponent(documentId)}`)
+            }
+          />
+        </section>
+      )}
       <LetterWorkflowHeader
         isInitiateDialogOpen={isInitiateDialogOpen}
         setIsInitiateDialogOpen={setIsInitiateDialogOpen}

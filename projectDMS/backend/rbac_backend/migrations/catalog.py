@@ -71,6 +71,18 @@ from .v20260813_0001_key_date_eot_attribution import DESCRIPTION as KEY_DATE_ATT
 from .v20260813_0001_key_date_eot_attribution import NAME as KEY_DATE_ATTRIBUTION_NAME
 from .v20260813_0001_key_date_eot_attribution import VERSION as KEY_DATE_ATTRIBUTION_VERSION
 from .v20260813_0001_key_date_eot_attribution import upgrade as upgrade_key_date_attribution
+from .v20261114_0001_skill_registry import DESCRIPTION as SKILL_REGISTRY_DESCRIPTION
+from .v20261114_0001_skill_registry import NAME as SKILL_REGISTRY_NAME
+from .v20261114_0001_skill_registry import VERSION as SKILL_REGISTRY_VERSION
+from .v20261114_0001_skill_registry import upgrade as upgrade_skill_registry
+from .v20261114_0002_seed_system_skills import DESCRIPTION as SEED_SYSTEM_SKILLS_DESCRIPTION
+from .v20261114_0002_seed_system_skills import NAME as SEED_SYSTEM_SKILLS_NAME
+from .v20261114_0002_seed_system_skills import VERSION as SEED_SYSTEM_SKILLS_VERSION
+from .v20261114_0002_seed_system_skills import upgrade as upgrade_seed_system_skills
+from .v20261114_0003_letter_bench_indexes import DESCRIPTION as LETTER_BENCH_INDEXES_DESCRIPTION
+from .v20261114_0003_letter_bench_indexes import NAME as LETTER_BENCH_INDEXES_NAME
+from .v20261114_0003_letter_bench_indexes import VERSION as LETTER_BENCH_INDEXES_VERSION
+from .v20261114_0003_letter_bench_indexes import upgrade as upgrade_letter_bench_indexes
 
 
 MIGRATIONS = [
@@ -169,5 +181,23 @@ MIGRATIONS = [
         name=KEY_DATE_ATTRIBUTION_NAME,
         description=KEY_DATE_ATTRIBUTION_DESCRIPTION,
         upgrade=upgrade_key_date_attribution,
+    ),
+    Migration(
+        version=SKILL_REGISTRY_VERSION,
+        name=SKILL_REGISTRY_NAME,
+        description=SKILL_REGISTRY_DESCRIPTION,
+        upgrade=upgrade_skill_registry,
+    ),
+    Migration(
+        version=SEED_SYSTEM_SKILLS_VERSION,
+        name=SEED_SYSTEM_SKILLS_NAME,
+        description=SEED_SYSTEM_SKILLS_DESCRIPTION,
+        upgrade=upgrade_seed_system_skills,
+    ),
+    Migration(
+        version=LETTER_BENCH_INDEXES_VERSION,
+        name=LETTER_BENCH_INDEXES_NAME,
+        description=LETTER_BENCH_INDEXES_DESCRIPTION,
+        upgrade=upgrade_letter_bench_indexes,
     ),
 ]

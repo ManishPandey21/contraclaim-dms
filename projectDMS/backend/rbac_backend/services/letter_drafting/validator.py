@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import List
+from typing import Any, List
 
 from ...models.letter_drafting import (
     DraftArtifact,
@@ -189,6 +189,23 @@ class DraftValidator:
                 )
             )
 
+        return ValidationReport(
+            blocking=any(finding.level == "error" for finding in findings),
+            findings=findings,
+        )
+
+    def skill_findings(self, board: Any, steps: Any, enabled: Any = None) -> ValidationReport:
+        """Checks derived from the skills' own rules, reported by assertion id.
+
+        Each finding's ``evidence`` is ``assertion:<id>`` so the Bench can show
+        it on the card it belongs to.
+        """
+        from ..skills.skill_validators import run_skill_validators
+
+        findings = [
+            finding.as_validation_finding()
+            for finding in run_skill_validators(board, steps, enabled)
+        ]
         return ValidationReport(
             blocking=any(finding.level == "error" for finding in findings),
             findings=findings,

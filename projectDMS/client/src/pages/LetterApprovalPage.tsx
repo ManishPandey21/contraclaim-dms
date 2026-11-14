@@ -1,5 +1,6 @@
 import React, { useCallback, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import { BenchReviewLink } from '@/components/letter-bench/BenchRoutes';
 import { ArrowLeft } from 'lucide-react';
 import { useLetterWorkflow } from '@/hooks/useLetterWorkflow';
 import LetterApprovalComponent from '@/components/letter-workflow/LetterApprovalComponent';
@@ -136,6 +137,7 @@ const LetterApprovalPage = () => {
   return (
     <div className="container mx-auto p-6 space-y-4">
       <h1 className="text-2xl font-bold">Letter Approval</h1>
+      <BenchReviewLink letterId={id} />
       <div>
         <Button variant="ghost" onClick={() => navigate('/letters')}>
           <ArrowLeft className="mr-2 h-4 w-4" />

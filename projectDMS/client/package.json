@@ -122,5 +122,8 @@
     "vite-tsconfig-paths": "^4.2.2",
     "vitest": "^4.1.6"
   },
-  "proxy": "https://api.contraclaim.com"
+  "proxy": "https://api.contraclaim.com",
+  "optionalDependencies": {
+    "@rollup/rollup-linux-x64-gnu": "^4.60.4"
+  }
 }
