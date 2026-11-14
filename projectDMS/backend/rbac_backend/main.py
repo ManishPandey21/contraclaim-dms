@@ -42,6 +42,8 @@ from .routers import (
     legal_words,
     letters,
     letter_drafting,
+    letter_bench,
+    skills,
     letter_templates,
     notifications,
     parties,
@@ -229,6 +231,9 @@ app.include_router(arbitration_drafting.router, prefix="/api", tags=["arbitratio
 app.include_router(chronology.router, prefix="/api", tags=["chronology"])
 app.include_router(ipc_categories.router, prefix="/api", tags=["ipc-categories"])
 app.include_router(sla.router, prefix="/api", tags=["sla"])
+# Registered before letters.router: "/letters/bench/..." must not be captured by "/letters/{letter_id}".
+app.include_router(letter_bench.router, prefix="/api", tags=["letter-bench"])
+app.include_router(skills.router, prefix="/api", tags=["skills"])
 app.include_router(letters.router, prefix="/api", tags=["letters"])
 app.include_router(letter_drafting.router, prefix="/api", tags=["letter-drafting"])
 app.include_router(letter_drafting.session_router, prefix="/api", tags=["letter-drafting"])

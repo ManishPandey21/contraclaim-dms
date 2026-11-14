@@ -227,6 +227,10 @@ class Settings(BaseSettings):
     DRAFT_ENGINE_CANARY_PERCENT: int = Field(default=0, ge=0, le=100, validation_alias="DRAFT_ENGINE_CANARY_PERCENT")
     DRAFT_ENGINE_CANARY_TENANT_IDS: str = Field(default="", validation_alias="DRAFT_ENGINE_CANARY_TENANT_IDS")
     DRAFT_ENGINE_SHADOW_ENABLED: bool = Field(default=False, validation_alias="DRAFT_ENGINE_SHADOW_ENABLED")
+    # Letter Bench (skill-based drafting) rollout. Server-authoritative, mirroring
+    # the engine flags above: off | canary (allow-listed tenants) | primary.
+    LETTER_BENCH_ROLLOUT_MODE: str = Field(default="off", validation_alias="LETTER_BENCH_ROLLOUT_MODE")
+    LETTER_BENCH_CANARY_TENANT_IDS: str = Field(default="", validation_alias="LETTER_BENCH_CANARY_TENANT_IDS")
     DRAFT_ENGINE_GRAPH_VERSION: str = Field(default="v3", validation_alias="DRAFT_ENGINE_GRAPH_VERSION")
     DRAFT_ENGINE_STATE_SCHEMA_VERSION: int = Field(default=1, ge=1, validation_alias="DRAFT_ENGINE_STATE_SCHEMA_VERSION")
     DRAFT_ENGINE_PRODUCTION_ACCEPTED: bool = Field(default=False, validation_alias="DRAFT_ENGINE_PRODUCTION_ACCEPTED")

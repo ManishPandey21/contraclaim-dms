@@ -90,6 +90,10 @@ DraftLifecycleEventType = Literal[
     "cancel_requested",
     "cancelled",
     "fallback_started",
+    # Letter Bench (skill-based drafting)
+    "skill_step_run",
+    "verdict_set",
+    "positions_locked",
 ]
 DraftEngine = Literal["v2", "langgraph_v3"]
 DraftExecutionStatus = Literal[
@@ -880,6 +884,12 @@ class DraftRun(BaseModel):
     cancellation_reason: Optional[str] = None
     resumed_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    # Skill provenance (Letter Bench). Absent on runs created by the wizard.
+    # Each entry pins step_id, skill_key, version and content hash, so
+    # publishing a new skill version never alters what a past run records.
+    skill_chain: List[Dict[str, Any]] = Field(default_factory=list)
+    board_version: Optional[int] = None
+    skill_manifest_hash: Optional[str] = None
     trace: List[Dict[str, Any]] = Field(default_factory=list)
     started_at: datetime = Field(default_factory=now_utc)
     completed_at: datetime = Field(default_factory=now_utc)
