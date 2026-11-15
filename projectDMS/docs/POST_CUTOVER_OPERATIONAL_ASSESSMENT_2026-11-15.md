@@ -143,6 +143,9 @@ empty MongoDB in a cloud development container on 2026-11-14
 (`docs/GATE_6_FRESH_INSTALL_EVIDENCE.md`). That is a fresh-install reading. It is
 not an upgrade-path reading and it was not taken on staging or production.
 
+**Runbook:** `docs/LETTER_BENCH_STAGING_CHECKS.md`, with the staging suite
+`client/e2e/staging/letter-bench-api.spec.ts`. Neither has been run on staging.
+
 **Required before deployment:**
 
 1. **The three migrations are unapplied in production.** *Script section D:*
