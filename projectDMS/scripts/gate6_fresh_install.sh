@@ -11,10 +11,11 @@
 #      settings resolve to that disposable server and to no other
 #   4. migrate_database --list, a --fail-on-warning dry run, then
 #      --apply --fail-on-warning, all inside the backend container
-#   5. checks the three Letter Bench migrations (20261114_0001 to _0003) by
-#      reading the server: collections, indexes with their uniqueness and
-#      partial filters, the three system skills at 1.0.0, and the unique
-#      indexes refusing a real duplicate
+#   5. checks the skill migrations (20261114_0001 to _0003 and 20261115_0001)
+#      by reading the server: collections, indexes with their uniqueness and
+#      partial filters, the three published letter skills at 1.0.0, the four
+#      claim and arbitration packs stored as unpublished drafts, and the
+#      unique indexes refusing a real duplicate
 #   6. applies again and proves nothing moved (idempotency), then --list again
 #   7. prints an evidence block to paste into
 #      docs/GATE_6_FRESH_INSTALL_EVIDENCE.md
@@ -37,7 +38,7 @@
 #   GATE6_BACKEND_IMAGE        use this image instead of building one. Its
 #                              org.opencontainers.image.revision label must
 #                              equal the checked-out commit.
-#   GATE6_EXPECTED_MIGRATIONS  catalogue size this run must find (default 22)
+#   GATE6_EXPECTED_MIGRATIONS  catalogue size this run must find (default 23)
 #   GATE6_MONGO_IMAGE          default mongo:8.0, the image CI uses
 #   GATE6_OUT_DIR              where step logs go (default: a new temp dir)
 #   GATE6_KEEP=1               leave the containers and network up afterwards
@@ -47,7 +48,7 @@
 set -Eeuo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-EXPECTED=${GATE6_EXPECTED_MIGRATIONS:-22}
+EXPECTED=${GATE6_EXPECTED_MIGRATIONS:-23}
 MONGO_IMAGE=${GATE6_MONGO_IMAGE:-mongo:8.0}
 # Lower case throughout: the name is also the server's hostname, and URL parsers
 # fold hostnames to lower case.
@@ -300,9 +301,9 @@ APPLY=$(py "$OUT_DIR/06-apply.stdout" "$SUMMARISE_RUN")
 ok "exit $APPLY_RC, $APPLY"
 
 # --------------------------------------------------------------------------- #
-# 3. The three Letter Bench migrations, read from the server
+# 3. The skill migrations (Letter Bench, and the draft packs), read from the server
 # --------------------------------------------------------------------------- #
-STEP="verify the Letter Bench migrations"
+STEP="verify the skill migrations"
 say "$STEP"
 # The expectations below are written out here, not imported from the migration
 # modules: a check that reads its expectation from the code under test passes
@@ -315,7 +316,7 @@ function check(name, pass, detail) {
 }
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
-const expectedCollections = ["skills", "skill_versions", "skill_bindings", "letter_position_boards", "letter_skill_steps"];
+const expectedCollections = ["skills", "skill_versions", "skill_bindings", "skill_approvals", "letter_position_boards", "letter_skill_steps"];
 const present = new Set(db.getCollectionNames());
 for (const name of expectedCollections) check("collection " + name + " exists", present.has(name));
 
@@ -324,6 +325,7 @@ const expectedIndexes = [
   ["skill_versions", "skill_version_unique", { skill_key: 1, version: 1 }, true, null],
   ["skill_versions", "skill_version_status", { skill_key: 1, status: 1 }, false, null],
   ["skill_bindings", "skill_binding_scope_unique", { organization_id: 1, project_id: 1, skill_key: 1 }, true, null],
+  ["skill_approvals", "skill_approvals_by_version", { skill_key: 1, version: 1, decided_at: 1 }, false, null],
   ["letter_position_boards", "bench_board_letter_unique", { letter_id: 1 }, true, null],
   ["letter_position_boards", "bench_board_scope_time", { organization_id: 1, project_id: 1, updated_at: -1 }, false, null],
   ["letter_position_boards", "bench_board_document_unique", { organization_id: 1, incoming_document_id: 1 }, true,
@@ -349,25 +351,40 @@ const partials = expectedIndexes.filter((e) => e[4] !== null).length;
 check("partial unique indexes expected", partials === 2, partials + " declared");
 
 const expectedSkills = ["indian-infra-contract-letters", "indian-infra-letter-analysis", "indian-infra-variations"];
+// Stored by 20261115_0001 as DRAFTS: unreviewed method text that must not be
+// usable for drafting until its technical and legal approvals exist.
+const expectedDrafts = ["indian-infra-arbitration-hearing", "indian-infra-arbitration-pleadings", "indian-infra-claims", "indian-infra-eot-claims"];
 const versions = db.skill_versions.find({}).sort({ skill_key: 1 }).toArray();
-check("skill_versions holds exactly the three system skills",
-  same(versions.map((v) => v.skill_key), expectedSkills), versions.length + " rows");
+check("skill_versions holds exactly the three published skills and the four draft packs",
+  same(versions.map((v) => v.skill_key), expectedSkills.concat(expectedDrafts).sort()), versions.length + " rows");
 for (const v of versions) {
-  check("skill " + v.skill_key + " seeded at 1.0.0, published, system-owned",
-    v.version === "1.0.0" && v.status === "published" && v.owner_scope === "system" && /^[0-9a-f]{64}$/.test(v.content_hash || ""),
-    "version=" + v.version + " status=" + v.status + " owner_scope=" + v.owner_scope);
+  const hashed = /^[0-9a-f]{64}$/.test(v.content_hash || "");
+  if (expectedDrafts.includes(v.skill_key)) {
+    const reviews = ((v.manifest || {}).required_approvals || []).map((r) => r.kind + ":" + r.reviewer_role).sort();
+    check("skill " + v.skill_key + " stored at 1.0.0 as an unpublished draft that names a legal approver",
+      v.version === "1.0.0" && v.status === "draft" && v.owner_scope === "system" && hashed &&
+        !v.published_at && !v.published_by && !v.eval_report && reviews.includes("legal:senior_legal_approver") &&
+        reviews.some((r) => r.startsWith("technical:")),
+      "status=" + v.status + " published_at=" + (v.published_at || null) + " required_approvals=" + JSON.stringify(reviews));
+  } else {
+    check("skill " + v.skill_key + " seeded at 1.0.0, published, system-owned",
+      v.version === "1.0.0" && v.status === "published" && v.owner_scope === "system" && hashed,
+      "version=" + v.version + " status=" + v.status + " owner_scope=" + v.owner_scope);
+  }
   print("SEED  " + v.skill_key + " " + v.version + " " + v.content_hash);
 }
 const skills = db.skills.find({}).sort({ skill_key: 1 }).toArray();
-check("skills holds exactly the three system skills",
+check("skills holds exactly the three published skills (a draft gets no latest-published pointer)",
   same(skills.map((s) => s.skill_key), expectedSkills), skills.length + " rows");
 for (const s of skills) {
   check("skill " + s.skill_key + " active, latest published 1.0.0",
     s.status === "active" && s.latest_published_version === "1.0.0" && s.owner_scope === "system");
 }
+check("no skill approval exists on a fresh install", db.skill_approvals.countDocuments({}) === 0,
+  db.skill_approvals.countDocuments({}) + " rows");
 
 const ledger = db.schema_migrations.find({}).toArray().map((r) => r.version).sort();
-for (const version of ["20261114_0001", "20261114_0002", "20261114_0003"]) {
+for (const version of ["20261114_0001", "20261114_0002", "20261114_0003", "20261115_0001"]) {
   check("ledger records " + version, ledger.includes(version));
 }
 print("ledger_rows=" + ledger.length);
@@ -390,7 +407,7 @@ for v in sorted(system_skill_versions(), key=lambda v: v.skill_key):
 SEEDED=$(grep '^SEED  ' "$OUT_DIR/07-bench.stdout")
 BUNDLED=$(grep '^SEED  ' "$OUT_DIR/08-bundled-hashes.stdout")
 [[ -n "$SEEDED" && "$SEEDED" == "$BUNDLED" ]] || die "stored skills differ from the bundled files: stored [$SEEDED] bundled [$BUNDLED]"
-ok "3 of 3 stored content hashes equal the bundled files"
+ok "7 of 7 stored content hashes equal the bundled files"
 
 STEP="unique indexes refuse a real duplicate"
 say "$STEP"
@@ -426,6 +443,8 @@ r = attempt(boards, { letter_id: "p1", organization_id: org });
 check("second board for the same letter is refused", r === "E11000 bench_board_letter_unique", r);
 r = attempt("skill_versions", { skill_key: "indian-infra-variations", version: "1.0.0", owner_scope: "gate6-probe" });
 check("a second 1.0.0 of a seeded skill is refused", r === "E11000 skill_version_unique", r);
+r = attempt("skill_versions", { skill_key: "indian-infra-claims", version: "1.0.0", owner_scope: "gate6-probe", status: "published" });
+check("a second 1.0.0 of a draft pack is refused", r === "E11000 skill_version_unique", r);
 
 db.getCollection(boards).deleteMany({ organization_id: org });
 db.skill_versions.deleteMany({ owner_scope: "gate6-probe" });
@@ -520,7 +539,7 @@ RUN="docker run --rm --network <private> -e DATABASE_URL=mongodb://<disposable>:
   echo "  5. ${MIGRATE} --list"
   echo "       exit ${LIST_AFTER_RC}   ${LIST_AFTER_COUNTS}"
   echo
-  echo "Letter Bench migrations 20261114_0001 to _0003, read with mongosh: ${BENCH_PASSES} passed, 0 failed"
+  echo "Skill migrations 20261114_0001 to _0003 and 20261115_0001, read with mongosh: ${BENCH_PASSES} passed, 0 failed"
   grep -E '^(PASS|FAIL)' "$OUT_DIR/07-bench.stdout" | sed 's/^/  /'
   echo "Seeded skills (key, version, content hash) - equal to the files bundled in the image: YES"
   echo "$SEEDED" | sed 's/^SEED  /  /'
