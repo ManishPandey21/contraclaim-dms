@@ -57,7 +57,7 @@ VALID_MODES = {"off", "canary", "primary"}
 MAX_HEADS = 40
 MAX_CLAUSE_CHARS = 2500
 
-CLAIM_HEAD_TEST_PROMPT_KEY = "claims.v1.head_test"
+CLAIM_HEAD_TEST_PROMPT = "claims.v1.head_test"
 CLAIM_HEAD_TEST_TEMPLATE = (
     """TASK: apply the skill above to ONE head of claim, acting for the {role}.
 
@@ -94,7 +94,7 @@ Rules:
     + UNTRUSTED_CONTENT_GUARD
     + "\n"
 )
-register_default_template(CLAIM_HEAD_TEST_PROMPT_KEY, CLAIM_HEAD_TEST_TEMPLATE)
+register_default_template(CLAIM_HEAD_TEST_PROMPT, CLAIM_HEAD_TEST_TEMPLATE)
 
 
 # --------------------------------------------------------------------------- #
@@ -908,7 +908,7 @@ class ClaimBenchService:
             organization_id=str(claim.get("organization_id") or "") or None,
             project_id=claim.get("project_id"),
             role=perspective,
-            prompt_key=CLAIM_HEAD_TEST_PROMPT_KEY,
+            prompt_key=CLAIM_HEAD_TEST_PROMPT,
             inputs={
                 "facts": facts,
                 "title": head.title,
@@ -950,7 +950,7 @@ class ClaimBenchService:
 
 
 __all__ = [
-    "CLAIM_HEAD_TEST_PROMPT_KEY",
+    "CLAIM_HEAD_TEST_PROMPT",
     "BenchGate",
     "BoardVersionRequest",
     "ClaimBenchAvailability",

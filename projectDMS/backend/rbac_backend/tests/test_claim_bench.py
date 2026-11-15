@@ -23,7 +23,7 @@ from rbac_backend.models.claim import ELEMENT_KEYS, ClaimBench, ClaimHead, Notic
 from rbac_backend.models.claim_skill_outputs import ClaimHeadTestOutput, ElementFinding
 from rbac_backend.routers.claims import _read_model, mark_bench_tests_stale
 from rbac_backend.services.claim_bench import (
-    CLAIM_HEAD_TEST_PROMPT_KEY,
+    CLAIM_HEAD_TEST_PROMPT,
     BoardVersionRequest,
     ClaimBenchService,
     ClauseCheck,
@@ -268,7 +268,7 @@ async def test_an_unchanged_head_reuses_its_step_and_force_runs_it_again() -> No
 
 
 def test_the_claim_prompt_has_its_own_template() -> None:
-    assert has_default_template(CLAIM_HEAD_TEST_PROMPT_KEY)
+    assert has_default_template(CLAIM_HEAD_TEST_PROMPT)
 
 
 # --------------------------------------------------------------------------- #
