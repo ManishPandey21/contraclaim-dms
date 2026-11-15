@@ -276,7 +276,8 @@ def _point_reference(assertion: Assertion) -> str:
 def fallback_paragraph(assertion: Assertion, role: str) -> ReplyParagraphOutput:
     verdict = assertion.verdict or "need_information"
     opening = f"In respect of your statement that \"{_point_reference(assertion)}\":"
-    direction = f" {assertion.user_direction.strip()}" if (assertion.user_direction or "").strip() else ""
+    direction_text = (assertion.user_direction or "").strip()
+    direction = f" {direction_text}" if direction_text else ""
     body = {
         "entitlement": (
             "this is accepted, subject to the contractual procedure being followed. "
@@ -316,7 +317,7 @@ def framing_paragraphs(board: PositionBoard, existing: Sequence[ReplyParagraph])
     """The deterministic parts of the letters skill's structure. A part the user
     has edited is kept as they left it."""
     meta = board.incoming_meta or {}
-    kept = {p.part: p for p in existing if p.part != "point" and p.edited_by_user}
+    kept: Dict[str, ReplyParagraph] = {p.part: p for p in existing if p.part != "point" and p.edited_by_user}
     reference = meta.get("letter_no") or "[CONFIRM: your letter reference]"
     dated = meta.get("letter_date") or "[CONFIRM: date]"
     subject = meta.get("subject") or "[CONFIRM: subject]"
@@ -347,7 +348,7 @@ def framing_paragraphs(board: PositionBoard, existing: Sequence[ReplyParagraph])
 
 
 def ordered_paragraphs(board: PositionBoard, paragraphs: Sequence[ReplyParagraph]) -> List[ReplyParagraph]:
-    framing = {p.part: p for p in paragraphs if p.part != "point"}
+    framing: Dict[str, ReplyParagraph] = {p.part: p for p in paragraphs if p.part != "point"}
     points = {p.assertion_id: p for p in paragraphs if p.part == "point" and p.assertion_id}
     ordered: List[ReplyParagraph] = []
     for part in ("header", "opening"):
