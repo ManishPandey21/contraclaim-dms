@@ -44,6 +44,7 @@ from .deterministic import (
     _string_list,
     _verified,
 )
+from ..approval_policy import material_contributors
 from ..paragraph_positions import sync_paragraph_position_projection
 
 logger = logging.getLogger(__name__)
@@ -583,10 +584,24 @@ class LLMArbitrationAgent(DeterministicArbitrationAgent):
                 if _verified(existing):
                     # Never mutate rows a human has already approved/verified.
                     continue
-                await index_collection.update_one(
-                    {"_id": existing["_id"], "case_id": self.case_id},
-                    {"$set": {**analysis, **self._status_defaults("document-index"), "generated_by_agent": agent_type}},
+                # Only the revision checked above: a review that lands meanwhile
+                # wins, and this rewrite invalidates any review computed before it.
+                result = await index_collection.update_one(
+                    {"_id": existing["_id"], "case_id": self.case_id, "edit_revision": existing.get("edit_revision")},
+                    {
+                        "$set": {
+                            **analysis,
+                            **self._status_defaults("document-index"),
+                            "generated_by_agent": agent_type,
+                            "last_material_editor_id": _actor_id(self.current_user),
+                            "material_contributor_ids": material_contributors(existing, _actor_id(self.current_user)),
+                        },
+                        "$inc": {"edit_revision": 1},
+                    },
                 )
+                if not getattr(result, "matched_count", 1):
+                    self.warnings.append(f"Document index row for {document_id} changed during analysis and was left as is.")
+                    continue
                 self.source_ids.add(document_id)
                 self.created_records.append(
                     {

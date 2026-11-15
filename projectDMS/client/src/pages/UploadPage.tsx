@@ -43,8 +43,12 @@ import {
 import enhancedApi, {
   BulkUploadStatus,
   DocumentProcessingResult,
+  FALLBACK_UPLOAD_EXTENSIONS,
   Organization as OrgModel,
+  UploadPolicy,
 } from "@/services/enhanced-api";
+import { useRegisterProjectScope } from "@/hooks/useRegisterProjectScope";
+import { isTerminalProcessingStatus } from "@/utils/processingStatus";
 
 interface DuplicateBlock {
   message: string;
@@ -117,6 +121,17 @@ const describeDocumentProgress = (
     return { label: "Retrying", tone: "warning" };
   }
   const stage = (result.processing_stage || "").toLowerCase();
+  if (status === "human_review_required") {
+    return { label: "Needs human review", tone: "warning" };
+  }
+  if (status === "stored_only") {
+    return { label: "Stored without extraction", tone: "success" };
+  }
+  if (status === "partially_processed") {
+    return isTerminalProcessingStatus(status, stage)
+      ? { label: "Partially processed", tone: "warning" }
+      : { label: "Retrying remaining pages", tone: "warning" };
+  }
   return {
     label:
       PROCESSING_STAGE_LABELS[stage] ||
@@ -133,7 +148,7 @@ const isDocumentProgressSettled = (result: DocumentProcessingResult): boolean =>
   if (!result.success || !result.document_id) return true;
   const status = (result.processing_status || "").toLowerCase();
   if (!status) return true;
-  return ["completed", "failed", "dead_lettered"].includes(status);
+  return isTerminalProcessingStatus(status, result.processing_stage);
 };
 
 interface UploadFile {
@@ -163,6 +178,9 @@ const UploadPage: React.FC = () => {
 
   // Single upload states
   const [files, setFiles] = useState<UploadFile[]>([]);
+  // The backend owns the supported-file policy; the picker renders it. The
+  // fallback is used only when the request fails.
+  const [uploadPolicy, setUploadPolicy] = useState<UploadPolicy | null>(null);
   const [uploadType, setUploadType] = useState<"incoming" | "outgoing">(
     "incoming"
   );
@@ -191,6 +209,24 @@ const UploadPage: React.FC = () => {
     string[]
   >([]);
   const [isFolderDragOver, setIsFolderDragOver] = useState(false);
+  // CL-4A: an upload is filed in the navbar project - the server refuses any
+  // other (403 context_forbidden) - so the pickers follow and are locked to it.
+  const { selectedProjectId, selectedOrganizationId, projectLocked } = useRegisterProjectScope();
+  useEffect(() => {
+    if (!projectLocked) return;
+    if (organizationId !== selectedOrganizationId) setOrganizationId(selectedOrganizationId);
+    if (projectId !== selectedProjectId) setProjectId(selectedProjectId);
+    if (bulkOrganizationId !== selectedOrganizationId) setBulkOrganizationId(selectedOrganizationId);
+    if (bulkProjectId !== selectedProjectId) setBulkProjectId(selectedProjectId);
+  }, [
+    projectLocked,
+    selectedOrganizationId,
+    selectedProjectId,
+    organizationId,
+    projectId,
+    bulkOrganizationId,
+    bulkProjectId,
+  ]);
 
   // Controls
   const [uploading, setUploading] = useState<boolean>(false);
@@ -250,6 +286,17 @@ const UploadPage: React.FC = () => {
         .replace(/(^-|-$)/g, "") || "untitled"
     ); // Fallback
   };
+
+  // Fetch the canonical upload policy so the picker offers exactly what the
+  // backend accepts. Previously this list was hard-coded and drifted: it
+  // offered .doc/.docx/.gif, all of which the backend rejects with 415.
+  useEffect(() => {
+    void enhancedApi.getUploadPolicy().then(setUploadPolicy);
+  }, []);
+
+  const acceptedExtensions = (
+    uploadPolicy?.document.extensions ?? FALLBACK_UPLOAD_EXTENSIONS
+  ).join(",");
 
   // Fetch organizations and projects
   useEffect(() => {
@@ -806,7 +853,7 @@ const UploadPage: React.FC = () => {
                     className="hidden"
                     multiple
                     onChange={handleFileChange}
-                    accept=".pdf,.doc,.docx,.txt,.jpg,.jpeg,.png,.gif"
+                    accept={acceptedExtensions}
                   />
                   <div className="flex flex-col items-center">
                     <Upload className="h-12 w-12 text-muted-foreground mb-4" />
@@ -959,6 +1006,7 @@ const UploadPage: React.FC = () => {
                   <Label htmlFor="organization">Organization</Label>
                   <Select
                     onValueChange={setOrganizationId}
+                    disabled={projectLocked}
                     value={organizationId || ""}
                   >
                     <SelectTrigger id="organization">
@@ -979,7 +1027,7 @@ const UploadPage: React.FC = () => {
                   <Select
                     onValueChange={setProjectId}
                     value={projectId || ""}
-                    disabled={!organizationId}
+                    disabled={!organizationId || projectLocked}
                   >
                     <SelectTrigger id="project">
                       <SelectValue placeholder="Select project" />
@@ -1246,6 +1294,7 @@ const UploadPage: React.FC = () => {
                       <Select
                         onValueChange={handleBulkOrganizationChange}
                         value={bulkOrganizationId || ""}
+                        disabled={projectLocked}
                       >
                         <SelectTrigger id="bulkOrganization">
                           <SelectValue placeholder="Select organization" />
@@ -1264,7 +1313,7 @@ const UploadPage: React.FC = () => {
                       <Select
                         onValueChange={setBulkProjectId}
                         value={bulkProjectId || ""}
-                        disabled={!bulkOrganizationId}
+                        disabled={!bulkOrganizationId || projectLocked}
                       >
                         <SelectTrigger id="bulkProject">
                           <SelectValue placeholder="Select project" />

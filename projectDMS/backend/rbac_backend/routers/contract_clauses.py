@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from ..core.database import get_db
 from ..core.security import CurrentUser, get_current_user
+from ..core.tenant_context import ActiveScope, active_scope
 from ..services.contract_clause.agent import ClauseChunkingAgent
 from ..services.contract_clause.index_service import (
     ClauseIndexService,
@@ -71,13 +72,17 @@ async def run_clause_indexing(
     db=Depends(get_db),
     contract_service: ContractService = Depends(get_contract_service),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Kick off clause-wise indexing for a contract document (Phase 2/3 pipeline).
 
     Authorization + scope are checked synchronously (so a 403/422 surfaces here);
     the heavy extraction/embedding/graph work runs in the background.
+    CL-4A: the contract Document is held to the navbar selection.
     """
+    selection.require_selection()
     document = await contract_service.get_contract_document(document_id, current_user)
+    await selection.require_record(document, allow_unscoped=True)
     resolved_id = str(document.get("_id") or document_id)
     org_id = str(document.get("organization_id") or "")
     project_id = str(document.get("project_id") or "")
@@ -107,9 +112,15 @@ async def list_document_clauses(
     service: ClauseIndexService = Depends(get_clause_index_service),
     contract_service: ContractService = Depends(get_contract_service),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    """List clause records for a contract document (Clause Index tab)."""
+    """List clause records for a contract document (Clause Index tab).
+
+    CL-4A: the contract Document is held to the navbar selection.
+    """
+    selection.require_selection()
     document = await contract_service.get_contract_document(document_id, current_user)
+    await selection.require_record(document, allow_unscoped=True)
     org_id = str(document.get("organization_id") or "")
     project_id = str(document.get("project_id") or "")
     clauses = await service.list_clauses(

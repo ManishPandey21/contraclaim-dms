@@ -66,7 +66,7 @@ export const StepOutput: React.FC<{ step: SkillStep }> = ({ step }) => {
     return (
       <div className="space-y-5">
         <Section title="Short summary">
-          <Bullets items={asList(output.short_summary)} />
+          <Bullets items={asList(output.summary_lines)} />
         </Section>
         <Section title="A. Basic particulars">
           <dl className="grid grid-cols-[6rem_1fr] gap-x-3 gap-y-1">

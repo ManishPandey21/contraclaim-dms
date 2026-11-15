@@ -64,12 +64,22 @@ class _Collection:
     def find(self, query):
         return _Cursor([doc for doc in self.docs.values() if _matches(doc, query)])
 
-    async def find_one_and_update(self, query, update, return_document=True):
+    async def find_one_and_update(self, query, update, return_document=True, upsert=False):
         for _id, doc in self.docs.items():
             if _matches(doc, query):
                 doc.update(update.get("$set", {}))
+                for field, amount in update.get("$inc", {}).items():
+                    doc[field] = int(doc.get(field) or 0) + int(amount)
                 self.docs[_id] = doc
                 return dict(doc)
+        if upsert:
+            # Reference counters (`delay_event_reference_counters`) upsert on _id.
+            doc = {key: value for key, value in query.items() if not key.startswith("$")}
+            doc.update(update.get("$set", {}))
+            for field, amount in update.get("$inc", {}).items():
+                doc[field] = int(amount)
+            self.docs[doc["_id"]] = doc
+            return dict(doc)
         return None
 
     async def count_documents(self, query):
@@ -106,6 +116,7 @@ class _DB:
             "variations",
             "bank_guarantees",
             "ipc_bills",
+            "delay_event_reference_counters",
         ):
             setattr(self, name, _Collection())
 

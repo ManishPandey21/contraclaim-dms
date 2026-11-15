@@ -129,22 +129,22 @@ class ContractCategorizerError(Exception):
 
 class LLMService:
     """Service for handling LLM interactions with proper error handling"""
-    
+
     def __init__(self, settings):
         self.settings = settings
         self._client = None
         self._initialize_client()
-    
+
     def _initialize_client(self):
         """Initialize LLM client with proper error handling"""
         try:
             from langchain_openai import ChatOpenAI
             from langchain_core.prompts import ChatPromptTemplate
-            
+
             if not self.settings.OPENAI_API_KEY:
                 logger.warning("OpenAI API key not configured, LLM categorization disabled")
                 return
-                
+
             self._client = ChatOpenAI(
                 model=getattr(self.settings, "OPENAI_RESPONSES_MODEL", ContractCategorizerConfig.DEFAULT_MODEL),
                 temperature=ContractCategorizerConfig.LLM_TEMPERATURE,
@@ -153,29 +153,29 @@ class LLMService:
             )
             self._prompt_template = ChatPromptTemplate
             logger.info("LLM client initialized successfully")
-            
+
         except ImportError as e:
             logger.warning(f"LangChain not available: {e}")
         except Exception as e:
             logger.error(f"Failed to initialize LLM client: {e}")
-    
+
     def is_available(self) -> bool:
         """Check if LLM service is available"""
         return self._client is not None
-    
+
     async def categorize(self, text: str, organization_name: Optional[str], project_name: Optional[str]) -> List[str]:
         """Categorize text using LLM with proper error handling"""
         if not self.is_available():
             return []
-        
+
         try:
             # Truncate text to prevent token limit issues
             truncated_text = text[:ContractCategorizerConfig.MAX_TEXT_LENGTH]
-            
+
             # Build context strings
             org_context = f"Organization: {organization_name}" if organization_name else "Organization: (unknown)"
             proj_context = f"Project: {project_name}" if project_name else "Project: (unknown)"
-            
+
             # Create system prompt
             allowed_keys = [key.value for key in CategoryKey]
             allowed_str = ", ".join(allowed_keys)
@@ -185,112 +185,112 @@ class LLMService:
                 "Return strictly a JSON object with the shape: {{\"categories\": [\"key1\", \"key2\", ...]}} where each key is from the allowed list. "
                 "If no category fits, return {{\"categories\": []}}. Do not include any explanations."
             )
-            
+
             # Create user prompt
             user_prompt = f"{org_context}\n{proj_context}\n\nContract excerpt:\n{truncated_text}"
-            
+
             # Create and invoke chain
             prompt = self._prompt_template.from_messages([("system", system_prompt), ("user", user_prompt)])
             chain = prompt | self._client
-            
+
             response = chain.invoke({})
             content = getattr(response, "content", None)
-            
+
             if not content:
                 logger.warning("Empty response from LLM")
                 return []
-            
+
             # Parse JSON response
             try:
                 data = json.loads(content)
                 categories = data.get("categories", [])
-                
+
                 if not isinstance(categories, list):
                     logger.warning("Invalid categories format from LLM")
                     return []
-                
+
                 # Validate and filter categories
                 valid_categories = []
                 valid_keys = {key.value for key in CategoryKey}
-                
+
                 for category in categories:
                     if isinstance(category, str) and category in valid_keys:
                         if category not in valid_categories:  # Avoid duplicates
                             valid_categories.append(category)
-                
+
                 logger.info(f"LLM categorization successful: {len(valid_categories)} categories found")
                 return valid_categories
-                
+
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to parse LLM response as JSON: {e}")
                 return []
-                
+
         except Exception as e:
             logger.error(f"LLM categorization failed: {e}")
             return []
 
 class KeywordMatcher:
     """Service for keyword-based categorization with improved matching"""
-    
+
     @staticmethod
     def normalize_text(text: str) -> str:
         """Normalize text for better matching"""
         if not isinstance(text, str):
             raise ValueError("Text must be a string")
-        
+
         normalized = text.lower()
         normalized = re.sub(r'\s+', ' ', normalized)
         normalized = normalized.strip()
         return normalized
-    
+
     @staticmethod
     def match_categories(text: str) -> List[str]:
         """Match categories based on keyword presence"""
         if not text or not text.strip():
             return []
-        
+
         try:
             normalized_text = KeywordMatcher.normalize_text(text)
             category_scores = []
-            
+
             for category_key, category_info in CATEGORY_TAXONOMY.items():
                 score = 0
-                
+
                 for keyword in category_info.keywords:
                     normalized_keyword = KeywordMatcher.normalize_text(keyword)
                     if normalized_keyword in normalized_text:
                         score += 1
-                
+
                 if score > 0:
                     category_scores.append((category_key.value, score))
-            
+
             # Sort by score (descending) and limit results
             category_scores.sort(key=lambda x: x[1], reverse=True)
             top_categories = [key for key, _ in category_scores[:ContractCategorizerConfig.MAX_CATEGORIES_FALLBACK]]
-            
+
             logger.info(f"Keyword matching found {len(top_categories)} categories")
             return top_categories
-            
+
         except Exception as e:
             logger.error(f"Keyword matching failed: {e}")
             return []
 
 class ContractCategorizer:
     """Main contract categorizer service with hybrid approach"""
-    
+
     def __init__(self, settings):
         self.settings = settings
         self.llm_service = LLMService(settings)
         self.keyword_matcher = KeywordMatcher()
-    
+
     def _validate_input(self, text: str) -> None:
         """Validate input parameters"""
         if not isinstance(text, str):
             raise ContractCategorizerError("Text must be a string")
-        
+
         if not text.strip():
             raise ContractCategorizerError("Text cannot be empty")
-    
+
     async def categorize(
         self,
         text: str,
@@ -300,46 +300,46 @@ class ContractCategorizer:
     ) -> List[str]:
         """
         Categorize contract text using hybrid approach.
-        
+
         Args:
             text: Contract text to categorize
             organization_name: Optional organization context
             project_name: Optional project context
             prefer_llm: Whether to prefer LLM over keyword matching
-            
+
         Returns:
             List of category keys
-            
+
         Raises:
             ContractCategorizerError: If input validation fails
         """
         try:
             # Validate input
             self._validate_input(text)
-            
+
             categories = []
-            
+
             # Try LLM first if preferred and available
             if prefer_llm and self.llm_service.is_available():
                 logger.info("Attempting LLM categorization")
                 categories = await self.llm_service.categorize(text, organization_name, project_name)
-            
+
             # Fallback to keyword matching if LLM failed or not preferred
             if not categories:
                 logger.info("Using keyword-based categorization")
                 categories = self.keyword_matcher.match_categories(text)
-            
+
             # Ensure uniqueness and validity
             unique_categories = []
             valid_keys = {key.value for key in CategoryKey}
-            
+
             for category in categories:
                 if category in valid_keys and category not in unique_categories:
                     unique_categories.append(category)
-            
+
             logger.info(f"Final categorization result: {len(unique_categories)} categories")
             return unique_categories
-            
+
         except ContractCategorizerError:
             raise
         except Exception as e:
@@ -361,11 +361,11 @@ async def categorize_contract(
 ) -> List[str]:
     """
     Convenience function for contract categorization.
-    
+
     Note: In production, you should create a categorizer instance once and reuse it.
     """
     if settings is None:
         from ..core.config import settings
-    
+
     categorizer = create_contract_categorizer(settings)
     return await categorizer.categorize(text, organization_name, project_name, prefer_llm)

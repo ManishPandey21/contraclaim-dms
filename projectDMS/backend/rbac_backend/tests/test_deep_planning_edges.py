@@ -21,7 +21,16 @@ class _FakeLetters:
         self._by_id = by_id
 
     async def find_one(self, filt: Dict[str, Any]):
-        # Expect {"_id": ObjectId("..")} or {"_id": "raw-id"}
+        # Expect {"_id": ObjectId("..")} or {"_id": "raw-id"}, or the scoped
+        # target lookup {"$and": [{"_id": {"$in": [...]}}, <scope>]}. These
+        # tests run as an unselected superadmin, whose scope is {}.
+        if "$and" in filt:
+            id_clause, scope = filt["$and"]
+            assert scope == {}, scope
+            for candidate in id_clause["_id"]["$in"]:
+                if candidate in self._by_id:
+                    return self._by_id[candidate]
+            return None
         return self._by_id.get(filt.get("_id"))
 
     def find(self, _filter: Dict[str, Any]):

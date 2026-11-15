@@ -417,7 +417,7 @@ async def test_dissect_routes_skills_per_assertion_and_shows_missing_ones(monkey
 async def test_model_assertions_are_kept_only_when_verbatim(monkeypatch) -> None:
     llm = StubLLM(
         analysis={
-            "short_summary": ["Contractor notice of delay and variation."],
+            "summary_lines": ["Contractor notice of delay and variation."],
             "immediate_action": "Reply within 14 days.",
             "assertions": [
                 {"quoted_text": "the Site was handed over 46 days late", "clause_refs": ["20.2"],

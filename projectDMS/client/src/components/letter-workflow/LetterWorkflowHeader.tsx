@@ -483,7 +483,7 @@ export const LetterWorkflowHeader: React.FC<LetterWorkflowHeaderProps> = ({
                       </SelectContent>
                     </Select>
                   </div>
-                  
+
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div className="space-y-2">
                       <Label className="text-sm font-semibold text-foreground">Due Date (Optional)</Label>

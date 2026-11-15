@@ -16,14 +16,14 @@ from ..services.organization_service import OrganizationService
 from ..services.authorization_service import AuthorizationService
 from ..services.step_up_service import require_step_up
 from ..models.organization import (
-    Organization, OrganizationCreate, OrganizationUpdate, 
+    Organization, OrganizationCreate, OrganizationUpdate,
     OrganizationResponse, OrganizationListResponse
 )
 from ..utils.validation import (
-    validate_input, sanitize_text, validate_pan_number, 
+    validate_input, sanitize_text, validate_pan_number,
     validate_gst_number, validate_email, validate_phone
 )
-from ..utils.error_handler import handle_exceptions, OrganizationError
+from ..utils.error_handler import BaseDomainError, handle_exceptions, OrganizationError
 from ..utils.rate_limiter import RateLimiter
 from ..utils.audit_logger import AuditLogger
 
@@ -33,7 +33,7 @@ router = APIRouter()
 
 class OrganizationController:
     """Secure organization controller with comprehensive validation and authorization."""
-    
+
     def __init__(
         self,
         org_service: OrganizationService,
@@ -55,29 +55,29 @@ class OrganizationController:
         try:
             # Rate limiting for expensive operations
             await self.rate_limiter.check_user_limit(current_user.id, cost=10)
-            
+
             # Authorization check - only superadmin can create organizations
             await self.auth_service.require_role(current_user, "superadmin")
-            
+
             # Validate and sanitize input
             validated_data = await self._validate_organization_input(org_data)
-            
+
             # Check for duplicates
             await self._check_organization_duplicates(validated_data)
-            
+
             # Create organization
             organization = await self.org_service.create_organization(
                 validated_data, current_user
             )
-            
+
             # Audit log
             await self.audit_logger.log_organization_created(
                 current_user.id, organization.id, organization.name
             )
-            
+
             return organization
-            
-        except (OrganizationError, HTTPException):
+
+        except (BaseDomainError, HTTPException):
             # Let 429s from the rate limiter and auth errors keep their real
             # status instead of being masked as a 500 "unavailable".
             raise
@@ -98,17 +98,17 @@ class OrganizationController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id)
-            
+
             # Build authorized query based on user role
             authorized_query = await self.auth_service.build_organization_query(
                 current_user, filters
             )
-            
+
             # Get organizations with pagination
             organizations, total_count = await self.org_service.get_organizations_paginated(
                 authorized_query, pagination
             )
-            
+
             # Normalize to OrganizationResponse to satisfy response_model and avoid validation errors
             resp_orgs = []
             for org in organizations:
@@ -156,7 +156,7 @@ class OrganizationController:
                 limit=pagination["limit"]
             )
 
-        except (OrganizationError, HTTPException):
+        except (BaseDomainError, HTTPException):
             # Rate-limit (429) and authorization errors must surface with
             # their real status; masking them as 500 "temporarily unavailable"
             # made intermittent rate-limit hits look like service outages.
@@ -177,23 +177,23 @@ class OrganizationController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id)
-            
+
             # Authorization check
             await self.auth_service.check_organization_access(
                 current_user, organization_id, "read"
             )
-            
+
             # Get organization
             organization = await self.org_service.get_organization_by_id(organization_id)
             if not organization:
                 raise OrganizationError(
-                    "Organization not found", 
+                    "Organization not found",
                     status.HTTP_404_NOT_FOUND
                 )
-            
+
             return organization
-            
-        except (OrganizationError, HTTPException):
+
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to get organization {organization_id}: {str(e)}")
@@ -212,12 +212,12 @@ class OrganizationController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id, cost=5)
-            
+
             # Authorization check
             await self.auth_service.check_organization_access(
                 current_user, organization_id, "update"
             )
-            
+
             # Get existing organization
             existing_org = await self.org_service.get_organization_by_id(organization_id)
             if not existing_org:
@@ -225,26 +225,26 @@ class OrganizationController:
                     "Organization not found",
                     status.HTTP_404_NOT_FOUND
                 )
-            
+
             # Validate update data
             validated_update = await self._validate_organization_update(
                 update_data, organization_id
             )
-            
+
             # Update organization
             updated_org = await self.org_service.update_organization(
                 organization_id, validated_update, current_user
             )
-            
+
             # Audit log
             changed_fields = self._get_changed_fields(existing_org, validated_update)
             await self.audit_logger.log_organization_updated(
                 current_user.id, organization_id, changed_fields
             )
-            
+
             return updated_org
-            
-        except (OrganizationError, HTTPException):
+
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to update organization {organization_id}: {str(e)}")
@@ -262,12 +262,12 @@ class OrganizationController:
         try:
             # Rate limiting for destructive operations
             await self.rate_limiter.check_user_limit(current_user.id, cost=20)
-            
+
             # Authorization check - only superadmin or org admin can delete
             await self.auth_service.check_organization_access(
                 current_user, organization_id, "delete"
             )
-            
+
             # Get organization for audit
             organization = await self.org_service.get_organization_by_id(organization_id)
             if not organization:
@@ -275,7 +275,7 @@ class OrganizationController:
                     "Organization not found",
                     status.HTTP_404_NOT_FOUND
                 )
-            
+
             # Check for dependencies (users, projects, etc.)
             dependencies = await self.org_service.check_organization_dependencies(
                 organization_id
@@ -285,18 +285,18 @@ class OrganizationController:
                     f"Cannot delete organization with active dependencies: {', '.join(dependencies)}",
                     status.HTTP_409_CONFLICT
                 )
-            
+
             # Delete organization
             await self.org_service.delete_organization(organization_id, current_user)
-            
+
             # Audit log
             await self.audit_logger.log_organization_deleted(
                 current_user.id, organization_id, organization.name
             )
-            
+
             return {"message": "Organization deleted successfully"}
-            
-        except (OrganizationError, HTTPException):
+
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to delete organization {organization_id}: {str(e)}")
@@ -320,7 +320,7 @@ class OrganizationController:
             city=sanitize_text(validate_input(org_data.city, max_length=100)) if org_data.city else None,
             state=sanitize_text(validate_input(org_data.state, max_length=100)) if org_data.state else None,
             pinCode=validate_input(
-                org_data.pinCode, 
+                org_data.pinCode,
                 pattern=r'^\d{6}$' if org_data.pinCode else None
             ) if org_data.pinCode else None,
             adminName=sanitize_text(validate_input(org_data.adminName, max_length=200)) if org_data.adminName else None,
@@ -334,45 +334,45 @@ class OrganizationController:
     ) -> OrganizationUpdate:
         """Validate organization update data."""
         validated_fields = {}
-        
+
         if update_data.name is not None:
             validated_fields['name'] = sanitize_text(
                 validate_input(update_data.name, max_length=200, required=True)
             )
-            
+
         if update_data.shortName is not None:
             validated_fields['shortName'] = sanitize_text(
                 validate_input(update_data.shortName, max_length=10)
             )
-            
+
         if update_data.email is not None:
             validated_fields['email'] = validate_email(update_data.email)
-            
+
         if update_data.phone is not None:
             validated_fields['phone'] = validate_phone(update_data.phone)
-            
+
         if update_data.panNumber is not None:
             validated_fields['panNumber'] = validate_pan_number(update_data.panNumber)
-            
+
         if update_data.gstNumber is not None:
             validated_fields['gstNumber'] = validate_gst_number(update_data.gstNumber)
-            
+
         # Validate other fields...
         for field in ['address', 'city', 'state', 'adminName']:
             if getattr(update_data, field, None) is not None:
                 validated_fields[field] = sanitize_text(
                     validate_input(getattr(update_data, field), max_length=500)
                 )
-        
+
         if update_data.adminEmail is not None:
             validated_fields['adminEmail'] = validate_email(update_data.adminEmail)
-            
+
         if update_data.adminContact is not None:
             validated_fields['adminContact'] = validate_phone(update_data.adminContact)
-            
+
         if update_data.billingEnabled is not None:
             validated_fields['billingEnabled'] = update_data.billingEnabled
-        
+
         return OrganizationUpdate(**validated_fields)
 
     async def _check_organization_duplicates(
@@ -385,7 +385,7 @@ class OrganizationController:
                 "Organization with this name already exists",
                 status.HTTP_409_CONFLICT
             )
-        
+
         # Check PAN duplicate
         if org_data.panNumber:
             if await self.org_service.organization_exists_by_pan(org_data.panNumber):
@@ -399,14 +399,14 @@ class OrganizationController:
     ) -> List[str]:
         """Get list of fields that were changed."""
         changed_fields = []
-        
+
         for field_name in update.__fields_set__:
             if hasattr(original, field_name):
                 old_value = getattr(original, field_name)
                 new_value = getattr(update, field_name)
                 if old_value != new_value:
                     changed_fields.append(field_name)
-        
+
         return changed_fields
 
 
@@ -424,7 +424,7 @@ async def get_organization_controller() -> OrganizationController:
         scope="organizations",
     )
     audit_logger = AuditLogger()
-    
+
     return OrganizationController(
         org_service, auth_service, rate_limiter, audit_logger
     )
@@ -462,7 +462,7 @@ async def get_organizations(
         'state': state
     }
     pagination = {'skip': skip, 'limit': limit}
-    
+
     return await controller.get_organizations(pagination, filters, current_user)
 
 
@@ -518,7 +518,7 @@ async def get_organization_stats(
     await controller.auth_service.check_organization_access(
         current_user, organization_id, "read"
     )
-    
+
     return await controller.org_service.get_organization_stats(organization_id)
 
 
@@ -534,5 +534,5 @@ async def validate_organization_data(
     await controller.auth_service.check_organization_access(
         current_user, organization_id, "admin"
     )
-    
+
     return await controller.org_service.validate_organization_data(organization_id)

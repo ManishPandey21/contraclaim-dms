@@ -151,6 +151,15 @@ class BenchRunContext:
         self.extra_findings = list(extra_findings or [])
 
 
+def _constant(value: Any) -> Callable[[], Any]:
+    """A fallback that returns ``value``, bound now rather than when it is called."""
+
+    def _fallback() -> Any:
+        return value
+
+    return _fallback
+
+
 def _user_id(current_user: Any) -> Optional[str]:
     value = getattr(current_user, "id", None)
     return str(value) if value else None
@@ -408,6 +417,8 @@ class LetterBenchService:
         user_id = _user_id(current_user) or "system"
         letter = await self.drafts.letter_service.create_letter(
             Letter(
+                _id=None,
+                letter_no=None,
                 title=title[:300],
                 recipient=recipient[:500],
                 subject=subject[:500],
@@ -595,6 +606,8 @@ class LetterBenchService:
                 role=board.role,
                 incoming_document_id=board.incoming_document_id,
             )
+            if letter is None:
+                raise RuntimeError("The letter for this bench no longer exists")
             analysis = await self.drafts.incoming_analyzer.analyze(letter, request, adapter)
             try:
                 analysis = await self.drafts.clause_checker.enrich(
@@ -745,7 +758,7 @@ class LetterBenchService:
                 "recipient": analysis.recipient,
                 "subject": analysis.subject,
                 "analysis": analysis.model_dump(mode="json"),
-                "summary": output.short_summary,
+                "summary": output.summary_lines,
                 "immediate_action": output.immediate_action,
             }
             fresh.questions = [
@@ -829,9 +842,9 @@ class LetterBenchService:
         # A model can miss a point. "Never leave an assertion unanswered" starts with
         # finding them all, so rule-based finds the model did not cover are kept;
         # a surplus card is removed in one click, a missed demand is not noticed.
-        for item in extracted:
-            if not any(item["start"] < other["end"] and other["start"] < item["end"] for other in located):
-                located.append(dict(item))
+        for found in extracted:
+            if not any(found["start"] < other["end"] and other["start"] < found["end"] for other in located):
+                located.append(dict(found))
         return sorted(located, key=lambda item: item["start"])
 
     # -------------------------------------------------------- step execution
@@ -1021,7 +1034,7 @@ class LetterBenchService:
                     )
                     + "\nBOQ rates: not on record.\nOriginal scope documents: not on record.",
                 },
-                fallback=lambda fallback_output=fallback_output: fallback_output,
+                fallback=_constant(fallback_output),
                 parents=[board.analysis_step_id] if board.analysis_step_id else [],
                 user_id=user_id,
                 force=force,
@@ -1204,9 +1217,9 @@ class LetterBenchService:
             raise HTTPException(status_code=422, detail="Only an evaluation skill can be routed to an assertion")
         if board.role not in version.manifest.roles_supported:
             raise HTTPException(status_code=422, detail=f"{version.name} is not available when drafting as {board.role}")
-        link = next((item for item in board.chain if item.skill_key == new_key), None)
-        if link is None:
-            link = ChainLink(
+        target: Optional[ChainLink] = next((item for item in board.chain if item.skill_key == new_key), None)
+        if target is None:
+            target = ChainLink(
                 link_id=uuid.uuid4().hex[:12],
                 skill_key=new_key,
                 label=version.name,
@@ -1214,10 +1227,10 @@ class LetterBenchService:
                 skill_version=version.version,
                 added_by="user",
             )
-            board.chain.insert(max(len(board.chain) - 1, 1), link)
-        if assertion.assertion_id not in link.target_assertion_ids:
-            link.target_assertion_ids.append(assertion.assertion_id)
-        link.status = "pending" if link.status in {"done", "unavailable", "failed"} else link.status
+            board.chain.insert(max(len(board.chain) - 1, 1), target)
+        if assertion.assertion_id not in target.target_assertion_ids:
+            target.target_assertion_ids.append(assertion.assertion_id)
+        target.status = "pending" if target.status in {"done", "unavailable", "failed"} else target.status
         assertion.routed_skill_key = new_key
 
     @staticmethod
@@ -1565,6 +1578,7 @@ class LetterBenchService:
         )
         if version is None:
             raise RuntimeError(f"The drafting skill is unavailable: {reason}")
+        letters_skill_version = version.version
         steps = await self._steps(letter_id)
         by_assertion = {p.assertion_id: p for p in board.reply_paragraphs if p.assertion_id}
         new_points: Dict[str, ReplyParagraph] = {}
@@ -1629,7 +1643,7 @@ class LetterBenchService:
                     )
                     or "No contract clause sources are available. Use [CONFIRM: ...] for clause wording.",
                 },
-                fallback=lambda fallback_output=fallback_output: fallback_output,
+                fallback=_constant(fallback_output),
                 parents=[item.step_id for item in evaluations],
                 user_id=user_id,
                 force=force and wanted,
@@ -1732,7 +1746,7 @@ class LetterBenchService:
                 plan_override=plan[:12000],
                 response_deadline=board.deadline.due_date or board.deadline.raw,
                 user_direction_answers=[
-                    UserDirectionAnswer(question_id=item.question.question_id, answer=item.answer)
+                    UserDirectionAnswer(question_id=item.question.question_id, answer=item.answer or "")
                     for item in board.questions
                     if (item.answer or "").strip()
                 ],
@@ -1810,7 +1824,7 @@ class LetterBenchService:
                 )
             for link in fresh.chain:
                 if link.kind == "drafting" and link.status != "unavailable":
-                    link.status, link.skill_version, link.reason = "done", version.version, None
+                    link.status, link.skill_version, link.reason = "done", letters_skill_version, None
 
         await self._mutate(letter_id, _done, user_id)
 

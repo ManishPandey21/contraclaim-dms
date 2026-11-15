@@ -99,6 +99,7 @@ class FakeCollection:
 class FakeDatabase:
     def __init__(self, documents: Iterable[Dict[str, Any]] | None = None) -> None:
         self.documents = FakeCollection(documents)
+        self.contract_documents = FakeCollection()
         self.document_processing_jobs = FakeCollection()
         self.reference_sync_queue = FakeCollection()
         self.projects = FakeCollection()

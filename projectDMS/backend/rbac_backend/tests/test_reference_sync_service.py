@@ -377,8 +377,3 @@ def test_sync_bidirectional_does_not_duplicate_missing_queue_entries():
 
     assert len(queue.items) == 1
     assert queue.items[0]["reference_key"] == "letter:unknown-ref"
-
-
-
-
-

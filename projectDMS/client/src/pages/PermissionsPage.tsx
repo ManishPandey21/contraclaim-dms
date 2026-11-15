@@ -56,7 +56,7 @@ import { ENTITY_PERMISSIONS } from "@/constants/entityPermissions";
 import {
   PERMISSION_CATALOG_PERMISSION_ITEMS,
   ROLE_ADMIN_PERMISSION_ITEMS,
-} from "./permissionCatalogItems";
+} from "./permissionsCatalog";
 
 // Helper to normalize role id across potential API variations
 const getRoleId = (role: any) =>
@@ -86,7 +86,6 @@ const deriveRoleLevel = (role: any) => {
   // Default to project-level to keep permissions scoped conservatively
   return "project";
 };
-
 
 const PermissionsPage = () => {
   const [selectedRole, setSelectedRole] = useState("all");

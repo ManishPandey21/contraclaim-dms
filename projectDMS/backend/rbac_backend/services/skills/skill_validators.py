@@ -130,7 +130,8 @@ def valuation_limb_stated(steps: Iterable[SkillStep]) -> List[SkillFinding]:
         limb = output.get("valuation_limb")
         justified = bool(str(output.get("valuation_justification") or "").strip())
         if limb in (None, "", "not_determined") or not justified:
-            for assertion_id in step.target_assertion_ids or [None]:
+            targets: List[Optional[str]] = list(step.target_assertion_ids) or [None]
+            for assertion_id in targets:
                 findings.append(
                     SkillFinding(
                         level="error",

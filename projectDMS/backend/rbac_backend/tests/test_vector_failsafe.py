@@ -43,8 +43,9 @@ def _failing_client() -> VectorClient:
 
     class _Models:
         class Filter:
-            def __init__(self, must=None):
+            def __init__(self, must=None, must_not=None):
                 self.must = must
+                self.must_not = must_not
 
         class FieldCondition:
             def __init__(self, **kwargs):
@@ -103,8 +104,9 @@ async def test_list_chunk_ids_returns_payload_chunk_id_from_qdrant_scroll():
 
     class _Models:
         class Filter:
-            def __init__(self, must=None):
+            def __init__(self, must=None, must_not=None):
                 self.must = must
+                self.must_not = must_not
 
         class FieldCondition:
             def __init__(self, **kwargs):
@@ -143,8 +145,9 @@ async def test_list_chunk_ids_reads_nested_langchain_metadata():
 
     class _Models:
         class Filter:
-            def __init__(self, must=None):
+            def __init__(self, must=None, must_not=None):
                 self.must = must
+                self.must_not = must_not
 
         class FieldCondition:
             def __init__(self, **kwargs):
@@ -166,6 +169,9 @@ async def test_list_chunk_ids_reads_nested_langchain_metadata():
     assert len(scroll_client.filters) == 2
     nested_keys = [condition.key for condition in scroll_client.filters[1].must]
     assert nested_keys == ["metadata.org_id", "metadata.project_id"]
+    # Canonical correspondence points are never listed for a chunks reconcile.
+    for scroll_filter in scroll_client.filters:
+        assert [c.key for c in scroll_filter.must_not] == ["payload_schema_version"]
 
 
 @pytest.mark.asyncio

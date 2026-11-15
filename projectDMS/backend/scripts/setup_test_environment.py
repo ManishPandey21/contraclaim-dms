@@ -65,7 +65,7 @@ def check_package(package_name: str, import_name: str = None) -> bool:
     """Check if a Python package is installed"""
     if import_name is None:
         import_name = package_name
-    
+
     try:
         __import__(import_name)
         return True
@@ -76,7 +76,7 @@ def check_package(package_name: str, import_name: str = None) -> bool:
 def check_packages() -> Tuple[bool, List[str]]:
     """Check if all required packages are installed"""
     print_header("CHECKING PYTHON PACKAGES")
-    
+
     packages = [
         ("PyPDF2", "PyPDF2"),
         ("qdrant-client", "qdrant_client"),
@@ -87,10 +87,10 @@ def check_packages() -> Tuple[bool, List[str]]:
         ("redis", "redis"),
         ("openai", "openai"),
     ]
-    
+
     missing = []
     all_installed = True
-    
+
     for package_name, import_name in packages:
         if check_package(package_name, import_name):
             print_success(f"{package_name} is installed")
@@ -98,19 +98,19 @@ def check_packages() -> Tuple[bool, List[str]]:
             print_error(f"{package_name} is NOT installed")
             missing.append(package_name)
             all_installed = False
-    
+
     if missing:
         print_warning("\nMissing packages detected!")
         print_info("Install missing packages with:")
         print(f"  pip install {' '.join(missing)}")
-    
+
     return all_installed, missing
 
 
 def check_environment_variables() -> Tuple[bool, List[str]]:
     """Check if required environment variables are set"""
     print_header("CHECKING ENVIRONMENT VARIABLES")
-    
+
     required_vars = [
         ("OPENAI_API_KEY", True),
         ("QDRANT_URL", False),
@@ -120,10 +120,10 @@ def check_environment_variables() -> Tuple[bool, List[str]]:
         ("FALKORDB_PORT", False),
         ("VECTOR_DUAL_WRITE_ENABLED", False),
     ]
-    
+
     missing = []
     all_set = True
-    
+
     for var_name, is_critical in required_vars:
         value = os.getenv(var_name)
         if value:
@@ -140,43 +140,43 @@ def check_environment_variables() -> Tuple[bool, List[str]]:
                 all_set = False
             else:
                 print_warning(f"{var_name} is NOT set (will use default)")
-    
+
     if missing:
         print_warning("\nCritical environment variables missing!")
         print_info("Set them in your .env file or export them:")
         for var in missing:
             print(f"  export {var}=your_value")
-    
+
     return all_set, missing
 
 
 def test_qdrant_connection() -> bool:
     """Test connection to Qdrant"""
     print_header("TESTING QDRANT CONNECTION")
-    
+
     try:
         from qdrant_client import QdrantClient
         from rbac_backend.config.document_processing_config import DocumentProcessingConfig
-        
+
         config = DocumentProcessingConfig()
-        
+
         if not config.qdrant_enabled:
             print_warning("Qdrant is disabled in configuration")
             return False
-        
+
         print_info(f"Connecting to Qdrant at {config.qdrant_url}...")
-        
+
         client = QdrantClient(
             url=config.qdrant_url,
             api_key=config.qdrant_api_key,
             timeout=5.0
         )
-        
+
         # Try to get collections
         collections = client.get_collections()
         print_success(f"Connected to Qdrant successfully!")
         print_info(f"Available collections: {len(collections.collections)}")
-        
+
         # Check if our collection exists
         collection_names = [c.name for c in collections.collections]
         if config.qdrant_collection in collection_names:
@@ -184,9 +184,9 @@ def test_qdrant_connection() -> bool:
             print_success(f"Collection '{config.qdrant_collection}' exists with {info.points_count} vectors")
         else:
             print_warning(f"Collection '{config.qdrant_collection}' does not exist yet (will be created)")
-        
+
         return True
-        
+
     except ImportError as e:
         print_error(f"Required packages not installed: {e}")
         return False
@@ -200,35 +200,35 @@ def test_qdrant_connection() -> bool:
 def test_falkordb_connection() -> bool:
     """Test connection to FalkorDB"""
     print_header("TESTING FALKORDB CONNECTION")
-    
+
     try:
         from rbac_backend.services.falkor_graph_service import FalkorGraphService
-        
+
         service = FalkorGraphService()
-        
+
         if not service.enabled:
             print_warning("FalkorDB is disabled in configuration")
             return False
-        
+
         print_info(f"Connecting to FalkorDB at {service.config.host}:{service.config.port}...")
-        
+
         # Try to ensure schema (this will test connection)
         service.ensure_schema()
         print_success("Connected to FalkorDB successfully!")
-        
+
         # Get statistics
         total_letters = service.debug_count_letters()
         print_info(f"Current graph has {total_letters} letter nodes")
-        
+
         if total_letters > 0:
             print_info("Sample letters:")
             letters = service.debug_list_all_letters(limit=5)
             for letter in letters:
                 subject = letter.get('subject') or 'N/A'
                 print(f"  - {letter.get('code', 'N/A')}: {subject[:50]}")
-        
+
         return True
-        
+
     except ImportError as e:
         print_error(f"Required packages not installed: {e}")
         return False
@@ -242,21 +242,21 @@ def test_falkordb_connection() -> bool:
 def check_test_data() -> bool:
     """Check if test data folder exists"""
     print_header("CHECKING TEST DATA")
-    
+
     test_folder = r"C:\Users\santo\Downloads\KNPCC-06 Borewell (1)\KNPCC-06 Borewell\New folder\test data"
-    
+
     if os.path.exists(test_folder):
         pdf_files = [f for f in os.listdir(test_folder) if f.lower().endswith('.pdf')]
         print_success(f"Test data folder exists: {test_folder}")
         print_info(f"Found {len(pdf_files)} PDF files")
-        
+
         if pdf_files:
             print_info("Sample files:")
             for pdf in pdf_files[:5]:
                 print(f"  - {pdf}")
             if len(pdf_files) > 5:
                 print(f"  ... and {len(pdf_files) - 5} more")
-        
+
         return True
     else:
         print_error(f"Test data folder not found: {test_folder}")
@@ -267,7 +267,7 @@ def check_test_data() -> bool:
 def print_next_steps(all_checks_passed: bool):
     """Print next steps based on check results"""
     print_header("NEXT STEPS")
-    
+
     if all_checks_passed:
         print_success("All checks passed! You're ready to run the tests.")
         print_info("\nRun the test suite with:")
@@ -293,17 +293,17 @@ def print_next_steps(all_checks_passed: bool):
 def main():
     """Main entry point"""
     print_header("QDRANT & FALKORDB TEST ENVIRONMENT SETUP")
-    
+
     # Run all checks
     packages_ok, missing_packages = check_packages()
     env_ok, missing_env = check_environment_variables()
     qdrant_ok = test_qdrant_connection() if packages_ok else False
     falkor_ok = test_falkordb_connection() if packages_ok else False
     data_ok = check_test_data()
-    
+
     # Summary
     print_header("SETUP SUMMARY")
-    
+
     checks = [
         ("Python Packages", packages_ok),
         ("Environment Variables", env_ok),
@@ -311,18 +311,18 @@ def main():
         ("FalkorDB Connection", falkor_ok),
         ("Test Data", data_ok),
     ]
-    
+
     for check_name, passed in checks:
         if passed:
             print_success(f"{check_name}: OK")
         else:
             print_error(f"{check_name}: FAILED")
-    
+
     all_passed = all(passed for _, passed in checks)
-    
+
     # Print next steps
     print_next_steps(all_passed)
-    
+
     # Exit with appropriate code
     sys.exit(0 if all_passed else 1)
 

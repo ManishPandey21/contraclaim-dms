@@ -101,12 +101,12 @@ export const PromptSettingsPanel: React.FC = () => {
   const [templateText, setTemplateText] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(true);
   const [saving, setSaving] = useState<boolean>(false);
-  
+
   const { toast } = useToast();
-  
+
   const selectedPrompt = prompts.find(p => p.prompt_key === selectedKey);
   const requiredVariables = REQUIRED_VARS[selectedKey] || [];
-  
+
   const fetchPrompts = useCallback(async (activePromptKey: string = STRATEGY_PROMPT_KEY) => {
     try {
       setLoading(true);
@@ -116,7 +116,7 @@ export const PromptSettingsPanel: React.FC = () => {
       if (!res.ok) throw new Error("Failed to load prompt templates");
       const data = await res.json();
       setPrompts(data);
-      
+
       const active = data.find((p: PromptConfig) => p.prompt_key === activePromptKey);
       if (active) {
         setTemplateText(active.template);
@@ -168,7 +168,7 @@ export const PromptSettingsPanel: React.FC = () => {
       });
       return;
     }
-    
+
     try {
       setSaving(true);
       const res = await authenticatedFetch(joinApiUrl(`/ai-assistant/prompts/${selectedKey}`), {
@@ -176,17 +176,17 @@ export const PromptSettingsPanel: React.FC = () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ template: templateText })
       });
-      
+
       if (!res.ok) {
         const errData = await res.json();
         throw new Error(errData?.detail || "Failed to update prompt template");
       }
-      
+
       toast({
         title: "Success",
         description: "Prompt template updated successfully.",
       });
-      
+
       await fetchPrompts(selectedKey);
     } catch (err: any) {
       toast({
@@ -268,7 +268,7 @@ export const PromptSettingsPanel: React.FC = () => {
                     Restore Default
                   </Button>
                 </div>
-                
+
                 <Textarea
                   value={templateText}
                   onChange={(e) => setTemplateText(e.target.value)}
@@ -298,7 +298,7 @@ export const PromptSettingsPanel: React.FC = () => {
                     );
                   })}
                 </div>
-                
+
                 {missingVariables.length > 0 ? (
                   <div className="flex gap-2 items-start text-xs border border-red-500/20 bg-red-500/5 p-3 rounded-lg text-red-500 leading-normal">
                     <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
@@ -316,7 +316,7 @@ export const PromptSettingsPanel: React.FC = () => {
                     </div>
                   </div>
                 )}
-                
+
                 {selectedKey === STRATEGY_PROMPT_KEY && (
                   <div className="flex gap-2 items-start text-xs border border-blue-500/20 bg-blue-500/5 p-3 rounded-lg text-blue-500 leading-normal">
                     <Info className="h-4 w-4 shrink-0 mt-0.5" />

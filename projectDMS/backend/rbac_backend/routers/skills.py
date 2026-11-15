@@ -31,6 +31,7 @@ from ..services.ai_guardrails import AIOutputGuardrailService
 from ..services.policy_service import PolicyService
 from ..services.skills.loader import MAX_BUNDLE_BYTES, SkillBundleError, load_skill_zip
 from ..services.skills.registry import SkillRegistry
+from ..services.upload_streaming import read_upload_within_limit
 from ..utils.error_handler import handle_exceptions
 from ..utils.rate_limiter import RateLimiter
 
@@ -131,7 +132,9 @@ async def import_skill_bundle(
     """Upload a zip as a DRAFT version. It is untrusted until published."""
     await policy.authorize(current_user, "drafting.skill.publish", resource_type="skill")
     await skill_admin_limiter.check_user_limit(_user_id(current_user))
-    data = await file.read(MAX_BUNDLE_BYTES + 1)
+    # Capped while reading: the request is refused with 413 on the byte that
+    # crosses the limit, before the bundle is parsed or anything is stored.
+    data = await read_upload_within_limit(file, MAX_BUNDLE_BYTES)
     try:
         options = SkillImportOptions(
             version=version, kind=kind, manifest=SkillManifest(**json.loads(manifest))

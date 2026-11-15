@@ -18,10 +18,10 @@ interface LetterInputComponentProps {
   isProcessing?: boolean;
 }
 
-const LetterInputComponent: React.FC<LetterInputComponentProps> = ({ 
-  letter, 
+const LetterInputComponent: React.FC<LetterInputComponentProps> = ({
+  letter,
   inputRequests,
-  onProvideInput, 
+  onProvideInput,
   onCancel,
   isProcessing = false,
 }) => {
@@ -69,7 +69,7 @@ const LetterInputComponent: React.FC<LetterInputComponentProps> = ({
             <div className="font-medium">{letter.recipient}</div>
           </div>
         </div>
-        
+
         <div className="mb-4">
           <Label className="text-muted-foreground text-sm">Subject</Label>
           <div className="font-medium">{letter.subject}</div>
@@ -114,7 +114,7 @@ const LetterInputComponent: React.FC<LetterInputComponentProps> = ({
                     {request.requestDetails}
                   </p>
                 </div>
-                
+
                 <div className="space-y-3">
                   <div>
                     <Label htmlFor="input-response">Your Response</Label>
@@ -174,15 +174,15 @@ const LetterInputComponent: React.FC<LetterInputComponentProps> = ({
           ))}
         </div>
       )}
-      
+
       <div className="flex justify-end gap-2">
         <Button variant="outline" onClick={onCancel}>
           Cancel
         </Button>
         {pendingRequests.length > 0 && (
-          <Button 
-            onClick={handleProvideInput} 
-            className="gap-2" 
+          <Button
+            onClick={handleProvideInput}
+            className="gap-2"
             disabled={submitting || isProcessing}
           >
             <ArrowRight className="h-4 w-4" />

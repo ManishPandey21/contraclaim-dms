@@ -51,6 +51,7 @@ from ..models.arbitration_drafting import (
 )
 from ..services.arbitration_drafting import ArbitrationCaseWorkspaceService, ArbitrationDraftingService
 from ..services.arbitration_drafting.case_workspace import MATRIX_COLLECTIONS
+from ..services.arbitration_drafting.permission_receipts import annotate_permission_states
 from ..services.policy_service import PolicyService
 from ..services.step_up_service import require_step_up
 from ..services.arbitration_drafting.workflow_service import ArbitrationWorkflowService
@@ -532,10 +533,11 @@ async def list_arbitration_case_matrix(
     policy: PolicyService = Depends(get_policy),
 ):
     await _load_case_and_authorize(case_id, Permissions.ARBITRATION_VIEW, db, current_user, policy)
-    return [
-        ArbitrationMatrixRow(**row)
-        for row in await ArbitrationCaseWorkspaceService(db).list_matrix_rows(case_id, matrix_slug, draft_id=draft_id)
-    ]
+    rows = await ArbitrationCaseWorkspaceService(db).list_matrix_rows(case_id, matrix_slug, draft_id=draft_id)
+    if matrix_slug == "rejoinder-matrix":
+        # The stored grant is the record; these fields say whether it counts and why not.
+        rows = await annotate_permission_states(db, rows)
+    return [ArbitrationMatrixRow(**row) for row in rows]
 
 
 @router.post("/cases/{case_id}/{matrix_slug}", response_model=ArbitrationMatrixRow, status_code=status.HTTP_201_CREATED)
@@ -606,9 +608,9 @@ async def record_rejoinder_new_matter_permission(
     policy: PolicyService = Depends(get_policy),
 ):
     await _load_case_and_authorize(case_id, Permissions.ARBITRATION_APPROVE, db, current_user, policy)
-    return ArbitrationMatrixRow(
-        **await ArbitrationCaseWorkspaceService(db).record_rejoinder_permission(case_id, row_id, payload, current_user)
-    )
+    row = await ArbitrationCaseWorkspaceService(db).record_rejoinder_permission(case_id, row_id, payload, current_user)
+    [annotated] = await annotate_permission_states(db, [row])
+    return ArbitrationMatrixRow(**annotated)
 
 
 @router.get("/drafts", response_model=List[ArbitrationDraft])

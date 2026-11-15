@@ -48,6 +48,12 @@ class Enclosure(BaseModel):
     filesize: int = Field(default=0)
     uploadedAt: datetime = Field(default_factory=now_utc)
     uploadedBy: str = Field(...)
+    #: The first-class child Document made from this entry (Phase 8), if any.
+    #: Storage fields (``storage_key``, ``file_object_id``,
+    #: ``storage_locations``) stay off this model on purpose; they are not for
+    #: the client, so writers must edit the raw array, never rewrite it from
+    #: model dumps.
+    child_document_id: Optional[str] = Field(default=None)
 
 class StorageLocation(BaseModel):
     """Represents one stored copy of a document."""
@@ -85,6 +91,12 @@ class Document(BaseModel):
     compressionEnabled: bool = Field(default=False)
     ocrText: Optional[str] = Field(None)
     full_text: Optional[str] = Field(default=None)
+    #: Source-text provenance (services/source_text.py). Declared so a model
+    #: object carries it to the publication policy; this model drops
+    #: undeclared fields.
+    ocr_text_kind: Optional[str] = Field(default=None)
+    full_text_source: Optional[str] = Field(default=None)
+    source_text_status: Optional[str] = Field(default=None)
     keywords: Optional[List[str]] = Field(default=None)
     additional_keywords: Optional[List[str]] = Field(default=None)
     contractual_clauses: Optional[List[str]] = Field(default=None)
@@ -112,6 +124,13 @@ class Document(BaseModel):
     processing_error: Optional[Dict[str, Any]] = Field(default=None)
     processed_path: Optional[str] = Field(default=None)
     metadata_source: Optional[str] = Field(default=None)
+    #: Extraction quality of the last metadata run (see
+    #: services/metadata_integrity.py). Declared, because this model drops
+    #: undeclared fields and a degraded extraction must stay visible.
+    metadata_quality: Optional[Dict[str, Any]] = Field(default=None)
+    #: Fields a person edited; reprocessing never overwrites them.
+    human_edited_fields: Optional[List[str]] = Field(default=None)
+    manual_summary_metadata_override: Optional[bool] = Field(default=None)
     processed_at: Optional[datetime] = Field(default=None)
     contract_upload_id: Optional[str] = Field(default=None)
     contract_categories: List[str] = Field(default_factory=list)
@@ -119,6 +138,16 @@ class Document(BaseModel):
     sha256: Optional[str] = Field(default=None)
     page_count: Optional[int] = Field(default=None)
     duplicate_status: Optional[str] = Field(default=None)
+    # `lifecycle_state` is an AUTHORITY field: publication_policy treats
+    # "duplicate"/"deleted" as quarantine. It must be declared here, because
+    # this model has no `extra="allow"` and therefore silently DROPS undeclared
+    # Mongo fields - every `Document(**row).__dict__` / `.model_dump()` /
+    # `getattr(doc, "lifecycle_state", None)` consumer then reads None and the
+    # authority decision INVERTS across this boundary: is_consumable() returns
+    # False on the raw record and True on the model. A guard that runs but
+    # reads an object the field was stripped from is equivalent to no guard.
+    lifecycle_state: Optional[str] = Field(default=None)
+    deletedAt: Optional[datetime] = Field(default=None)
     duplicate_of: Optional[str] = Field(default=None)
     revision_of: Optional[str] = Field(default=None)
     duplicate_review: Optional[Dict[str, Any]] = Field(default=None)
@@ -127,6 +156,17 @@ class Document(BaseModel):
     createdBy: str = Field(...)
     version: str = Field(default="1.0")
     enclosures: List[Enclosure] = Field(default_factory=list)
+    # Phase 8 child documents (services/child_document_service.py). Declared
+    # because this model drops undeclared fields: a child read through it
+    # without `parent_document_id` would pass for a top-level document.
+    parent_document_id: Optional[str] = Field(default=None)
+    relationship_type: Optional[str] = Field(default=None, pattern=r"^(enclosure|annexure|attachment)$")
+    source_page_range: Optional[Dict[str, int]] = Field(default=None)
+    parent_provenance: Optional[Dict[str, Any]] = Field(default=None)
+    original_filename: Optional[str] = Field(default=None)
+    #: Set when a parent's delete cascaded to this child, so a later parent
+    #: restore can tell cascaded children from ones deleted on their own.
+    lifecycle_cascade_parent_id: Optional[str] = Field(default=None)
     references: List[DocumentReference] = Field(default_factory=list)
     referencedBy: List[DocumentReference] = Field(default_factory=list)
     storage_locations: List[StorageLocation] = Field(default_factory=list)
@@ -282,12 +322,12 @@ class BulkUploadStatus(BaseModel):
     completed_at: Optional[datetime] = Field(default=None)
     error_message: Optional[str] = Field(default=None)
     results: List[DocumentProcessingResult] = Field(default_factory=list)
-    
+
     # Progress metrics
     progress_percentage: Optional[float] = Field(default=None)
     estimated_completion: Optional[datetime] = Field(default=None)
     processing_rate: Optional[float] = Field(default=None)  # files per minute
-    
+
     model_config = ConfigDict(json_encoders={datetime: isoformat_z})
 
     @model_validator(mode="after")
@@ -305,7 +345,7 @@ class BulkUploadResponse(BaseModel):
     total_files: int = Field(...)
     status: str = Field(...)
     created_at: datetime = Field(default_factory=now_utc)
-    
+
     model_config = ConfigDict(json_encoders={datetime: isoformat_z})
 
 class DocumentListResponse(BaseModel):
@@ -321,6 +361,15 @@ class EnclosureResponse(BaseModel):
     """Response model for enclosure operations."""
     enclosure: Enclosure = Field(...)
     message: str = Field(default="Enclosure added successfully")
+    #: Phase 8 PR B: the first-class child Document the upload became. Its
+    #: processing is independent of the parent's.
+    child_document_id: Optional[str] = Field(default=None)
+    child_created: Optional[bool] = Field(default=None)
+    relationship_type: Optional[str] = Field(default=None)
+    version_id: Optional[str] = Field(default=None)
+    processing_job_id: Optional[str] = Field(default=None)
+    pipeline_version: Optional[str] = Field(default=None)
+    processing_status: Optional[str] = Field(default=None)
 
 class ReferenceCreate(BaseModel):
     """Model for creating document references."""
@@ -356,7 +405,7 @@ class CSVTemplateRow(BaseModel):
     sub_tags: Optional[str] = Field(None, description="Comma-separated sub-tags")
     status: Optional[str] = Field(default="draft", description="Document status")
     ocr_enabled: Optional[str] = Field(default="true", description="Enable OCR processing (true/false)")
-    
+
     model_config = ConfigDict(
         populate_by_name=True,
         json_schema_extra={
@@ -410,5 +459,5 @@ class DocumentProcessingTask(BaseModel):
     completed_at: Optional[datetime] = Field(default=None)
     error_message: Optional[str] = Field(default=None)
     result: Optional[Dict[str, Any]] = Field(default=None)
-    
+
     model_config = ConfigDict(json_encoders={datetime: isoformat_z})

@@ -21,6 +21,35 @@ import {
 
 import axios from "axios";
 import { API_BASE_URL, joinApiUrl } from "../config/api";
+
+export interface UploadSurfacePolicy {
+  mimes: string[];
+  extensions: string[];
+  max_size_mb: number;
+}
+
+export interface UploadPolicy {
+  document: UploadSurfacePolicy;
+  enclosure: UploadSurfacePolicy;
+  contract: UploadSurfacePolicy;
+  version: UploadSurfacePolicy;
+}
+
+/**
+ * Offline fallback only - the backend owns the real policy.
+ *
+ * A backend test asserts this stays a subset of what the server accepts, so
+ * the two cannot drift the way the old hard-coded accept list did: it offered
+ * .doc/.docx/.gif while the backend answered 415.
+ */
+export const FALLBACK_UPLOAD_EXTENSIONS = [
+  ".pdf",
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".txt",
+  ".zip",
+];
 import {
   ensureValidToken,
   refreshToken,
@@ -99,6 +128,11 @@ export interface Document {
   enclosures?: Enclosure[];
   processing_status?: string | null;
   processing_job_id?: string | null;
+  // Phase 8: set on a child document (enclosure, annexure, attachment).
+  parent_document_id?: string | null;
+  relationship_type?: string | null;
+  parent_provenance?: Record<string, any> | null;
+  lifecycle_state?: string | null;
   processing_metadata?: Record<string, any> | null;
   processing_error?: Record<string, any> | null;
   processed_path?: string | null;
@@ -201,11 +235,27 @@ export interface DocumentReference {
 export interface Enclosure {
   id: string;
   filename: string;
-  presigned_url: string;
+  /** Null for entries stored without a presigned link (Phase 8 streamed uploads). */
+  presigned_url?: string | null;
   filetype: string;
   filesize: number;
   uploadedAt: string;
   uploadedBy: string;
+  /** The first-class child Document this entry became (Phase 8); absent on historical entries. */
+  child_document_id?: string | null;
+}
+
+/** `POST /documents/{id}/enclosures` answers with this envelope, not a bare Enclosure. */
+export interface EnclosureUploadResponse {
+  enclosure: Enclosure;
+  message: string;
+  child_document_id?: string | null;
+  child_created?: boolean | null;
+  relationship_type?: string | null;
+  version_id?: string | null;
+  processing_job_id?: string | null;
+  pipeline_version?: string | null;
+  processing_status?: string | null;
 }
 
 export interface Tag {
@@ -561,13 +611,24 @@ class EnhancedApiService {
     if (response.status === 403) {
       // Permission denied should surface a clear message to the UI
       let detail = "Permission denied";
+      let structured: any = null;
       try {
         const parsed = await response.json();
-        detail = parsed?.detail || parsed?.message || detail;
+        // A scope refusal (`context_forbidden`) carries {code, message}: show the
+        // message, keep the code for callers, never render "[object Object]".
+        if (parsed?.detail && typeof parsed.detail === "object") {
+          structured = parsed.detail;
+          detail = structured.message || detail;
+        } else {
+          detail = parsed?.detail || parsed?.message || detail;
+        }
       } catch {
         // ignore parse errors
       }
-      throw new Error(detail);
+      const error = new Error(detail) as Error & { status?: number; detail?: any };
+      error.status = 403;
+      if (structured) error.detail = structured;
+      throw error;
     }
 
     if (!response.ok) {
@@ -1141,19 +1202,39 @@ class EnhancedApiService {
     );
   }
 
+  /** Canonical supported-file policy. Null when the request fails. */
+  async getUploadPolicy(): Promise<UploadPolicy | null> {
+    try {
+      const response = await this.request<{ policy: UploadPolicy }>(
+        "/config/upload-policy",
+      );
+      return response.policy;
+    } catch {
+      return null;
+    }
+  }
+
   // Document Enclosures
   async getDocumentEnclosures(id: string): Promise<Enclosure[]> {
     return this.request<Enclosure[]>(`/documents/${id}/enclosures`);
   }
 
-  async addDocumentEnclosure(id: string, file: File): Promise<Enclosure> {
+  async addDocumentEnclosure(
+    id: string,
+    file: File,
+  ): Promise<EnclosureUploadResponse> {
     const formData = new FormData();
     formData.append("file", file);
 
-    return this.request<Enclosure>(`/documents/${id}/enclosures`, {
+    return this.request<EnclosureUploadResponse>(`/documents/${id}/enclosures`, {
       method: "POST",
       body: formData,
     });
+  }
+
+  /** The parent's live child documents (Phase 8), for enclosure status. */
+  async getDocumentChildren(id: string): Promise<Document[]> {
+    return this.request<Document[]>(`/documents/${id}/children`);
   }
 
   async deleteDocumentEnclosure(

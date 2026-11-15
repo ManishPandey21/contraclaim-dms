@@ -8,6 +8,13 @@ from bson import ObjectId
 from ..core.database import get_database
 from ..models.rbac_monetization import AccountType
 
+#: The role keys whose holders reach every project of their organisation without a
+#: project assignment. The one definition: ``is_client_scope_allowed`` answers
+#: project access with it, and ``has_organization_wide_scope`` exposes it to routes
+#: that act organisation-wide (Contract Master reconciliation), so the two can never
+#: disagree about who is organisation tier.
+ORGANIZATION_WIDE_ROLE_KEYS = frozenset({"orgadmin", "orguser"})
+
 
 class ScopeService:
     """Computes client membership and ContraClaim expert allocation scopes."""
@@ -111,11 +118,26 @@ class ScopeService:
                 return False
             if str(project_id) in project_ids:
                 return True
-            if roles & {"orgadmin", "orguser"} and organization_id and str(organization_id) in org_ids:
+            if roles & ORGANIZATION_WIDE_ROLE_KEYS and organization_id and str(organization_id) in org_ids:
                 return True
             return False
 
         return bool(org_ids)
+
+    async def has_organization_wide_scope(self, user: Any, *, organization_id: Optional[str]) -> bool:
+        """Whether ``user`` reaches the whole of ``organization_id``, not just assigned projects.
+
+        ``is_client_scope_allowed(organization_id=X)`` with no project is true for any
+        member of X - a Project Admin included - so it cannot answer this. This is the
+        rule that grants unassigned project access above, stated once.
+        """
+        if self.is_superadmin(user):
+            return True
+        if not organization_id:
+            return False
+        if not self.role_names(user) & ORGANIZATION_WIDE_ROLE_KEYS:
+            return False
+        return str(organization_id) in await self.client_organization_ids(user)
 
     async def active_expert_allocations(
         self,

@@ -48,6 +48,9 @@ export interface ClaimDTO {
   project_id?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
+  evidence_frozen_at?: string | null;
+  evidence_frozen_by?: string | null;
+  evidence_freeze_reason?: string | null;
 }
 
 export interface ClaimPayload {

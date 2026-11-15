@@ -111,15 +111,15 @@
   .glass-morphism {
     @apply bg-white/70 backdrop-blur-md border border-white/20 shadow-sm;
   }
-  
+
   .glass-card {
     @apply bg-white/80 backdrop-blur-lg border border-gray-200/50 shadow-md rounded-xl transition-all duration-300 hover:shadow-lg;
   }
-  
+
   .sidebar-item {
     @apply flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors hover:bg-docsumo-blue/10 hover:text-docsumo-blue;
   }
-  
+
   .sidebar-item.active {
     @apply bg-docsumo-blue/10 text-docsumo-blue;
   }
@@ -147,11 +147,11 @@
   .pdf-viewer-container {
     @apply w-full h-full min-h-[calc(100vh-4rem)] flex flex-row;
   }
-  
+
   .pdf-viewer {
     @apply flex-1 overflow-auto bg-gray-100;
   }
-  
+
   .metadata-sidebar {
     @apply w-80 bg-white border-l border-gray-200 p-4 overflow-y-auto;
   }

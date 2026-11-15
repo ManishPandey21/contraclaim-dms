@@ -403,5 +403,3 @@ async def raw_query(request: QueryRequest) -> QueryResponse:
     except redis.RedisError as exc:
         logger.exception("Raw query failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-

@@ -2,7 +2,7 @@
 Running Backend
 sudo systemctl restart contraclaim-api
 
-Check status of Docker 
+Check status of Docker
 sudo service docker status
 
 Go to front end Directory

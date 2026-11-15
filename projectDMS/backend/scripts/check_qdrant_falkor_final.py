@@ -118,11 +118,11 @@ def _count_falkor_letters() -> Optional[int]:
     client = _get_falkor_client()
     if not client:
         return None
-    
+
     try:
         print("Counting letters in FalkorDB...")
         result = client.execute_command("GRAPH.QUERY", "G", "MATCH (l:Letter) RETURN COUNT(l)")
-        
+
         # Parse result - format is [['COUNT(l)'], [[count]]]
         if result and len(result) >= 2 and result[1]:
             count = int(result[1][0][0])
@@ -131,7 +131,7 @@ def _count_falkor_letters() -> Optional[int]:
         else:
             print("✓ No letters found (database is empty)")
             return 0
-            
+
     except Exception as exc:
         print(f"✗ Query failed: {exc}")
         return None
@@ -144,10 +144,10 @@ def _get_falkor_schema():
     client = _get_falkor_client()
     if not client:
         return
-    
+
     try:
         print("\n--- FalkorDB Schema ---")
-        
+
         # Get node labels
         result = client.execute_command("GRAPH.QUERY", "G", "CALL db.labels()")
         if result and len(result) >= 2 and result[1]:
@@ -155,7 +155,7 @@ def _get_falkor_schema():
             print(f"Node labels: {labels}")
         else:
             print("No node labels found")
-        
+
         # Get relationship types
         result = client.execute_command("GRAPH.QUERY", "G", "CALL db.relationshipTypes()")
         if result and len(result) >= 2 and result[1]:
@@ -163,14 +163,14 @@ def _get_falkor_schema():
             print(f"Relationship types: {rel_types}")
         else:
             print("No relationship types found")
-            
+
         # Get sample letters if they exist
         result = client.execute_command("GRAPH.QUERY", "G", "MATCH (l:Letter) RETURN l.normCode LIMIT 5")
         if result and len(result) >= 2 and result[1]:
             letters = [row[0] for row in result[1] if row[0]]
             if letters:
                 print(f"Sample letter codes: {letters}")
-        
+
     except Exception as exc:
         print(f"Schema query failed: {exc}")
     finally:
@@ -199,11 +199,11 @@ async def main(args: argparse.Namespace) -> int:
     # Check FalkorDB
     print("\n--- FalkorDB Inspection ---")
     print("Connecting to FalkorDB on localhost:6380 (no password)...")
-    
+
     total_falkor = _count_falkor_letters()
     if total_falkor is not None:
         print(f"Falkor letters: {total_falkor}")
-        
+
         # Show schema if we have letters
         if total_falkor > 0:
             _get_falkor_schema()

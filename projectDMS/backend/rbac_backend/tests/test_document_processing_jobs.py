@@ -20,6 +20,10 @@ class FakeCollection:
                 if not any(self._match(doc, branch) for branch in expected):
                     return False
                 continue
+            if key == "$and":
+                if not all(self._match(doc, branch) for branch in expected):
+                    return False
+                continue
             actual = doc.get(key)
             if isinstance(expected, dict):
                 if "$in" in expected and actual not in expected["$in"]:
@@ -71,6 +75,7 @@ class FakeCollection:
 class FakeDB:
     def __init__(self):
         self.documents = FakeCollection()
+        self.contract_documents = FakeCollection()
         self.document_processing_jobs = FakeCollection()
 
 

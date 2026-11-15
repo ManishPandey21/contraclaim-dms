@@ -15,23 +15,23 @@ from rbac_backend.config.document_processing_config import DocumentProcessingCon
 
 def debug_falkor():
     print("=== FalkorDB Connection Debug ===")
-    
+
     # Check config
     config = DocumentProcessingConfig()
     print(f"FALKORDB_URL: {config.falkordb_url}")
     print(f"FALKORDB_PASSWORD: {'*' * len(config.falkordb_password) if config.falkordb_password else 'None'}")
     print(f"FALKORDB_ENABLED: {config.falkordb_enabled}")
-    
+
     # Try to create service
     service = FalkorGraphService()
     print(f"Service enabled: {service.enabled}")
     print(f"Service _client attr: {hasattr(service, '_client')}")
-    
+
     if hasattr(service, '_client'):
         client_val = service._client
         print(f"Service _client value: {client_val}")
         print(f"Service _client type: {type(client_val)}")
-        
+
         # If it's a property/method, try to call it
         if callable(client_val):
             try:
@@ -40,7 +40,7 @@ def debug_falkor():
                 print(f"Result type: {type(result)}")
             except Exception as e:
                 print(f"Error calling _client(): {e}")
-    
+
     # Test direct connection
     if service.enabled:
         print("\n--- Testing direct query ---")

@@ -21,9 +21,9 @@ User uploads PDF → DocumentService.create_document()
    ↓
 1. Store base document record in MongoDB: documents collection
    Fields: filename, organization_id, project_id, status="pending", created_at
-   
+
 2. Return document_id (ObjectId) to frontend
-   
+
 3. Queue background job: DocumentService.queue_document_processing()
    → Background worker will process asynchronously
 ```
@@ -44,7 +44,7 @@ Background Worker (Celery) processes:
 
 1. DocumentService.process_document_async()
    └─ Located in: document_service.py:1070+
-   
+
 2. DocumentProcessor.process_document()
    ├─ Step 1: OCRService.process_pdf() → raw_ocr_text
    ├─ Step 2: OpenAI upload & extraction → extracted_content
@@ -405,12 +405,12 @@ if metadata.references:
 
 ```cypher
 # Current cleanup query:
-MATCH (src:Letter {normCode:$norm})-[e:CITES|REPLIES_TO]->(dst:Letter) 
-WHERE coalesce(e.source,'') <> 'manual' 
-AND NOT (dst.normCode + '|' + type(e)) IN $keep 
+MATCH (src:Letter {normCode:$norm})-[e:CITES|REPLIES_TO]->(dst:Letter)
+WHERE coalesce(e.source,'') <> 'manual'
+AND NOT (dst.normCode + '|' + type(e)) IN $keep
 DELETE e
 
-# Issue: If referenced letter never got its own node, 
+# Issue: If referenced letter never got its own node,
 # the edge deletion might not work as expected
 ```
 
@@ -430,10 +430,10 @@ from bson.objectid import ObjectId
 
 class ReferenceSyncService:
     """Ensures references are synchronized bidirectionally across all stores."""
-    
+
     def __init__(self, db: Database):
         self.db = db
-    
+
     async def sync_bidirectional_references(
         self,
         source_doc_id: str,
@@ -443,30 +443,30 @@ class ReferenceSyncService:
     ) -> Dict[str, Any]:
         """
         Sync references bidirectionally for a document.
-        
+
         When document A extracts references to B & C:
         1. Set A.references = [B, C]
         2. Set B.referencedBy += [A]
         3. Set C.referencedBy += [A]
         4. Update Qdrant payloads for A, B, C
         5. Update FalkorDB edges
-        
+
         Args:
             source_doc_id: MongoDB ObjectId of source document
             references: List of {letterNo, date, text, ...}
             organization_id: Org scoping
             project_id: Project scoping
-        
+
         Returns:
             {"synced": N, "updated_documents": [...]}
         """
-        
+
         source_oid = ObjectId(source_doc_id)
         source_doc = await self.db.documents.find_one({"_id": source_oid})
-        
+
         if not source_doc:
             raise ValueError(f"Source document {source_doc_id} not found")
-        
+
         # 1. Update source document references
         await self.db.documents.update_one(
             {"_id": source_oid},
@@ -476,16 +476,16 @@ class ReferenceSyncService:
                 "references_count": len(references or [])
             }}
         )
-        
+
         # 2. Find and update all referenced documents
         updated_count = 0
         updated_doc_ids = []
-        
+
         for ref in (references or []):
             ref_letter_no = ref.get("letterNo") or ref.get("letter_no")
             if not ref_letter_no:
                 continue
-            
+
             # Find target document by letterNo
             target_docs = await self.db.documents.find(
                 {
@@ -494,11 +494,11 @@ class ReferenceSyncService:
                     "project_id": project_id
                 }
             ).to_list(None)
-            
+
             for target_doc in target_docs:
                 target_oid = target_doc["_id"]
                 updated_doc_ids.append(str(target_oid))
-                
+
                 # Add source to target's referencedBy array (idempotent)
                 await self.db.documents.update_one(
                     {"_id": target_oid},
@@ -508,9 +508,9 @@ class ReferenceSyncService:
                     }},
                     upsert=False
                 )
-                
+
                 updated_count += 1
-        
+
         # 3. Invalidate cached vector payloads for all affected documents
         affected_ids = [str(source_oid)] + updated_doc_ids
         await self.db.sync_status.insert_one({
@@ -520,54 +520,54 @@ class ReferenceSyncService:
             "vector_sync_needed": True,
             "timestamp": datetime.utcnow()
         })
-        
+
         return {
             "synced": True,
             "source_document_id": str(source_oid),
             "updated_target_count": updated_count,
             "updated_document_ids": updated_doc_ids
         }
-    
+
     async def update_linked_references_in_vectors(
         self,
         document_id: str,
     ) -> int:
         """
         Update Qdrant vector payloads for a document after reference changes.
-        
-        This MUST be called after sync_bidirectional_references() 
+
+        This MUST be called after sync_bidirectional_references()
         to update Qdrant's stale metadata.
         """
         source_oid = ObjectId(document_id)
-        
+
         # Fetch updated document
         doc = await self.db.documents.find_one({"_id": source_oid})
         if not doc:
             return 0
-        
+
         # Fetch all vectors for this document
         vectors = await self.db.document_vectors.find(
             {"document_id": str(source_oid)}
         ).to_list(None)
-        
+
         if not vectors:
             return 0
-        
+
         # Update payloads in Qdrant (via LangChainVectorService)
         from services.langchain_vector_service import LangChainVectorService
         from config.document_processing_config import DocumentProcessingConfig
-        
+
         config = DocumentProcessingConfig()  # Load from env
         qdrant_service = LangChainVectorService(config)
-        
+
         if not qdrant_service.enabled:
             return 0
-        
+
         # Rebuild payloads with fresh metadata
         payloads = []
         for vector in vectors:
             metadata = dict(vector.get("metadata") or {})
-            
+
             # Update metadata fields that may have changed
             if doc.get("reference"):
                 metadata["references"] = [
@@ -575,16 +575,16 @@ class ReferenceSyncService:
                 ]
             if doc.get("keywords"):
                 metadata["keywords"] = doc.get("keywords", [])
-            
+
             payloads.append({
                 "text": vector.get("text"),
                 "metadata": metadata,
                 "checksum": vector.get("checksum_sha256")
             })
-        
+
         # Replace in Qdrant
         updated_count = await qdrant_service.replace_document(payloads)
-        
+
         return updated_count
 ```
 
@@ -619,7 +619,7 @@ import asyncio
 
 class VectorSyncService:
     """Handles synchronization of vectors across MongoDB and Qdrant."""
-    
+
     def __init__(
         self,
         db: Database,
@@ -629,7 +629,7 @@ class VectorSyncService:
         self.db = db
         self.llamaindex_service = llamaindex_service
         self.langchain_service = langchain_service
-    
+
     async def sync_document_vectors(
         self,
         document_id: str,
@@ -637,28 +637,28 @@ class VectorSyncService:
     ) -> Dict[str, int]:
         """
         Synchronize vectors across MongoDB and Qdrant.
-        
+
         Args:
             document_id: Document to sync
             full_resync: If True, delete and recreate; if False, update payloads
-        
+
         Returns:
             {"mongodb": N, "qdrant": N, "falkordb_refs": N}
         """
-        
+
         mongo_updated = await self._sync_mongodb_vectors(document_id)
         qdrant_updated = await self._sync_qdrant_vectors(document_id, full_resync)
-        
+
         return {
             "mongodb": mongo_updated,
             "qdrant": qdrant_updated
         }
-    
+
     async def _sync_mongodb_vectors(self, document_id: str) -> int:
         """Ensure all vectors in MongoDB have fresh metadata."""
         # Implementation: Re-fetch document, update all its vectors' metadata
         pass
-    
+
     async def _sync_qdrant_vectors(self, document_id: str, full_resync: bool) -> int:
         """Ensure all vectors in Qdrant have fresh metadata."""
         # Implementation: Call LangChainVectorService.replace_document()
@@ -680,23 +680,23 @@ async def sync_document_references(
 ):
     """
     Manually trigger bidirectional reference sync and vector updates.
-    
+
     Use this after updating document metadata via API.
     """
     try:
         doc = await db.documents.find_one(
             {"_id": ObjectId(document_id)}
         )
-        
+
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found")
-        
+
         # Verify access
         if doc["organization_id"] != current_user.organization_id:
             raise HTTPException(status_code=403, detail="Access denied")
-        
+
         reference_sync = ReferenceSyncService(db)
-        
+
         # Sync references bidirectionally
         result = await reference_sync.sync_bidirectional_references(
             source_doc_id=document_id,
@@ -704,19 +704,19 @@ async def sync_document_references(
             organization_id=doc["organization_id"],
             project_id=doc["project_id"]
         )
-        
+
         # Update Qdrant payloads
         vector_update = await reference_sync.update_linked_references_in_vectors(
             document_id=document_id
         )
-        
+
         return {
             "status": "synced",
             "references_updated": result["updated_target_count"],
             "vectors_updated": vector_update,
             "affected_documents": result["updated_document_ids"]
         }
-    
+
     except Exception as e:
         logger.error(f"Reference sync failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -731,7 +731,7 @@ async def sync_document_references(
 ```python
 def _ensure_collection(self, client, qmodels, distance) -> None:
     """Safely ensure Qdrant collection exists with proper error handling."""
-    
+
     try:
         # Check if collection exists
         try:
@@ -747,18 +747,18 @@ def _ensure_collection(self, client, qmodels, distance) -> None:
                 # Not a "not found" error; something else is wrong
                 logger.error(f"Unexpected Qdrant error: {e}")
                 raise
-        
+
         # Collection doesn't exist; create it safely
         logger.info(
             "Creating new Qdrant collection: %s",
             self.config.qdrant_collection
         )
-        
+
         vectors_config = qmodels.VectorParams(
             size=self.config.qdrant_vector_size,
             distance=distance,
         )
-        
+
         try:
             # Create with timeout to prevent hanging
             collection = client.create_collection(
@@ -766,12 +766,12 @@ def _ensure_collection(self, client, qmodels, distance) -> None:
                 vectors_config=vectors_config,
                 timeout=30
             )
-            
+
             logger.info(
                 "Successfully created Qdrant collection: %s",
                 self.config.qdrant_collection
             )
-            
+
         except Exception as e:
             # If creation fails, verify collection still doesn't exist
             # before raising (in case concurrent request just created it)
@@ -781,7 +781,7 @@ def _ensure_collection(self, client, qmodels, distance) -> None:
             except:
                 logger.error(f"Failed to create Qdrant collection: {e}")
                 raise
-    
+
     except Exception as e:
         raise DocumentProcessingError(
             f"Qdrant collection initialization failed: {e}"
@@ -892,6 +892,3 @@ FALKORDB_EDGE_SOURCE_FILTER=true  # Only delete edges with source="parser"
 5. **Create a nightly reconciliation job** to detect and fix inconsistencies
 
 Good luck with your implementation!
-
-
-

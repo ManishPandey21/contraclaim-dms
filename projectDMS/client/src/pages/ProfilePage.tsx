@@ -22,6 +22,8 @@ import {
   getDateFormatLabel,
   type DateFormat,
 } from "@/utils/dateFormat";
+import { passwordPolicyError } from "@/utils/passwordPolicy";
+import { useAuth } from "@/hooks/use-auth";
 
 type ProfileRead = {
   id: string;
@@ -45,6 +47,7 @@ const COMMON_TIMEZONES = [
 
 const ProfilePage = () => {
   const { toast } = useToast();
+  const { logout } = useAuth();
   const [profile, setProfile] = useState<ProfileRead | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -197,11 +200,12 @@ const ProfilePage = () => {
       });
       return;
     }
-    if (newPassword.length < 6) {
+    const policyError = passwordPolicyError(newPassword);
+    if (policyError) {
       toast({
         variant: "destructive",
         title: "Validation",
-        description: "New password must be at least 6 characters.",
+        description: policyError,
       });
       return;
     }
@@ -223,8 +227,10 @@ const ProfilePage = () => {
       setConfirmPassword("");
       toast({
         title: "Password updated",
-        description: "Your password has been changed successfully.",
+        description: "Your password has been changed. Please sign in again.",
       });
+      // The server ended every session on this account, this one included.
+      logout();
     } catch (err: any) {
       console.error(err);
       toast({

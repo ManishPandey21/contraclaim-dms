@@ -10,7 +10,13 @@ import {
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
 import { toast } from "sonner";
-import { AlertTriangle, FileText, RefreshCw } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, FileText, PanelRightClose, RefreshCw, X } from "lucide-react";
 import {
   enhancedApi,
   Document,
@@ -18,7 +24,8 @@ import {
 } from "@/services/enhanced-api";
 import { joinApiUrl } from "@/config/api";
 import { authenticatedFetch } from "@/services/http";
-import { listSubTags, listTags } from "@/services/tags-api";
+import { listTags } from "@/services/tags-api";
+import { useSubtagOptions } from "@/hooks/useSubtagOptions";
 import RouteSkeleton from "@/components/layout/RouteSkeleton";
 
 // Import our new components
@@ -27,6 +34,14 @@ import MetadataEditor from "@/components/document-viewer/MetadataEditor";
 import EnclosuresPanel from "@/components/document-viewer/EnclosuresPanel";
 import ReferencesPanel from "@/components/document-viewer/ReferencesPanel";
 import DocumentDetailsPanel from "@/components/document-viewer/DocumentDetailsPanel";
+import LinkedRecordsPanel from "@/components/document-viewer/LinkedRecordsPanel";
+import ExtractionReviewPanel from "@/components/document-viewer/ExtractionReviewPanel";
+import ChildDocumentContext from "@/components/document-viewer/ChildDocumentContext";
+import { withoutChildLetterIdentity } from "@/utils/childDocument";
+import {
+  REVIEW_PUBLICATION_PENDING_STAGE,
+  isTerminalProcessingStatus,
+} from "@/utils/processingStatus";
 
 const DocumentViewer = React.lazy(
   () => import("@/components/document-viewer/DocumentViewer")
@@ -94,12 +109,23 @@ const DocumentViewerPage: React.FC = () => {
     "enclosure",
     "references",
     "details",
+    "records",
+    "review",
   ]);
   const initialTabParam = (searchParams.get("tab") || "metadata").toLowerCase();
   const initialActiveTab = allowedTabs.has(initialTabParam)
     ? initialTabParam
     : "metadata";
   const [activeTab, setActiveTab] = useState(initialActiveTab);
+  // `?page=N` opens the source PDF at that page (extraction review deep link).
+  const pageParam = Number.parseInt(searchParams.get("page") || "", 10);
+  const [pdfPage, setPdfPage] = useState<number | null>(
+    Number.isFinite(pageParam) && pageParam > 0 ? pageParam : null
+  );
+  useEffect(() => {
+    const requested = Number.parseInt(searchParams.get("page") || "", 10);
+    if (Number.isFinite(requested) && requested > 0) setPdfPage(requested);
+  }, [searchParams]);
   useEffect(() => {
     const t = (searchParams.get("tab") || "").toLowerCase();
     if (allowedTabs.has(t) && t !== activeTab) {
@@ -124,6 +150,8 @@ const DocumentViewerPage: React.FC = () => {
   const [processingStatus, setProcessingStatus] =
     useState<DocumentProcessingJobStatus | null>(null);
   const [isRetryingProcessing, setIsRetryingProcessing] = useState(false);
+  // The processing status the user dismissed the banner for; a new status shows it again.
+  const [dismissedBannerStatus, setDismissedBannerStatus] = useState<string | null>(null);
   const [createdByName, setCreatedByName] = useState<string>("");
   const [usersMap, setUsersMap] = useState<Record<string, string>>({});
   const [isLoadingReferences, setIsLoadingReferences] = useState(false);
@@ -138,10 +166,7 @@ const DocumentViewerPage: React.FC = () => {
   const [availableTags, setAvailableTags] = useState<
     { value: string; label: string }[]
   >([]);
-  const [availableSubtags, setAvailableSubtags] = useState<
-    { value: string; label: string; tagId: string }[]
-  >([]);
-  const [isLoadingSubtags, setIsLoadingSubtags] = useState(false);
+  const { availableSubtags, isLoadingSubtags, fetchSubtags } = useSubtagOptions();
 
   // Track the currently selected tag to update subtag options dynamically
   const [currentSelectedTag, setCurrentSelectedTag] = useState<string>("");
@@ -205,7 +230,7 @@ const DocumentViewerPage: React.FC = () => {
       return status;
     } catch (error) {
       console.warn("Unable to fetch processing status", error);
-      const fallbackStatus = {
+      const fallbackStatus: DocumentProcessingJobStatus = {
         _id: "",
         document_id: documentId,
         status: "not_queued",
@@ -254,19 +279,22 @@ const DocumentViewerPage: React.FC = () => {
   useEffect(() => {
     if (!documentId) return;
     let cancelled = false;
-    let completedRefreshDone = false;
-    const terminal = new Set(["completed", "failed", "dead_lettered", "not_queued"]);
+    let settledRefreshDone = false;
 
-    const currentStatus = processingStatus?.status;
-    if (currentStatus && terminal.has(currentStatus)) {
+    if (isTerminalProcessingStatus(processingStatus?.status, processingStatus?.stage)) {
       return;
     }
 
     const poll = async () => {
       const status = await fetchProcessingStatus();
       if (cancelled || !status) return;
-      if (status.status === "completed" && !completedRefreshDone) {
-        completedRefreshDone = true;
+      // Any final verdict, not only `completed`, may have rewritten the
+      // document (review message, extracted fields), so reload it once.
+      if (
+        isTerminalProcessingStatus(status.status, status.stage) &&
+        !settledRefreshDone
+      ) {
+        settledRefreshDone = true;
         await fetchDocument();
       }
     };
@@ -274,8 +302,7 @@ const DocumentViewerPage: React.FC = () => {
     void poll();
     const interval = window.setInterval(() => {
       if (cancelled) return;
-      const current = processingStatus?.status;
-      if (current && terminal.has(current)) {
+      if (isTerminalProcessingStatus(processingStatus?.status, processingStatus?.stage)) {
         window.clearInterval(interval);
         return;
       }
@@ -286,7 +313,13 @@ const DocumentViewerPage: React.FC = () => {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [documentId, fetchDocument, fetchProcessingStatus, processingStatus?.status]);
+  }, [
+    documentId,
+    fetchDocument,
+    fetchProcessingStatus,
+    processingStatus?.status,
+    processingStatus?.stage,
+  ]);
 
   const fetchAvailableAndLinkedDocuments = useCallback(async () => {
     if (!documentId) return;
@@ -377,44 +410,6 @@ const DocumentViewerPage: React.FC = () => {
       setIsLoadingReferences(false);
     }
   }, [documentId, uploadType, document?.project_id]);
-
-  const fetchSubtags = useCallback(async (tagId: string) => {
-    if (!tagId) {
-      setAvailableSubtags([]); // Clear subtags if no tagId
-      return;
-    }
-
-    setIsLoadingSubtags(true);
-    try {
-      const subtagArray = await listSubTags(tagId, { limit: 200 });
-
-      setAvailableSubtags((prevSubtags) => {
-        // Filter out subtags belonging to this tagId before adding new ones
-        const otherSubtags = prevSubtags.filter(
-          (subtag) => subtag.tagId !== tagId
-        );
-        const newSubtags = subtagArray
-          .map((subtag) => ({
-            value: subtag._id,
-            label: subtag.name,
-            tagId: tagId,
-          }))
-          .filter((subtag) => subtag.value && subtag.label);
-        return [...otherSubtags, ...newSubtags];
-      });
-    } catch (error) {
-      console.error("Error fetching subtags:", error);
-      toast.error("Failed to fetch subtags", {
-        description: "Please try again later",
-      });
-      // Set empty array on error to prevent UI issues
-      setAvailableSubtags((prevSubtags) =>
-        prevSubtags.filter((subtag) => subtag.tagId !== tagId)
-      );
-    } finally {
-      setIsLoadingSubtags(false);
-    }
-  }, []);
 
   const getSubtagOptions = useCallback(
     (selectedTagValue: string | undefined): string[] => {
@@ -526,7 +521,7 @@ const DocumentViewerPage: React.FC = () => {
         }
       };
 
-      setMetadataFields([
+      setMetadataFields(withoutChildLetterIdentity([
         {
           id: "uploadType",
           label: "Direction",
@@ -542,15 +537,15 @@ const DocumentViewerPage: React.FC = () => {
         },
         {
           id: "letterNo",
-          label: "Letter No.",
+          label: "Letter number",
           value: document.letterNo || "",
-          type: "text",
+          type: "textarea",
         },
         {
           id: "subject",
           label: "Subject",
           value: document.subject || "",
-          type: "text",
+          type: "textarea",
         },
         {
           id: "from_",
@@ -605,7 +600,7 @@ const DocumentViewerPage: React.FC = () => {
             "Reply Not Required",
           ],
         },
-      ]);
+      ], document));
     }
   }, [
     document,
@@ -678,9 +673,10 @@ const DocumentViewerPage: React.FC = () => {
               // Clear subtag when tag changes
               updatedDoc.subTags = [];
               setCurrentSelectedTag(selectedTag.value);
-            } else {
-              setAvailableSubtags([]);
             }
+            // No match (a stray empty value): leave the loaded options alone.
+            // They are filtered by the selected tag, and clearing them would
+            // only cost another read when the same tag is picked again.
             break;
           }
           case "subTag": {
@@ -811,10 +807,24 @@ const DocumentViewerPage: React.FC = () => {
     "dead_lettered",
     "metadata_extracted",
     "completed",
+    "human_review_required",
+    "partially_processed",
+    "stored_only",
   ].includes(effectiveProcessingStatus);
   const processingLabel =
     effectiveProcessingStatus === "completed"
       ? "Metadata extracted"
+      : effectiveProcessingStatus === "human_review_required"
+        ? "Needs human review"
+      : effectiveProcessingStatus === "partially_processed" &&
+          processingStatus?.stage === REVIEW_PUBLICATION_PENDING_STAGE
+        ? "Human review resolved; publishing"
+      : effectiveProcessingStatus === "partially_processed"
+        ? isTerminalProcessingStatus(effectiveProcessingStatus, processingStatus?.stage)
+          ? "Partially processed"
+          : "Partially processed; remaining pages will be retried"
+      : effectiveProcessingStatus === "stored_only"
+        ? "Stored without extraction"
       : effectiveProcessingStatus === "metadata_extracted"
         ? "Metadata extracted; indexing is finishing"
         : effectiveProcessingStatus === "failed" ||
@@ -826,8 +836,37 @@ const DocumentViewerPage: React.FC = () => {
               ? "Metadata extraction queued"
               : "Metadata extraction in progress";
 
+  const reviewPages: number[] = Array.isArray(
+    (processingError as { pages?: unknown } | null)?.pages
+  )
+    ? ((processingError as { pages: unknown[] }).pages
+        .map((page) => Number(page))
+        .filter((page) => Number.isFinite(page) && page > 0) as number[])
+    : [];
+  const showReviewTab =
+    effectiveProcessingStatus === "human_review_required" ||
+    activeTab === "review" ||
+    String(processingStatus?.stage || "").startsWith("review_");
+  const openReview = () => {
+    setShowMetadata(true);
+    setActiveTab("review");
+    if (reviewPages.length) setPdfPage(reviewPages[0]);
+  };
+  const refreshAfterReview = () => {
+    void fetchProcessingStatus();
+    void fetchDocument();
+  };
+
   return (
-    <div className="h-screen flex flex-col bg-gray-100">
+    <div className="flex h-full min-h-[640px] flex-col overflow-hidden bg-slate-50 text-slate-900">
+      <nav aria-label="Breadcrumb" className="flex shrink-0 items-center gap-2 px-4 pt-4 text-sm md:px-6">
+        <button type="button" onClick={() => navigate(-1)} className="rounded text-blue-600 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-600">
+          Back
+        </button>
+        <ChevronRight aria-hidden="true" className="h-3.5 w-3.5 text-slate-400" />
+        <span className="text-slate-500">Document viewer</span>
+      </nav>
+      <div className="shrink-0 px-4 py-3 md:px-6 [&>header]:border-0 [&>header]:bg-transparent [&>div]:rounded-lg [&_h1]:break-words [&_h1]:text-xl [&_h1]:font-semibold [&_button]:rounded-lg">
       <DocumentHeader
         document={document}
         showMetadata={showMetadata}
@@ -838,9 +877,11 @@ const DocumentViewerPage: React.FC = () => {
         setIsLinkReferenceDialogOpen={setIsLinkReferenceDialogOpen}
         relatedDocuments={relatedDocuments}
       />
-      {showProcessingBanner && (
+      <ChildDocumentContext document={document} />
+      </div>
+      {showProcessingBanner && dismissedBannerStatus !== effectiveProcessingStatus && (
         <div
-          className={`border-b px-4 py-2 text-sm ${
+          className={`mx-4 mb-3 shrink-0 rounded-lg border px-4 py-2.5 text-sm md:mx-6 ${
             effectiveProcessingStatus === "failed" ||
             effectiveProcessingStatus === "dead_lettered"
               ? "border-red-200 bg-red-50 text-red-800"
@@ -850,9 +891,14 @@ const DocumentViewerPage: React.FC = () => {
           }`}
         >
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <span className="font-medium">{processingLabel}</span>
-              {processingStatus?.stage && (
+            <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
+              {effectiveProcessingStatus === "completed" ? (
+                <CheckCircle2 aria-hidden="true" className="h-4 w-4 shrink-0" />
+              ) : (
+                <AlertTriangle aria-hidden="true" className="h-4 w-4 shrink-0" />
+              )}
+              <span className="font-medium">{effectiveProcessingStatus === "completed" ? "Metadata extracted successfully" : processingLabel}</span>
+              {processingStatus?.stage && effectiveProcessingStatus !== "completed" && (
                 <span className="ml-2 text-xs opacity-80">
                   Stage: {processingStatus.stage}
                 </span>
@@ -864,6 +910,11 @@ const DocumentViewerPage: React.FC = () => {
               )}
             </div>
             <div className="flex items-center gap-2">
+              {effectiveProcessingStatus === "human_review_required" && (
+                <Button size="sm" variant="outline" onClick={openReview}>
+                  Review pages
+                </Button>
+              )}
               {processingError && (
                 <Button
                   size="sm"
@@ -885,6 +936,17 @@ const DocumentViewerPage: React.FC = () => {
                   {isRetryingProcessing ? "Retrying..." : "Retry Processing"}
                 </Button>
               )}
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                aria-label="Dismiss processing status"
+                title="Dismiss"
+                onClick={() => setDismissedBannerStatus(effectiveProcessingStatus)}
+                className="h-7 w-7 p-0 opacity-70 hover:opacity-100"
+              >
+                <X aria-hidden="true" className="h-4 w-4" />
+              </Button>
             </div>
           </div>
         </div>
@@ -935,9 +997,9 @@ const DocumentViewerPage: React.FC = () => {
           </div>
         </div>
       )}
-      <div className="flex-1 overflow-hidden">
-        <ResizablePanelGroup direction="horizontal">
-          <ResizablePanel defaultSize={75} minSize={50}>
+      <div className="min-h-0 flex-1 overflow-hidden px-4 pb-4 md:px-6 md:pb-6">
+        <ResizablePanelGroup direction="horizontal" className="rounded-xl border border-slate-200 bg-white shadow-sm">
+          <ResizablePanel defaultSize={65} minSize={40} className="min-w-0 bg-slate-200/60">
             <Suspense
               fallback={
                 <div className="flex h-full min-h-[480px] flex-col items-center justify-center bg-white text-muted-foreground">
@@ -946,32 +1008,89 @@ const DocumentViewerPage: React.FC = () => {
                 </div>
               }
             >
-              <DocumentViewer document={document} />
+              <DocumentViewer document={document} page={pdfPage} />
             </Suspense>
           </ResizablePanel>
 
-          {showMetadata && <ResizableHandle withHandle />}
+          {showMetadata && <ResizableHandle withHandle className="bg-slate-200 transition-colors hover:bg-blue-300 focus-visible:bg-blue-400" />}
 
           {showMetadata && (
-            <ResizablePanel defaultSize={25} minSize={20}>
+            <ResizablePanel defaultSize={35} minSize={28} className="min-w-0 bg-white">
               <div className="h-full min-h-0 flex flex-col">
                 <Tabs
                   value={activeTab}
                   onValueChange={setActiveTab}
                   className="w-full h-full min-h-0 flex flex-col"
                 >
-                  <div className="bg-white border-b p-3">
-                    <TabsList className="grid w-full grid-cols-4">
-                      <TabsTrigger value="metadata">Metadata</TabsTrigger>
-                      <TabsTrigger value="enclosure">Enclosures</TabsTrigger>
-                      <TabsTrigger value="references">References</TabsTrigger>
-                      <TabsTrigger value="details">Details</TabsTrigger>
+                  <div className="shrink-0 border-b border-slate-200 bg-white px-2">
+                    <TabsList className="flex w-full h-auto bg-transparent p-0 border-b border-slate-200">
+                      <TabsTrigger
+                        value="metadata"
+                        className="flex-1 min-w-0 text-sm px-3 py-2.5 rounded-none border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:text-blue-600 data-[state=active]:bg-transparent data-[state=active]:shadow-none"
+                      >
+                        Metadata
+                      </TabsTrigger>
+                      <TabsTrigger
+                        value="enclosure"
+                        className="flex-1 min-w-0 text-sm px-3 py-2.5 rounded-none border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:text-blue-600 data-[state=active]:bg-transparent data-[state=active]:shadow-none"
+                      >
+                        Enclosures
+                      </TabsTrigger>
+
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <button
+                            className={`flex-1 min-w-0 inline-flex items-center justify-center gap-1 rounded-none px-3 py-2.5 text-sm font-medium border-b-2 bg-transparent transition-all ${
+                              ["references", "details", "records", "review"].includes(activeTab)
+                                ? "border-blue-600 text-blue-600"
+                                : "border-transparent text-slate-500 hover:text-slate-900"
+                            }`}
+                          >
+                            <span className="truncate">
+                              {activeTab === "references" ? "References" :
+                               activeTab === "details" ? "Details" :
+                               activeTab === "records" ? "Linked records" :
+                               activeTab === "review" ? "Extraction review" : "More"}
+                            </span>
+                            <ChevronDown className="h-4 w-4 shrink-0" />
+                          </button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" className="w-48 bg-popover z-50">
+                          <DropdownMenuItem onClick={() => setActiveTab("references")}>
+                            References
+                            {linkedReferences.length > 0 && (
+                              <span className="ml-auto rounded-full bg-slate-100 px-1.5 text-[10px] text-slate-600">
+                                {linkedReferences.length}
+                              </span>
+                            )}
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => setActiveTab("details")}>
+                            Details
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => setActiveTab("records")}>
+                            Linked records
+                          </DropdownMenuItem>
+                          {showReviewTab && (
+                            <DropdownMenuItem onClick={() => setActiveTab("review")}>
+                              Extraction review
+                            </DropdownMenuItem>
+                          )}
+                        </DropdownMenuContent>
+                      </DropdownMenu>
                     </TabsList>
                   </div>
 
                   <ScrollArea className="flex-1 min-h-0">
-                    <div className="p-4 space-y-5">
-                      <TabsContent value="metadata" className="m-0">
+                    <div className="space-y-5 p-4 lg:p-5">
+                      <div className="flex items-center justify-between gap-2">
+                        <h2 className="text-base font-semibold tracking-tight text-slate-900">
+                          {activeTab === "metadata" ? "Document metadata" : activeTab === "enclosure" ? "Enclosures" : activeTab === "references" ? "References" : activeTab === "records" ? "Linked records" : activeTab === "review" ? "Extraction review" : "Document details"}
+                        </h2>
+                        <Button type="button" variant="ghost" size="sm" aria-label="Hide document information" title="Hide document information" onClick={() => setShowMetadata(false)} className="h-8 w-8 p-0 text-slate-400 hover:text-blue-600">
+                          <PanelRightClose aria-hidden="true" className="h-4 w-4" />
+                        </Button>
+                      </div>
+                      <TabsContent value="metadata" className="m-0 [&_label]:text-sm [&_label]:font-medium [&_label]:text-slate-700 [&_input]:min-w-0 [&_input]:rounded-lg [&_input]:border-slate-200 [&_textarea]:min-h-[72px] [&_textarea]:resize-y [&_textarea]:rounded-lg [&_textarea]:border-slate-200 [&_textarea]:leading-relaxed [&_button]:rounded-lg">
                         <MetadataEditor
                           metadataFields={metadataFields}
                           onMetadataChange={handleMetadataChange}
@@ -1022,6 +1141,21 @@ const DocumentViewerPage: React.FC = () => {
                       <TabsContent value="enclosure" className="m-0">
                         <EnclosuresPanel documentId={documentId} />
                       </TabsContent>
+
+                      <TabsContent value="records" className="m-0">
+                        <LinkedRecordsPanel documentId={documentId!} />
+                      </TabsContent>
+
+                      {showReviewTab && documentId && (
+                        <TabsContent value="review" className="m-0">
+                          <ExtractionReviewPanel
+                            documentId={documentId}
+                            currentPage={pdfPage}
+                            onShowPage={setPdfPage}
+                            onDecided={refreshAfterReview}
+                          />
+                        </TabsContent>
+                      )}
                     </div>
                   </ScrollArea>
                 </Tabs>

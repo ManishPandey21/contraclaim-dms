@@ -10,12 +10,190 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
 
-from fastapi import UploadFile
+from fastapi import HTTPException, UploadFile, status
 
 from ..core.config import settings
 from ..models.document import FileValidationResult
 from ..utils.file_validation import sniff_mime_from_bytes
 from ..utils.validation import sanitize_filename
+
+
+def _human_size(size_bytes: int) -> str:
+    """A size an operator can act on.
+
+    `size_bytes // (1024 * 1024)` renders **"0MB"** for every cap below a
+    megabyte, and R-A8U introduced the first sub-megabyte caps on this service
+    (the 256 KB webhook body). A refusal that cannot say what the limit is
+    sends the caller back to guess.
+    """
+    size = int(size_bytes)
+    if size >= 1024 * 1024:
+        return f"{size // (1024 * 1024)}MB"
+    if size >= 1024:
+        return f"{size // 1024}KB"
+    return f"{size} bytes"
+
+
+class UploadTooLargeError(HTTPException):
+    """A refusal, raised as one, at the seam that discovers it.
+
+    This used to be a bare `ValueError`, and the two production callers
+    disagreed about what that meant. `routers/contracts.py` runs under
+    `handle_exceptions`, which maps `ValueError` to 422; `DocumentController`
+    has its own handler, whose `except Exception` turned the refusal into
+    **500 "Document creation service temporarily unavailable"** - measured, not
+    inferred. A client cannot tell that from a real outage, so the UI shows a
+    server-error state and the user retries the same oversize file, and
+    monitoring counts a policy decision as a 5xx.
+
+    `UploadConcurrencyLimiter` already raises `HTTPException(429)` from this
+    same layer for the same reason, and `contract_service` raises 413 for its
+    own size rule. Raising the status here rather than at each call site is what
+    stops the fourth caller re-introducing the disagreement: every existing
+    handler in the upload paths re-raises `HTTPException` unchanged.
+    """
+
+    def __init__(self, max_size_bytes: int) -> None:
+        super().__init__(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=(
+                "Upload exceeds the maximum allowed file size "
+                f"({_human_size(max_size_bytes)})"
+            ),
+        )
+        self.max_size_bytes = int(max_size_bytes)
+
+
+async def read_upload_within_limit(
+    upload: UploadFile,
+    max_size_bytes: int,
+) -> bytes:
+    """Read a small upload into memory, refusing it on the byte that crosses the cap.
+
+    For the paths that legitimately want the whole body in memory - a CSV import,
+    a profile photo, a pasted text document - where spooling to disk buys
+    nothing. What it does not do is `await upload.read()` and then measure, which
+    is what five call sites used to do:
+
+    * `bank_guarantees.py`, `key_dates.py` and `deep_planning.py` had **no
+      application-level size limit at all**, so the only bound was the gateway's
+      `client_max_body_size 200m`;
+    * `profiles.py` and `folder_structure.py` had a limit and applied it *after*
+      buffering, so a 200 MB body was already resident before the 5 MB rule
+      refused it.
+
+    A limit enforced after the read is not a limit on what the process holds. The
+    refusal here is the same `UploadTooLargeError` the streaming path raises, so
+    every upload surface answers 413 for the same condition.
+    """
+    limit = max(1, int(max_size_bytes))
+    chunk_size = max(1, int(getattr(settings, "UPLOAD_STREAM_CHUNK_SIZE_MB", 1))) * 1024 * 1024
+    chunks: list[bytes] = []
+    total = 0
+
+    await upload.seek(0)
+    while True:
+        chunk = await upload.read(chunk_size)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise UploadTooLargeError(limit)
+        chunks.append(chunk)
+    try:
+        await upload.seek(0)
+    except Exception:
+        pass
+    return b"".join(chunks)
+
+
+async def read_request_body_within_limit(request, max_size_bytes: int) -> bytes:
+    """Read a raw request body, refusing it on the byte that crosses the cap.
+
+    `await request.body()` holds the whole request before anything can object to
+    its size, and it is the one upload channel that carries no `UploadFile` at
+    all - which is why the Gate 5 guard, built around `UploadFile`, was green
+    over `POST /api/billing/webhooks/{provider}` while that route did exactly
+    that. The webhook is **intentionally unauthenticated**, so the only bound on
+    what an anonymous caller could make the process hold was the gateway's
+    `client_max_body_size 200m`.
+
+    `request.stream()` is an async iterator over the transport, so the refusal
+    happens during the read rather than after it. The refusal is the same
+    `UploadTooLargeError` every other upload surface raises, so the answer is
+    413 and not a 500 (F-A8S-2).
+    """
+    limit = max(1, int(max_size_bytes))
+    chunks: list[bytes] = []
+    total = 0
+
+    async for chunk in request.stream():
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > limit:
+            raise UploadTooLargeError(limit)
+        chunks.append(chunk)
+
+    body = b"".join(chunks)
+    # Cache it the way `Request.body()` does, so this is a drop-in replacement
+    # rather than a one-shot. Starlette's `stream()` yields a cached `_body`
+    # when one exists and raises `RuntimeError("Stream consumed")` when the
+    # stream is gone; without this line a *later* `await request.body()` - a
+    # signature check, a debug dump, a second dependency - would hit that
+    # RuntimeError, and the failure would look nothing like the size limit that
+    # actually consumed the stream. The bytes are identical to what `body()`
+    # would have returned, which is what keeps a webhook signature verifiable.
+    try:
+        request._body = body
+    except Exception:  # pragma: no cover - a Request shape without the slot
+        pass
+    return body
+
+
+def read_file_within_limit(handle, max_size_bytes: int) -> bytes:
+    """The synchronous sibling of `read_upload_within_limit`.
+
+    For the call sites that hold `UploadFile.file` - the spooled handle - rather
+    than the async wrapper, and so cannot await. It reads the same way for the
+    same reason: chunk by chunk, refusing on the byte that crosses the cap,
+    never `handle.read()` followed by a measurement.
+
+    Written because `POST /api/documents/bulk-upload` takes **two** upload
+    parameters and measured only one. The route caps `files` by count and by
+    total size; `csv_file` is a separate parameter nothing measured, and
+    `bulk_upload_service.read_csv_from_upload_file` read it whole with
+    `upload_file.file.read()` and then `.decode()`d it, so the process could
+    hold two copies of a body bounded only by the gateway's
+    `client_max_body_size 200m`. F-A8S-4 closed six such sites through the async
+    helper; this one kept its own shape and survived, which is the argument for
+    fixing at a seam rather than at a list of call sites.
+
+    The handle is rewound before and after, so a caller that reads it again gets
+    the whole body.
+    """
+    limit = max(1, int(max_size_bytes))
+    chunk_size = max(1, int(getattr(settings, "UPLOAD_STREAM_CHUNK_SIZE_MB", 1))) * 1024 * 1024
+    chunks: list[bytes] = []
+    total = 0
+
+    try:
+        handle.seek(0)
+    except Exception:
+        pass
+    while True:
+        chunk = handle.read(chunk_size)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise UploadTooLargeError(limit)
+        chunks.append(chunk)
+    try:
+        handle.seek(0)
+    except Exception:
+        pass
+    return b"".join(chunks)
 
 
 @dataclass
@@ -69,7 +247,7 @@ async def spool_upload_file(
                 break
             total += len(chunk)
             if max_size_bytes is not None and total > max_size_bytes:
-                raise ValueError("Upload exceeds the maximum allowed file size")
+                raise UploadTooLargeError(max_size_bytes)
             hasher.update(chunk)
             if len(sample) < max_sample:
                 remaining = max_sample - len(sample)

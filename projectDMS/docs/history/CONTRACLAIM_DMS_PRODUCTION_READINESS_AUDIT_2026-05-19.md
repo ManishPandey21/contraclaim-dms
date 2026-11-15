@@ -1,7 +1,7 @@
 # Contraclaim DMS Production-Readiness Audit
 
-Audit date: 2026-05-19  
-Repository path: `c:\SaaS\projectDMS`  
+Audit date: 2026-05-19
+Repository path: `c:\SaaS\projectDMS`
 Scope reviewed: React/Vite frontend, FastAPI backend, MongoDB/Qdrant/FalkorDB/Redis integrations, Docker/Apache deployment, CI, scripts, docs, and tests.
 
 ## Executive Summary
@@ -10,7 +10,7 @@ Contraclaim DMS is a substantial, actively hardened application. It has a modern
 
 It is not production-ready yet. The main blockers are authorization consistency, session/CSRF hardening, database migration/index discipline, legacy duplicate APIs, dependency currency, stale documentation, and operational runbook gaps. The frontend builds, but still carries localStorage-derived role/scope state, large bundles, old duplicate pages, and inconsistent API/auth patterns.
 
-Overall score before improvements: **63/100**  
+Overall score before improvements: **63/100**
 Estimated score after roadmap completion: **88/100**
 
 ## Verification Performed
@@ -56,7 +56,7 @@ Recommendation:
 - Add route inventory tests asserting every non-public route declares auth, permission, and scope policy.
 - Add regression tests for AI assistant admin endpoints.
 
-Before score: **55/100**  
+Before score: **55/100**
 After score: **88/100**
 
 ### 2. Cookie Auth Lacks Explicit CSRF Protection
@@ -76,7 +76,7 @@ Recommendation:
 - Validate `Origin`/`Referer` for browser requests.
 - Keep `AUTH_COOKIE_SAMESITE=strict` unless cross-site SSO or embedding requirements force otherwise.
 
-Before score: **60/100**  
+Before score: **60/100**
 After score: **90/100**
 
 ### 3. Duplicate Legacy Authentication Endpoints Remain Active
@@ -95,7 +95,7 @@ Recommendation:
 - Route all auth through `routers/auth.py`.
 - Add API contract tests for login, refresh, logout, cookie clearing, and stale session rejection.
 
-Before score: **62/100**  
+Before score: **62/100**
 After score: **90/100**
 
 ### 4. Frontend Still Uses LocalStorage for Roles, Scope, and Some Bearer Headers
@@ -116,7 +116,7 @@ Recommendation:
 - Move all API calls through `createHttpClient`.
 - Delete old `client/src/utils/*Page.tsx`, `useLetterWorkflow1/2/3`, `UploadPage1`, `UploadPage_check`, and other duplicate/dormant pages once routes are confirmed unused.
 
-Before score: **62/100**  
+Before score: **62/100**
 After score: **88/100**
 
 ### 5. Database Integrity Relies on Application Logic More Than Constraints
@@ -137,7 +137,7 @@ Recommendation:
 - Fail startup or readiness if required indexes are missing in production.
 - Add migration runbooks and backup/restore validation before schema changes.
 
-Before score: **58/100**  
+Before score: **58/100**
 After score: **86/100**
 
 ### 6. Public Share Links Need Stronger Governance
@@ -159,7 +159,7 @@ Recommendation:
 - Add public endpoint rate limiting by IP and token hash.
 - Consider one-time or recipient-bound links for sensitive documents.
 
-Before score: **65/100**  
+Before score: **65/100**
 After score: **90/100**
 
 ### 7. Frontend Bundle and Rendering Risks Remain
@@ -181,7 +181,7 @@ Recommendation:
 - Fix hook dependency warnings, especially RBAC/sidebar/notification/workflow hooks.
 - Add accessibility and responsive smoke tests for the top workflows.
 
-Before score: **65/100**  
+Before score: **65/100**
 After score: **87/100**
 
 ### 8. Dependency and Image Hardening Needs Closure
@@ -202,7 +202,7 @@ Recommendation:
 - Pin base images by digest for production.
 - Generate SBOMs and store dependency scan artifacts for each release.
 
-Before score: **68/100**  
+Before score: **68/100**
 After score: **88/100**
 
 ## Frontend Page Scores
@@ -287,7 +287,7 @@ Additional frontend concern: there are many duplicate or dormant pages (`Dashboa
 
 ## Database Readiness
 
-Before score: **58/100**  
+Before score: **58/100**
 After score: **86/100**
 
 Findings:
@@ -307,7 +307,7 @@ Recommendations:
 
 ## Security Readiness
 
-Before score: **58/100**  
+Before score: **58/100**
 After score: **89/100**
 
 Findings:
@@ -331,7 +331,7 @@ Security recommendations:
 
 ## DevOps and Deployment Readiness
 
-Before score: **70/100**  
+Before score: **70/100**
 After score: **88/100**
 
 Findings:
@@ -352,7 +352,7 @@ Recommendations:
 
 ## Documentation Readiness
 
-Before score: **55/100**  
+Before score: **55/100**
 After score: **84/100**
 
 Findings:
@@ -451,4 +451,3 @@ Target score: **88/100**
 Current status: **No-Go for production handling real customer documents.**
 
 The application is close enough that a focused hardening sprint can move it into staging readiness, but it should not be promoted to production until CSRF protection, authorization consolidation, public share governance, database migration/index controls, dependency audit closure, and full CI/test evidence are complete.
-

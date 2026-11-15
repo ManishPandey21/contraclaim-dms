@@ -141,7 +141,27 @@ class InsuranceService:
 
     async def create(self, payload: InsuranceCreate, current_user: Any) -> Dict[str, Any]:
         db = await self._get_db()
+        if payload.linked_document_ids:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Legacy linked_document_ids cannot express an unambiguous "
+                    "Insurance relationship role; use the Document relationship API"
+                ),
+            )
+        if payload.document_id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Legacy Insurance file tokens cannot create canonical evidence; "
+                    "use the policy-scoped canonical Document upload endpoint"
+                ),
+            )
         doc = Insurance(**payload.model_dump()).model_dump(by_alias=True)
+        doc.pop("linked_document_ids", None)
+        doc.pop("document_id", None)
+        doc.pop("document_name", None)
+        doc.pop("document_content_type", None)
         if not doc.get("organization_id"):
             doc["organization_id"] = getattr(current_user, "organization_id", None)
         if not doc.get("contract_id"):
@@ -193,6 +213,28 @@ class InsuranceService:
 
     async def update(self, ins: Dict[str, Any], payload: Dict[str, Any], current_user: Any) -> Optional[Dict[str, Any]]:
         db = await self._get_db()
+        if payload.get("linked_document_ids"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Legacy linked_document_ids cannot replace canonical Insurance "
+                    "relationships; use the Document relationship API"
+                ),
+            )
+        if payload.get("document_id"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Legacy Insurance file tokens cannot replace canonical evidence; "
+                    "use the policy-scoped canonical Document upload endpoint"
+                ),
+            )
+        payload = {k: v for k, v in payload.items() if k != "linked_document_ids"}
+        payload = {
+            k: v
+            for k, v in payload.items()
+            if k not in {"document_id", "document_name", "document_content_type"}
+        }
         update = {k: v for k, v in payload.items() if v is not None and k != "contract_id_set"}
         # Re-check the duplicate constraint when an identifying field changes.
         if any(k in update for k in ("policy_number", "insurance_type", "contract_id")):
@@ -241,6 +283,25 @@ class InsuranceService:
         res = await db.insurance_policies.delete_one({"_id": ins["_id"]})
         await self._emit("insurance.deleted", current_user, ins, before=ins)
         return res.deleted_count > 0
+
+    async def rollback_create(
+        self, ins: Dict[str, Any], current_user: Any, *, reason: str
+    ) -> None:
+        """Undo a policy whose caller-required evidence link failed.
+
+        Creation and the first relationship are one intent: a policy that exists
+        without the evidence the caller made a precondition is worse than no
+        policy at all. The rollback is audited rather than silent.
+        """
+        db = await self._get_db()
+        await db.insurance_policies.delete_one({"_id": ins["_id"]})
+        await self._emit(
+            "insurance.create_rolled_back",
+            current_user,
+            ins,
+            before=ins,
+            after={"reason": reason},
+        )
 
     async def summary(self, scope_filter: Dict[str, Any], *, project_id: Optional[str] = None) -> Dict[str, Any]:
         db = await self._get_db()
