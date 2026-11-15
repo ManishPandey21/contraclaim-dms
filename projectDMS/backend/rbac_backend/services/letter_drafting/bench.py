@@ -69,6 +69,7 @@ from ...models.letter_drafting import (
     ValidationFinding,
 )
 from ...models.skill import SkillVersion
+from ..publication_policy import authoritative_fact_text, is_consumable
 from ..skills.compiler import SkillRoleNotSupported, overlay_key_for
 from ..skills.executor import SkillExecutor, canonical_hash, step_input_hash
 from ..skills.registry import SkillRegistry
@@ -158,6 +159,12 @@ def _constant(value: Any) -> Callable[[], Any]:
         return value
 
     return _fallback
+
+
+_HELD_DOCUMENT_MESSAGE = (
+    "This document is held for review or marked as a duplicate, so it cannot be used "
+    "for drafting. Resolve that on the document, then run the analysis again."
+)
 
 
 def _user_id(current_user: Any) -> Optional[str]:
@@ -327,6 +334,20 @@ class LetterBenchService:
                 {"letter_id": str(letter_id), "step_id": {"$in": list(step_ids)}},
                 {"$set": {"stale": True}},
             )
+
+    async def _ensure_source_usable(self, board: PositionBoard) -> None:
+        """Refuse to build on the board's copy of a letter that is now held.
+
+        The board keeps the text it analysed. If the document has since gone to
+        review or been quarantined, that copy is no longer a source, and locking,
+        evaluating or composing from it would draft on unverified content.
+        Running the analysis again is allowed: it is what retracts the copy.
+        """
+        if not board.incoming_document_id:
+            return
+        document = await self._document(board.incoming_document_id)
+        if document is not None and not is_consumable(document):
+            raise HTTPException(status_code=409, detail=_HELD_DOCUMENT_MESSAGE)
 
     async def _document(self, document_id: Optional[str]) -> Optional[Dict[str, Any]]:
         if not document_id:
@@ -595,11 +616,18 @@ class LetterBenchService:
         board = await self._load_board(letter_id)
         document = await self._document(board.incoming_document_id)
 
+        # A document under review, or quarantined as a duplicate, is not a source:
+        # nothing it carries - body, summary or extracted metadata - is analysed,
+        # sent to the model or kept on the board (services/publication_policy.py).
+        held = document is not None and not is_consumable(document)
         if document is not None:
-            text = clean_incoming_text(
-                document.get("full_text") or document.get("ocrText") or document.get("content") or document.get("summary")
+            # The letter's own body only. A summary is the model's paraphrase and
+            # must never be shown, quoted or answered as the letter.
+            text = (
+                ""
+                if held
+                else clean_incoming_text(authoritative_fact_text(document) or document.get("content"))
             )
-            adapter = _SingleDocumentService(document)
             request = DraftRunCreateRequest(
                 mode="background",
                 draft_type="reply",
@@ -608,13 +636,18 @@ class LetterBenchService:
             )
             if letter is None:
                 raise RuntimeError("The letter for this bench no longer exists")
-            analysis = await self.drafts.incoming_analyzer.analyze(letter, request, adapter)
-            try:
-                analysis = await self.drafts.clause_checker.enrich(
-                    analysis, board.organization_id, board.project_id or ""
+            if held:
+                analysis = IncomingLetterAnalysis(subject=getattr(letter, "subject", None))
+            else:
+                analysis = await self.drafts.incoming_analyzer.analyze(
+                    letter, request, _SingleDocumentService(document)
                 )
-            except Exception as exc:  # visible, not fatal: checks stay "not checked"
-                logger.warning("letter bench clause check skipped: %s", exc)
+                try:
+                    analysis = await self.drafts.clause_checker.enrich(
+                        analysis, board.organization_id, board.project_id or ""
+                    )
+                except Exception as exc:  # visible, not fatal: checks stay "not checked"
+                    logger.warning("letter bench clause check skipped: %s", exc)
         else:
             text = board.incoming_text
             request = DraftRunCreateRequest(mode="background", draft_type="fresh", role=board.role)
@@ -774,7 +807,9 @@ class LetterBenchService:
             fresh.locked_strategy_version = None
             fresh.model_blocked_reason = model_blocked
             fresh.last_error = " ".join(notices) or None
-            if not text.strip():
+            if held:
+                fresh.last_error = _HELD_DOCUMENT_MESSAGE
+            elif not text.strip():
                 fresh.last_error = (
                     "No text could be read from this document. Check that it has been processed, "
                     "then run the analysis again."
@@ -919,6 +954,7 @@ class LetterBenchService:
             return await self.begin_dissect(letter_id, current_user)
         board = await self._load_board(letter_id)
         self._ensure_idle(board)
+        await self._ensure_source_usable(board)
         version, _binding, reason = await self.registry.resolve(
             request.skill_key, board.organization_id, board.project_id
         )
@@ -1431,6 +1467,7 @@ class LetterBenchService:
         letter = await self._authorize(letter_id, current_user, "drafting.request.accept")
         board = await self._load_board(letter_id)
         self._check_version(board, request.board_version)
+        await self._ensure_source_usable(board)
         steps = await self._steps(letter_id)
         gate = logic.compute_gate(board, steps)
         if gate.blockers:
@@ -1539,6 +1576,7 @@ class LetterBenchService:
         await self._authorize(letter_id, current_user, "drafting.draft.create")
         board = await self._load_board(letter_id)
         self._check_version(board, request.board_version)
+        await self._ensure_source_usable(board)
         gate = logic.compute_gate(board, await self._steps(letter_id))
         if not gate.can_compose:
             raise HTTPException(
