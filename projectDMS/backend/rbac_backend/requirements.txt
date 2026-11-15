@@ -26,7 +26,7 @@ cryptography==50.0.0
 Deprecated==1.2.18
 deprecation==2.1.0
 distro==1.9.0
-dnspython==2.9.0
+dnspython==2.9.2
 redis==7.0.1
 email_validator==2.3.0
 exceptiongroup==1.2.2
@@ -112,8 +112,9 @@ wrapt==1.17.3
 pydantic-ai-slim[openai]==1.107.7
 # Previously held at 1.37.0 because older pydantic-ai imported the private
 # ``opentelemetry._events`` module. pydantic-ai-slim 1.107.7 no longer does and
-# is verified with 1.45.1, the release that fixes CVE-2026-114603.
-opentelemetry-api==1.45.1
+# is verified with 1.45.x. 1.45.1 fixed CVE-2026-114603; 1.45.2 fixes
+# CVE-2026-126360.
+opentelemetry-api==1.45.2
 griffe==1.14.0
 bleach==6.4.0
 langchain-core==1.5.0
