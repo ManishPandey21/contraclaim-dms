@@ -123,6 +123,10 @@ from .v20261116_0001_claim_bench_indexes import DESCRIPTION as CLAIM_BENCH_INDEX
 from .v20261116_0001_claim_bench_indexes import NAME as CLAIM_BENCH_INDEXES_NAME
 from .v20261116_0001_claim_bench_indexes import VERSION as CLAIM_BENCH_INDEXES_VERSION
 from .v20261116_0001_claim_bench_indexes import upgrade as upgrade_claim_bench_indexes
+from .v20261117_0001_claim_head_link_indexes import DESCRIPTION as CLAIM_HEAD_LINK_INDEXES_DESCRIPTION
+from .v20261117_0001_claim_head_link_indexes import NAME as CLAIM_HEAD_LINK_INDEXES_NAME
+from .v20261117_0001_claim_head_link_indexes import VERSION as CLAIM_HEAD_LINK_INDEXES_VERSION
+from .v20261117_0001_claim_head_link_indexes import upgrade as upgrade_claim_head_link_indexes
 
 
 MIGRATIONS = [
@@ -269,5 +273,11 @@ MIGRATIONS = [
         name=CLAIM_BENCH_INDEXES_NAME,
         description=CLAIM_BENCH_INDEXES_DESCRIPTION,
         upgrade=upgrade_claim_bench_indexes,
+    ),
+    Migration(
+        version=CLAIM_HEAD_LINK_INDEXES_VERSION,
+        name=CLAIM_HEAD_LINK_INDEXES_NAME,
+        description=CLAIM_HEAD_LINK_INDEXES_DESCRIPTION,
+        upgrade=upgrade_claim_head_link_indexes,
     ),
 ]

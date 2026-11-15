@@ -11,7 +11,7 @@ Static paths here have two segments after ``/claims`` (``/claims/bench/...``,
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -37,7 +37,21 @@ from ..services.claim_bench import (
     HeadPatchRequest,
     HeadTestRequest,
 )
+from ..services.claim_delay_lab import (
+    DETERMINATIONS,
+    HINDRANCES,
+    SUBMISSIONS,
+    ClaimDelayLab,
+    DelaySettingsRequest,
+    DelayView,
+    EventDecisionRequest,
+    LinkCreateRequest,
+    LinkRemoveRequest,
+    OverlapDecisionRequest,
+)
 from ..services.claim_notice_requirements import NoticeRequirementService
+from ..services.claim_quantum import ClaimQuantum, QuantumLineRequest, QuantumView
+from ..services.document_relationship_service import DocumentRelationshipService
 from ..services.claim_signals import ClaimSignal, ClaimSignalService, PotentialClaimRequest
 from ..services.policy_service import PolicyService
 from ..utils.error_handler import BaseDomainError, handle_exceptions
@@ -463,6 +477,291 @@ async def get_claim_bench_step(
     """One test step: which skill version ran, for which party, and what it returned."""
     claim = await _claim(claim_id, Permissions.CLAIM_VIEW, db, current_user, policy, selection, bench)
     return await bench.get_step(claim, step_id)
+
+
+# --------------------------------------------------------------------------- #
+# Delay Lab
+# --------------------------------------------------------------------------- #
+_LINK_PERMISSION = {
+    "hindrance": Permissions.HINDRANCE_VIEW,
+    "eot_submission": "dms.keydate.view",
+    "eot_determination": "dms.keydate.view",
+}
+
+
+class LinkCandidate(BaseModel):
+    target_type: str
+    target_id: str
+    label: str
+    title: Optional[str] = None
+    date: Optional[Any] = None
+    status: Optional[str] = None
+    milestones: List[str] = Field(default_factory=list)
+
+
+@router.get("/claims/{claim_id}/bench/heads/{head_id}/delay", response_model=DelayView)
+@handle_exceptions
+async def get_head_delay(
+    claim_id: str,
+    head_id: str,
+    db=Depends(get_db),
+    bench: ClaimBenchService = Depends(get_bench),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
+):
+    """The delay assessment of a head: linked events, overlaps, decisions and the extension they give."""
+    claim = await _claim(claim_id, Permissions.CLAIM_VIEW, db, current_user, policy, selection, bench)
+    return await ClaimDelayLab(db, bench).view(claim, head_id)
+
+
+@router.get("/claims/{claim_id}/bench/delay/candidates", response_model=List[LinkCandidate])
+@handle_exceptions
+async def list_delay_link_candidates(
+    claim_id: str,
+    db=Depends(get_db),
+    bench: ClaimBenchService = Depends(get_bench),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
+):
+    """Records of the claim's project that a head could link to. A register the
+    caller may not read contributes nothing."""
+    claim = await _claim(claim_id, Permissions.CLAIM_VIEW, db, current_user, policy, selection, bench)
+    org, project = str(claim.get("organization_id") or ""), str(claim.get("project_id") or "")
+    if not org or not project:
+        return []
+    scope = build_scope_query(current_user, organization_id=org, project_id=project)
+    result: List[LinkCandidate] = []
+    if await _may(policy, current_user, Permissions.HINDRANCE_VIEW, org, project):
+        rows = await db[HINDRANCES].find({**scope, "archived_at": None}).to_list(length=500)
+        for row in rows:
+            reference = row.get("hindrance_ref") or row.get("delay_ref") or str(row.get("_id"))
+            result.append(
+                LinkCandidate(
+                    target_type="hindrance",
+                    target_id=str(row.get("_id")),
+                    label=f"Hindrance {reference}",
+                    title=row.get("title"),
+                    date=row.get("start_date"),
+                    status=str(getattr(row.get("responsibility"), "value", row.get("responsibility")) or "") or None,
+                )
+            )
+    if await _may(policy, current_user, "dms.keydate.view", org, project):
+        for row in await db[SUBMISSIONS].find(scope).to_list(length=200):
+            result.append(
+                LinkCandidate(
+                    target_type="eot_submission",
+                    target_id=str(row.get("_id")),
+                    label=f"EOT submission {row.get('eot_reference') or row.get('revision_label') or row.get('_id')}",
+                    date=row.get("contractor_submission_date"),
+                    status=str(getattr(row.get("status"), "value", row.get("status")) or "") or None,
+                )
+            )
+        for row in await db[DETERMINATIONS].find(scope).to_list(length=200):
+            items = await db.key_date_eot_determination_items.find(
+                {"determination_id": str(row.get("_id"))}
+            ).to_list(length=200)
+            result.append(
+                LinkCandidate(
+                    target_type="eot_determination",
+                    target_id=str(row.get("_id")),
+                    label=f"EOT determination {row.get('determination_reference') or row.get('_id')}",
+                    date=row.get("determination_date"),
+                    status=str(getattr(row.get("status"), "value", row.get("status")) or "") or None,
+                    milestones=sorted(str(item.get("milestone_ref")) for item in items if item.get("milestone_ref")),
+                )
+            )
+    return result
+
+
+@router.post("/claims/{claim_id}/bench/heads/{head_id}/delay/links", response_model=DelayView)
+@handle_exceptions
+async def add_head_link(
+    claim_id: str,
+    head_id: str,
+    payload: LinkCreateRequest,
+    db=Depends(get_db),
+    bench: ClaimBenchService = Depends(get_bench),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
+):
+    """Link a hindrance, EOT submission or EOT determination to a head. The record
+    is not changed; the link is pinned to it as it is now."""
+    claim = await _claim(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection, bench)
+    lab = ClaimDelayLab(db, bench)
+    record = await lab.load_target(payload.target_type, payload.target_id)
+    if not record:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Record not found")
+    await selection.require_record(record)
+    await policy.authorize_document(
+        current_user, _LINK_PERMISSION[payload.target_type], record, resource_type=payload.target_type
+    )
+    return await lab.add_link(claim, head_id, payload, record, _user_id(current_user))
+
+
+@router.post(
+    "/claims/{claim_id}/bench/heads/{head_id}/delay/links/{link_id}/remove", response_model=DelayView
+)
+@handle_exceptions
+async def remove_head_link(
+    claim_id: str,
+    head_id: str,
+    link_id: str,
+    payload: LinkRemoveRequest,
+    db=Depends(get_db),
+    bench: ClaimBenchService = Depends(get_bench),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
+):
+    """Remove a link, or with ``refresh`` replace it with one pinned to the record as it is now."""
+    claim = await _claim(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection, bench)
+    return await ClaimDelayLab(db, bench).remove_link(claim, head_id, link_id, payload, _user_id(current_user))
+
+
+@router.put("/claims/{claim_id}/bench/heads/{head_id}/delay/settings", response_model=DelayView)
+@handle_exceptions
+async def set_head_delay_settings(
+    claim_id: str,
+    head_id: str,
+    payload: DelaySettingsRequest,
+    db=Depends(get_db),
+    bench: ClaimBenchService = Depends(get_bench),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
+):
+    claim = await _claim(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection, bench)
+    return await ClaimDelayLab(db, bench).set_settings(claim, head_id, payload, _user_id(current_user))
+
+
+@router.put("/claims/{claim_id}/bench/heads/{head_id}/delay/events/{event_id}", response_model=DelayView)
+@handle_exceptions
+async def decide_head_delay_event(
+    claim_id: str,
+    head_id: str,
+    event_id: str,
+    payload: EventDecisionRequest,
+    db=Depends(get_db),
+    bench: ClaimBenchService = Depends(get_bench),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
+):
+    """Record who carries the risk of a delay event and whether it was critical."""
+    claim = await _claim(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection, bench)
+    return await ClaimDelayLab(db, bench).decide_event(claim, head_id, event_id, payload, _user_id(current_user))
+
+
+@router.put(
+    "/claims/{claim_id}/bench/heads/{head_id}/delay/overlaps/{overlap_id}", response_model=DelayView
+)
+@handle_exceptions
+async def decide_head_delay_overlap(
+    claim_id: str,
+    head_id: str,
+    overlap_id: str,
+    payload: OverlapDecisionRequest,
+    db=Depends(get_db),
+    bench: ClaimBenchService = Depends(get_bench),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
+):
+    """Record how an overlap between Employer and Contractor delay is treated, and on what basis."""
+    claim = await _claim(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection, bench)
+    return await ClaimDelayLab(db, bench).decide_overlap(
+        claim, head_id, overlap_id, payload, _user_id(current_user)
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Quantum Builder
+# --------------------------------------------------------------------------- #
+async def _claim_documents(claim: dict, db, current_user: CurrentUser) -> set:
+    """Documents linked to the claim that the caller may see: the only records a quantum line may cite."""
+    ids = await DocumentRelationshipService(db).authorized_document_ids(
+        current_user,
+        "claim",
+        str(claim.get("_id") or ""),
+        legacy_document_ids=claim.get("linked_document_ids") or [],
+    )
+    return {str(item) for item in ids}
+
+
+@router.get("/claims/{claim_id}/bench/heads/{head_id}/quantum", response_model=QuantumView)
+@handle_exceptions
+async def get_head_quantum(
+    claim_id: str,
+    head_id: str,
+    db=Depends(get_db),
+    bench: ClaimBenchService = Depends(get_bench),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
+):
+    claim = await _claim(claim_id, Permissions.CLAIM_VIEW, db, current_user, policy, selection, bench)
+    return await ClaimQuantum(db, bench).view(claim, head_id)
+
+
+@router.post("/claims/{claim_id}/bench/heads/{head_id}/quantum/lines", response_model=QuantumView)
+@handle_exceptions
+async def add_head_quantum_line(
+    claim_id: str,
+    head_id: str,
+    payload: QuantumLineRequest,
+    db=Depends(get_db),
+    bench: ClaimBenchService = Depends(get_bench),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
+):
+    claim = await _claim(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection, bench)
+    return await ClaimQuantum(db, bench).add_line(
+        claim, head_id, payload, await _claim_documents(claim, db, current_user), _user_id(current_user)
+    )
+
+
+@router.put("/claims/{claim_id}/bench/heads/{head_id}/quantum/lines/{line_id}", response_model=QuantumView)
+@handle_exceptions
+async def update_head_quantum_line(
+    claim_id: str,
+    head_id: str,
+    line_id: str,
+    payload: QuantumLineRequest,
+    db=Depends(get_db),
+    bench: ClaimBenchService = Depends(get_bench),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
+):
+    claim = await _claim(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection, bench)
+    return await ClaimQuantum(db, bench).update_line(
+        claim, head_id, line_id, payload, await _claim_documents(claim, db, current_user), _user_id(current_user)
+    )
+
+
+@router.post(
+    "/claims/{claim_id}/bench/heads/{head_id}/quantum/lines/{line_id}/remove", response_model=QuantumView
+)
+@handle_exceptions
+async def remove_head_quantum_line(
+    claim_id: str,
+    head_id: str,
+    line_id: str,
+    payload: BoardVersionRequest,
+    db=Depends(get_db),
+    bench: ClaimBenchService = Depends(get_bench),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
+):
+    claim = await _claim(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection, bench)
+    return await ClaimQuantum(db, bench).remove_line(
+        claim, head_id, line_id, payload.board_version, _user_id(current_user)
+    )
 
 
 __all__ = ["router"]

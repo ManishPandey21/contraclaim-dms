@@ -14,6 +14,8 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .claim_delay import HeadDelay, QuantumLine
+
 
 class ClaimType(str, Enum):
     EOT = "eot"
@@ -139,6 +141,10 @@ class ClaimHead(BaseModel):
     step_id: Optional[str] = None
     test_stale: bool = False
     tested_at: Optional[datetime] = None
+    # Phase 2. The delay assessment (decisions about linked events and overlaps)
+    # and the quantum build-up. Linked records themselves are in claim_head_links.
+    delay: HeadDelay = Field(default_factory=HeadDelay)
+    quantum_lines: List[QuantumLine] = Field(default_factory=list)
 
 
 class ClaimBench(BaseModel):

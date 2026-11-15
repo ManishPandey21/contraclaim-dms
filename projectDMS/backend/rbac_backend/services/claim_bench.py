@@ -671,7 +671,7 @@ class ClaimBenchService:
             project_id=claim.get("project_id"),
             exists=bench is not None,
             bench=board,
-            gate=compute_gate(board),
+            gate=await self._gate(claim, board),
             steps=[
                 BenchStepSummary(
                     step_id=step.step_id,
@@ -696,6 +696,19 @@ class ClaimBenchService:
             read_only_reason=reason,
             rollout_mode=self.availability(str(claim.get("organization_id") or "") or None).rollout_mode,
         )
+
+    async def _gate(self, claim: Dict[str, Any], bench: ClaimBench) -> BenchGate:
+        """The lock gate: the five elements and classification of every head, plus
+        any delay assessment that has been started and not finished."""
+        gate = compute_gate(bench)
+        # Imported here: the Delay Lab is built on this service.
+        from .claim_delay_lab import ClaimDelayLab
+
+        delay = await ClaimDelayLab(self.db, self).blockers(claim, bench)
+        if delay:
+            gate.blockers.extend(delay)
+            gate.can_lock = False
+        return gate
 
     # --------------------------------------------------------------- reads
     async def get(self, claim: Dict[str, Any]) -> ClaimBenchResponse:
@@ -837,6 +850,11 @@ class ClaimBenchService:
 
         response = await self._change(claim, request.board_version, user_id, _apply)
         await self.runner.mark_stale(removed)
+        # The head's links go with it. They are marked removed, not deleted.
+        await self.db.claim_head_links.update_many(
+            {"claim_id": str(claim["_id"]), "head_id": head_id, "status": "active"},
+            {"$set": {"status": "removed", "removed_by": user_id, "removed_at": now_utc()}},
+        )
         return response
 
     async def decide_element(
@@ -865,9 +883,14 @@ class ClaimBenchService:
 
     async def lock(self, claim: Dict[str, Any], request: BoardVersionRequest, user_id: Optional[str]) -> ClaimBenchResponse:
         perspective = await self._perspective(claim)
+        current = self._require_bench(claim)
+        delay_blockers = (await self._gate(claim, current)).blockers
 
         def _apply(bench: ClaimBench) -> None:
             gate = compute_gate(bench)
+            # Delay blockers were worked out on the board as loaded; the version
+            # check in _change refuses the lock if the board has moved since.
+            gate.blockers = list(dict.fromkeys([*gate.blockers, *delay_blockers]))
             if gate.blockers:
                 raise HTTPException(status_code=409, detail="; ".join(gate.blockers))
             bench.stage = "locked"
