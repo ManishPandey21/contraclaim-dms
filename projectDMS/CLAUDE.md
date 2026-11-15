@@ -241,8 +241,9 @@ Production is `contraclaim.com` (SSH alias `contraclaim`), checkout
 
 - **Current open items live in `docs/POST_CUTOVER_OPERATIONAL_ASSESSMENT_2026-11-15.md`**, not in
   pull request #20 (closed; its blocker list is from 2026-09-09) and not in the bullets below, which
-  are the 2026-09-21 receipt. As of 2026-11-15 nothing in that assessment has been re-read from
-  production: the third-party image exception lapsed on 2026-10-15 with all four digests still
+  are the 2026-09-21 receipt. As of 2026-11-15 one thing has been re-read from production:
+  the checkout is on `release/contraclaim-rc1` at `34d664a` (2026-10-23), 67 commits behind that
+  branch's tip, four of them authorization fixes. Nothing else has: the third-party image exception lapsed on 2026-10-15 with all four digests still
   pinned in the compose files, R-A9I has no completion record, and `main` carries three migrations
   (`20261114_0001`-`_0003`) newer than any production receipt. Take readings with
   `scripts/post_cutover_readonly_checks.sh` (read-only) and record them in that document.

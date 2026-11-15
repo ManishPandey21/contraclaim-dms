@@ -5,10 +5,11 @@ replaces the blocker list in pull request #20 (written 2026-09-09, closed
 2026-11-15), which describes a state that no longer exists and must not be read
 as current.
 
-**Status of this assessment: repository review only.** No production check was
-run to produce it. Every statement about production below is either quoted from
-a dated repository receipt or marked NOT VERIFIED. Section 6 is where fresh
-production readings are recorded; it is empty until someone runs them.
+**Status of this assessment: repository review, plus one production reading.**
+The one reading (2026-11-15, section 6) is the deployed checkout's branch and
+commit. Every other statement about production below is either quoted from a
+dated repository receipt or marked NOT VERIFIED. Section 6 is where fresh
+production readings are recorded.
 
 ## 1. Two kinds of statement, kept apart
 
@@ -39,8 +40,8 @@ closes it.
 | 4 | Production migrations, including `20260906_0001` | **RESOLVED (historical)** for the 19-migration catalogue | The owner approved the production migration sequence on 2026-09-20 (`docs/R_A9G_OWNER_DECISION_RECORD.md`) and R-A9H records the deployment as successful. Three migrations added on `main` on 2026-11-14 are a new item: W3 |
 | 5 | Production S3 shared bucket; window-only second copy recommended | **ACCEPTED DEBT** | `docs/S3_STORAGE_POSTURE_DEBT.md` §1; owner decision record item A6. Carried in the risk register, R3 |
 | 6 | Post-deploy backup semantic validation | **RESOLVED (historical)** for FalkorDB and Redis; **STILL OPEN** for MongoDB and uploads | Receipt, 2026-09-21: canonical backups with a proven persistence flush and disposable restores (R-A9H §3, evidence 12 to 14). The same receipt records that `backup_status` checks MongoDB, uploads and the manifest for freshness only (R9H-7) and that nothing automatic reads the flush result (R9H-11) |
-| 7 | "Production is not deployed from this branch and is unchanged" | **SUPERSEDED** | Receipt, 2026-09-21: production tracks `release/contraclaim-rc1` (R-A9H §2). On 2026-11-15 `main` received the release line plus the Letter Bench; `main` is now ahead of what production tracked |
-| 8 | Backend, contract-worker and document-worker images stale | **SUPERSEDED** | Receipt, 2026-09-21: certified images deployed (R-A9H §14). The release branch has moved since (last commit 2026-11-01); whether production was redeployed is NOT VERIFIED |
+| 7 | "Production is not deployed from this branch and is unchanged" | **SUPERSEDED** | Receipt, 2026-09-21: production tracks `release/contraclaim-rc1` (R-A9H §2). **Read 2026-11-15:** the production checkout is on that branch at `34d664a` (2026-10-23), 67 commits behind the branch tip and 87 behind `main`. See R9 |
+| 8 | Backend, contract-worker and document-worker images stale | **SUPERSEDED** | Receipt, 2026-09-21: certified images deployed (R-A9H §14). The release branch has moved since (last commit 2026-11-01). **Read 2026-11-15:** the checkout was moved to `34d664a` (2026-10-23), so production was updated at least once after the receipt; which commit the running images were built from is NOT VERIFIED |
 | 9 | G32 production state: not certified | **STILL OPEN** | Receipt, 2026-09-21: not run, separate owner authorization required (R-A9H §17). Risk register, R2 |
 | 10 | Readiness 74/100; Gate 9 final review 0/6 | **SUPERSEDED** | `docs/PRODUCTION_READINESS_RELEASE_GATE.md` records 91/100 and Gate 9 6/6 by owner decision on 2026-09-20 |
 | 11 | Gate 3 browser E2E 1/9; 49 routes without error-state coverage | **ACCEPTED DEBT**, deadline passed | Gate 3 stands at 2/9. Six bullets were carried as owner-accepted debt with a follow-up dated 2026-10-15; no receipt shows that follow-up happened. Risk register, R1 |
@@ -143,6 +144,9 @@ empty MongoDB in a cloud development container on 2026-11-14
 (`docs/GATE_6_FRESH_INSTALL_EVIDENCE.md`). That is a fresh-install reading. It is
 not an upgrade-path reading and it was not taken on staging or production.
 
+**Runbook:** `docs/LETTER_BENCH_STAGING_CHECKS.md`, with the staging suite
+`client/e2e/staging/letter-bench-api.spec.ts`. Neither has been run on staging.
+
 **Required before deployment:**
 
 1. **The three migrations are unapplied in production.** *Script section D:*
@@ -193,6 +197,7 @@ be lost.
 | R5 | **Recovery time is recorded, not demonstrated.** RPO 24 h and RTO 8 h have not been proven on production-sized data | Owner-accepted debt | Decision record A7 | A timed restore of a production-sized archive |
 | R6 | **Out-of-band containers on the production host**, two of them carrying the dead FalkorDB credential, plus rollback images and scratch files | Open; owner declined cleanup in R-A9H | R-A9H §14, §18 (R9H-4 to R9H-8) | Owner-authorised cleanup after W1 |
 | R7 | **`main` and production have diverged.** `main` now carries the Letter Bench; production tracked `release/contraclaim-rc1` on 2026-09-21. Which branch production should track is undecided | Open | R-A9H §15 step 4 | An owner decision, recorded here |
+| R9 | **Production is behind its own release branch.** Read 2026-11-15: checkout at `34d664a` (2026-10-23); `release/contraclaim-rc1` is at `614890f` (2026-11-01), 67 commits ahead (52 non-merge, 45 files). Not deployed: tenant-scope read hardening (#90), user-create organisation scope (#92), letter-tree reparent authorization (#93), arbitration exhibit ownership (#94), the zod, pymongo/dnspython, pyasn1 and follow-redirects advisories (#91, #105, #107), and an arbitration rejoinder fix (#104). No migration and no compose file differs across that range; `requirements.txt` and `package.json` do, so closing it is an image rebuild with no database step | Open; four of the eight are authorization fixes | `git rev-list 34d664a..origin/release/contraclaim-rc1`, section 6 | A certified deploy of the release tip, recreating services with `--no-deps` while W1 is open. Confirm first which commit the running images carry |
 | R8 | **Live AI, vector and graph integration unproven on production** (P0-002), and document extraction has not run live since 2026-08-24 | Owner-accepted debt, follow-up dated 2026-10-15, **overdue** | R-A9H §17 backlog items 3 and 5 | Staging or production proof runs; model spend needs approval |
 
 ## 5. How to take the production readings
@@ -222,9 +227,10 @@ Not covered by the script, and still required: the credential-in-logs check
 
 ## 6. Current production verification log
 
-Nothing has been verified yet. Add one row per reading; attach or quote the
-report, scanned by value with `scripts/evidence_secret_scan.py` first.
+Add one row per reading; attach or quote the report, scanned by value with
+`scripts/evidence_secret_scan.py` first.
 
 | Date (UTC) | Operator | What was read | Result | Report |
 |---|---|---|---|---|
-| — | — | — | NOT YET RUN | — |
+| 2026-11-15 | Release owner, over SSH from their own machine | Deployed checkout: host name, branch, last commit. Command: `ssh contraclaim "hostname; cd /opt/contraclaim-dms/projectDMS && git branch --show-current && git log -1 --format='%h %cs %s'"` | Host `vps-5dec80c1`; branch `release/contraclaim-rc1`; commit `34d664a`, 2026-10-23, "Merge pull request #88 from ManishPandey21/feat/grounded-summary-prompt-v4". Compared in the repository: an ancestor of the release tip `614890f`, 67 commits behind it, 87 behind `main` `48b1e4c`. **This is the checkout, not the running images**: the image revision label was not read | Output pasted into the working session; three lines, no secret |
+| — | — | Everything else: container inventory, FalkorDB topology and credential, image digests, migration ledger, backups (`scripts/post_cutover_readonly_checks.sh`) | NOT YET RUN | — |
