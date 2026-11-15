@@ -1136,3 +1136,98 @@ async def test_splitting_an_assertion_puts_its_evaluation_out_of_date(monkeypatc
     assert evaluation.stale
     assert next(l for l in split.board.chain if l.skill_key == VARIATIONS_SKILL_KEY).status == "stale"
     assert next(a for a in split.board.assertions if a.assertion_id == "A3").needs == []
+
+
+# --------------------------------------------------------------------------- #
+# Document authority: the Bench reads the incoming letter through
+# services/publication_policy.py, like every other drafting consumer.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "held",
+    [
+        {"processing_status": "human_review_required"},
+        {"duplicate_status": "duplicate"},
+        {"lifecycle_state": "duplicate"},
+        {"lifecycle_state": "deleted"},
+    ],
+    ids=lambda fields: "-".join(f"{k}={v}" for k, v in fields.items()),
+)
+async def test_a_held_document_is_not_dissected_or_sent_to_the_model(monkeypatch, held) -> None:
+    llm = StubLLM(analysis={"assertions": []})
+    service, db, _ = _bench(monkeypatch, llm)
+    # Everything a held document carries is unverified, the metadata included.
+    db.documents.docs[0].update(held, key_reply_points=["REPLY POINT: dispute the soil data"])
+    letter_id = await _opened(service)
+    bench = await service.get(letter_id, _user())
+    board = bench.board
+    assert board.incoming_text == ""
+    assert board.assertions == []
+    assert "held" in board.last_error and "No text could be read" not in board.last_error
+    assert llm.calls == []
+    assert "REPLY POINT" not in json.dumps(board.incoming_meta, default=str)
+    assert bench.gate.can_lock is False
+
+
+async def test_the_summary_never_stands_in_for_the_letter(monkeypatch) -> None:
+    service, db, _ = _bench(monkeypatch, StubLLM(down=True))
+    db.documents.docs[0]["full_text"] = ""
+    db.documents.docs[0]["summary"] = "LLM SUMMARY: the Contractor claims Rs. 99,99,999 under Clause 99.9."
+    letter_id = await _opened(service)
+    board = (await service.get(letter_id, _user())).board
+    assert "LLM SUMMARY" not in board.incoming_text
+    assert board.assertions == []
+    assert "No text could be read" in board.last_error
+
+
+async def test_an_extraction_report_in_ocr_text_is_not_read_as_the_letter(monkeypatch) -> None:
+    service, db, _ = _bench(monkeypatch, StubLLM(down=True))
+    db.documents.docs[0]["full_text"] = ""
+    db.documents.docs[0]["ocrText"] = "REPORT: the model's own account of the letter under Clause 99.9."
+    db.documents.docs[0]["ocr_text_kind"] = "extraction_report"
+    letter_id = await _opened(service)
+    board = (await service.get(letter_id, _user())).board
+    assert "REPORT" not in board.incoming_text
+    assert board.assertions == []
+
+
+async def test_a_document_held_after_analysis_stops_lock_evaluation_and_compose(monkeypatch) -> None:
+    service, db, _ = _bench(monkeypatch, StubLLM(analysis={"assertions": []}))
+    letter_id = await _opened(service)
+    bench = await _decide_all(service, letter_id)
+    assert bench.gate.can_lock
+
+    db.documents.docs[0]["processing_status"] = "human_review_required"
+
+    with pytest.raises(HTTPException) as lock:
+        await service.lock_positions(
+            letter_id, LockPositionsRequest(board_version=bench.board.board_version), _user()
+        )
+    assert lock.value.status_code == 409 and "held" in lock.value.detail
+    with pytest.raises(HTTPException) as step:
+        await service.begin_step(
+            letter_id,
+            StepRunRequest(skill_key=VARIATIONS_SKILL_KEY, target_assertion_ids=["A3"], force=True),
+            _user(),
+        )
+    assert step.value.status_code == 409 and "held" in step.value.detail
+
+    # Running the analysis again is the way out, and it retracts the stored copy.
+    await service.begin_dissect(letter_id, _user())
+    await service.run_dissect(letter_id, _user())
+    board = (await service.get(letter_id, _user())).board
+    assert board.incoming_text == "" and board.assertions == []
+
+
+async def test_a_document_held_after_locking_stops_compose(monkeypatch) -> None:
+    service, db, _ = _bench(monkeypatch, StubLLM(analysis={"assertions": []}))
+    letter_id = await _opened(service)
+    bench = await _decide_all(service, letter_id)
+    locked = await service.lock_positions(
+        letter_id, LockPositionsRequest(board_version=bench.board.board_version), _user()
+    )
+    db.documents.docs[0]["duplicate_status"] = "duplicate"
+    with pytest.raises(HTTPException) as compose:
+        await service.begin_compose(
+            letter_id, ComposeRequest(board_version=locked.board.board_version), _user()
+        )
+    assert compose.value.status_code == 409 and "held" in compose.value.detail

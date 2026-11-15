@@ -134,6 +134,15 @@ it used, so publishing never changes what a past run records.
   any skill step. If it trips the scan, no step on that board calls the model:
   analysis is rule-based and paragraphs use template wording, with a standing
   notice on the Bench, until the analysis is run again on clean text.
+- **The incoming document is held.** The Bench reads the letter through
+  `services/publication_policy.py`, like the other drafting consumers. A
+  document in human review, or quarantined as a duplicate or deleted, is not
+  analysed: no text, summary or extracted metadata reaches the board or the
+  model, and the Bench says the document is held. If a document becomes held
+  after it was analysed, locking, running a skill step and composing answer
+  409 until the analysis is run again, which clears the stored copy. The
+  letter text is the document's own body only; a summary or an extraction
+  report is never shown as the letter.
 - **The run pipeline refuses the draft.** If composing ends in a blocked or
   failed run, the board stays at "locked", shows the reason, and the letter
   body is not written. It is never shown as a composed draft.
