@@ -932,6 +932,45 @@ async def test_a_fresh_letter_from_a_variation_record_can_be_composed(monkeypatc
     assert again.created is False and again.letter_id == opened.letter_id
 
 
+async def test_a_notice_letter_can_be_started_from_a_claim_using_only_its_record(monkeypatch) -> None:
+    service, db, authorized = _bench(monkeypatch, StubLLM(down=True))
+    db.claims.docs.append({
+        "_id": "claim-1", "organization_id": ORG, "project_id": PROJECT, "claim_ref": "CLM-014",
+        "title": "Delayed handover of Site", "type": "eot", "status": "potential",
+        "description": "Right of way between Km 12 and Km 18 was not handed over.",
+        "event_date": datetime(2026, 3, 2, tzinfo=timezone.utc), "contract_clauses": ["20.2"],
+        "bench": {"heads": [{"head_id": "H1", "title": "Extension of time", "event_summary": "Site access delayed.", "clause_refs": ["8.4"]}]},
+    })
+    opened = await service.open(BenchOpenRequest(trigger_type="claim", trigger_id="claim-1", role="contractor"), _user())
+    assert ("dms.claim.view", ORG, None) in authorized
+    board = (await service.get(opened.letter_id, _user())).board
+    assert board.trigger == {
+        "type": "claim", "id": "claim-1", "label": "Claim CLM-014", "status": "potential", "claim_type": "eot",
+    }
+    text = board.incoming_text
+    assert "Claim CLM-014: Delayed handover of Site" in text and "Event date: 2026-03-02" in text
+    assert "Clauses relied on: Sub-Clause 20.2, Sub-Clause 8.4" in text
+    assert "Head of claim: Extension of time. Site access delayed." in text
+    assert "Notice served on" not in text  # nothing the register does not hold
+    letter = db.letters.docs[0]
+    assert letter["title"] == "Notice for claim CLM-014" and letter["recipient"] == "[CONFIRM: addressee]"
+    await service.begin_first_dissect(opened.letter_id, _user())
+    await service.run_dissect(opened.letter_id, _user())
+    chain = (await service.get(opened.letter_id, _user())).board.chain
+    # A delay claim is routed to the EOT skill, which is shown as awaiting approval, not dropped.
+    eot = next(link for link in chain if link.skill_key == EOT_SKILL_KEY)
+    assert eot.status == "unavailable" and eot.reason == "Awaiting legal approval"
+    again = await service.open(BenchOpenRequest(trigger_type="claim", trigger_id="claim-1"), _user())
+    assert again.created is False and again.letter_id == opened.letter_id
+
+
+async def test_a_notice_letter_cannot_be_started_from_a_claim_that_does_not_exist(monkeypatch) -> None:
+    service, _, _ = _bench(monkeypatch, StubLLM(down=True))
+    with pytest.raises(HTTPException) as exc:
+        await service.open(BenchOpenRequest(trigger_type="claim", trigger_id="missing"), _user())
+    assert exc.value.status_code == 404
+
+
 @pytest.mark.parametrize("status", ["Review", "Approval", "Completed"])
 async def test_a_letter_past_drafting_cannot_be_changed_through_the_bench(monkeypatch, status) -> None:
     service, db, _ = _bench(monkeypatch, StubLLM(analysis={"assertions": []}))

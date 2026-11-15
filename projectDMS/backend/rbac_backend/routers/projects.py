@@ -1,7 +1,8 @@
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Literal
 from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from pydantic import BaseModel
 from pymongo import ReturnDocument
 
 from ..core.security import _normalize_roles_list, require_permission, get_current_user, build_scope_query
@@ -298,6 +299,37 @@ async def update_project_notification_settings(
         {"project_id": project_id, "user_id": current_user.id}
     )
     return _project_subscription_response(saved or {})
+
+
+class ContractualCapacityUpdate(BaseModel):
+    contractual_capacity: Literal["contractor", "engineer", "employer"]
+
+
+@router.patch("/projects/{project_id}/contractual-capacity", response_model=Project)
+async def set_project_contractual_capacity(
+    project_id: str,
+    payload: ContractualCapacityUpdate,
+    db=Depends(get_db),
+    current_user=Depends(get_current_user),
+    _: None = Depends(require_permission("projects:update")),
+):
+    """State which party to the contract this project's workspace acts for.
+
+    A narrow route so the setting can be made without resubmitting the whole
+    project. Claim tests and determinations are run from this position.
+    """
+    await _ensure_project_access(current_user, project_id, "projects:update", db)
+    existing = await _find_by_id(db.projects, project_id)
+    if not existing:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    updated = await db.projects.find_one_and_update(
+        {"_id": existing["_id"]},
+        {"$set": {"contractual_capacity": payload.contractual_capacity}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if not updated:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    return Project(**updated)
 
 
 @router.put("/projects/{project_id}", response_model=Project)

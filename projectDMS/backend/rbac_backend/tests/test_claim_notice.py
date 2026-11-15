@@ -148,6 +148,9 @@ class _Windows:
     async def for_claim(self, claim: dict) -> dict:
         return self.windows
 
+    async def requirement_for(self, claim: dict):
+        return None
+
 
 async def test_claim_read_carries_the_assessment_and_the_allowed_moves() -> None:
     claim = _claim(event_date=datetime(2026, 3, 2), notice_date=datetime(2026, 4, 11))

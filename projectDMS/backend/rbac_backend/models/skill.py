@@ -142,6 +142,56 @@ class Skill(BaseModel):
         return None if value is None else str(value)
 
 
+SkillSubjectType = Literal["claim", "claim_head", "arbitration_case", "arbitration_draft", "hearing"]
+SkillRunStatus = Literal["completed", "failed"]
+
+
+class SkillRunStep(BaseModel):
+    """One skill step run against a subject other than a letter.
+
+    The Letter Bench keeps its own step records. Everything else (claims now,
+    arbitration later) records steps here, keyed by what the step was about.
+    ``skill_version`` and ``skill_hash`` are empty when no published version of
+    the skill existed: the output is then the deterministic fallback, the step
+    is ``degraded`` and ``error`` says why.
+    """
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    id: Optional[str] = Field(default=None, alias="_id")
+    step_id: str
+    subject_type: SkillSubjectType
+    subject_id: str
+    # The record the subject belongs to, for listing (a head's claim, say).
+    parent_id: Optional[str] = None
+    organization_id: Optional[str] = None
+    project_id: Optional[str] = None
+    skill_key: str
+    skill_version: str = ""
+    skill_hash: str = ""
+    skill_name: Optional[str] = None
+    role: Optional[str] = None
+    overlay_key: Optional[str] = None
+    input_hash: str
+    output: Dict[str, Any] = Field(default_factory=dict)
+    output_schema_key: str
+    status: SkillRunStatus = "completed"
+    stale: bool = False
+    degraded: bool = False
+    error: Optional[str] = None
+    model: Optional[str] = None
+    prompt_key: Optional[str] = None
+    prompt_version: Optional[int] = None
+    created_by: Optional[str] = None
+    created_at: datetime = Field(default_factory=now_utc)
+    completed_at: Optional[datetime] = None
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _stringify_id(cls, value: Any) -> Optional[str]:
+        return None if value is None else str(value)
+
+
 class SkillBinding(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
 
@@ -305,6 +355,8 @@ __all__ = [
     "SkillManifest",
     "SkillPublishRequest",
     "SkillReference",
+    "SkillRunStep",
+    "SkillSubjectType",
     "SkillRole",
     "SkillVersion",
     "SkillVersionStatus",

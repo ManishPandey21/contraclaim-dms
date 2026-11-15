@@ -20,23 +20,35 @@ class _Result:
 
 
 def _get(doc: Dict[str, Any], dotted: str) -> Any:
+    """Value at a dotted path. A path through an array yields every element's value,
+    as Mongo does (``chain.skill_key`` over a list of links)."""
     value: Any = doc
     for part in dotted.split("."):
-        if not isinstance(value, dict):
+        if isinstance(value, list):
+            value = [item.get(part) for item in value if isinstance(item, dict)]
+        elif isinstance(value, dict):
+            value = value.get(part)
+        else:
             return None
-        value = value.get(part)
     return value
+
+
+def _equals(actual: Any, expected: Any) -> bool:
+    # An array field matches a scalar when any element does.
+    if isinstance(actual, list) and not isinstance(expected, list):
+        return expected in actual
+    return actual == expected
 
 
 def _match(doc: Dict[str, Any], query: Dict[str, Any]) -> bool:
     for key, expected in query.items():
         actual = _get(doc, key)
         if isinstance(expected, dict) and any(k.startswith("$") for k in expected):
-            if "$in" in expected and actual not in expected["$in"]:
+            if "$in" in expected and not any(_equals(actual, option) for option in expected["$in"]):
                 return False
-            if "$ne" in expected and actual == expected["$ne"]:
+            if "$ne" in expected and _equals(actual, expected["$ne"]):
                 return False
-        elif actual != expected:
+        elif not _equals(actual, expected):
             return False
     return True
 
@@ -88,7 +100,15 @@ class FakeCollection:
 
     @staticmethod
     def _apply(doc: Dict[str, Any], update: Dict[str, Any]) -> None:
-        doc.update(copy.deepcopy(update.get("$set", {})))
+        for key, value in update.get("$set", {}).items():
+            # A dotted key sets a nested field, as Mongo does.
+            target = doc
+            *parents, leaf = key.split(".")
+            for part in parents:
+                if not isinstance(target.get(part), dict):
+                    target[part] = {}
+                target = target[part]
+            target[leaf] = copy.deepcopy(value)
         for key, value in update.get("$push", {}).items():
             doc.setdefault(key, []).append(copy.deepcopy(value))
 

@@ -298,7 +298,7 @@ class SkillStepSummary(BaseModel):
 # --------------------------------------------------------------------------- #
 class BenchOpenRequest(BaseModel):
     incoming_document_id: Optional[str] = None
-    trigger_type: Optional[Literal["variation", "key_date", "hindrance"]] = None
+    trigger_type: Optional[Literal["variation", "key_date", "hindrance", "claim"]] = None
     trigger_id: Optional[str] = None
     project_id: Optional[str] = None
     organization_id: Optional[str] = None

@@ -376,6 +376,11 @@ class LetterBenchService:
             subject = f"Re: {document.get('subject') or reference}"
             recipient = str(document.get("from") or "")
             origin_key = {"incoming_document_id": str(request.incoming_document_id)}
+        elif request.trigger_type == "claim":
+            organization_id, project_id, title, subject, recipient, trigger, incoming_text = (
+                await self._claim_trigger(str(request.trigger_id), current_user)
+            )
+            origin_key = {"trigger.type": "claim", "trigger.id": str(request.trigger_id)}
         else:
             from ..variation_service import VariationService
 
@@ -477,6 +482,61 @@ class LetterBenchService:
                 letter_id=winner["letter_id"], created=False, board_version=winner.get("board_version", 0)
             )
         return BenchOpenResponse(letter_id=board.letter_id, created=True, board_version=0)
+
+    async def _claim_trigger(self, claim_id: str, current_user: Any) -> tuple:
+        """Origin of a letter drafted from a claim (its notice, typically).
+
+        The text handed to the analysis is the claim's own record: what
+        happened, the dates, the clauses relied on and the heads. Nothing is
+        added that the register does not hold.
+        """
+        from ..claim_service import ClaimService
+
+        record = await ClaimService(self.db).get(claim_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Claim not found")
+        await self.drafts.policy_service.authorize_document(
+            current_user, "dms.claim.view", record, resource_type="claim"
+        )
+        reference = record.get("claim_ref") or record.get("title") or claim_id
+        heads = ((record.get("bench") or {}).get("heads")) or []
+        clauses = list(record.get("contract_clauses") or [])
+        for head in heads:
+            for ref in head.get("clause_refs") or []:
+                if ref not in clauses:
+                    clauses.append(ref)
+
+        def _day(value: Any) -> str:
+            return str(value)[:10] if value else ""
+
+        parts = [
+            f"Claim {reference}: {record.get('title') or ''}".strip(),
+            str(record.get("description") or ""),
+            f"Event date: {_day(record.get('event_date'))}" if record.get("event_date") else "",
+            f"Became aware on: {_day(record.get('awareness_date'))}" if record.get("awareness_date") else "",
+            f"Notice served on: {_day(record.get('notice_date'))}" if record.get("notice_date") else "",
+            ("Clauses relied on: " + ", ".join(f"Sub-Clause {ref}" for ref in clauses)) if clauses else "",
+            *[
+                f"Head of claim: {head.get('title')}. {head.get('event_summary') or ''}".strip()
+                for head in heads
+            ],
+        ]
+        trigger = {
+            "type": "claim",
+            "id": claim_id,
+            "label": f"Claim {reference}",
+            "status": str(record.get("status") or ""),
+            "claim_type": str(record.get("type") or ""),
+        }
+        return (
+            str(record.get("organization_id") or ""),
+            str(record.get("project_id") or "") or None,
+            f"Notice for claim {reference}",
+            f"Notice of claim: {record.get('title') or reference}",
+            "[CONFIRM: addressee]",
+            trigger,
+            clean_incoming_text("\n\n".join(part for part in parts if part)),
+        )
 
     async def _letter_exists(self, letter_id: str) -> bool:
         try:
@@ -653,7 +713,7 @@ class LetterBenchService:
             request = DraftRunCreateRequest(mode="background", draft_type="fresh", role=board.role)
             analysis = IncomingLetterAnalysis(
                 subject=getattr(letter, "subject", None),
-                issue_type="variation" if (board.trigger or {}).get("type") == "variation" else "other",
+                issue_type=_trigger_issue_type(board.trigger),
                 issue_type_source="system_default",
                 main_request=condense_text(text, 500),
                 clauses_cited=extract_clause_refs(text),
@@ -1881,6 +1941,17 @@ class _SingleDocumentService:
 
     async def get_documents_by_ids(self, _ids: List[str]) -> List[Any]:
         return [self._document]
+
+
+def _trigger_issue_type(trigger: Optional[Dict[str, Any]]) -> str:
+    """Issue type of a letter started from a record rather than from a letter."""
+    kind = (trigger or {}).get("type")
+    if kind == "variation":
+        return "variation"
+    if kind == "claim":
+        # A delay claim routes to the EOT skill; any other claim to the claims skill.
+        return "delay" if (trigger or {}).get("claim_type") == "eot" else "claim"
+    return "other"
 
 
 def _find(board: PositionBoard, assertion_id: str) -> Assertion:

@@ -119,6 +119,10 @@ from .v20261115_0001_seed_claim_arbitration_skill_drafts import (
 from .v20261115_0001_seed_claim_arbitration_skill_drafts import (
     upgrade as upgrade_seed_claim_arbitration_skill_drafts,
 )
+from .v20261116_0001_claim_bench_indexes import DESCRIPTION as CLAIM_BENCH_INDEXES_DESCRIPTION
+from .v20261116_0001_claim_bench_indexes import NAME as CLAIM_BENCH_INDEXES_NAME
+from .v20261116_0001_claim_bench_indexes import VERSION as CLAIM_BENCH_INDEXES_VERSION
+from .v20261116_0001_claim_bench_indexes import upgrade as upgrade_claim_bench_indexes
 
 
 MIGRATIONS = [
@@ -259,5 +263,11 @@ MIGRATIONS = [
         name=SEED_CLAIM_ARBITRATION_SKILL_DRAFTS_NAME,
         description=SEED_CLAIM_ARBITRATION_SKILL_DRAFTS_DESCRIPTION,
         upgrade=upgrade_seed_claim_arbitration_skill_drafts,
+    ),
+    Migration(
+        version=CLAIM_BENCH_INDEXES_VERSION,
+        name=CLAIM_BENCH_INDEXES_NAME,
+        description=CLAIM_BENCH_INDEXES_DESCRIPTION,
+        upgrade=upgrade_claim_bench_indexes,
     ),
 ]

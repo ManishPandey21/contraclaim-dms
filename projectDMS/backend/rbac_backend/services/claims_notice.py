@@ -1,15 +1,17 @@
 """Deterministic notice-period assessment for a claim.
 
-Dates in, dates out: no model call. The period used here is NOT read from the
-executed contract. It is either a figure the organisation configured
-(``sla_rules``) or a typical figure for the claim type, and the result says
-which. Callers must not present either as a verified contractual requirement.
+Dates in, dates out: no model call. The period comes, in order of preference,
+from a notice requirement recorded for the project from its own contract, from
+a figure the organisation configured (``sla_rules``), or from a typical figure
+for the claim type. The result says which. Only a requirement a person has
+verified against the quoted clause is reported as ``contract_verified``;
+callers must not present any other source as the contract's requirement.
 """
 
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 from ..models.claim import NoticeAssessment
 from .sla_service import DEFAULT_NOTICE_WINDOWS, TERMINAL_STATUSES, _as_datetime
@@ -30,16 +32,22 @@ def assess_notice(
     *,
     now: Optional[datetime] = None,
     organisation_windows: Optional[Dict[str, int]] = None,
+    requirement: Optional[Any] = None,
 ) -> Optional[NoticeAssessment]:
     """Assess ``claim`` against its notice period, or ``None`` when there is no date to run from.
 
     ``organisation_windows`` holds only the periods the organisation has set
     itself, keyed by claim type. A type absent from it uses the typical figure
-    and is reported as ``assumed_default``.
+    and is reported as ``assumed_default``. ``requirement`` is the project's
+    recorded notice requirement for this claim type, when there is one; it
+    takes precedence, and its own trigger decides which date the period runs from.
     """
     awareness = _as_datetime(claim.get("awareness_date"))
     event = _as_datetime(claim.get("event_date"))
-    basis_date = awareness or event
+    runs_from_event = requirement is not None and getattr(requirement, "trigger", None) == "event"
+    # A period the contract counts from the event runs from the event even when
+    # a later awareness date is recorded; otherwise awareness comes first.
+    basis_date = (event or awareness) if runs_from_event else (awareness or event)
     if basis_date is None:
         return None
     served = _as_datetime(claim.get("notice_date"))
@@ -48,7 +56,13 @@ def assess_notice(
 
     claim_type = str(getattr(claim.get("type"), "value", claim.get("type")) or "other")
     configured = (organisation_windows or {}).get(claim_type)
-    if isinstance(configured, int) and configured > 0:
+    source: Union[str, None]
+    if requirement is not None:
+        period_days = int(requirement.period_days)
+        source = (
+            "contract_verified" if requirement.verification == "verified" else "contract_unverified"
+        )
+    elif isinstance(configured, int) and configured > 0:
         period_days, source = configured, "organisation_rule"
     else:
         period_days = DEFAULT_NOTICE_WINDOWS.get(claim_type, DEFAULT_NOTICE_WINDOWS["other"])
@@ -56,10 +70,13 @@ def assess_notice(
 
     due_day = _day(basis_date) + timedelta(days=period_days)
     result = NoticeAssessment(
-        basis="awareness" if awareness else "event",
+        basis="awareness" if basis_date is awareness and awareness is not None else "event",
         basis_date=_midnight(_day(basis_date)),
         period_days=period_days,
         period_source=source,  # type: ignore[arg-type]
+        period_verified=source == "contract_verified",
+        clause_no=getattr(requirement, "clause_no", None),
+        requirement_id=getattr(requirement, "id", None),
         due_date=_midnight(due_day),
         state="open",
     )

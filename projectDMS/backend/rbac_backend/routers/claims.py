@@ -32,6 +32,7 @@ from ..services.approval_service import ApprovalError, ApprovalService
 from ..services.audit_event_service import AuditEventService
 from ..services.claim_assessment_service import ClaimAssessmentService
 from ..services.claim_service import ClaimService
+from ..services.claim_notice_requirements import NoticeRequirementService
 from ..services.claims_notice import assess_notice
 from ..services.sla_service import SlaService
 from ..services.evidence_bundle_service import EvidenceBundleService
@@ -46,11 +47,23 @@ router = APIRouter()
 
 
 class _NoticeWindows:
-    """Per-request cache of each organisation's own notice periods."""
+    """Per-request cache of each organisation's own notice periods, and of the
+    periods recorded for each project from its contract."""
 
     def __init__(self, db) -> None:
         self._service = SlaService(db)
+        self._requirements = NoticeRequirementService(db)
         self._cache: dict[str, dict] = {}
+        self._project_cache: dict[tuple, dict] = {}
+
+    async def requirement_for(self, claim: dict):
+        scope = (str(claim.get("organization_id") or ""), str(claim.get("project_id") or ""))
+        if scope not in self._project_cache:
+            self._project_cache[scope] = await self._requirements.current_for_project(
+                scope[0] or None, scope[1] or None
+            )
+        claim_type = str(getattr(claim.get("type"), "value", claim.get("type")) or "other")
+        return self._project_cache[scope].get(claim_type)
 
     async def for_claim(self, claim: dict) -> dict:
         organization_id = str(claim.get("organization_id") or "")
@@ -63,12 +76,20 @@ class _NoticeWindows:
 
 async def _read_model(claim: dict, linked_document_ids: list, windows: _NoticeWindows) -> ClaimRead:
     presented = {**claim, "linked_document_ids": linked_document_ids}
-    presented.pop("notice_assessment", None)
-    presented.pop("allowed_status_transitions", None)
+    for derived in ("notice_assessment", "allowed_status_transitions", "head_count", "bench_stage"):
+        presented.pop(derived, None)
+    # The board is read through the Bench; the register only needs its outline.
+    bench = presented.pop("bench", None) or {}
     return ClaimRead(
         **presented,
-        notice_assessment=assess_notice(claim, organisation_windows=await windows.for_claim(claim)),
+        notice_assessment=assess_notice(
+            claim,
+            organisation_windows=await windows.for_claim(claim),
+            requirement=await windows.requirement_for(claim),
+        ),
         allowed_status_transitions=allowed_next_statuses(claim.get("status")),
+        head_count=len(bench.get("heads") or []),
+        bench_stage=bench.get("stage") if bench.get("heads") else None,
     )
 
 
@@ -91,6 +112,37 @@ async def _present_claims(claims: list[dict], db, current_user: CurrentUser) -> 
         await _read_model(claim, ids_by_claim.get(str(claim.get("_id") or ""), []), windows)
         for claim in claims
     ]
+
+
+BENCH_FACT_FIELDS = ("type", "event_date", "awareness_date", "notice_date")
+
+
+async def mark_bench_tests_stale(db, claim: dict) -> Optional[dict]:
+    """After a change to a fact the heads were tested against: mark every tested
+    head stale and reopen a locked board. Decisions people made are kept."""
+    bench = claim.get("bench")
+    if not isinstance(bench, dict) or not bench.get("heads"):
+        return None
+    heads = [
+        {**head, "test_stale": True} if head.get("step_id") else head for head in bench["heads"]
+    ]
+    version = int(bench.get("board_version") or 0)
+    update = {
+        "bench.heads": heads,
+        "bench.stage": "heads",
+        "bench.locked_at": None,
+        "bench.locked_by": None,
+        "bench.board_version": version + 1,
+    }
+    result = await db.claims.update_one(
+        {"_id": claim["_id"], "bench.board_version": version}, {"$set": update}
+    )
+    if not getattr(result, "matched_count", 0):
+        return None
+    step_ids = [head["step_id"] for head in bench["heads"] if head.get("step_id")]
+    if step_ids:
+        await db.skill_steps.update_many({"step_id": {"$in": step_ids}}, {"$set": {"stale": True}})
+    return await db.claims.find_one({"_id": claim["_id"]})
 
 
 def _require_status_transition(claim: dict, target: ClaimStatus) -> None:
@@ -230,6 +282,11 @@ async def update_claim(
     legacy_ids = changes.pop("linked_document_ids", None)
     claim_service = ClaimService(db)
     updated = await claim_service.update(claim_id, changes, current_user, before=claim)
+    if updated and any(
+        key in changes and changes[key] != claim.get(key) for key in BENCH_FACT_FIELDS
+    ):
+        # The heads were tested against the dates and type as they were.
+        updated = await mark_bench_tests_stale(db, updated) or updated
     if legacy_ids is not None:
         try:
             await DocumentRelationshipService(db).replace_legacy_document_ids(

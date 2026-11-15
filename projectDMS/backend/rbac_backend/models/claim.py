@@ -26,6 +26,9 @@ class ClaimType(str, Enum):
 
 
 class ClaimStatus(str, Enum):
+    # Raised from a signal (a hindrance, an incoming letter) before anyone has
+    # decided to pursue it. Its notice period is already running.
+    POTENTIAL = "potential"
     DRAFT = "draft"
     NOTIFIED = "notified"
     SUBMITTED = "submitted"
@@ -39,6 +42,8 @@ class ClaimStatus(str, Enum):
 # Moves a claim may make. Anything else is refused: a status is a statement
 # about where the claim stands with the other party, not a free label.
 ALLOWED_STATUS_TRANSITIONS: Dict[ClaimStatus, frozenset] = {
+    # Taken up (draft, or straight to notified once notice is served) or dropped.
+    ClaimStatus.POTENTIAL: frozenset({ClaimStatus.DRAFT, ClaimStatus.NOTIFIED, ClaimStatus.CLOSED}),
     ClaimStatus.DRAFT: frozenset({ClaimStatus.NOTIFIED, ClaimStatus.SUBMITTED, ClaimStatus.CLOSED}),
     ClaimStatus.NOTIFIED: frozenset({ClaimStatus.SUBMITTED, ClaimStatus.CLOSED}),
     ClaimStatus.SUBMITTED: frozenset(
@@ -82,6 +87,82 @@ def allowed_next_statuses(current: Any) -> List[ClaimStatus]:
     return [item for item in ClaimStatus if item in allowed]
 
 
+# --------------------------------------------------------------------------- #
+# Claim Bench: a claim as a board of heads, each tested on five elements
+# --------------------------------------------------------------------------- #
+ELEMENT_KEYS = ("event", "notice", "contractual_basis", "causation", "quantum")
+ElementKey = Literal["event", "notice", "contractual_basis", "causation", "quantum"]
+ElementState = Literal["supported", "weak", "missing", "not_applicable"]
+HeadKind = Literal["time", "cost", "time_and_cost"]
+HeadClassification = Literal["excusable", "compensable", "contractor_risk", "undetermined"]
+BenchStage = Literal["heads", "locked"]
+Perspective = Literal["contractor", "engineer", "employer"]
+
+
+class HeadElement(BaseModel):
+    """One of the five things a head of claim must establish.
+
+    ``proposed_*`` is what the last test proposed (the skill, or the record
+    checks when no skill ran). ``state`` is the call a person made. Nothing is
+    decided until a person decides it.
+    """
+
+    proposed_state: Optional[ElementState] = None
+    proposed_reason: Optional[str] = None
+    proposed_by: Optional[Literal["skill", "record_check"]] = None
+    source_ids: List[str] = Field(default_factory=list)
+    state: Optional[ElementState] = None
+    note: Optional[str] = Field(default=None, max_length=2000)
+    decided_by: Optional[str] = None
+    decided_at: Optional[datetime] = None
+
+
+def _empty_elements() -> Dict[str, HeadElement]:
+    return {key: HeadElement() for key in ELEMENT_KEYS}
+
+
+class ClaimHead(BaseModel):
+    head_id: str
+    title: str = Field(..., min_length=1, max_length=300)
+    kind: HeadKind = "time_and_cost"
+    event_summary: Optional[str] = Field(default=None, max_length=4000)
+    clause_refs: List[str] = Field(default_factory=list)
+    amount_claimed: Optional[float] = Field(default=None, ge=0)
+    eot_days_claimed: Optional[int] = Field(default=None, ge=0)
+    elements: Dict[str, HeadElement] = Field(default_factory=_empty_elements)
+    proposed_classification: Optional[HeadClassification] = None
+    classification: Optional[HeadClassification] = None
+    residual_risks: List[str] = Field(default_factory=list)
+    missing_information: List[str] = Field(default_factory=list)
+    # The step that produced the current proposals, and whether the head has
+    # been edited since (the proposals then describe an earlier version of it).
+    step_id: Optional[str] = None
+    test_stale: bool = False
+    tested_at: Optional[datetime] = None
+
+
+class ClaimBench(BaseModel):
+    """Board state stored on the claim under ``bench``."""
+
+    board_version: int = 0
+    stage: BenchStage = "heads"
+    heads: List[ClaimHead] = Field(default_factory=list)
+    # The party this board was worked for, recorded when it was last tested or locked.
+    perspective: Optional[Perspective] = None
+    locked_at: Optional[datetime] = None
+    locked_by: Optional[str] = None
+    updated_at: Optional[datetime] = None
+    updated_by: Optional[str] = None
+
+
+class ClaimOrigin(BaseModel):
+    """The record a potential claim was raised from. One claim per origin."""
+
+    type: Literal["hindrance", "letter_bench"]
+    id: str
+    label: Optional[str] = None
+
+
 class ClaimBase(BaseModel):
     claim_ref: Optional[str] = None
     type: ClaimType = ClaimType.OTHER
@@ -109,6 +190,7 @@ class ClaimBase(BaseModel):
     type_metadata: Dict[str, Any] = Field(default_factory=dict)
     organization_id: Optional[str] = None
     project_id: Optional[str] = None
+    origin: Optional[ClaimOrigin] = None
 
 
 class ClaimCreate(ClaimBase):
@@ -151,23 +233,34 @@ class Claim(ClaimBase):
     evidence_frozen_at: Optional[datetime] = None
     evidence_frozen_by: Optional[str] = None
     evidence_freeze_reason: Optional[str] = None
+    bench: Optional[ClaimBench] = None
 
     model_config = ConfigDict(populate_by_name=True)
 
 
 NoticeBasis = Literal["awareness", "event"]
-NoticePeriodSource = Literal["organisation_rule", "assumed_default"]
+NoticePeriodSource = Literal[
+    # Read from a clause of this project's contract and confirmed by a person.
+    "contract_verified",
+    # Read from a clause of this project's contract; nobody has confirmed it yet.
+    "contract_unverified",
+    "organisation_rule",
+    "assumed_default",
+]
 NoticeState = Literal["open", "due_soon", "overdue", "served_in_time", "served_late"]
 
 
 class NoticeAssessment(BaseModel):
     """Where a claim stands against its notice period. Computed, never stored.
 
-    ``period_source`` says where the period came from. Neither source is the
-    executed contract: ``organisation_rule`` is a figure the organisation set,
-    ``assumed_default`` is a typical figure for the claim type. Until the period
-    is read from the contract itself, a "late" result is an indication to check,
-    not a finding that the notice was out of time under the contract.
+    ``period_source`` says where the period came from. Only
+    ``contract_verified`` is the contract's own period, confirmed by a person
+    against the quoted clause; ``period_verified`` is true for that source
+    alone. ``contract_unverified`` was read from a clause but not confirmed,
+    ``organisation_rule`` is a figure the organisation set, and
+    ``assumed_default`` is a typical figure for the claim type. For anything
+    but a verified period, a "late" result is an indication to check, not a
+    finding that the notice was out of time under the contract.
     """
 
     basis: NoticeBasis
@@ -175,6 +268,9 @@ class NoticeAssessment(BaseModel):
     period_days: int
     period_source: NoticePeriodSource
     period_verified: bool = False
+    # Where a contract-derived period was read from.
+    clause_no: Optional[str] = None
+    requirement_id: Optional[str] = None
     due_date: datetime
     served_on: Optional[datetime] = None
     days_remaining: Optional[int] = None
@@ -187,6 +283,9 @@ class ClaimRead(Claim):
 
     notice_assessment: Optional[NoticeAssessment] = None
     allowed_status_transitions: List[ClaimStatus] = Field(default_factory=list)
+    # Summary of the board for the register; the board itself is read through the Bench.
+    head_count: int = 0
+    bench_stage: Optional[BenchStage] = None
 
 
 class ClaimAssessment(BaseModel):

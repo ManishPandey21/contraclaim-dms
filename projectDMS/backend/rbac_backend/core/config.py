@@ -299,6 +299,9 @@ class Settings(BaseSettings):
     # the engine flags above: off | canary (allow-listed tenants) | primary.
     LETTER_BENCH_ROLLOUT_MODE: str = Field(default="off", validation_alias="LETTER_BENCH_ROLLOUT_MODE")
     LETTER_BENCH_CANARY_TENANT_IDS: str = Field(default="", validation_alias="LETTER_BENCH_CANARY_TENANT_IDS")
+    # Claim Bench rollout, same shape as the Letter Bench: off | canary | primary.
+    CLAIM_BENCH_ROLLOUT_MODE: str = Field(default="off", validation_alias="CLAIM_BENCH_ROLLOUT_MODE")
+    CLAIM_BENCH_CANARY_TENANT_IDS: str = Field(default="", validation_alias="CLAIM_BENCH_CANARY_TENANT_IDS")
     # Model used for skill steps (letters, claims, arbitration). Empty keeps the built-in default.
     SKILL_MODEL: str = Field(default="", validation_alias="SKILL_MODEL")
     DRAFT_ENGINE_GRAPH_VERSION: str = Field(default="v3", validation_alias="DRAFT_ENGINE_GRAPH_VERSION")
