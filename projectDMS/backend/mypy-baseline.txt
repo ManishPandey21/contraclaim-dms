@@ -53,6 +53,10 @@
 1	projectDMS/backend/rbac_backend/services/conversation_service.py	arg-type	Argument 2 to "_recompute_descendants" of "ConversationService" has incompatible type "list[str | None]"; expected "list[str]"
 1	projectDMS/backend/rbac_backend/services/database_service.py	arg-type	Argument "mongo_uri" to "LlamaIndexVectorService" has incompatible type "str | None"; expected "str"
 1	projectDMS/backend/rbac_backend/services/database_service.py	union-attr	Item "None" of "LangChainVectorService | None" has no attribute "replace_document"
+1	projectDMS/backend/rbac_backend/services/document_relationship_service.py	arg-type	Argument 1 to "append" of "list" has incompatible type "tuple[DocumentRelationshipInput, dict[str, Any] | None, DocumentRelationship, Any]"; expected "tuple[DocumentRelationshipInput, dict[str, Any], DocumentRelationship, dict[str, Any]]"
+1	projectDMS/backend/rbac_backend/services/document_relationship_service.py	assignment	Incompatible types in assignment (expression has type "dict[str, Any] | None", variable has type "dict[str, Any]")
+1	projectDMS/backend/rbac_backend/services/document_relationship_service.py	return-value	Incompatible return value type (got "dict[str, Any] | None", expected "dict[str, Any]")
+1	projectDMS/backend/rbac_backend/services/document_relationship_service.py	union-attr	Item "None" of "dict[str, Any] | None" has no attribute "get"
 1	projectDMS/backend/rbac_backend/services/document_service.py	arg-type	Argument "metadata_source" to "ingest_document" of "GraphIngestionService" has incompatible type "str | None"; expected "str"
 1	projectDMS/backend/rbac_backend/services/document_service.py	return-value	Incompatible return value type (got "Document | None", expected "Document")
 1	projectDMS/backend/rbac_backend/services/document_service.py	union-attr	Item "None" of "ProcessingResult | None" has no attribute "processed_path"
@@ -79,5 +83,6 @@
 1	projectDMS/backend/rbac_backend/services/permission_service.py	var-annotated	Need type annotation for "category_groups" (hint: "category_groups: dict[<type>, <type>] = ...")
 1	projectDMS/backend/rbac_backend/services/runtime_state.py	misc	Incompatible types in "await" (actual type "Awaitable[bool] | bool | Any", expected type "Awaitable[Any]")
 1	projectDMS/backend/rbac_backend/services/runtime_state.py	union-attr	Item "None" of "Redis | None" has no attribute "ping"
+1	projectDMS/backend/rbac_backend/services/variation_service.py	arg-type	Argument 2 to "sync_current_value" of "ContractMasterService" has incompatible type "str | None"; expected "str"
 1	projectDMS/backend/rbac_backend/utils/notification_service.py	var-annotated	Need type annotation for "preference"
 1	projectDMS/backend/rbac_backend/utils/notification_service.py	var-annotated	Need type annotation for "subscription"
