@@ -3,14 +3,18 @@ import type { ClaimDTO } from "./claims-api";
 import type {
   ClaimBenchResponse,
   ClaimSignal,
+  DelayView,
   ElementKey,
   ElementState,
   HeadInput,
   HeadPatch,
+  LinkCandidate,
   NoticeCandidates,
   NoticeRequirement,
   NoticeRequirementInput,
   Perspective,
+  QuantumLineInput,
+  QuantumView,
 } from "@/types/claimBench";
 
 // Claim Bench and Notice Clock. Mirrors backend routers/claim_bench.py. Every
@@ -136,4 +140,125 @@ export async function setProjectPerspective(projectId: string, perspective: Pers
   await api.patch(`/projects/${encodeURIComponent(projectId)}/contractual-capacity`, {
     contractual_capacity: perspective,
   });
+}
+
+// --------------------------------------------------------------------------- //
+// Delay Lab and Quantum Builder
+// --------------------------------------------------------------------------- //
+const headPath = (claimId: string, headId: string) => `${bench(claimId)}/heads/${encodeURIComponent(headId)}`;
+
+export async function fetchHeadDelay(claimId: string, headId: string): Promise<DelayView> {
+  const { data } = await api.get<DelayView>(`${headPath(claimId, headId)}/delay`);
+  return data;
+}
+
+export async function fetchDelayCandidates(claimId: string): Promise<LinkCandidate[]> {
+  const { data } = await api.get<LinkCandidate[]>(`${bench(claimId)}/delay/candidates`);
+  return Array.isArray(data) ? data : [];
+}
+
+export async function addHeadLink(
+  claimId: string,
+  headId: string,
+  boardVersion: number,
+  link: { target_type: string; target_id: string; milestone_ref?: string }
+): Promise<DelayView> {
+  const { data } = await api.post<DelayView>(`${headPath(claimId, headId)}/delay/links`, {
+    board_version: boardVersion,
+    ...link,
+  });
+  return data;
+}
+
+export async function removeHeadLink(
+  claimId: string,
+  headId: string,
+  linkId: string,
+  boardVersion: number,
+  refresh = false
+): Promise<DelayView> {
+  const { data } = await api.post<DelayView>(
+    `${headPath(claimId, headId)}/delay/links/${encodeURIComponent(linkId)}/remove`,
+    { board_version: boardVersion, refresh }
+  );
+  return data;
+}
+
+export async function setDelaySettings(
+  claimId: string,
+  headId: string,
+  boardVersion: number,
+  settings: {
+    method?: string;
+    as_of_date?: string;
+    clear_as_of_date?: boolean;
+    include_neutral?: boolean;
+    neutral_basis?: string;
+  }
+): Promise<DelayView> {
+  const { data } = await api.put<DelayView>(`${headPath(claimId, headId)}/delay/settings`, {
+    board_version: boardVersion,
+    ...settings,
+  });
+  return data;
+}
+
+export async function decideDelayEvent(
+  claimId: string,
+  headId: string,
+  eventId: string,
+  boardVersion: number,
+  decision: { risk_owner?: string; criticality?: string; clear?: boolean; note?: string }
+): Promise<DelayView> {
+  const { data } = await api.put<DelayView>(
+    `${headPath(claimId, headId)}/delay/events/${encodeURIComponent(eventId)}`,
+    { board_version: boardVersion, ...decision }
+  );
+  return data;
+}
+
+export async function decideDelayOverlap(
+  claimId: string,
+  headId: string,
+  overlapId: string,
+  boardVersion: number,
+  decision: { treatment?: string; days_to_eot?: number; basis?: string; clear?: boolean }
+): Promise<DelayView> {
+  const { data } = await api.put<DelayView>(
+    `${headPath(claimId, headId)}/delay/overlaps/${encodeURIComponent(overlapId)}`,
+    { board_version: boardVersion, ...decision }
+  );
+  return data;
+}
+
+export async function fetchHeadQuantum(claimId: string, headId: string): Promise<QuantumView> {
+  const { data } = await api.get<QuantumView>(`${headPath(claimId, headId)}/quantum`);
+  return data;
+}
+
+export async function saveQuantumLine(
+  claimId: string,
+  headId: string,
+  boardVersion: number,
+  line: QuantumLineInput,
+  lineId?: string
+): Promise<QuantumView> {
+  const body = { board_version: boardVersion, ...line };
+  const { data } = lineId
+    ? await api.put<QuantumView>(`${headPath(claimId, headId)}/quantum/lines/${encodeURIComponent(lineId)}`, body)
+    : await api.post<QuantumView>(`${headPath(claimId, headId)}/quantum/lines`, body);
+  return data;
+}
+
+export async function removeQuantumLine(
+  claimId: string,
+  headId: string,
+  lineId: string,
+  boardVersion: number
+): Promise<QuantumView> {
+  const { data } = await api.post<QuantumView>(
+    `${headPath(claimId, headId)}/quantum/lines/${encodeURIComponent(lineId)}/remove`,
+    { board_version: boardVersion }
+  );
+  return data;
 }

@@ -61,9 +61,38 @@ The server decides. With the Bench off, `/claims/{id}` shows the claim record pa
 | Verify a notice requirement | `dms.claim.manage` |
 | Raise a potential claim | `dms.claim.create`, plus read access to the source (`dms.hindrance.view` or `drafting.request.view`) |
 
+## Delay Lab and Quantum Builder (Phase 2)
+
+Each head has three tabs: Elements, Delay, Quantum.
+
+**Delay.** A head links to hindrances and to key-date EOT submissions and determinations. Linking writes nothing to those registers. A link is pinned to the record as it was; if the record later changes the Lab says so and keeps using the linked version until someone chooses "Use latest".
+
+- Only an event a person has decided is **critical**, with a decided risk owner, is counted. What the hindrance register records is shown as a proposal.
+- Days are calendar days, counted inclusively. An event with no end date runs to the "analysis runs to" date.
+- Where critical Employer delay and critical Contractor delay fall on the same days, that is an **overlap**. It is never deducted or added automatically. Each overlap needs a treatment (time no cost, time and cost, apportioned, no time, not true concurrency) and a stated basis. Until then the extension is shown as a range and the board cannot be locked.
+- A finding belongs to the overlap it was made for. If the events change so that the overlap no longer exists, the finding is dropped, not carried over.
+- **Already granted** days are read from linked determinations (the item for the milestone named when linking). They cannot be typed. A superseded, pending or rejected item is not counted, and the Lab says why.
+- Neutral events give time only if someone records that the contract does, with its basis.
+- Methods offered: as-planned vs as-built, and windows. Time impact analysis and collapsed as-built are listed as unavailable: the product holds milestones, not a programme network.
+
+**Quantum.** A head's amount becomes the total of its lines once it has any. Each line is locked until its proof is linked:
+
+| Kind of cost | Unlocks when |
+|---|---|
+| Direct, disruption | At least one supporting record |
+| Prolongation | A period, every day of it inside a period decided as compensable, and a supporting record |
+| Overheads by formula | A formula chosen, a period inside compensable periods, and a record of actual loss |
+| Loss of profit | A record of work available and declined |
+| Interest | A stated basis |
+
+Compensable periods come from the delay decisions: Employer critical delay with no Contractor delay, plus any overlap decided as "time and cost" or "not true concurrency". A record must be a document already linked to the claim. A locked line stays on the board with what would unlock it, and is left out of the supported total.
+
+Migration `20261117_0001` indexes `claim_head_links`. Linking needs `dms.claim.edit` and read access to the record (`dms.hindrance.view` or `dms.keydate.view`).
+
 ## Not in this phase
 
 - The project form has no field for the party; it is set from the Bench.
-- Hindrance and key-date links per head, the concurrency matrix and net EOT (Phase 2).
-- Quantum build-up (Phase 2), determinations and the submission pack (Phase 3).
+- Determinations and the submission pack (Phase 3).
+- Skill proposals for delay events, overlap treatment and quantum lines. The delay proposals shown come from the hindrance register; the EOT and claims skills are unpublished, and their review steps are built with Phase 3.
+- The contract's own concurrency clause is not looked up and quoted on an overlap; the person states the basis.
 - Notice periods are proposed from single clauses. Precedence between a general condition and a document that modifies it is shown (modifying documents are listed first and marked) and decided by the person, not computed.

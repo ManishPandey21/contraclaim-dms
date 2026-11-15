@@ -12,7 +12,7 @@
 #   4. migrate_database --list, a --fail-on-warning dry run, then
 #      --apply --fail-on-warning, all inside the backend container
 #   5. checks the skill and claim migrations (20261114_0001 to _0003,
-#      20261115_0001 and 20261116_0001) by reading the server: collections, indexes with their uniqueness and
+#      20261115_0001, 20261116_0001 and 20261117_0001) by reading the server: collections, indexes with their uniqueness and
 #      partial filters, the three published letter skills at 1.0.0, the four
 #      claim and arbitration packs stored as unpublished drafts, and the
 #      unique indexes refusing a real duplicate
@@ -38,7 +38,7 @@
 #   GATE6_BACKEND_IMAGE        use this image instead of building one. Its
 #                              org.opencontainers.image.revision label must
 #                              equal the checked-out commit.
-#   GATE6_EXPECTED_MIGRATIONS  catalogue size this run must find (default 24)
+#   GATE6_EXPECTED_MIGRATIONS  catalogue size this run must find (default 25)
 #   GATE6_MONGO_IMAGE          default mongo:8.0, the image CI uses
 #   GATE6_OUT_DIR              where step logs go (default: a new temp dir)
 #   GATE6_KEEP=1               leave the containers and network up afterwards
@@ -48,7 +48,7 @@
 set -Eeuo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-EXPECTED=${GATE6_EXPECTED_MIGRATIONS:-24}
+EXPECTED=${GATE6_EXPECTED_MIGRATIONS:-25}
 MONGO_IMAGE=${GATE6_MONGO_IMAGE:-mongo:8.0}
 # Lower case throughout: the name is also the server's hostname, and URL parsers
 # fold hostnames to lower case.
@@ -316,7 +316,7 @@ function check(name, pass, detail) {
 }
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
-const expectedCollections = ["skills", "skill_versions", "skill_bindings", "skill_approvals", "letter_position_boards", "letter_skill_steps", "skill_steps", "claim_notice_requirements"];
+const expectedCollections = ["skills", "skill_versions", "skill_bindings", "skill_approvals", "letter_position_boards", "letter_skill_steps", "skill_steps", "claim_notice_requirements", "claim_head_links"];
 const present = new Set(db.getCollectionNames());
 for (const name of expectedCollections) check("collection " + name + " exists", present.has(name));
 
@@ -344,6 +344,11 @@ const expectedIndexes = [
   ["claim_notice_requirements", "notice_requirement_history", { organization_id: 1, project_id: 1, claim_type: 1, created_at: -1 }, false, null],
   ["claims", "claim_origin_unique", { organization_id: 1, "origin.type": 1, "origin.id": 1 }, true,
     { "origin.id": { $type: "string" } }],
+  // 20261117_0001: links from a head of claim to hindrances and key-date EOT records.
+  ["claim_head_links", "claim_head_link_active_unique", { claim_id: 1, head_id: 1, target_type: 1, target_id: 1 }, true,
+    { status: "active" }],
+  ["claim_head_links", "claim_head_link_claim_time", { claim_id: 1, status: 1, created_at: 1 }, false, null],
+  ["claim_head_links", "claim_head_link_target", { organization_id: 1, target_type: 1, target_id: 1, status: 1 }, false, null],
 ];
 for (const [collection, name, key, unique, partial] of expectedIndexes) {
   const found = db.getCollection(collection).getIndexes().find((i) => i.name === name);
@@ -357,7 +362,7 @@ for (const [collection, name, key, unique, partial] of expectedIndexes) {
   );
 }
 const partials = expectedIndexes.filter((e) => e[4] !== null).length;
-check("partial unique indexes expected", partials === 4, partials + " declared");
+check("partial unique indexes expected", partials === 5, partials + " declared");
 
 const expectedSkills = ["indian-infra-contract-letters", "indian-infra-letter-analysis", "indian-infra-variations"];
 // Stored by 20261115_0001 as DRAFTS: unreviewed method text that must not be
@@ -393,7 +398,7 @@ check("no skill approval exists on a fresh install", db.skill_approvals.countDoc
   db.skill_approvals.countDocuments({}) + " rows");
 
 const ledger = db.schema_migrations.find({}).toArray().map((r) => r.version).sort();
-for (const version of ["20261114_0001", "20261114_0002", "20261114_0003", "20261115_0001", "20261116_0001"]) {
+for (const version of ["20261114_0001", "20261114_0002", "20261114_0003", "20261115_0001", "20261116_0001", "20261117_0001"]) {
   check("ledger records " + version, ledger.includes(version));
 }
 print("ledger_rows=" + ledger.length);
@@ -482,13 +487,28 @@ check("first skill step is accepted", attempt("skill_steps", { step_id: "gate6-s
 r = attempt("skill_steps", { step_id: "gate6-s2", ...stepKey });
 check("the same skill step replayed is refused", r === "E11000 skill_step_idempotency_unique", r);
 
+// 20261117_0001. One active link per record and head; removed links are history;
+// the same hindrance may serve another head.
+const links = "claim_head_links";
+const link = { organization_id: org, claim_id: "gate6-claim", head_id: "H1", target_type: "hindrance", target_id: "h-1" };
+check("first link from a head to a hindrance is accepted", attempt(links, { _id: "k1", ...link, status: "active" }) === "inserted");
+r = attempt(links, { _id: "k2", ...link, status: "active" });
+check("a second active link from the same head to the same hindrance is refused", r === "E11000 claim_head_link_active_unique", r);
+check("removed links to it are kept as history",
+  attempt(links, { _id: "k3", ...link, status: "removed" }) === "inserted" &&
+  attempt(links, { _id: "k4", ...link, status: "removed" }) === "inserted");
+check("the same hindrance can be linked to another head",
+  attempt(links, { _id: "k5", ...link, head_id: "H2", status: "active" }) === "inserted");
+
 db.getCollection(boards).deleteMany({ organization_id: org });
 db.skill_versions.deleteMany({ owner_scope: "gate6-probe" });
+db.getCollection(links).deleteMany({ organization_id: org });
 db.getCollection(notice).deleteMany({ organization_id: org });
 db.claims.deleteMany({ organization_id: org });
 db.skill_steps.deleteMany({ subject_id: "gate6:H1" });
 const left = db.getCollection(boards).countDocuments({}) + db.skill_versions.countDocuments({ owner_scope: "gate6-probe" }) +
-  db.getCollection(notice).countDocuments({}) + db.claims.countDocuments({}) + db.skill_steps.countDocuments({});
+  db.getCollection(notice).countDocuments({}) + db.claims.countDocuments({}) + db.skill_steps.countDocuments({}) +
+  db.getCollection(links).countDocuments({});
 check("probe rows removed", left === 0, left + " left");
 if (failed) { print("PROBE FAILED=" + failed); quit(1); }
 print("PROBE=PASS");
@@ -579,7 +599,7 @@ RUN="docker run --rm --network <private> -e DATABASE_URL=mongodb://<disposable>:
   echo "  5. ${MIGRATE} --list"
   echo "       exit ${LIST_AFTER_RC}   ${LIST_AFTER_COUNTS}"
   echo
-  echo "Skill and claim migrations 20261114_0001 to _0003, 20261115_0001 and 20261116_0001, read with mongosh: ${BENCH_PASSES} passed, 0 failed"
+  echo "Skill and claim migrations 20261114_0001 to 20261117_0001, read with mongosh: ${BENCH_PASSES} passed, 0 failed"
   grep -E '^(PASS|FAIL)' "$OUT_DIR/07-bench.stdout" | sed 's/^/  /'
   echo "Seeded skills (key, version, content hash) - equal to the files bundled in the image: YES"
   echo "$SEEDED" | sed 's/^SEED  /  /'

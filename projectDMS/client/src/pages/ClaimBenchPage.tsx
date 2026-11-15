@@ -3,7 +3,9 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { ArrowLeft, FileText, Lock, LockOpen, Mail, Plus, Scale } from "lucide-react";
 
 import ClaimStatusPill from "@/components/claims/ClaimStatusPill";
+import DelayTab from "@/components/claim-bench/DelayTab";
 import HeadPanel from "@/components/claim-bench/HeadPanel";
+import QuantumTab from "@/components/claim-bench/QuantumTab";
 import NoticeClockCard from "@/components/claim-bench/NoticeClockCard";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -61,6 +63,7 @@ const ClaimBenchPage: React.FC = () => {
   const navigate = useNavigate();
   const { query, open, addHead, patchHead, removeHead, decide, test, lock, unlock, perspective } = useClaimBench(id);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [tab, setTab] = useState<"elements" | "delay" | "quantum">("elements");
   const data = query.data;
 
   if (query.isLoading) {
@@ -237,8 +240,36 @@ const ClaimBenchPage: React.FC = () => {
             </Button>
           </nav>
 
-          <main>
-            {head ? (
+          <main className="space-y-4">
+            {head && (
+              <div role="tablist" aria-label={`Parts of head ${head.head_id}`} className="flex gap-1 rounded-lg border bg-card p-1">
+                {(
+                  [
+                    ["elements", "Elements"],
+                    ["delay", "Delay"],
+                    ["quantum", "Quantum"],
+                  ] as const
+                ).map(([key, label]) => (
+                  <button
+                    key={key}
+                    type="button"
+                    role="tab"
+                    aria-selected={tab === key}
+                    onClick={() => setTab(key)}
+                    className={`flex-1 rounded-md px-3 py-1.5 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                      tab === key ? "bg-primary text-primary-foreground" : "hover:bg-muted"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+            {head && tab === "delay" ? (
+              <DelayTab key={head.head_id} claimId={id} headId={head.head_id} boardVersion={bench.board_version} readOnly={readOnly} />
+            ) : head && tab === "quantum" ? (
+              <QuantumTab key={head.head_id} claimId={id} headId={head.head_id} boardVersion={bench.board_version} readOnly={readOnly} />
+            ) : head ? (
               <HeadPanel
                 head={head}
                 readOnly={readOnly}

@@ -179,3 +179,152 @@ export interface HeadPatch {
   classification?: HeadClassification;
   clear_classification?: boolean;
 }
+
+// --------------------------------------------------------------------------- //
+// Delay Lab and Quantum Builder (Phase 2)
+// --------------------------------------------------------------------------- //
+export type RiskOwner = "employer" | "contractor" | "neutral";
+export type Criticality = "critical" | "not_critical" | "unproven";
+export type DelayMethod = "as_planned_vs_as_built" | "windows";
+export type OverlapTreatment =
+  | "eot_granted_no_cost"
+  | "eot_granted_with_cost"
+  | "apportioned"
+  | "no_eot"
+  | "not_true_concurrency";
+export type LinkTargetType = "hindrance" | "eot_submission" | "eot_determination";
+
+export interface EventDecision {
+  proposed_risk_owner?: RiskOwner | null;
+  proposed_criticality?: Criticality | null;
+  proposed_reason?: string | null;
+  proposed_by?: "skill" | "register" | null;
+  risk_owner?: RiskOwner | null;
+  criticality?: Criticality | null;
+  note?: string | null;
+  decided_by?: string | null;
+}
+
+export interface DelayEventView {
+  event_id: string;
+  link_id: string;
+  label: string;
+  title: string;
+  start_date: string;
+  end_date?: string | null;
+  open_ended: boolean;
+  register_responsibility?: string | null;
+  register_critical?: boolean | null;
+  /** False when the hindrance has changed since it was linked. */
+  revision_current: boolean;
+  counted: boolean;
+  days?: number | null;
+  decision: EventDecision;
+}
+
+export interface ConcurrencyFinding {
+  treatment: OverlapTreatment;
+  days_to_eot?: number | null;
+  basis: string;
+  decided_by?: string | null;
+  decided_at?: string | null;
+}
+
+export interface OverlapView {
+  overlap_id: string;
+  start_date: string;
+  end_date: string;
+  days: number;
+  employer_event_ids: string[];
+  contractor_event_ids: string[];
+  finding?: ConcurrencyFinding | null;
+  days_to_eot?: number | null;
+}
+
+export interface LinkedRecordView {
+  link_id: string;
+  target_type: LinkTargetType;
+  target_id: string;
+  label: string;
+  status?: string | null;
+  date?: string | null;
+  milestone_ref?: string | null;
+  granted_days?: number | null;
+  counted: boolean;
+  not_counted_reason?: string | null;
+  revision_current: boolean;
+}
+
+export interface DelayView {
+  head_id: string;
+  method?: DelayMethod | null;
+  as_of_date?: string | null;
+  unavailable_methods: Record<string, string>;
+  include_neutral: boolean;
+  neutral_basis?: string | null;
+  events: DelayEventView[];
+  overlaps: OverlapView[];
+  records: LinkedRecordView[];
+  employer_critical_days: number;
+  contractor_critical_days: number;
+  neutral_critical_days: number;
+  contractor_only_days: number;
+  net: {
+    low: number;
+    high: number;
+    /** Set only when every overlap has a decided treatment. */
+    days?: number | null;
+    settled: boolean;
+    previously_granted: number;
+    employer_only_days: number;
+    overlap_days_to_eot: number;
+    neutral_days_included: number;
+  };
+  compensable_periods: { start_date: string; end_date: string; days: number }[];
+  blockers: string[];
+  stale_links: number;
+}
+
+export interface LinkCandidate {
+  target_type: LinkTargetType;
+  target_id: string;
+  label: string;
+  title?: string | null;
+  date?: string | null;
+  status?: string | null;
+  milestones: string[];
+}
+
+export type QuantumCategory =
+  | "direct"
+  | "prolongation"
+  | "disruption"
+  | "overhead_formula"
+  | "loss_of_profit"
+  | "interest";
+export type QuantumFormula = "none" | "hudson" | "emden" | "eichleay";
+export type RecordRole = "support" | "actual_loss" | "work_declined";
+
+export interface QuantumLine {
+  line_id: string;
+  category: QuantumCategory;
+  description: string;
+  amount: number;
+  period_start?: string | null;
+  period_end?: string | null;
+  formula: QuantumFormula;
+  basis?: string | null;
+  records: { document_id: string; role: RecordRole }[];
+}
+
+export type QuantumLineInput = Omit<QuantumLine, "line_id">;
+
+export interface QuantumView {
+  head_id: string;
+  currency: string;
+  lines: { line: QuantumLine; locked: boolean; lock_reasons: string[] }[];
+  claimed_total: number;
+  supported_total: number;
+  locked_total: number;
+  locked_count: number;
+}
