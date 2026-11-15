@@ -49,7 +49,9 @@ cd /opt/contraclaim-dms/projectDMS && bash scripts/post_cutover_readonly_checks.
 ```
 
 Pass: section D of the report shows `20261114_0001`, `_0002` and `_0003` each as
-unapplied. If any is recorded as applied, stop and find out what applied it.
+unapplied. The production checkout was read on 2026-11-15 at `34d664a`
+(2026-10-23), which predates those migrations, but the checkout is not the
+ledger: this check is still required. If any is recorded as applied, stop and find out what applied it.
 
 ### B. Upgrade path on a production-derived staging copy
 
