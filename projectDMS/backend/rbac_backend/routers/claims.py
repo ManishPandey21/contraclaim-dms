@@ -18,11 +18,22 @@ from ..core.permissions import Permissions
 from ..core.security import CurrentUser, build_scope_query, get_current_user
 from ..core.tenant_context import ActiveScope, active_scope
 from ..models.approval import ApprovalRecord, AssignBody, DecisionBody
-from ..models.claim import Claim, ClaimAssessment, ClaimCreate, ClaimStatusUpdate, ClaimUpdate
+from ..models.claim import (
+    Claim,
+    ClaimAssessment,
+    ClaimCreate,
+    ClaimRead,
+    ClaimStatus,
+    ClaimStatusUpdate,
+    ClaimUpdate,
+    allowed_next_statuses,
+)
 from ..services.approval_service import ApprovalError, ApprovalService
 from ..services.audit_event_service import AuditEventService
 from ..services.claim_assessment_service import ClaimAssessmentService
 from ..services.claim_service import ClaimService
+from ..services.claims_notice import assess_notice
+from ..services.sla_service import SlaService
 from ..services.evidence_bundle_service import EvidenceBundleService
 from ..services.document_relationship_service import (
     DocumentRelationshipError,
@@ -34,39 +45,76 @@ from ..utils.error_handler import handle_exceptions
 router = APIRouter()
 
 
-async def _present_claim(claim: dict, db, current_user: CurrentUser) -> Claim:
-    presented = dict(claim)
-    presented["linked_document_ids"] = await DocumentRelationshipService(
-        db
-    ).authorized_document_ids(
+class _NoticeWindows:
+    """Per-request cache of each organisation's own notice periods."""
+
+    def __init__(self, db) -> None:
+        self._service = SlaService(db)
+        self._cache: dict[str, dict] = {}
+
+    async def for_claim(self, claim: dict) -> dict:
+        organization_id = str(claim.get("organization_id") or "")
+        if organization_id not in self._cache:
+            self._cache[organization_id] = await self._service.notice_window_overrides_for(
+                organization_id or None
+            )
+        return self._cache[organization_id]
+
+
+async def _read_model(claim: dict, linked_document_ids: list, windows: _NoticeWindows) -> ClaimRead:
+    presented = {**claim, "linked_document_ids": linked_document_ids}
+    presented.pop("notice_assessment", None)
+    presented.pop("allowed_status_transitions", None)
+    return ClaimRead(
+        **presented,
+        notice_assessment=assess_notice(claim, organisation_windows=await windows.for_claim(claim)),
+        allowed_status_transitions=allowed_next_statuses(claim.get("status")),
+    )
+
+
+async def _present_claim(claim: dict, db, current_user: CurrentUser) -> ClaimRead:
+    linked = await DocumentRelationshipService(db).authorized_document_ids(
         current_user,
         "claim",
         str(claim.get("_id") or ""),
         legacy_document_ids=claim.get("linked_document_ids") or [],
     )
-    return Claim(**presented)
+    return await _read_model(claim, linked, _NoticeWindows(db))
 
 
-async def _present_claims(claims: list[dict], db, current_user: CurrentUser) -> list[Claim]:
+async def _present_claims(claims: list[dict], db, current_user: CurrentUser) -> list[ClaimRead]:
     ids_by_claim = await DocumentRelationshipService(
         db
     ).authorized_document_ids_for_claims(current_user, claims)
+    windows = _NoticeWindows(db)
     return [
-        Claim(
-            **{
-                **claim,
-                "linked_document_ids": ids_by_claim.get(str(claim.get("_id") or ""), []),
-            }
-        )
+        await _read_model(claim, ids_by_claim.get(str(claim.get("_id") or ""), []), windows)
         for claim in claims
     ]
+
+
+def _require_status_transition(claim: dict, target: ClaimStatus) -> None:
+    """Refuse a status move the lifecycle does not allow. Same status is a no-op."""
+    current = str(claim.get("status") or ClaimStatus.DRAFT.value)
+    if current == target.value:
+        return
+    allowed = allowed_next_statuses(current)
+    if target not in allowed:
+        options = ", ".join(item.value for item in allowed) or "none"
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"A claim that is {current} cannot be moved to {target.value}. "
+                f"Allowed next statuses: {options}."
+            ),
+        )
 
 
 async def get_policy(db=Depends(get_db)) -> PolicyService:
     return PolicyService(db=db)
 
 
-@router.get("/claims", response_model=List[Claim])
+@router.get("/claims", response_model=List[ClaimRead])
 @handle_exceptions
 async def list_claims(
     organization_id: Optional[str] = Query(None),
@@ -102,7 +150,7 @@ async def list_claims(
     return await _present_claims(claims, db, current_user)
 
 
-@router.post("/claims", response_model=Claim, status_code=status.HTTP_201_CREATED)
+@router.post("/claims", response_model=ClaimRead, status_code=status.HTTP_201_CREATED)
 @handle_exceptions
 async def create_claim(
     payload: ClaimCreate,
@@ -151,7 +199,7 @@ async def _load_authorized(
     return claim
 
 
-@router.get("/claims/{claim_id}", response_model=Claim)
+@router.get("/claims/{claim_id}", response_model=ClaimRead)
 @handle_exceptions
 async def get_claim(
     claim_id: str,
@@ -164,7 +212,7 @@ async def get_claim(
     return await _present_claim(claim, db, current_user)
 
 
-@router.put("/claims/{claim_id}", response_model=Claim)
+@router.put("/claims/{claim_id}", response_model=ClaimRead)
 @handle_exceptions
 async def update_claim(
     claim_id: str,
@@ -176,6 +224,9 @@ async def update_claim(
 ):
     claim = await _load_authorized(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection)
     changes = payload.model_dump(exclude_unset=True)
+    if changes.get("status") is not None:
+        # The edit form carries a status too: the same lifecycle rule applies here.
+        _require_status_transition(claim, ClaimStatus(changes["status"]))
     legacy_ids = changes.pop("linked_document_ids", None)
     claim_service = ClaimService(db)
     updated = await claim_service.update(claim_id, changes, current_user, before=claim)
@@ -191,7 +242,8 @@ async def update_claim(
     return await _present_claim(updated or claim, db, current_user)
 
 
-@router.post("/claims/{claim_id}/status", response_model=Claim)
+@router.post("/claims/{claim_id}/status", response_model=ClaimRead)
+@handle_exceptions
 async def set_claim_status(
     claim_id: str,
     body: ClaimStatusUpdate,
@@ -201,10 +253,11 @@ async def set_claim_status(
     selection: ActiveScope = Depends(active_scope),
 ):
     claim = await _load_authorized(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection)
+    _require_status_transition(claim, body.status)
     updated = await ClaimService(db).update(
         claim_id, {"status": body.status.value}, current_user, before=claim
     )
-    return Claim(**(updated or claim))
+    return await _present_claim(updated or claim, db, current_user)
 
 
 @router.delete("/claims/{claim_id}", status_code=status.HTTP_204_NO_CONTENT)

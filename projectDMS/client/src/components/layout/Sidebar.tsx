@@ -86,7 +86,7 @@ const Sidebar = () => {
       label: "Dashboard",
     },
     { path: "/legal-words", icon: <BookOpen size={20} />, label: "Learn Legal Words" },
-    { path: "/register", icon: <Upload size={20} />, label: "Regisration" },
+    { path: "/register", icon: <Upload size={20} />, label: "Registration" },
 
     {
       path: "/organizations",

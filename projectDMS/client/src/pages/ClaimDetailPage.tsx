@@ -10,8 +10,10 @@ import {
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import {
+  AlertTriangle,
   ArrowLeft,
   ClipboardList,
+  Clock,
   Download,
   FileText,
   Loader2,
@@ -21,7 +23,6 @@ import {
 import { toast } from "sonner";
 import {
   ClaimDTO,
-  ClaimStatus,
   downloadEvidenceBundle,
   getClaim,
 } from "@/services/claims-api";
@@ -32,17 +33,9 @@ import ClaimTaskDialog from "@/components/claims/ClaimTaskDialog";
 import ClaimDocumentLinks from "@/components/claims/ClaimDocumentLinks";
 import useHasPermission from "@/hooks/useHasPermission";
 import { scopeRefusalMessage } from "@/services/active-scope";
-
-const STATUS_COLOR: Record<ClaimStatus, string> = {
-  draft: "bg-gray-500",
-  notified: "bg-blue-500",
-  submitted: "bg-indigo-500",
-  under_review: "bg-amber-500",
-  agreed: "bg-green-600",
-  rejected: "bg-red-500",
-  disputed: "bg-red-700",
-  closed: "bg-gray-700",
-};
+import { describeNotice, type NoticeTone } from "@/lib/claims-helpers";
+import ClaimStatusPill from "@/components/claims/ClaimStatusPill";
+import { formatCrore, formatDateIN, formatINR } from "@/lib/format-in";
 
 const TYPE_LABELS: Record<string, string> = {
   eot: "Extension of Time",
@@ -54,8 +47,12 @@ const TYPE_LABELS: Record<string, string> = {
   other: "Other",
 };
 
-const fmtDate = (d?: string | null) => (d ? new Date(d).toLocaleDateString() : "—");
-const fmtAmount = (n?: number | null) => (n != null ? n.toLocaleString() : "—");
+const NOTICE_BANNER: Record<NoticeTone, string> = {
+  neutral: "border-slate-300 bg-slate-50 text-slate-800",
+  ok: "border-green-700 bg-green-50 text-green-900",
+  warn: "border-amber-600 bg-amber-50 text-amber-900",
+  danger: "border-red-700 bg-red-50 text-red-900",
+};
 
 const Field: React.FC<{ label: string; value: React.ReactNode }> = ({ label, value }) => (
   <div>
@@ -116,6 +113,8 @@ const ClaimDetailPage: React.FC = () => {
     );
   }
 
+  const notice = describeNotice(claim?.notice_assessment);
+
   if (!claim) {
     return (
       <div className="container mx-auto p-6">
@@ -161,7 +160,7 @@ const ClaimDetailPage: React.FC = () => {
         <CardHeader>
           <div className="flex flex-wrap items-center gap-2">
             <CardTitle>{claim.title}</CardTitle>
-            <Badge className={STATUS_COLOR[claim.status]}>{claim.status}</Badge>
+            <ClaimStatusPill status={claim.status} />
             <Badge variant="outline">{TYPE_LABELS[claim.type] || claim.type}</Badge>
           </div>
           {claim.claim_ref && (
@@ -169,17 +168,63 @@ const ClaimDetailPage: React.FC = () => {
           )}
         </CardHeader>
         <CardContent className="grid grid-cols-2 gap-4 sm:grid-cols-3">
-          <Field label="Amount claimed" value={fmtAmount(claim.amount_claimed)} />
-          <Field label="Amount agreed" value={fmtAmount(claim.amount_agreed)} />
-          <Field label="Currency" value={claim.currency || "—"} />
-          <Field label="Event date" value={fmtDate(claim.event_date)} />
-          <Field label="Notice date" value={fmtDate(claim.notice_date)} />
-          <Field label="Response due" value={fmtDate(claim.response_due_date)} />
+          <Field
+            label="Amount claimed"
+            value={
+              <>
+                {formatINR(claim.amount_claimed, claim.currency)}
+                {claim.amount_claimed != null && (
+                  <span className="ml-2 text-xs font-normal text-muted-foreground">
+                    {formatCrore(claim.amount_claimed, claim.currency)}
+                  </span>
+                )}
+              </>
+            }
+          />
+          <Field label="Amount agreed" value={formatINR(claim.amount_agreed, claim.currency)} />
+          <Field label="Response due" value={formatDateIN(claim.response_due_date)} />
+          <Field label="Event date" value={formatDateIN(claim.event_date)} />
+          <Field label="Became aware on" value={formatDateIN(claim.awareness_date)} />
+          <Field label="Notice served on" value={formatDateIN(claim.notice_date)} />
           <Field label="EOT days claimed" value={claim.eot_days_claimed ?? "—"} />
           <Field label="EOT days granted" value={claim.eot_days_granted ?? "—"} />
-          <Field label="Responsible party" value={claim.responsible_party_id || "—"} />
+          <Field
+            label="Clauses relied on"
+            value={claim.contract_clauses.length > 0 ? claim.contract_clauses.join(", ") : "—"}
+          />
         </CardContent>
       </Card>
+
+      {notice ? (
+        <div
+          role={notice.tone === "danger" ? "alert" : "status"}
+          className={`flex items-start gap-3 rounded-md border p-4 text-sm ${NOTICE_BANNER[notice.tone]}`}
+        >
+          {notice.tone === "danger" || notice.tone === "warn" ? (
+            <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0" aria-hidden />
+          ) : (
+            <Clock className="mt-0.5 h-5 w-5 shrink-0" aria-hidden />
+          )}
+          <div>
+            <p className="font-semibold">{notice.label}</p>
+            <p>{notice.sentence}</p>
+            {claim.notice_assessment && (
+              <p className="pt-1 text-xs opacity-80">
+                Counted from {formatDateIN(claim.notice_assessment.basis_date)}; period ends{" "}
+                {formatDateIN(claim.notice_assessment.due_date)}.
+              </p>
+            )}
+          </div>
+        </div>
+      ) : (
+        <div role="status" className={`rounded-md border p-4 text-sm ${NOTICE_BANNER.neutral}`}>
+          <p className="font-semibold">Notice period not tracked</p>
+          <p>
+            This claim has no event or awareness date, so its notice period cannot be counted. Add the
+            dates from the register (More actions, Edit details).
+          </p>
+        </div>
+      )}
 
       {claim.description && (
         <Card>
@@ -215,11 +260,6 @@ const ClaimDetailPage: React.FC = () => {
                 <FileText className="h-4 w-4" /> Letter {letterId}
               </Link>
             ))}
-            {claim.contract_clauses.length > 0 && (
-              <p className="pt-2 text-xs text-muted-foreground">
-                Clauses: {claim.contract_clauses.join(", ")}
-              </p>
-            )}
           </CardContent>
         </Card>
 

@@ -24,6 +24,26 @@ export type ClaimStatus =
   | "disputed"
   | "closed";
 
+export type NoticeState = "open" | "due_soon" | "overdue" | "served_in_time" | "served_late";
+
+/**
+ * Where a claim stands against its notice period, computed by the server.
+ * `period_source` is never the executed contract: it is either a figure the
+ * organisation set or a typical figure for the claim type.
+ */
+export interface NoticeAssessment {
+  basis: "awareness" | "event";
+  basis_date: string;
+  period_days: number;
+  period_source: "organisation_rule" | "assumed_default";
+  period_verified: boolean;
+  due_date: string;
+  served_on?: string | null;
+  days_remaining?: number | null;
+  served_late_by_days?: number | null;
+  state: NoticeState;
+}
+
 export interface ClaimDTO {
   id: string;
   claim_ref?: string | null;
@@ -32,6 +52,7 @@ export interface ClaimDTO {
   description?: string | null;
   status: ClaimStatus;
   event_date?: string | null;
+  awareness_date?: string | null;
   notice_date?: string | null;
   submission_date?: string | null;
   response_due_date?: string | null;
@@ -44,6 +65,8 @@ export interface ClaimDTO {
   contract_clauses: string[];
   linked_document_ids: string[];
   linked_letter_ids: string[];
+  notice_assessment?: NoticeAssessment | null;
+  allowed_status_transitions: ClaimStatus[];
   organization_id?: string | null;
   project_id?: string | null;
   created_at?: string | null;
@@ -61,7 +84,12 @@ export interface ClaimPayload {
   status?: ClaimStatus;
   amount_claimed?: number;
   currency?: string;
+  event_date?: string;
+  awareness_date?: string;
+  notice_date?: string;
   response_due_date?: string;
+  eot_days_claimed?: number;
+  contract_clauses?: string[];
   project_id?: string;
   responsible_party_id?: string;
 }
@@ -73,6 +101,7 @@ function normalize(raw: any): ClaimDTO {
     contract_clauses: raw?.contract_clauses ?? [],
     linked_document_ids: raw?.linked_document_ids ?? [],
     linked_letter_ids: raw?.linked_letter_ids ?? [],
+    allowed_status_transitions: raw?.allowed_status_transitions ?? [],
   } as ClaimDTO;
 }
 

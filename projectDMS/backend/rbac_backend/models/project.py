@@ -1,7 +1,7 @@
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 from bson import ObjectId
-from typing import Optional
+from typing import Literal, Optional
 
 
 class Project(BaseModel):
@@ -25,6 +25,12 @@ class Project(BaseModel):
     adminEmail: Optional[str] = Field(default=None)
     adminContact: Optional[str] = Field(default=None)
     billingEnabled: Optional[bool] = Field(default=False)
+    # Which party to the contract this workspace acts for. Unset means "not yet
+    # stated": features that depend on it ask, they never assume a side.
+    contractual_capacity: Optional[Literal["contractor", "engineer", "employer"]] = Field(
+        default=None,
+        validation_alias=AliasChoices("contractual_capacity", "contractualCapacity"),
+    )
     # Add other relevant fields like start date, end date, status, etc.
 
     @field_validator("id", "organization_id", mode="before")
