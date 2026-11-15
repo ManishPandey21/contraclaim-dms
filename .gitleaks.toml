@@ -78,18 +78,3 @@ other value, in that file or any other, is still reported.
 targetRules = ["generic-api-key"]
 regexTarget = "secret"
 regexes = ['''^shadow-(?:failure|artifacts)-1$''']
-
-[[allowlists]]
-description = """
-A prompt template key. `CLAIM_HEAD_TEST_PROMPT_KEY` in the Claim Bench service
-names the prompt template a head test is rendered from, in the same series as
-`letter_drafting.v3.skill_step`. The constant's name ends in `_KEY`, so the
-generic rule reads the template name as a credential.
-
-Scoped to one rule and this one literal value, not to its file, for the reason
-given on the idempotency-key entry above: a path clause would exempt the whole
-file. Any other value assigned there is still reported.
-"""
-targetRules = ["generic-api-key"]
-regexTarget = "secret"
-regexes = ['''^claims\.v1\.head_test$''']
