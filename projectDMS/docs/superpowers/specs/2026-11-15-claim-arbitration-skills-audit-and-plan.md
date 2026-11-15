@@ -1,6 +1,6 @@
 # Claim → Arbitration: audit and ten-move plan, with skills doing the heavy lifting
 
-Date: 2026-11-15 · Status: plan only, nothing implemented · Scope: `projectDMS/backend/rbac_backend`, `projectDMS/client`
+Date: 2026-11-15 · Revised: 2026-11-15 after owner decisions D-01 to D-04 and corrections A to C (see Part D) · Status: plan only, nothing implemented · Scope: `projectDMS/backend/rbac_backend`, `projectDMS/client`
 
 **The one-line finding.** The product has a governed skill engine that only letters use, a claims register that is a flat form, three EOT systems that do not know about each other, and an arbitration module whose prompts are hard-coded strings. The four skill packs supplied with this request (`indian-infra-claims`, `indian-infra-eot-claims`, `indian-infra-arbitration-pleadings`, `indian-infra-arbitration-hearing`) describe exactly the method the claim and arbitration screens are missing. Two of them are already named in the code as *known but not installed*. The plan installs them and rebuilds the claim-to-hearing journey around them.
 
@@ -85,13 +85,15 @@ How this was checked: code read of the claims, key-date, hindrance, skills and a
 - Default model is hard-wired (`DEFAULT_SKILL_MODEL = "gpt-4o"`, `executor.py:35`).
 - The LangGraph arbitration engine is deployed but switched off in production (`ARBITRATION_ENGINE_DEFAULT=arbitration_v2`); open blockers B1–B6, chiefly no legally reviewed golden matters. Zero production cases.
 - `POST /claims/{id}/status` has no transition guard and no `@handle_exceptions` (`routers/claims.py:194`).
+- Publishing a skill does not require a legal signature. `SkillEvalReport.signed_off_by` is optional and `SkillRegistry.publish()` checks only guardrail findings, score and case count (`registry.py:292-318`). The evaluator, the signatory and the publisher are not distinguished.
+- No project or organisation field records which party the workspace acts for. The Letter Bench carries `role` per board; claims and arbitration carry none (arbitration has `party_perspective` per case only).
 - The supplied skill packs are thin on references (7–20 lines each) and cite authorities by name only (McDermott, Unibros, Batliboi). They are method, not law reports; a lawyer must confirm them before the packs are published.
 
 ---
 
 ## Part B — The ten moves
 
-Design rule for all ten: **the skill decides the method, the code does the arithmetic, the human makes the call.** Skills never compute dates, days or rupees; they classify, test, explain and draft. Every number shown to a user is produced by deterministic code from recorded inputs.
+Design rule for all ten: **the skill decides the method, the code does the arithmetic, the human makes the call.** Skills never compute dates, days or rupees; they classify, test, explain and draft. Every number shown to a user is produced by deterministic code from recorded inputs. Where the contract or the delay method decides how a number is treated (a notice window, a concurrent period), code computes the facts and a named person records the treatment; nothing is assumed silently.
 
 | # | Move | Skill that carries it | Replaces |
 |---|---|---|---|
@@ -99,7 +101,7 @@ Design rule for all ten: **the skill decides the method, the code does the arith
 | 2 | Notice Clock: time-bar radar that opens claims before they exist | claims + letter-analysis + contract-letters | `sla_service` fixed windows |
 | 3 | Delay Lab: concurrency matrix and net EOT on a swim-lane timeline | eot-claims | Three unlinked EOT systems |
 | 4 | Quantum Builder with proof locks | claims (quantum principles) + eot-claims step 6 | Single `amount_claimed` field |
-| 5 | Two Chairs: run your own claim as the other side | claims (determine), role overlay | Free-text "AI assessment" |
+| 5 | Two Chairs: role-aware evaluation, plus a labelled internal simulation of the other side | claims (determine), role overlay | Free-text "AI assessment" |
 | 6 | Submission Pack with a privilege wall | claims (structure) + contract-letters | Raw ZIP evidence bundle |
 | 7 | Escalate to Arbitration: one action, explicit lineage | pleadings (integration section) | "Latest 50 claims in the project" |
 | 8 | Pleadings on skills: Traverse Board and four-element validator | arbitration-pleadings | Hard-coded prompt strings, raw-id forms |
@@ -117,11 +119,27 @@ Backend
 - Manifests declare chains: claims → eot (keywords: delay, critical path) → contract-letters; claims → pleadings (`issue_types: ["dispute"]`); pleadings → hearing.
 - New output schemas (all Pydantic, all owned by us): `claim_head_test.v1`, `notice_compliance.v1`, `delay_event_classification.v1`, `concurrency_finding.v1`, `quantum_head_review.v1`, `claim_determination.v1`, `submission_section.v1`, `strategy_note.v1`, `pleading_head.v1`, `traverse_response.v1`, `hearing_deliverable.v1`, `examination_plan.v1`.
 - New validators in `skill_validators.py`: `four_elements_per_head`, `notice_pleaded_expressly`, `quantum_has_record`, `every_point_has_exhibit`, `no_invented_amounts` (every number in output must exist in inputs).
-- Migration `v2026MMDD_0001_seed_claim_arbitration_skills.py` seeds the four as **draft**, not published. Publishing goes through the existing eval-report gate after legal sign-off. Emit documentary notes as `notices=`.
+- Migration `v2026MMDD_0001_seed_claim_arbitration_skills.py` seeds the four as **draft**, not published. Emit documentary notes as `notices=`.
+- **Strengthened publication gate (D-03).** New collection `skill_approvals`, one record per review: `skill_key`, `version`, `content_hash`, `eval_suite`, `eval_report_hash` (hash of suite, score, threshold, case count), `kind` (`technical` | `legal`), `reviewer_role`, `reviewer_user_id`, `decided_at`, `decision`, `revoked_at`, `revoked_by`. `SkillManifest` gains `required_approvals` (list of `{kind, reviewer_role}`).
+  - `SkillRegistry.publish()` refuses unless every required approval exists, is not revoked, and matches the exact version, content hash and eval-report hash being published. A re-import, a changed pack or a re-run evaluation makes earlier approvals stale by construction.
+  - Evaluator (`eval_report.recorded_by`, new, required), each approver and the publisher must be three different users for the legal approval; the publisher may not be the legal signatory. A Super Admin may publish an approved version but holds no implicit approval: approval rights come only from an explicit role assignment.
+  - Legal sign-off uses the existing `senior_legal_approver` role (`arbitration_drafting/approval_policy.py:90-98`); it is lifted from the arbitration policy into `core/permissions.py` so skills and arbitration share one definition. New specialist roles for technical review: `chief_contract_expert`, `delay_planning_expert`, `arbitration_case_preparation_expert`. Adding roles is a behaviour change and goes through the single role-normalisation source.
+  - Revoking an approval on a published version deprecates it and blocks new steps with that version; existing outputs keep their recorded version and hash.
+  - The three already-published letter packs carry the "seed-structural" report with no signatory. They keep working; the gate applies to them at their next version. This is recorded as a notice, not hidden.
+  - A published skill never substitutes for case-level approval. Pleadings and hearing material keep every existing gate.
+
+  | Skill pack | Technical reviewer | Legal sign-off |
+  |---|---|---|
+  | indian-infra-claims | Chief Contract Expert | Senior Legal Approver |
+  | indian-infra-eot-claims | Delay/Planning Expert and Chief Contract Expert | Senior Legal Approver |
+  | indian-infra-arbitration-pleadings | Contract/Claims Expert | Lead Arbitration Counsel (holding `senior_legal_approver`) |
+  | indian-infra-arbitration-hearing | Arbitration Case Preparation Expert | Lead Arbitration Counsel (holding `senior_legal_approver`) |
+- **Working perspective (D-01).** `Project.contractual_capacity` (`contractor` | `engineer` | `employer`), with an organisation default; unset means the user is asked once per project, never assumed. Every claim board, skill step and arbitration seed records the perspective it was made under.
 - Permissions: reuse `drafting.skill.*` for administration; add `dms.claim.skill.run` and `dms.arbitration.skill.run`.
 
 Frontend
 - Lift `SkillRail`, `SkillStepDrawer`, `SkillPalette` from `components/letter-bench/` to `components/skills/`, parameterised by subject. Move the admin page route from `/letters/skills` to `/skills` (redirect the old path).
+- Skill admin shows, per version, the approvals required, who gave each, what they were bound to, and why Publish is disabled when one is missing, stale or revoked.
 
 Tests: extend `test_skill_loader_compiler.py` and `test_skill_registry_router_executor.py` for the four packs; one test per schema that the deterministic fallback validates; regenerate the route inventory.
 
@@ -146,7 +164,11 @@ Frontend
 Claims are lost before they are opened. The clock runs from **awareness**, the window comes from **this contract's clause**, and the system proposes the claim.
 
 Backend
-- `services/claims/notice_clock.py` (deterministic): window = clause-index lookup for the project's claims clause (FIDIC 20.1/20.2 → 28 days; contract data may shorten it) with the existing `sla_rules` override; falls back to today's per-type default and says so. Computes `due`, `days_left`, and — the missing case — `served_late_by` when a notice exists.
+- `services/claims/notice_clock.py` (deterministic). The window is a `NoticeRequirement` record per project and claim type: `period_days`, `trigger` (awareness | event | other), `clause_id`, `instrument_id` and revision, `source` and `verification`.
+  - `source` is resolved through the contract instruments in priority order — amendments, then special / particular conditions, then general conditions (`models/contract_document.py:81-89`) — using only instruments whose projection is current. A later instrument overrides an earlier one.
+  - `verification` is one of `verified` (a person with `dms.contract.clause.read` and claim-manage rights confirmed the extracted period against the quoted clause text), `extracted_unverified`, or `assumed_default`.
+  - An `assumed_default` (today's per-type figure, e.g. 28 days) is displayed as "Assumed 28 days — contract provision not found", in a distinct style, and is never written into a notice-compliance finding, a submission, a determination or an arbitration matrix row as a contractual requirement. Those outputs state "notice period not established from the contract" until the requirement is at least extracted.
+  - Computes `due`, `days_left`, and — the missing case — `served_late_by` when a notice exists, each carrying the verification state of the window it used.
 - Triggers that create a **potential claim** (new status before `draft`): a Letter Bench analysis chain that routes to the claims or EOT skill; a hindrance saved with `critical_path_impact` and employer responsibility; a variation instruction without an agreed rate.
 - Skill step `notice_compliance.v1`: given event, awareness evidence, notice letter and clause text, states whether notice was compliant and, if late, what the record shows about prejudice to the Employer. The skill's principle — never rely on time-bar alone — becomes a visible field in both chairs.
 - One action "Draft notice" opens a Letter Bench pre-loaded with the head, routed to the contract-letters skill.
@@ -157,20 +179,39 @@ Frontend
 
 ### Move 3 — Delay Lab
 
+The claim head owns the EOT **assessment** (D-02). The hindrance register and the key-date submissions and determinations remain the authoritative records of their own facts. The Delay Lab stores links and analysis; it never copies or edits those records, so it cannot become a fourth register.
+
+```
+Claim (contract and project scoped)
+└─ Claim Head — EOT entitlement        assessment, causation, days claimed, days recommended
+     ├─ hindrance events               → hindrance register (authoritative)
+     ├─ key-date EOT submissions       → key dates (authoritative)
+     ├─ EOT determinations             → key dates (authoritative)
+     ├─ notice letters                 → letters / documents
+     ├─ baseline and updated programmes→ programme milestones, documents
+     └─ supporting evidence            → documents
+```
+
 Backend
-- `ClaimDelayEvent` links a claim head to an existing hindrance (`hindrance_id`) or stands alone: dates, `risk_owner` (employer | contractor | neutral), `critical` (yes | no | unproven), `notice_ref`, `source_ids`. The hindrance register gains `claim` as a link target; key-date `EOTSubmission` gains optional `claim_id`. No data is moved; the three systems are joined, not merged.
-- `services/claims/delay_engine.py` (deterministic, pure functions, heavily unit-tested): overlap detection between employer and contractor critical events → concurrency periods; net EOT = critical employer days − previously granted − overlap adjustments; revised completion date; LD-exposed days. Output is the skill's table: Event | Type | Critical delay | Concurrent? | Net EOT.
-- Skill steps: `delay_event_classification.v1` (proposes risk owner and whether the record proves criticality, with reasons) and `concurrency_finding.v1` (narrative per overlap: EOT yes, prolongation cost no unless separated). Method is stated on every output; with no CPM data the only offered methods are As-Planned vs As-Built and Windows on milestones. TIA is listed as unavailable with the reason.
+- New collection `claim_head_links`: `claim_id`, `head_id`, `target_type` (hindrance | eot_submission | eot_determination | key_date | programme_milestone | letter | document), `target_id`, `target_revision` (the revision or content hash linked, immutable), `role`, `created_by`, `created_at`, `superseded_by`. Many-to-many in both directions: one hindrance may serve several heads and milestones; one submission may cover several hindrances and heads. Links are never updated in place; a change writes a new link and supersedes the old, so history is kept.
+- When a linked record gains a newer revision, the head shows "linked revision is not the latest" and dependent analysis steps go stale. Nothing re-points automatically.
+- `EotAssessment` on the head, versioned: `method` (as_planned_vs_as_built | windows; TIA and collapsed as-built listed as unavailable without a CPM network), `baseline_ref`, `events[]`, `overlaps[]`, `days_claimed`, `days_recommended`, `days_approved` (read from linked determinations, never typed), `previously_granted`, `status`, and the full source list for every figure.
+- `services/claims/delay_engine.py` (deterministic, pure functions) computes **facts only**: per-event critical delay as recorded, every overlap between employer-risk and contractor-risk events with its dates and length, previously granted days, and days at LD exposure under each treatment.
+- **Overlaps are not deducted automatically (correction A).** Each overlap is a `ConcurrencyFinding` that must be decided: `treatment` (eot_granted_no_cost | eot_granted_with_cost | apportioned | no_eot | not_true_concurrency), `days_to_eot`, `basis` (the contract clause, the method and the reasoning), `decided_by`, `decided_at`. The contract's own concurrency provision, where the clause index has one, is quoted on the finding. Until every overlap on a head is decided, the net-EOT figure is shown as a range (all overlaps counted to the Contractor ↔ none counted) and the head cannot be locked.
+- Skill steps: `delay_event_classification.v1` proposes risk owner and whether the record proves criticality, with reasons; `concurrency_finding.v1` proposes a treatment per overlap with its reasoning and the opposing argument. Both are proposals; the delay/planning reviewer decides.
+- The net-EOT table (Event | Type | Critical delay | Concurrent? | Treatment | Net EOT) is assembled from decided findings only.
 
 Frontend
-- A swim-lane timeline: Employer lane, Contractor lane, Neutral lane, milestones on top. Overlaps are hatched. Dragging is not allowed; dates come from records. Below it, the net-EOT table, each cell traceable to the events that produced it.
-- Use the `dataviz` conventions already in the product for colour; risk owner is encoded by lane position and label, not colour alone.
+- A swim-lane timeline: Employer lane, Contractor lane, Neutral lane, milestones on top. Overlaps are hatched and numbered; each opens its finding. Dates are read from the linked records and cannot be dragged.
+- Each overlap card shows the computed facts, the contract provision if one exists, the proposed treatment, and the decision control. Undecided overlaps are counted in the head's blockers.
+- Linked records open in their own register; the Lab shows which revision is linked.
+- Risk owner is encoded by lane position and label, not colour alone.
 
 ### Move 4 — Quantum Builder with proof locks
 
 Backend
 - `QuantumLine` per head: `category` (direct | prolongation | disruption | overhead_formula | loss_of_profit | interest), `basis`, `period`, `amount`, `record_ids`, `formula` (none | hudson | emden | eichleay), `lock_state`.
-- Locks enforced in code, taken straight from the quantum reference: prolongation only for periods the Delay Lab marks non-concurrent employer delay; a formula line stays locked until records of actual loss are linked; loss of profit needs evidence of work declined. A locked line cannot enter a submission or a pleading.
+- Locks enforced in code, taken straight from the quantum reference: prolongation only for periods the Delay Lab's decided findings treat as compensable (non-concurrent employer delay, or an overlap decided `eot_granted_with_cost` with separated costs); a formula line stays locked until records of actual loss are linked; loss of profit needs evidence of work declined. A locked line cannot enter a submission or a pleading.
 - Arithmetic is code. Skill step `quantum_head_review.v1` only reviews: is each line supported, what record is missing, is it a global claim.
 - Roll-up writes `amount_claimed`; arbitration's quantum annexures are generated from these lines in Move 7.
 
@@ -179,15 +220,28 @@ Frontend
 
 ### Move 5 — Two Chairs
 
-The same board, viewed from the other side. Switching chair re-runs the claims skill's determination workflow with the engineer or employer role (the manifest already supports `roles_supported`).
+Three perspectives are supported as equals (D-01):
+
+| Perspective | Work on the board |
+|---|---|
+| Contractor | Prepare, substantiate, quantify and submit claims |
+| Engineer | Evaluate claims, assess entitlement, determine admissible time and cost, prepare recommendations or determinations within delegated authority |
+| Employer | Review exposure, the Engineer's recommendations, counterclaims, disputes and settlement options |
+
+The working perspective comes from `Project.contractual_capacity` (Move 0), not from a global assumption. Release 1 leads with Contractor-side preparation; the Engineer and Employer evaluation workflow ships in the same phase and is not a reduced mode.
 
 Backend
-- `ClaimDetermination` per head: `result` (full | partial | none | insufficient_information), `days`, `amount`, `findings`, `residual_risks`, `information_required[]` with deadline and contractual consequence. Schema `claim_determination.v1`; fallback is `insufficient_information` and degraded.
-- For a contractor, this is a red-team run stored as `internal`; for an engineer or employer it is the draft determination and feeds a FIDIC 3.7-style letter through the contract-letters skill. One model, two uses.
+- Two separate record types, never one record with a flag:
+  - `ClaimDetermination` — an **official** finding. Can be created only when the project's capacity is `engineer` or `employer`, by a user holding determination authority; passes the approval workflow; immutable once approved; a change is a new revision. Feeds a FIDIC 3.7-style letter through the contract-letters skill.
+  - `ClaimSimulation` — an **internal analysis** of how another party is likely to respond. Stored in the privileged collection with the strategy note (Move 6), permission `dms.claim.strategy.read`, excluded from every export, from the arbitration source ledger and from matrix seeding. Every API response and screen carries the label "Internal analysis — not a determination".
+- Both hold per-head `result` (full | partial | none | insufficient_information), `days`, `amount`, `findings`, `residual_risks`, `information_required[]` with deadline and contractual consequence. Schema `claim_determination.v1`; fallback is `insufficient_information` and degraded.
+- **Switching perspective changes the lens, not the record.** Contractual facts (events, dates, notices, clauses, linked records, quantum lines) are perspective-independent and are not written by a perspective switch. A simulation cannot write to any fact, to another party's finding, or to an approved determination; this is enforced in the service and covered by tests that attempt each overwrite.
+- A determination received from the real Engineer is recorded as a linked document plus a transcribed `ClaimDetermination` with `origin: received`, distinct from one authored in the workspace.
 - Supersedes `claim_assessment_service` for new claims; the old endpoint stays and returns history.
 
 Frontend
-- A chair toggle in the Bench header. In the opposing chair each head shows the likely answer and the three weakest points. "Request information" drafts the letter.
+- The Bench header names the perspective the project works in. A contractor workspace offers "Simulate the Engineer's response"; the result opens in a visibly different frame with the internal-analysis label on every panel and on any printout.
+- An engineer or employer workspace opens on evaluation: heads to determine, information to request, recommendation to issue. "Request information" drafts the letter.
 
 ### Move 6 — Submission Pack with a privilege wall
 
@@ -204,7 +258,7 @@ Frontend
 
 Backend
 - `POST /api/claims/escalate` with `claim_ids[]` creates or extends a case. Case gains `claim_ids`; claim gains `arbitration_case_id` and status `disputed`. Evidence freeze is applied (the field exists).
-- Seeding is deterministic and explicit: heads → `claim-matrix` rows; notice results → `notice-compliance`; quantum lines → `quantum-annexures`; delay events and linked letters → `chronology-matrix`; linked documents → `document-index`. Rows carry `origin: {claim_id, head_id}` and start `needs_review`, as the existing rule requires. `_find_source_rows` prefers `case.claim_ids` and falls back to project scope only for cases with none.
+- Seeding is deterministic and explicit: heads → `claim-matrix` rows; notice results → `notice-compliance`; quantum lines → `quantum-annexures`; delay events and linked letters → `chronology-matrix`; linked documents → `document-index`. Rows carry `origin: {claim_id, head_id}` and start `needs_review`, as the existing rule requires. Simulations, strategy notes and assumed-default notice periods are never seeded; undecided concurrency findings are seeded as open issues, not as figures. `_find_source_rows` prefers `case.claim_ids` and falls back to project scope only for cases with none.
 - Dispute ladder on the case (deterministic tracker): determination → DAB / conciliation if the contract requires it → Section 21 notice date → limitation date, replacing the default three-year placeholder in `agents/deterministic.py:34` with dates the user confirms.
 
 Frontend
@@ -217,13 +271,17 @@ Backend
 - New validator node `four_elements` in the LangGraph fan-out: each pleaded head must carry provision, event, causal link and quantified relief; notice compliance must be pleaded expressly.
 - Counterclaim gets its own section set and a real agent (LD, defects, over-payment, indemnity, costs).
 - Opponent pleading intake accepts an uploaded document (existing extraction pipeline) and splits it into numbered paragraphs.
-- The engine stays behind its existing rollout flags. This move does not change which engine production runs.
+- **Evidence and approval controls (correction C).**
+  - Every citation in a draft version is classified deterministically as `verified` (resolves to an approved document-index row with a source in the ledger), `unverified` (resolves to a row not yet approved) or `unresolved` (no matching exhibit). Counts are stored on the version. The "Sources: 0" figure beside a draft that cites exhibits is replaced by these three counts from the same computation the validators use.
+  - Legal approval, draft approval and filing export are refused while any citation is `unverified` or `unresolved`, or while a mandatory provenance item (arbitration clause source, notice records for each pleaded head, quantum support for each amount) is missing. The refusal lists each item.
+  - A draft with no case workspace is a **scratch draft**: creation requires choosing it explicitly (the default becomes "select a case"), it is watermarked, and it can be neither approved nor exported for filing. Attaching it to a case subjects it to every gate from that point. Existing ungated drafts are reported by the migration as notices and become scratch drafts; none is deleted.
+- The engine stays behind its existing rollout flags. This move does not change which engine production runs, and no step in this plan bypasses the arbitration approval gates, the acceptance receipt chain or the production rollout controls.
 
 Frontend
 - **Traverse Board** for defence and rejoinder: opponent paragraph on the left, our response on the right (admit / deny / put to proof), denial reason mandatory, positive case and exhibit attached. This uses the existing paragraph-response model.
 - The eight gates become a horizontal stepper with the current gate, who must act, and what blocks it.
 - Every raw-id input becomes a picker. Engine vocabulary is renamed: "Prepare the case file", "Review the matrices", "Approve for drafting".
-- The draft renders as a formatted pleading with numbered paragraphs and clickable exhibit chips; version diff.
+- The draft renders as a formatted pleading with numbered paragraphs and clickable exhibit chips; version diff. Exhibit chips show their state (verified / unverified / unresolved); Approve and Export are disabled with the blocking list shown.
 - Split the two monolith pages into route-level components (`CaseRegister`, `CaseDashboard`, `MatrixEditor`, `Readiness`, `FilingBundle`, `PleadingEditor`, `TraverseBoard`).
 
 ### Move 9 — Hearing Room
@@ -232,17 +290,20 @@ Backend
 - Case status gains `hearing_preparation`, `hearing`, `award` after `filed`.
 - `services/arbitration_hearing/`: one generator per deliverable, each a skill step (`hearing_deliverable.v1`, `examination_plan.v1`) over approved matrices and the filed pleadings only. Validator `every_point_has_exhibit`. Internal documents (strategy note, examination plans, aide-mémoire) are stored apart from tribunal-facing ones (opening outline, timeline, matrix, deck, closing skeleton), with separate permissions.
 - Witness register (`name`, `role`, `statement_document_id`, `topics`). Examination plans are per witness.
-- Deck export to PPTX (python-pptx; new dependency, needs the pip-audit gate) following the skill's eleven-section order, one idea per slide. Visual timeline is rendered from the chronology matrix.
+- **Deck (D-04): PDF only in Release 1.** The deck is a structured, editable object in ContraClaim (`HearingDeck` → ordered `slides[]`, each with a layout type, title, body blocks, exhibit references and source step), following the skill's eleven-section order, one idea per slide. Users edit slides before export; an edited slide is marked so regeneration does not overwrite it silently.
+  - Export is a presentation-style PDF through the existing reportlab exporter with a new landscape slide template: one slide per page, large type, rendered timeline pages from the chronology matrix, one or two claim-summary slides per head, exhibit references on every evidential point, page numbers, and a footer with case reference, deck version and content hash.
+  - Tribunal-facing and internal material are separate documents with separate exports; internal pages carry an "Internal — not for the tribunal" band and cannot be included in a tribunal-facing export.
+  - No new dependency. PPTX export is deferred to a later release, after demand, layout fidelity, dependency security and export regression are checked. Existing DOCX/PDF pleading exports are untouched; their tests are the regression guard.
 - "Tribunal questions": a fixed list from the advocacy reference (why was notice late, where is the critical-path proof) plus skill-proposed ones, each answered with exhibits or flagged as a gap.
 
 Frontend
-- `/arbitration/cases/:id/hearing`: a kit of eight cards with readiness per card, a timeline view colour-and-lane coded by risk owner, a rehearsal view for the opening with timing marks.
+- `/arbitration/cases/:id/hearing`: a kit of eight cards with readiness per card, a timeline view colour-and-lane coded by risk owner, a slide editor with live preview, a rehearsal view for the opening with timing marks.
 
 ### Move 10 — Dispute Spine and exposure band
 
 Backend
 - `GET /api/disputes/spine?claim_id|case_id` assembles one read model: event → notice → claim → determination → dispute ladder → pleadings → hearing → award, with the date, state and owner of each stage.
-- Exposure band (deterministic): per head, claimed vs supported vs the opposing chair's likely result gives best / likely / worst totals in days and rupees. No probabilities are invented; "likely" is the Two-Chairs result the user has confirmed.
+- Exposure band (deterministic): per head, claimed vs supported vs the opposing chair's likely result gives best / likely / worst totals in days and rupees. No probabilities are invented; "likely" is the confirmed result of an official determination where one exists, otherwise of an internal simulation, and is labelled with which. The band is internal analysis and is not exported.
 
 Frontend
 - A single "Disputes" entry replaces eight sidebar links. The spine is a persistent header on every claim and case screen. Portfolio view: all claims by stage, with exposure bands and the Notice Clock strip.
@@ -256,12 +317,12 @@ Frontend
 
 | Phase | Contents | Ships to users as |
 |---|---|---|
-| 0 | Move 0; claim model fields; status transition guard; register and detail quick fixes (dates, grouping, contrast, pickers, late-notice flag computed deterministically) | Visible fixes, no AI change |
+| 0 | Move 0 including the strengthened publication gate and project perspective; claim model fields; status transition guard; register and detail quick fixes (dates, grouping, contrast, pickers, late-notice flag computed deterministically) | Visible fixes, no AI change |
 | 1 | Moves 1, 2 | Claim Bench behind `CLAIM_BENCH_ROLLOUT_MODE` (off / shadow / primary, same pattern as the Letter Bench) |
 | 2 | Moves 3, 4 | Delay Lab and Quantum Builder tabs on the Bench |
 | 3 | Moves 5, 6 | Two Chairs, Submission Pack; old assessment retired from the UI |
-| 4 | Moves 7, 8 | Escalation; pleadings on skills behind the existing arbitration rollout flags |
-| 5 | Move 9 | Hearing Room |
+| 4 | Moves 7, 8 | Escalation; pleadings on skills behind the existing arbitration rollout flags. The evidence and approval controls (correction C) ship first within this phase and do not depend on skills |
+| 5 | Move 9 | Hearing Room with PDF deck; PPTX deferred |
 | 6 | Move 10 | Navigation change, portfolio view |
 
 Each phase is independently releasable. Phases 0–3 do not touch the arbitration engine.
@@ -279,22 +340,44 @@ Each phase is independently releasable. Phases 0–3 do not touch the arbitratio
 
 | Risk | Handling |
 |---|---|
-| Skill text is method, not verified law; authorities are cited by name only | Seed as draft; publish only with a signed eval report; a lawyer reviews each pack; skill text never enters the source ledger (already enforced by design) |
+| Skill text is method, not verified law; authorities are cited by name only | Seed as draft; publication requires technical review and independent legal approval bound to version, content hash and evaluation (Move 0); skill text never enters the source ledger (already enforced by design) |
 | No golden set for claims or pleadings (existing blocker B1) | Build 10–15 anonymised matters per skill during Phase 1; this also unblocks B1 |
 | Model invents days or amounts | Skills never compute; `no_invented_amounts` validator; all numbers from deterministic engines |
 | No CPM data | Delay Lab states its method and its limits; TIA shown as unavailable rather than faked |
+| Concurrent delay reduced to arithmetic | Overlaps are computed, never auto-deducted; each needs a recorded treatment with its contractual basis; undecided overlaps show a range and block locking |
+| An assumed notice period mistaken for the contract's | Three verification states; an assumed default is never written into any finding or outgoing document |
+| A simulation mistaken for a determination | Separate record types and collections; simulations are privileged, labelled, unexportable and cannot write facts or findings |
 | Privileged strategy material leaking into exports or pleadings | Separate collection, separate permission, excluded from exporters and the source ledger, covered by tests |
-| Three EOT systems drifting further | Linked by foreign keys in Move 3; the claim is the parent, key-date submissions and hindrances stay authoritative for their own data |
+| Three EOT systems drifting further, or a fourth appearing | Many-to-many revision-pinned links in Move 3; the claim head owns only the assessment, key-date and hindrance records stay authoritative and are never copied |
 | Arbitration engine is off in production | Move 8 keeps both engines working and changes no rollout flag |
 | Single LLM provider, hard-wired model | Model name moves to settings in Move 0; provider abstraction is out of scope |
 
-### Decisions needed before implementation
-
-1. **Default chair.** Is the primary user the Contractor (preparing claims) or the Engineer / Employer (determining them)? The plan supports both; the default shapes the first screen. Recommendation: Contractor, since the existing register and letters flow are written from that side for claims.
-2. **EOT parentage.** Confirm that a claim head is the parent and key-date EOT submissions link up to it (recommended), rather than the reverse.
-3. **Legal reviewer.** Who signs the eval reports that publish the four packs?
-4. **Deck format.** PPTX export (new dependency) or PDF only for the first release of the Hearing Room. Recommendation: PDF first.
-
 ### Not in this plan
 
-Provider abstraction for the LLM; a CPM scheduling engine; post-award work under Sections 34 and 37; e-filing integrations; changes to the letter, variation or contract-master modules beyond the links named above.
+PowerPoint export of the hearing deck; provider abstraction for the LLM; a CPM scheduling engine; post-award work under Sections 34 and 37; e-filing integrations; changes to the letter, variation or contract-master modules beyond the links named above.
+
+---
+
+## Part D — Decision record (owner, 2026-11-15)
+
+| No. | Decision | Status | Where it lands |
+|---|---|---|---|
+| D-01 | Contractor-first for contractor workspaces; perspective derived from project/organisation configuration; Engineer and Employer workflows equally supported; switching perspective never changes facts or another party's approved findings; contractor-side simulations are internal analysis, not determinations | Approved with conditions | Move 0 (perspective), Move 5 |
+| D-02 | Claim head owns the EOT assessment; hindrances, key-date submissions, determinations, notices, programmes and evidence are linked many-to-many by immutable, revision-pinned references; existing registers stay authoritative | Approved with conditions | Move 3 |
+| D-03 | Independent Senior Legal Approver signs before any of the four packs is published; specialist technical co-review per pack; evaluator, signatory and publisher are separate; approval bound to version, content hash, suite, results and time; missing, revoked or stale approval blocks publication; Super Admin cannot substitute for legal approval; case-level gates still apply | Approved | Move 0 |
+| D-04 | Presentation-style PDF hearing deck in Release 1, editable in-app before export; PPTX deferred | Approved | Move 9 |
+
+Corrections accepted in this revision
+
+| Ref | Correction | Change made |
+|---|---|---|
+| A | Subtracting overlaps from employer-caused critical delay is too simplistic | Delay engine computes overlaps as facts only; each overlap needs a decided treatment with contractual basis and method; net EOT is a range until decided (Move 3) |
+| B | A default 28-day period must never be presented as a verified contractual requirement | Notice requirement resolved from executed instruments including amendments and special conditions, with three verification states; assumed defaults never enter findings or outgoing documents (Move 2) |
+| C | Ungated drafting and a draft citing exhibits with zero linked sources | Citation states (verified / unverified / unresolved) computed and shown; approval and filing blocked on missing provenance; case-less drafts become non-approvable scratch drafts (Move 8) |
+
+Standing constraint: the phased rollout is retained, and no implementation step may bypass the existing arbitration approval gates or production rollout controls.
+
+Still open, to settle when Phase 0 is specified in detail
+- Which named users hold `senior_legal_approver` and the three specialist roles, per organisation.
+- Whether a technical reviewer and the evaluator may be the same person (the plan currently requires only that the legal signatory and the publisher differ from the evaluator and from each other).
+- Who may mark a notice requirement `verified`: this revision assumes a user with claim-manage rights; a contracts-lead role may be preferable.
