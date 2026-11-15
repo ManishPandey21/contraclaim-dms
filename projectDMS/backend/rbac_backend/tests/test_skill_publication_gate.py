@@ -365,3 +365,33 @@ async def test_a_seeded_draft_publishes_only_through_the_gate() -> None:
     assert published.status == "published"
     effective = {item.skill_key: item for item in await registry.list_effective("org1", None)}
     assert effective[CLAIMS_SKILL_KEY].available and effective[CLAIMS_SKILL_KEY].version == "1.0.0"
+
+
+async def test_a_fresh_install_publishes_only_the_letter_packs() -> None:
+    """Both seed migrations in order, as a new database receives them.
+
+    The older seed iterates the whole bundle. It must not hand the draft packs
+    a publication date or a "latest published" pointer before the later
+    migration stores them as drafts.
+    """
+    from rbac_backend.migrations.v20261114_0002_seed_system_skills import upgrade as seed_published
+    from rbac_backend.migrations.v20261115_0001_seed_claim_arbitration_skill_drafts import (
+        upgrade as seed_drafts,
+    )
+    from rbac_backend.services.skills.system_skills import DRAFT_SKILL_KEYS
+
+    db = FakeDB()
+    first = await seed_published(db, False)
+    assert first.warnings == []
+    after_first = await db.skill_versions.find({}).to_list(length=100)
+    assert len(after_first) == 3 and not {doc["skill_key"] for doc in after_first} & set(DRAFT_SKILL_KEYS)
+
+    await seed_drafts(db, False)
+    versions = {doc["skill_key"]: doc for doc in await db.skill_versions.find({}).to_list(length=100)}
+    assert len(versions) == 7
+    for key in DRAFT_SKILL_KEYS:
+        assert versions[key]["status"] == "draft"
+        assert versions[key].get("published_at") is None and versions[key].get("published_by") is None
+    pointers = await db.skills.find({}).to_list(length=100)
+    assert len(pointers) == 3 and not {doc["skill_key"] for doc in pointers} & set(DRAFT_SKILL_KEYS)
+    assert all(doc["latest_published_version"] == "1.0.0" for doc in pointers)
