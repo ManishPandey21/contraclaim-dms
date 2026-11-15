@@ -280,6 +280,9 @@ export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   // letter_drafting.py), not `draft.request.view`.
   "/letters": ["drafting.request.view"],
   "/letter-quality": ["drafting.request.view"],
+  // Skill registry: managed by whoever may publish, and open to reviewers who
+  // can read skills so they can record the approval a draft asks of them.
+  "/skills": ["drafting.skill.publish", "drafting.skill.read"],
   "/letter-templates": ["letter_templates:read"],
   "/contracts": ["dms.document.view"],
   "/contracts/viewer": ["dms.document.view"],

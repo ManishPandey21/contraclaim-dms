@@ -9,6 +9,9 @@ import type {
   EffectiveSkill,
   SkillAdminList,
   SkillBinding,
+  SkillApproval,
+  SkillApprovalKind,
+  SkillApprovalList,
   SkillEvalReport,
   SkillStep,
   SkillVersionSummary,
@@ -185,6 +188,32 @@ export async function publishSkillVersion(
   const { data } = await api.post<SkillVersionSummary>(
     `/skills/${encodeURIComponent(skillKey)}/versions/${encodeURIComponent(version)}/publish`,
     { eval_report: evalReport }
+  );
+  return data;
+}
+
+const versionPath = (skillKey: string, version: string) =>
+  `/skills/${encodeURIComponent(skillKey)}/versions/${encodeURIComponent(version)}`;
+
+export async function fetchSkillApprovals(skillKey: string, version: string): Promise<SkillApprovalList> {
+  const { data } = await api.get<SkillApprovalList>(`${versionPath(skillKey, version)}/approvals`);
+  return data;
+}
+
+/** Record the signed-in user's approval. The server checks they hold `reviewerRole`. */
+export async function recordSkillApproval(
+  skillKey: string,
+  version: string,
+  input: { kind: SkillApprovalKind; reviewer_role: string; eval_report: SkillEvalReport; comment?: string }
+): Promise<SkillApproval> {
+  const { data } = await api.post<SkillApproval>(`${versionPath(skillKey, version)}/approvals`, input);
+  return data;
+}
+
+export async function revokeSkillApproval(approvalId: string, reason: string): Promise<SkillApproval> {
+  const { data } = await api.post<SkillApproval>(
+    `/skills/approvals/${encodeURIComponent(approvalId)}/revoke`,
+    { reason }
   );
   return data;
 }

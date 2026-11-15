@@ -443,7 +443,7 @@ const LetterWorkflowPage = () => {
             </p>
           </div>
           <Link
-            to="/letters/skills"
+            to="/skills"
             className="text-sm font-medium text-primary underline-offset-2 hover:underline"
           >
             Skills

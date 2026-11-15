@@ -1,5 +1,5 @@
 import React, { Suspense } from "react";
-import { Routes, Route } from "react-router-dom";
+import { Navigate, Routes, Route } from "react-router-dom";
 import { lazyWithRetry } from "@/lib/lazyWithRetry";
 import MainLayout from "./components/layout/MainLayout";
 import ProtectedRoute from "./components/auth/ProtectedRoute";
@@ -203,7 +203,8 @@ const AppRoutes = () => (
             the Bench only when the server says the Bench is on AND that letter
             has one. */}
         <Route path="letters/bench/new" element={<BenchOpenRoute />} />
-        <Route path="letters/skills" element={<SkillAdminPage />} />
+        <Route path="skills" element={<SkillAdminPage />} />
+        <Route path="letters/skills" element={<Navigate to="/skills" replace />} />
         <Route path="letters/:id/bench" element={<LetterBenchPage />} />
         <Route
           path="letters/:id/input"

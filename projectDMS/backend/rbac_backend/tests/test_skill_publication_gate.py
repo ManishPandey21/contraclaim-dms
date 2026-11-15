@@ -291,6 +291,8 @@ async def test_an_approval_records_exactly_what_was_reviewed() -> None:
     assert approval.content_hash == record.content_hash
     assert approval.eval_suite == "claims-golden-v1"
     assert approval.eval_report_hash == eval_report_hash(report)
+    assert (approval.eval_score, approval.eval_threshold, approval.eval_case_count) == (0.92, 0.85, 12)
+    assert approval.eval_recorded_by == "evaluator"
     assert approval.reviewer_user_id == "counsel" and approval.decided_at is not None
     statuses = {item.reviewer_role: item for item in approval_statuses(record, report, [approval])}
     assert statuses[LEGAL].satisfied and statuses[LEGAL].state == "ok"

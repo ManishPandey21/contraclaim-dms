@@ -249,6 +249,46 @@ export interface SkillEvalReport {
   case_count: number;
   signed_off_by?: string | null;
   notes?: string | null;
+  /** User id of whoever ran the evaluation. Required when the version needs approvals. */
+  recorded_by?: string | null;
+}
+
+export type SkillApprovalKind = "technical" | "legal";
+
+export interface SkillApprovalRequirement {
+  kind: SkillApprovalKind;
+  reviewer_role: string;
+}
+
+/** A reviewer's decision, bound to the text and the evaluation result they saw. */
+export interface SkillApproval {
+  _id?: string;
+  id?: string;
+  skill_key: string;
+  version: string;
+  content_hash: string;
+  eval_suite: string;
+  eval_report_hash: string;
+  eval_score?: number | null;
+  eval_threshold?: number | null;
+  eval_case_count?: number | null;
+  eval_recorded_by?: string | null;
+  kind: SkillApprovalKind;
+  reviewer_role: string;
+  reviewer_user_id: string;
+  comment?: string | null;
+  decided_at: string;
+  revoked_at?: string | null;
+  revoked_by?: string | null;
+  revoke_reason?: string | null;
+}
+
+export interface SkillApprovalList {
+  skill_key: string;
+  version: string;
+  content_hash: string;
+  required: SkillApprovalRequirement[];
+  approvals: SkillApproval[];
 }
 
 export interface SkillVersionSummary {
@@ -262,6 +302,7 @@ export interface SkillVersionSummary {
   eval_report?: SkillEvalReport | null;
   created_at?: string | null;
   published_at?: string | null;
+  required_approvals?: SkillApprovalRequirement[];
 }
 
 export interface SkillBinding {

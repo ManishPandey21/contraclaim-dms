@@ -184,6 +184,11 @@ class SkillApproval(BaseModel):
     content_hash: str = Field(..., min_length=64, max_length=64)
     eval_suite: str
     eval_report_hash: str = Field(..., min_length=64, max_length=64)
+    # The result the reviewer saw, kept readable alongside its hash.
+    eval_score: Optional[float] = None
+    eval_threshold: Optional[float] = None
+    eval_case_count: Optional[int] = None
+    eval_recorded_by: Optional[str] = None
     kind: SkillApprovalKind
     reviewer_role: str = Field(..., pattern=APPROVER_ROLE_PATTERN)
     reviewer_user_id: str = Field(..., min_length=1)
