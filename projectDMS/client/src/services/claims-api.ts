@@ -15,6 +15,7 @@ export type ClaimType =
   | "other";
 
 export type ClaimStatus =
+  | "potential"
   | "draft"
   | "notified"
   | "submitted"
@@ -28,15 +29,18 @@ export type NoticeState = "open" | "due_soon" | "overdue" | "served_in_time" | "
 
 /**
  * Where a claim stands against its notice period, computed by the server.
- * `period_source` is never the executed contract: it is either a figure the
- * organisation set or a typical figure for the claim type.
+ * Only `contract_verified` is the contract's own period, confirmed by a person
+ * against the quoted clause. Every other source is a figure to be checked.
  */
 export interface NoticeAssessment {
   basis: "awareness" | "event";
   basis_date: string;
   period_days: number;
-  period_source: "organisation_rule" | "assumed_default";
+  period_source: "contract_verified" | "contract_unverified" | "organisation_rule" | "assumed_default";
+  /** True only for a contract period a person has verified against its clause. */
   period_verified: boolean;
+  clause_no?: string | null;
+  requirement_id?: string | null;
   due_date: string;
   served_on?: string | null;
   days_remaining?: number | null;
@@ -67,6 +71,10 @@ export interface ClaimDTO {
   linked_letter_ids: string[];
   notice_assessment?: NoticeAssessment | null;
   allowed_status_transitions: ClaimStatus[];
+  /** Outline of the claim's board; the board itself is read through the Claim Bench. */
+  head_count?: number;
+  bench_stage?: "heads" | "locked" | null;
+  origin?: { type: "hindrance" | "letter_bench"; id: string; label?: string | null } | null;
   organization_id?: string | null;
   project_id?: string | null;
   created_at?: string | null;

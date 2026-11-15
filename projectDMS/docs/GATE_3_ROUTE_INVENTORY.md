@@ -36,10 +36,10 @@ Gate 3's execution plan; it is not a licence to ship a page with no error state.
 ## Counts
 
 - Source: `client/src/routes.tsx`
-- Routes: **100**
-- Authenticated routes: **93**
-- Routes owing an empty state: **64**
-- Routes owing a loading state: **93**
+- Routes: **101**
+- Authenticated routes: **94**
+- Routes owing an empty state: **65**
+- Routes owing a loading state: **94**
 
 ## The inventory
 
@@ -74,7 +74,8 @@ Gate 3's execution plan; it is not a licence to ship a page with no error state.
 | `/chronology/:chronologyId/review` | GET | yes | `ChronologyBuilderPage` | yes | yes | MISSING - no fault-injection coverage yet |
 | `/chronology/new` | GET | yes | `ChronologyBuilderPage` | yes | yes | MISSING - no fault-injection coverage yet |
 | `/claims` | GET | yes | `ClaimsRegisterPage` | yes | yes | MISSING - no fault-injection coverage yet |
-| `/claims/:id` | GET | yes | `ClaimDetailPage` | no | yes | `client/src/pages/__tests__/ClaimDetailPage.document-links.test.tsx` |
+| `/claims/:id` | GET | yes | `ClaimRoute` | yes | yes | `client/src/pages/__tests__/ClaimBenchPage.test.tsx` |
+| `/claims/:id/record` | GET | yes | `ClaimDetailPage` | no | yes | `client/src/pages/__tests__/ClaimDetailPage.document-links.test.tsx` |
 | `/concerns` | GET | yes | `ConcernsPage` | yes | yes | MISSING - no fault-injection coverage yet |
 | `/contract-master/prototype` | GET | yes | `ContractMasterPrototypePage` | no | yes | `client/src/pages/__tests__/ContractMasterPrototypePage.test.tsx` |
 | `/contract-master/workspace` | GET | yes | `ContractMasterWorkspacePage` | yes | yes | `client/e2e/contract-master.spec.ts` |

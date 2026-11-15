@@ -110,6 +110,35 @@ describe("describeNotice", () => {
     expect(verified.sentence).not.toContain("Check the notice clause");
   });
 
+  it("names the clause for a contract period and keeps the caveat until it is verified", () => {
+    const unverified = describeNotice(
+      notice({
+        period_source: "contract_unverified",
+        clause_no: "20.1",
+        state: "served_late",
+        served_on: "2026-04-11T00:00:00",
+        served_late_by_days: 12,
+      }),
+    )!;
+    expect(unverified.sentence).toBe(
+      "Notice served 12 days after the 28-day period read from clause 20.1, not yet verified, counted from the event date. " +
+        "Verify the period against the clause before relying on this.",
+    );
+    const verified = describeNotice(
+      notice({
+        period_source: "contract_verified",
+        period_verified: true,
+        clause_no: "20.1",
+        state: "served_late",
+        served_on: "2026-04-11T00:00:00",
+        served_late_by_days: 12,
+      }),
+    )!;
+    expect(verified.sentence).toBe(
+      "Notice served 12 days after the 28-day period in clause 20.1, counted from the event date.",
+    );
+  });
+
   it("has nothing to say when there is no assessment", () => {
     expect(describeNotice(null)).toBeNull();
     expect(describeNotice(undefined)).toBeNull();

@@ -40,6 +40,7 @@ const PartiesInvolvedPage = lazyWithRetry(() => import("./pages/PartiesInvolvedP
 const LoginPage = lazyWithRetry(() => import("./pages/LoginPage"));
 const SecurityTermsPage = lazyWithRetry(() => import("./pages/SecurityTermsPage"));
 import { BenchOpenRoute, LegacyOrBench } from "./components/letter-bench/BenchRoutes";
+import { ClaimRoute } from "./components/claim-bench/ClaimRoutes";
 const LetterWorkflowPage = lazyWithRetry(() => import("./pages/LetterWorkflowPage"));
 const LetterInputPage = lazyWithRetry(() => import("./pages/LetterInputPage"));
 const LetterStrategicPlanPage = lazyWithRetry(
@@ -238,6 +239,14 @@ const AppRoutes = () => (
         />
         <Route
           path="claims/:id"
+          element={
+            <RoleGuard path="/claims" fallback="/overview">
+              <ClaimRoute />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="claims/:id/record"
           element={
             <RoleGuard path="/claims" fallback="/overview">
               <ClaimDetailPage />

@@ -214,6 +214,9 @@ PAGE_STATES: Dict[str, PageStates] = {
         empty=False,
         error="client/src/pages/__tests__/ClaimDetailPage.document-links.test.tsx",
     ),
+    # `/claims/:id`: the Claim Bench where the server has it on, the record page
+    # elsewhere. Its empty state is "open the board"; its error state is tested.
+    "ClaimRoute": _fetching(error="client/src/pages/__tests__/ClaimBenchPage.test.tsx"),
     "SLATrackerPage": _fetching(),
     "KeyDateRegisterPage": _fetching(),
     "KeyDateDetailPage": _fetching(

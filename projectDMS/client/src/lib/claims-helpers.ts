@@ -43,6 +43,7 @@ export function followUpTaskTitle(claim: Pick<ClaimDTO, "title" | "claim_ref">):
 }
 
 export const CLAIM_STATUS_LABEL: Record<ClaimStatus, string> = {
+  potential: "Potential",
   draft: "Draft",
   notified: "Notified",
   submitted: "Submitted",
@@ -55,6 +56,7 @@ export const CLAIM_STATUS_LABEL: Record<ClaimStatus, string> = {
 
 // White text on a dark fill; every pair is at least 4.5:1.
 export const CLAIM_STATUS_BADGE: Record<ClaimStatus, string> = {
+  potential: "bg-violet-700 text-white",
   draft: "bg-slate-600 text-white",
   notified: "bg-blue-700 text-white",
   submitted: "bg-indigo-700 text-white",
@@ -85,12 +87,28 @@ export interface NoticeSummary {
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
-/** How the notice period was arrived at, in words a reader cannot mistake for the contract. */
+/** How the notice period was arrived at, in words a reader cannot mistake for more than it is. */
 export function noticePeriodBasis(assessment: NoticeAssessment): string {
   const period = `${assessment.period_days}-day period`;
-  return assessment.period_source === "organisation_rule"
-    ? `the ${period} set in your organisation's rules`
-    : `an assumed ${period}`;
+  const clause = assessment.clause_no ? `clause ${assessment.clause_no}` : "the contract";
+  switch (assessment.period_source) {
+    case "contract_verified":
+      return `the ${period} in ${clause}`;
+    case "contract_unverified":
+      return `the ${period} read from ${clause}, not yet verified`;
+    case "organisation_rule":
+      return `the ${period} set in your organisation's rules`;
+    default:
+      return `an assumed ${period}`;
+  }
+}
+
+/** What a reader should do before relying on the assessment. Empty once the period is verified. */
+export function noticeCaveat(assessment: NoticeAssessment): string {
+  if (assessment.period_verified) return "";
+  return assessment.period_source === "contract_unverified"
+    ? " Verify the period against the clause before relying on this."
+    : " Check the notice clause in the contract before relying on this.";
 }
 
 /**
@@ -102,9 +120,7 @@ export function describeNotice(assessment?: NoticeAssessment | null): NoticeSumm
   if (!assessment) return null;
   const from = assessment.basis === "awareness" ? "the awareness date" : "the event date";
   const basis = noticePeriodBasis(assessment);
-  const check = assessment.period_verified
-    ? ""
-    : " Check the notice clause in the contract before relying on this.";
+  const check = noticeCaveat(assessment);
   switch (assessment.state) {
     case "served_late": {
       const days = assessment.served_late_by_days ?? 0;

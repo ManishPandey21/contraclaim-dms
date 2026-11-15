@@ -95,6 +95,7 @@ import {
   type ClaimSla,
 } from "@/lib/claims-helpers";
 import ClaimStatusPill from "@/components/claims/ClaimStatusPill";
+import ClaimSignalsStrip from "@/components/claim-bench/ClaimSignalsStrip";
 import { formatCrore, formatDateIN, formatINR, fromDateInput, toDateInput } from "@/lib/format-in";
 
 const CLAIM_TYPES: { value: ClaimType; label: string }[] = [
@@ -108,6 +109,7 @@ const CLAIM_TYPES: { value: ClaimType; label: string }[] = [
 ];
 
 const CLAIM_STATUSES: { value: ClaimStatus; label: string }[] = [
+  { value: "potential", label: "Potential" },
   { value: "draft", label: "Draft" },
   { value: "notified", label: "Notified" },
   { value: "submitted", label: "Submitted" },
@@ -330,6 +332,8 @@ const ClaimsRegisterPage: React.FC = () => {
           New Claim
         </Button>
       </div>
+
+      <ClaimSignalsStrip onRaised={() => void load()} />
 
       <Card>
         <CardHeader>
