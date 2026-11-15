@@ -36,10 +36,10 @@ Gate 3's execution plan; it is not a licence to ship a page with no error state.
 ## Counts
 
 - Source: `client/src/routes.tsx`
-- Routes: **99**
-- Authenticated routes: **92**
-- Routes owing an empty state: **63**
-- Routes owing a loading state: **92**
+- Routes: **100**
+- Authenticated routes: **93**
+- Routes owing an empty state: **64**
+- Routes owing a loading state: **93**
 
 ## The inventory
 
@@ -137,6 +137,7 @@ Gate 3's execution plan; it is not a licence to ship a page with no error state.
 | `/security-terms` | GET | yes | `SecurityTermsPage` | no | yes | MISSING - no fault-injection coverage yet |
 | `/settings` | GET | yes | `SettingsPage` | no | yes | MISSING - no fault-injection coverage yet |
 | `/share/:id` | GET | yes | `ShareDocumentPage` | no | yes | MISSING - no fault-injection coverage yet |
+| `/skills` | GET | yes | `SkillAdminPage` | yes | yes | MISSING - no fault-injection coverage yet |
 | `/sla` | GET | yes | `SLATrackerPage` | yes | yes | MISSING - no fault-injection coverage yet |
 | `/subscription-management` | GET | yes | `SubscriptionManagementPage` | yes | yes | MISSING - no fault-injection coverage yet |
 | `/tags` | GET | yes | `TagsPage` | yes | yes | MISSING - no fault-injection coverage yet |

@@ -2,8 +2,9 @@
 
 **Bullet, verbatim:** "Fresh install path is tested against real MongoDB."
 
-**Catalogue coverage: 22 of 22 migrations**, as of the run of 2026-11-14 recorded
-in "The 22-migration catalogue" below. The mapping that follows is the original
+**Catalogue coverage: 23 of 23 migrations**, as of the run of 2026-11-15 recorded
+in "The 23-migration catalogue" below; the 2026-11-14 run for 22 of 22 is kept
+after it. The mapping that follows is the original
 19-migration staging run and is kept as measured.
 
 **Disposition: SATISFIED by the R-A8Q Stage B staging run, 2026-09-08.** No new
@@ -60,6 +61,162 @@ never been applied to an empty database.
 `backend/rbac_backend/tests/test_gate6_fresh_install_evidence.py` fails when the
 migration count moves away from the number recorded here, which forces the tick
 to be re-earned rather than inherited.
+
+## The 23-migration catalogue: run of 2026-11-15
+
+**Disposition: migration path measured for 23 of 23; acceptance as gate
+evidence is the release owner's to confirm.** One migration was added after the
+2026-11-14 run: `20261115_0001 seed_claim_arbitration_skill_drafts`, which
+stores the claims, EOT, arbitration-pleadings and arbitration-hearing skill
+packs as unpublished drafts and indexes `skill_approvals`. It was applied, with
+the other 22, to an empty MongoDB by `scripts/gate6_fresh_install.sh`. The
+output below is that script's evidence block, unedited apart from the step-log
+path.
+
+### What the run found before it passed
+
+The first run of this script on the new catalogue **failed**, correctly. On an
+empty database `20261114_0002 seed_system_skills` iterated the whole bundle,
+which now includes the four draft packs, and gave each a `published_at` and a
+`skills.latest_published_version` pointer before `20261115_0001` ran. The unit
+tests had passed, because each exercised one migration against an in-memory
+fake. The fix makes `20261114_0002` seed only packs bundled as published, and a
+test now runs both seeds in order. The block below is the run after that fix.
+Databases where `20261114_0002` had already been applied are unaffected: it had
+only the three letter packs to seed at the time.
+
+### Where it ran, and what that means
+
+- **Same setting as the 2026-11-14 run**: an ephemeral cloud development
+  container, executed by the coding agent, this time on the pull request that
+  adds the migration. The server is a real `mongod` in a one-member replica
+  set, proved empty first; the commands are the documented install path, run
+  inside the backend image; the result is read back with `mongosh`.
+- **The owner's decision of 2026-11-14** accepted a disposable, empty
+  `mongo:8.0` as evidence for this bullet, for that run. It has not been
+  restated for this one. This section and the number pinned in
+  `test_gate6_fresh_install_evidence.py` were updated together so the tree is
+  consistent; if the decision does not extend to this run, revert both and run
+  the script on staging.
+- **Backend image.** Built from `backend/Dockerfile` at the commit named in the
+  block, with the same build-time difference as before: outbound TLS in the
+  container is intercepted by a proxy, so its CA bundle was mounted for the
+  `pip install` instruction only (a build secret; no file is left in the image)
+  and the build used the host network. No source file differs from the commit.
+
+### What changed in the script
+
+`scripts/gate6_fresh_install.sh` now expects 23 migrations and checks, by
+reading the server: the `skill_approvals` collection and its index; the four
+draft packs at `1.0.0` with status `draft`, no publication date, no evaluation
+report and a manifest naming a technical and a legal approver; exactly three
+rows in `skills` (a draft gets no latest-published pointer); no approval rows;
+and that a second `1.0.0` of a draft pack is refused by the unique index.
+
+### What this run did not re-measure
+
+As before, the script exercises the migration path only and does not start the
+application.
+
+### Evidence block
+
+```text
+GATE 6 BULLET 2 - FRESH INSTALL RUN  gate6-20261115t181625z-17480
+Result            PASS - 23/23 migrations applied to an empty MongoDB
+Date (UTC)        2026-11-15T18:16:46Z
+Host              Linux 6.18.44-fc-v470 x86_64; docker 29.9.2
+Commit            38a4fbd997b83d60351ab5530fa3cb6b5904b6eb (claude/zen-ptolemy-695liz); uncommitted backend changes: 0
+Backend image     contraclaim-gate6-backend:38a4fbd997b8-sandboxca sha256:78d678e45e17cb946009bdedfe6059790cad32a78acd0a86c0502921fa3e516d
+                  supplied (GATE6_BACKEND_IMAGE)
+MongoDB           mongo:8.0 sha256:d97fea17ccb8d004cd137be8dab54d70d0df11be69c9f422aefe4484c8414ab7
+                  server version 8.0.38; replica set read back from rs.status().set: gate6rs
+                  disposable container on a private network: no published port, no host bind mount
+
+Empty before anything ran
+  databases=["admin","config","local"]
+  user_databases=0
+  target_database=gate6_fresh_install
+  target_collections=0
+  ledger_rows=0
+  EMPTY=YES
+Target read back from inside the backend container
+  configured_host=gate6-20261115t181625z-17480-mongo
+  database=gate6_fresh_install
+  server_me=gate6-20261115t181625z-17480-mongo:27017
+  server_set=gate6rs
+
+Commands (each in a new backend container: docker run --rm --network <private> -e DATABASE_URL=mongodb://<disposable>:27017/gate6_fresh_install?replicaSet=gate6rs -e MONGODB_DATABASE=gate6_fresh_install -e MONGODB_REPLICA_SET=gate6rs -e ENVIRONMENT=development contraclaim-gate6-backend:38a4fbd997b8-sandboxca)
+  1. python -m rbac_backend.scripts.migrate_database --list
+       exit 0   total=23 applied=0 pending=23 applied_not_in_catalogue=0
+  2. python -m rbac_backend.scripts.migrate_database --fail-on-warning
+       exit 0   total=23 applied=0 dry_run=23 skipped=0 warnings=0 notices=4; database still empty afterwards
+  3. python -m rbac_backend.scripts.migrate_database --apply --fail-on-warning
+       exit 0   total=23 applied=23 dry_run=0 skipped=0 warnings=0 notices=4
+  4. python -m rbac_backend.scripts.migrate_database --apply --fail-on-warning   (second apply)
+       exit 0   total=23 applied=0 dry_run=0 skipped=23 warnings=0 notices=0
+       collections=153 indexes=521 documents=34, identical before and after
+  5. python -m rbac_backend.scripts.migrate_database --list
+       exit 0   total=23 applied=23 pending=0 applied_not_in_catalogue=0
+
+Skill migrations 20261114_0001 to _0003 and 20261115_0001, read with mongosh: 36 passed, 0 failed
+  PASS  collection skills exists
+  PASS  collection skill_versions exists
+  PASS  collection skill_bindings exists
+  PASS  collection skill_approvals exists
+  PASS  collection letter_position_boards exists
+  PASS  collection letter_skill_steps exists
+  PASS  index skills.skill_owner_key_unique  -  key={"owner_scope":1,"skill_key":1} unique=true partialFilterExpression=null
+  PASS  index skill_versions.skill_version_unique  -  key={"skill_key":1,"version":1} unique=true partialFilterExpression=null
+  PASS  index skill_versions.skill_version_status  -  key={"skill_key":1,"status":1} unique=false partialFilterExpression=null
+  PASS  index skill_bindings.skill_binding_scope_unique  -  key={"organization_id":1,"project_id":1,"skill_key":1} unique=true partialFilterExpression=null
+  PASS  index skill_approvals.skill_approvals_by_version  -  key={"skill_key":1,"version":1,"decided_at":1} unique=false partialFilterExpression=null
+  PASS  index letter_position_boards.bench_board_letter_unique  -  key={"letter_id":1} unique=true partialFilterExpression=null
+  PASS  index letter_position_boards.bench_board_scope_time  -  key={"organization_id":1,"project_id":1,"updated_at":-1} unique=false partialFilterExpression=null
+  PASS  index letter_position_boards.bench_board_document_unique  -  key={"organization_id":1,"incoming_document_id":1} unique=true partialFilterExpression={"incoming_document_id":{"$type":"string"}}
+  PASS  index letter_position_boards.bench_board_trigger_unique  -  key={"organization_id":1,"trigger.type":1,"trigger.id":1} unique=true partialFilterExpression={"trigger.id":{"$type":"string"}}
+  PASS  index letter_skill_steps.bench_step_letter_time  -  key={"letter_id":1,"created_at":1} unique=false partialFilterExpression=null
+  PASS  index letter_skill_steps.bench_step_idempotency_unique  -  key={"letter_id":1,"skill_key":1,"skill_hash":1,"input_hash":1} unique=true partialFilterExpression=null
+  PASS  index letter_skill_steps.bench_step_id_unique  -  key={"step_id":1} unique=true partialFilterExpression=null
+  PASS  partial unique indexes expected  -  2 declared
+  PASS  skill_versions holds exactly the three published skills and the four draft packs  -  7 rows
+  PASS  skill indian-infra-arbitration-hearing stored at 1.0.0 as an unpublished draft that names a legal approver  -  status=draft published_at=null required_approvals=["legal:senior_legal_approver","technical:arbitration_case_preparation_expert"]
+  PASS  skill indian-infra-arbitration-pleadings stored at 1.0.0 as an unpublished draft that names a legal approver  -  status=draft published_at=null required_approvals=["legal:senior_legal_approver","technical:chief_contract_expert"]
+  PASS  skill indian-infra-claims stored at 1.0.0 as an unpublished draft that names a legal approver  -  status=draft published_at=null required_approvals=["legal:senior_legal_approver","technical:chief_contract_expert"]
+  PASS  skill indian-infra-contract-letters seeded at 1.0.0, published, system-owned  -  version=1.0.0 status=published owner_scope=system
+  PASS  skill indian-infra-eot-claims stored at 1.0.0 as an unpublished draft that names a legal approver  -  status=draft published_at=null required_approvals=["legal:senior_legal_approver","technical:chief_contract_expert","technical:delay_planning_expert"]
+  PASS  skill indian-infra-letter-analysis seeded at 1.0.0, published, system-owned  -  version=1.0.0 status=published owner_scope=system
+  PASS  skill indian-infra-variations seeded at 1.0.0, published, system-owned  -  version=1.0.0 status=published owner_scope=system
+  PASS  skills holds exactly the three published skills (a draft gets no latest-published pointer)  -  3 rows
+  PASS  skill indian-infra-contract-letters active, latest published 1.0.0
+  PASS  skill indian-infra-letter-analysis active, latest published 1.0.0
+  PASS  skill indian-infra-variations active, latest published 1.0.0
+  PASS  no skill approval exists on a fresh install  -  0 rows
+  PASS  ledger records 20261114_0001
+  PASS  ledger records 20261114_0002
+  PASS  ledger records 20261114_0003
+  PASS  ledger records 20261115_0001
+Seeded skills (key, version, content hash) - equal to the files bundled in the image: YES
+  indian-infra-arbitration-hearing 1.0.0 c4f100f0ed20d848554aed28c414c0fd84aecb4de76e9f76880e1e8199aafeed
+  indian-infra-arbitration-pleadings 1.0.0 8af9e4d95a0a24da65d9e27b67e468518f068478fbf55c1cff52eebcee47a36c
+  indian-infra-claims 1.0.0 5f883bf0c2b1f5f6b7c38da6db506d86797e798fb8fcd2af44b54c52a149e1c6
+  indian-infra-contract-letters 1.0.0 818a6ad8f429feedbac0732bce835af5948992af029e2ddc6a507f9847151754
+  indian-infra-eot-claims 1.0.0 e37c1e84b7ef8250c81f4737247e313968f1edb3448b5d5b2057deb0b610c6b0
+  indian-infra-letter-analysis 1.0.0 4fb6f430b50aa8e166ebe044f500597a794aa36f26e9f6020947ae841fe9be53
+  indian-infra-variations 1.0.0 49bb0d50e9a05301004d567904ad00b4fd5a4fefe50cf30df20b41823e1f62ad
+Unique indexes probed with real inserts (probe rows removed afterwards): 10 passed, 0 failed
+  PASS  two boards without a document are both accepted
+  PASS  two boards with a null document are both accepted
+  PASS  first board for a document is accepted
+  PASS  second board for the same document is refused  -  E11000 bench_board_document_unique
+  PASS  first board for a trigger record is accepted
+  PASS  second board for the same trigger record is refused  -  E11000 bench_board_trigger_unique
+  PASS  second board for the same letter is refused  -  E11000 bench_board_letter_unique
+  PASS  a second 1.0.0 of a seeded skill is refused  -  E11000 skill_version_unique
+  PASS  a second 1.0.0 of a draft pack is refused  -  E11000 skill_version_unique
+  PASS  probe rows removed  -  0 left
+
+Step logs         not retained: the container that ran this was ephemeral; this block is the record
+```
 
 ## The 22-migration catalogue: run of 2026-11-14
 

@@ -21,6 +21,26 @@
 - No change to arbitration engine selection, rollout flags or approval gates.
 - Published letter packs (`1.0.0`) keep working unchanged.
 
+## Status (2026-11-15)
+
+Tasks 1 to 4 and 6 to 8 are implemented. Task 5 is implemented in the API and model only.
+
+Changes from the plan as written:
+
+- **No new permission.** The approval routes are reached with `drafting.skill.read`; the approval itself belongs to the named reviewer role, checked with `actor_role_names()` (lifted from the arbitration approval policy into `core/permissions.py`, which the arbitration policy now calls). This avoided changing seeded roles.
+- **Draft readable by its reviewers.** `GET /skills/{key}/versions/{version}` returns a draft to a user holding a reviewer role that draft asks an approval from.
+- **Legal independence is stricter than planned.** One user cannot give both a technical and the legal approval on the same text and evaluation.
+- **Approvals keep the evaluation they were given against** (score, threshold, cases, evaluator), not only its hash, so the screen can show it.
+- **`20261114_0002` was changed** to seed only packs bundled as published. The fresh-install gate against a real MongoDB found that it would otherwise publish the four drafts on a new database. See `docs/GATE_6_FRESH_INSTALL_EVIDENCE.md`.
+- **Claim status pill is its own component.** The shared `Badge` always applies a variant's colours, so a second colour class on it resolves by stylesheet order; that was the cause of the unreadable status badges.
+- **Skill components were not moved** to `components/skills/`. Nothing outside the Letter Bench uses them yet; the move comes with the Claim Bench. The new publish panel lives there.
+
+Not done:
+
+- **Project perspective has no form field.** `Project.contractual_capacity` is accepted and returned by the API. The project form is a 1,400-line combined organisation/project form; the field is added with its first consumer in Phase 1, which also asks for it when unset.
+- **No route-level test for the claim status endpoint.** The transition rule and the read model are tested directly; the route needs the document-relationship fakes and is covered only by the unit tests of the function it calls.
+- **Letters on the claim page still show ids.** Planned for the Claim Bench.
+
 ## Deferred from the spec's Move 0, with reason
 
 - `SkillStep` generalisation (`subject_type`, `skill_steps` collection) and the prompt-provider interface: they have no consumer until the Claim Bench (Phase 1) and are built with it.

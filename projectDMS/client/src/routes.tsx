@@ -1,5 +1,5 @@
 import React, { Suspense } from "react";
-import { Navigate, Routes, Route } from "react-router-dom";
+import { Routes, Route } from "react-router-dom";
 import { lazyWithRetry } from "@/lib/lazyWithRetry";
 import MainLayout from "./components/layout/MainLayout";
 import ProtectedRoute from "./components/auth/ProtectedRoute";
@@ -204,7 +204,8 @@ const AppRoutes = () => (
             has one. */}
         <Route path="letters/bench/new" element={<BenchOpenRoute />} />
         <Route path="skills" element={<SkillAdminPage />} />
-        <Route path="letters/skills" element={<Navigate to="/skills" replace />} />
+        {/* Former address of the skills page; kept so existing links still open it. */}
+        <Route path="letters/skills" element={<SkillAdminPage />} />
         <Route path="letters/:id/bench" element={<LetterBenchPage />} />
         <Route
           path="letters/:id/input"
