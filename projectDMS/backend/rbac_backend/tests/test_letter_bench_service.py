@@ -402,7 +402,7 @@ async def test_dissect_routes_skills_per_assertion_and_shows_missing_ones(monkey
     variations = next(link for link in bench.board.chain if link.skill_key == VARIATIONS_SKILL_KEY)
     assert variations.target_assertion_ids == ["A3"] and variations.status == "done"
     eot = next(link for link in bench.board.chain if link.skill_key == EOT_SKILL_KEY)
-    assert eot.status == "unavailable" and eot.reason == "Not installed"
+    assert eot.status == "unavailable" and eot.reason == "Awaiting legal approval"
     a3 = bench.board.assertions[2]
     assert a3.routed_skill_key == VARIATIONS_SKILL_KEY
     # Offline, the variations skill stops at 'insufficient information' and lists what is missing.

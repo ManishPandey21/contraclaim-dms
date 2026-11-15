@@ -7,6 +7,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 from fastapi import HTTPException, status
 
 from ...core.config import settings
+from ...core.permissions import actor_role_names
 
 
 def _actor_id(user: Any) -> Any:
@@ -115,18 +116,7 @@ def _configured_roles(gate: str) -> frozenset[str]:
 
 
 def actor_roles(user: Any) -> set[str]:
-    if isinstance(user, dict):
-        values = user.get("roles") or user.get("role_names") or [user.get("role")]
-    else:
-        values = getattr(user, "roles", None) or getattr(user, "role_names", None) or [getattr(user, "role", None)]
-    if isinstance(values, str):
-        values = [values]
-    result = set()
-    for value in values or []:
-        name = getattr(value, "name", None) or getattr(value, "value", None) or value
-        if name:
-            result.add(str(name).strip().lower())
-    return result
+    return actor_role_names(user)
 
 
 def enforce_gate_role(gate: str, claimed_role: str, user: Any) -> str:

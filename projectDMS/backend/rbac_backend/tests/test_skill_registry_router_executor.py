@@ -35,7 +35,9 @@ from rbac_backend.services.skills.system_skills import (
     ANALYSIS_SKILL_KEY,
     CLAIMS_SKILL_KEY,
     EOT_SKILL_KEY,
+    HEARING_SKILL_KEY,
     LETTERS_SKILL_KEY,
+    PLEADINGS_SKILL_KEY,
     VARIATIONS_SKILL_KEY,
     system_skill_version,
 )
@@ -70,8 +72,18 @@ async def test_bundled_system_skills_resolve_without_any_migration() -> None:
     effective = {item.skill_key: item for item in await registry.list_effective("org1", "p1")}
     assert effective[LETTERS_SKILL_KEY].available
     # Hand-off targets the packs name but that are not installed are listed, not hidden.
+    # Hand-off targets bundled as unreviewed drafts are listed as unavailable, with the reason.
     assert effective[CLAIMS_SKILL_KEY].available is False
-    assert effective[EOT_SKILL_KEY].unavailable_reason == "Not installed"
+    assert effective[EOT_SKILL_KEY].unavailable_reason == "Awaiting legal approval"
+    # Draft packs nothing hands off to yet are not shown to drafters at all.
+    assert PLEADINGS_SKILL_KEY not in effective and HEARING_SKILL_KEY not in effective
+
+
+async def test_a_bundled_draft_pack_never_resolves_for_drafting() -> None:
+    registry = SkillRegistry(FakeDB())
+    for key in (CLAIMS_SKILL_KEY, EOT_SKILL_KEY, PLEADINGS_SKILL_KEY, HEARING_SKILL_KEY):
+        version, _, reason = await registry.resolve(key, "org1", "p1")
+        assert version is None and reason == "No published version"
 
 
 async def test_draft_is_invisible_until_published_then_becomes_latest() -> None:
@@ -226,7 +238,7 @@ async def test_missing_hand_off_targets_degrade_openly() -> None:
         role="contractor",
     )
     eot = next(link for link in chain if link.skill_key == EOT_SKILL_KEY)
-    assert eot.status == "unavailable" and eot.reason == "Not installed"
+    assert eot.status == "unavailable" and eot.reason == "Awaiting legal approval"
     assert chain[-1].skill_key == LETTERS_SKILL_KEY and chain[-1].status == "pending"
 
 

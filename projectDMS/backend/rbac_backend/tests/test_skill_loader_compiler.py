@@ -7,6 +7,7 @@ import stat
 import zipfile
 
 import pytest
+from pydantic import BaseModel
 
 from rbac_backend.services.letter_drafting.prompts import (
     COMPOSE_PROMPT_KEY,
@@ -32,7 +33,13 @@ from rbac_backend.services.skills.loader import (
     load_skill_zip,
     parse_front_matter,
 )
+from rbac_backend.services.skills.schemas import get_schema, register_schema, registered_schema_keys
 from rbac_backend.services.skills.system_skills import (
+    CLAIMS_SKILL_KEY,
+    DRAFT_SKILL_KEYS,
+    EOT_SKILL_KEY,
+    HEARING_SKILL_KEY,
+    PLEADINGS_SKILL_KEY,
     ANALYSIS_SKILL_KEY,
     LETTERS_SKILL_KEY,
     VARIATIONS_SKILL_KEY,
@@ -135,13 +142,47 @@ def test_front_matter_parser_reads_flat_pairs() -> None:
     assert body.lstrip().startswith("# Demo Skill")
 
 
-def test_the_three_system_packs_load_with_manifests() -> None:
+def test_the_system_packs_load_with_manifests() -> None:
     versions = {item.skill_key: item for item in system_skill_versions()}
-    assert set(versions) == {ANALYSIS_SKILL_KEY, LETTERS_SKILL_KEY, VARIATIONS_SKILL_KEY}
+    letter_packs = {ANALYSIS_SKILL_KEY, LETTERS_SKILL_KEY, VARIATIONS_SKILL_KEY}
+    assert set(versions) == letter_packs | DRAFT_SKILL_KEYS
     assert versions[ANALYSIS_SKILL_KEY].kind == "analysis"
     assert versions[LETTERS_SKILL_KEY].manifest.native_role == "employer"
     assert "valuation_limb_stated" in versions[VARIATIONS_SKILL_KEY].manifest.validators
-    assert all(item.status == "published" and item.version == "1.0.0" for item in versions.values())
+    assert all(item.version == "1.0.0" for item in versions.values())
+    assert all(versions[key].status == "published" for key in letter_packs)
+
+
+def test_claim_and_arbitration_packs_ship_as_unpublished_drafts_naming_their_reviewers() -> None:
+    versions = {item.skill_key: item for item in system_skill_versions()}
+    expected_technical = {
+        CLAIMS_SKILL_KEY: {"chief_contract_expert"},
+        EOT_SKILL_KEY: {"delay_planning_expert", "chief_contract_expert"},
+        PLEADINGS_SKILL_KEY: {"chief_contract_expert"},
+        HEARING_SKILL_KEY: {"arbitration_case_preparation_expert"},
+    }
+    assert set(expected_technical) == set(DRAFT_SKILL_KEYS)
+    for key, technical in expected_technical.items():
+        version = versions[key]
+        assert version.status == "draft" and version.eval_report is None
+        assert version.published_by is None and version.published_at is None
+        required = version.manifest.required_approvals
+        assert {r.reviewer_role for r in required if r.kind == "technical"} == technical
+        assert [r.reviewer_role for r in required if r.kind == "legal"] == ["senior_legal_approver"]
+        # The schema the manifest names exists and its no-argument fallback is valid.
+        schema = get_schema(version.manifest.output_schema_key)
+        assert schema is not None and schema().model_dump()
+
+
+def test_schema_registry_refuses_a_conflicting_registration() -> None:
+    class Other(BaseModel):
+        value: int = 0
+
+    with pytest.raises(ValueError):
+        register_schema("letter_analysis.v1", Other)
+    assert {"letter_analysis.v1", "variation_evaluation.v1", "reply_paragraph.v1"} <= set(
+        registered_schema_keys()
+    )
 
 
 # --------------------------------------------------------------------------- #

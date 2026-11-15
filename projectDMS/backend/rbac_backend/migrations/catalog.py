@@ -107,6 +107,18 @@ from .v20261114_0003_letter_bench_indexes import DESCRIPTION as LETTER_BENCH_IND
 from .v20261114_0003_letter_bench_indexes import NAME as LETTER_BENCH_INDEXES_NAME
 from .v20261114_0003_letter_bench_indexes import VERSION as LETTER_BENCH_INDEXES_VERSION
 from .v20261114_0003_letter_bench_indexes import upgrade as upgrade_letter_bench_indexes
+from .v20261115_0001_seed_claim_arbitration_skill_drafts import (
+    DESCRIPTION as SEED_CLAIM_ARBITRATION_SKILL_DRAFTS_DESCRIPTION,
+)
+from .v20261115_0001_seed_claim_arbitration_skill_drafts import (
+    NAME as SEED_CLAIM_ARBITRATION_SKILL_DRAFTS_NAME,
+)
+from .v20261115_0001_seed_claim_arbitration_skill_drafts import (
+    VERSION as SEED_CLAIM_ARBITRATION_SKILL_DRAFTS_VERSION,
+)
+from .v20261115_0001_seed_claim_arbitration_skill_drafts import (
+    upgrade as upgrade_seed_claim_arbitration_skill_drafts,
+)
 
 
 MIGRATIONS = [
@@ -241,5 +253,11 @@ MIGRATIONS = [
         name=LETTER_BENCH_INDEXES_NAME,
         description=LETTER_BENCH_INDEXES_DESCRIPTION,
         upgrade=upgrade_letter_bench_indexes,
+    ),
+    Migration(
+        version=SEED_CLAIM_ARBITRATION_SKILL_DRAFTS_VERSION,
+        name=SEED_CLAIM_ARBITRATION_SKILL_DRAFTS_NAME,
+        description=SEED_CLAIM_ARBITRATION_SKILL_DRAFTS_DESCRIPTION,
+        upgrade=upgrade_seed_claim_arbitration_skill_drafts,
     ),
 ]

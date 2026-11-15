@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Any, Dict, List
 
 CLIENT_DMS_PERMISSIONS: List[str] = [
     "dms.document.view",
@@ -447,6 +447,31 @@ _DECLARED_BY: Dict[str, frozenset] = {
     )
     for alias in ALIAS_TO_CANONICAL
 }
+
+
+def actor_role_names(user: Any) -> set[str]:
+    """Lower-cased names of the roles a user holds, as assigned.
+
+    Used where a decision belongs to a named reviewer role (arbitration gates,
+    skill approvals) rather than to a permission. No alias resolution and no
+    global-role shortcut: a Super Admin holds a reviewer role only if assigned it.
+    """
+    if isinstance(user, dict):
+        values = user.get("roles") or user.get("role_names") or [user.get("role")]
+    else:
+        values = (
+            getattr(user, "roles", None)
+            or getattr(user, "role_names", None)
+            or [getattr(user, "role", None)]
+        )
+    if isinstance(values, str):
+        values = [values]
+    result = set()
+    for value in values or []:
+        name = getattr(value, "name", None) or getattr(value, "value", None) or value
+        if name:
+            result.add(str(name).strip().lower())
+    return result
 
 
 def equivalent_permissions(permission: str) -> set[str]:

@@ -38,6 +38,17 @@ class SkillChainRule(BaseModel):
     always: bool = False
 
 
+SkillApprovalKind = Literal["technical", "legal"]
+APPROVER_ROLE_PATTERN = r"^[a-z][a-z0-9_]{2,63}$"
+
+
+class SkillApprovalRequirement(BaseModel):
+    """One review a version must hold before it can be published."""
+
+    kind: SkillApprovalKind
+    reviewer_role: str = Field(..., pattern=APPROVER_ROLE_PATTERN)
+
+
 class SkillManifest(BaseModel):
     roles_supported: List[SkillRole] = Field(
         default_factory=lambda: ["contractor", "engineer", "employer"]
@@ -50,6 +61,9 @@ class SkillManifest(BaseModel):
     chains_to: List[SkillChainRule] = Field(default_factory=list)
     validators: List[str] = Field(default_factory=list)
     use_when: Optional[str] = None
+    # Reviews that must exist, bound to this exact text and its evaluation,
+    # before the version can be published. Empty keeps the evaluation-only gate.
+    required_approvals: List[SkillApprovalRequirement] = Field(default_factory=list)
 
 
 class SkillReference(BaseModel):
@@ -68,6 +82,9 @@ class SkillEvalReport(BaseModel):
     signed_off_by: Optional[str] = Field(default=None, max_length=200)
     notes: Optional[str] = Field(default=None, max_length=2000)
     recorded_at: datetime = Field(default_factory=now_utc)
+    # User id of whoever ran the evaluation. Required when the version needs
+    # approvals: the evaluator, each approver and the publisher are separate people.
+    recorded_by: Optional[str] = Field(default=None, max_length=200)
 
     @property
     def passed(self) -> bool:
@@ -151,6 +168,67 @@ class SkillPublishRequest(BaseModel):
     eval_report: SkillEvalReport
 
 
+class SkillApproval(BaseModel):
+    """A reviewer's decision on one skill version.
+
+    Bound to the exact text (``content_hash``) and evaluation result
+    (``eval_report_hash``) the reviewer saw. A re-imported draft or a re-run
+    evaluation produces different hashes, so an earlier approval stops matching.
+    """
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    id: Optional[str] = Field(default=None, alias="_id")
+    skill_key: str = Field(..., pattern=SKILL_KEY_PATTERN)
+    version: str = Field(..., pattern=SEMVER_PATTERN)
+    content_hash: str = Field(..., min_length=64, max_length=64)
+    eval_suite: str
+    eval_report_hash: str = Field(..., min_length=64, max_length=64)
+    kind: SkillApprovalKind
+    reviewer_role: str = Field(..., pattern=APPROVER_ROLE_PATTERN)
+    reviewer_user_id: str = Field(..., min_length=1)
+    comment: Optional[str] = Field(default=None, max_length=2000)
+    decided_at: datetime = Field(default_factory=now_utc)
+    revoked_at: Optional[datetime] = None
+    revoked_by: Optional[str] = None
+    revoke_reason: Optional[str] = Field(default=None, max_length=2000)
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _stringify_id(cls, value: Any) -> Optional[str]:
+        return None if value is None else str(value)
+
+
+class SkillApprovalRequest(BaseModel):
+    kind: SkillApprovalKind
+    reviewer_role: str = Field(..., pattern=APPROVER_ROLE_PATTERN)
+    eval_report: SkillEvalReport
+    comment: Optional[str] = Field(default=None, max_length=2000)
+
+
+class SkillApprovalRevokeRequest(BaseModel):
+    reason: str = Field(..., min_length=1, max_length=2000)
+
+
+class SkillApprovalStatus(BaseModel):
+    """Whether one required review is in place for a version and evaluation."""
+
+    kind: SkillApprovalKind
+    reviewer_role: str
+    satisfied: bool = False
+    # missing | stale_content | stale_evaluation | revoked | ok
+    state: str = "missing"
+    approval: Optional[SkillApproval] = None
+
+
+class SkillApprovalListResponse(BaseModel):
+    skill_key: str
+    version: str
+    content_hash: str
+    required: List[SkillApprovalRequirement] = Field(default_factory=list)
+    approvals: List[SkillApproval] = Field(default_factory=list)
+
+
 class SkillImportOptions(BaseModel):
     """Form fields accompanying an uploaded bundle."""
 
@@ -192,6 +270,7 @@ class SkillVersionSummary(BaseModel):
     eval_report: Optional[SkillEvalReport] = None
     created_at: Optional[datetime] = None
     published_at: Optional[datetime] = None
+    required_approvals: List[SkillApprovalRequirement] = Field(default_factory=list)
 
 
 class SkillAdminListResponse(BaseModel):
@@ -205,6 +284,13 @@ __all__ = [
     "EffectiveSkill",
     "Skill",
     "SkillAdminListResponse",
+    "SkillApproval",
+    "SkillApprovalKind",
+    "SkillApprovalListResponse",
+    "SkillApprovalRequest",
+    "SkillApprovalRequirement",
+    "SkillApprovalRevokeRequest",
+    "SkillApprovalStatus",
     "SkillBinding",
     "SkillBindingRequest",
     "SkillChainRule",

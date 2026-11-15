@@ -16,10 +16,15 @@ from pydantic import ValidationError as PydanticValidationError
 
 from ..core.config import settings
 from ..core.database import get_database
+from ..core.permissions import actor_role_names
 from ..core.security import CurrentUser, get_current_user
 from ..models.skill import (
     EffectiveSkill,
     SkillAdminListResponse,
+    SkillApproval,
+    SkillApprovalListResponse,
+    SkillApprovalRequest,
+    SkillApprovalRevokeRequest,
     SkillBinding,
     SkillBindingRequest,
     SkillImportOptions,
@@ -29,6 +34,7 @@ from ..models.skill import (
 )
 from ..services.ai_guardrails import AIOutputGuardrailService
 from ..services.policy_service import PolicyService
+from ..services.skills.approvals import SkillApprovalService
 from ..services.skills.loader import MAX_BUNDLE_BYTES, SkillBundleError, load_skill_zip
 from ..services.skills.registry import SkillRegistry
 from ..services.upload_streaming import read_upload_within_limit
@@ -45,6 +51,16 @@ async def get_skill_registry() -> SkillRegistry:
 
 async def get_policy_service() -> PolicyService:
     return PolicyService(await get_database())
+
+
+async def get_approval_service() -> SkillApprovalService:
+    return SkillApprovalService(await get_database())
+
+
+def _is_named_reviewer(record: SkillVersion, current_user: CurrentUser) -> bool:
+    """True when the user holds a reviewer role this version asks an approval from."""
+    wanted = {item.reviewer_role for item in record.manifest.required_approvals}
+    return bool(wanted & actor_role_names(current_user))
 
 
 def _user_id(current_user: CurrentUser) -> str:
@@ -112,8 +128,11 @@ async def get_skill_version(
         project_id=project_id,
     )
     record = await registry.get_version(skill_key, version)
-    if record is None or record.status == "draft":
-        # Drafts are unpublished, unreviewed text: not visible through the drafter route.
+    if record is None:
+        raise HTTPException(status_code=404, detail="Skill version not found")
+    if record.status == "draft" and not _is_named_reviewer(record, current_user):
+        # Drafts are unpublished, unreviewed text: not visible through the drafter
+        # route. The reviewers a draft names must be able to read what they sign.
         raise HTTPException(status_code=404, detail="Skill version not found")
     return record
 
@@ -170,6 +189,86 @@ async def publish_skill_version(
     )
     await skill_admin_limiter.check_user_limit(_user_id(current_user))
     return await registry.publish(skill_key, version, payload.eval_report, _user_id(current_user))
+
+
+@router.get(
+    "/{skill_key}/versions/{version}/approvals", response_model=SkillApprovalListResponse
+)
+@handle_exceptions
+async def list_skill_approvals(
+    skill_key: str,
+    version: str,
+    registry: SkillRegistry = Depends(get_skill_registry),
+    approvals: SkillApprovalService = Depends(get_approval_service),
+    policy: PolicyService = Depends(get_policy_service),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Reviews a version calls for, and every approval recorded against it."""
+    await policy.authorize(
+        current_user, "drafting.skill.read", resource_type="skill", resource_id=skill_key
+    )
+    record = await registry.get_version(skill_key, version)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Skill version not found")
+    return SkillApprovalListResponse(
+        skill_key=record.skill_key,
+        version=record.version,
+        content_hash=record.content_hash,
+        required=list(record.manifest.required_approvals),
+        approvals=await approvals.list(skill_key, version),
+    )
+
+
+@router.post(
+    "/{skill_key}/versions/{version}/approvals", response_model=SkillApproval, status_code=201
+)
+@handle_exceptions
+async def record_skill_approval(
+    skill_key: str,
+    version: str,
+    payload: SkillApprovalRequest,
+    registry: SkillRegistry = Depends(get_skill_registry),
+    approvals: SkillApprovalService = Depends(get_approval_service),
+    policy: PolicyService = Depends(get_policy_service),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Record a technical or legal approval of a draft, bound to its text and evaluation.
+
+    The permission lets a user reach the route; the approval itself belongs to
+    the named reviewer role, which no platform role substitutes for.
+    """
+    await policy.authorize(
+        current_user, "drafting.skill.read", resource_type="skill", resource_id=skill_key
+    )
+    await skill_admin_limiter.check_user_limit(_user_id(current_user))
+    record = await registry.get_version(skill_key, version)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Skill version not found")
+    return await approvals.record(record, payload, current_user)
+
+
+@router.post("/approvals/{approval_id}/revoke", response_model=SkillApproval)
+@handle_exceptions
+async def revoke_skill_approval(
+    approval_id: str,
+    payload: SkillApprovalRevokeRequest,
+    registry: SkillRegistry = Depends(get_skill_registry),
+    approvals: SkillApprovalService = Depends(get_approval_service),
+    policy: PolicyService = Depends(get_policy_service),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Withdraw an approval. A published version that relied on it is deprecated."""
+    await policy.authorize(current_user, "drafting.skill.read", resource_type="skill")
+    await skill_admin_limiter.check_user_limit(_user_id(current_user))
+    revoked = await approvals.revoke(approval_id, payload.reason, current_user)
+    record = await registry.get_version(revoked.skill_key, revoked.version)
+    if (
+        record is not None
+        and record.status == "published"
+        and record.content_hash == revoked.content_hash
+    ):
+        await registry.deprecate(revoked.skill_key, revoked.version, _user_id(current_user))
+    return revoked
 
 
 @router.post("/{skill_key}/versions/{version}/deprecate", response_model=SkillVersion)
