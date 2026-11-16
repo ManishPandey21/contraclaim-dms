@@ -79,4 +79,3 @@ async def upgrade(db: Any, dry_run: bool) -> MigrationResult:
             "No row is deleted or merged. A collection with duplicate (case, origin) rows keeps no new index.",
         ],
     )
-
