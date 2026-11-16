@@ -96,6 +96,11 @@ import {
 } from "@/lib/claims-helpers";
 import ClaimStatusPill from "@/components/claims/ClaimStatusPill";
 import ClaimSignalsStrip from "@/components/claim-bench/ClaimSignalsStrip";
+import EscalateDialog from "@/components/claim-bench/EscalateDialog";
+
+/** Claims the register offers for escalation; the server re-checks every one. */
+const NOT_ESCALATED = new Set(["closed", "agreed", "potential"]);
+const canEscalate = (claim: ClaimDTO) => !claim.evidence_frozen_at && !NOT_ESCALATED.has(claim.status);
 import { useClaimBenchOn } from "@/hooks/useClaimBenchOn";
 import { formatCrore, formatDateIN, formatINR, fromDateInput, toDateInput } from "@/lib/format-in";
 
@@ -174,6 +179,9 @@ const ClaimsRegisterPage: React.FC = () => {
   const [assessClaim, setAssessClaim] = useState<ClaimDTO | null>(null);
   // The free-text assessment is retired where the Claim Bench is on.
   const benchOn = useClaimBenchOn();
+  // 4B-40: several claims of one project escalated together, from the register.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [escalating, setEscalating] = useState(false);
   const [taskClaim, setTaskClaim] = useState<ClaimDTO | null>(null);
   const [slaMap, setSlaMap] = useState<Record<string, ClaimSla>>({});
   const [exportingId, setExportingId] = useState<string | null>(null);
@@ -345,6 +353,37 @@ const ClaimsRegisterPage: React.FC = () => {
 
       <ClaimSignalsStrip onRaised={() => void load()} />
 
+      {benchOn && selected.size > 0 && (() => {
+        const chosen = claims.filter((c) => selected.has(c.id));
+        const projects = new Set(chosen.map((c) => c.project_id || ""));
+        const oneProject = projects.size === 1 && !projects.has("");
+        return (
+          <div role="region" aria-label="Selected claims" className="mb-4 flex flex-wrap items-center gap-3 rounded-md border p-3 text-sm">
+            <span>
+              {chosen.length} claim{chosen.length === 1 ? "" : "s"} selected
+            </span>
+            <Button size="sm" onClick={() => setEscalating(true)} disabled={!oneProject}>
+              Escalate selected to arbitration
+            </Button>
+            {!oneProject && <span className="text-muted-foreground">Claims escalated together must belong to one project.</span>}
+            <Button size="sm" variant="ghost" onClick={() => setSelected(new Set())}>
+              Clear selection
+            </Button>
+            <EscalateDialog
+              claimIds={chosen.map((c) => c.id)}
+              claimTitle={chosen.length === 1 ? chosen[0].title : `${chosen[0]?.title ?? "Claims"} and others`}
+              projectId={oneProject ? chosen[0].project_id : null}
+              open={escalating}
+              onOpenChange={setEscalating}
+              onEscalated={() => {
+                setSelected(new Set());
+                void load();
+              }}
+            />
+          </div>
+        );
+      })()}
+
       <Card>
         <CardHeader>
           <CardTitle>Claims</CardTitle>
@@ -395,6 +434,11 @@ const ClaimsRegisterPage: React.FC = () => {
           <Table>
             <TableHeader>
               <TableRow>
+                {benchOn && (
+                  <TableHead className="w-8">
+                    <span className="sr-only">Select for escalation</span>
+                  </TableHead>
+                )}
                 <TableHead>Ref</TableHead>
                 <TableHead>Title</TableHead>
                 <TableHead>Type</TableHead>
@@ -408,7 +452,7 @@ const ClaimsRegisterPage: React.FC = () => {
             <TableBody>
               {claims.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={8} className="text-center text-muted-foreground py-8">
+                  <TableCell colSpan={benchOn ? 9 : 8} className="text-center text-muted-foreground py-8">
                     {typeFilter !== "all" || statusFilter !== "all"
                       ? "No claims match these filters."
                       : "No claims yet. Use New Claim to record the first one."}
@@ -417,6 +461,25 @@ const ClaimsRegisterPage: React.FC = () => {
               ) : (
                 claims.map((c) => (
                   <TableRow key={c.id}>
+                    {benchOn && (
+                      <TableCell>
+                        {canEscalate(c) ? (
+                          <input
+                            type="checkbox"
+                            aria-label={`Select ${c.claim_ref || c.title} for escalation`}
+                            checked={selected.has(c.id)}
+                            onChange={(event) =>
+                              setSelected((prev) => {
+                                const next = new Set(prev);
+                                if (event.target.checked) next.add(c.id);
+                                else next.delete(c.id);
+                                return next;
+                              })
+                            }
+                          />
+                        ) : null}
+                      </TableCell>
+                    )}
                     <TableCell className="font-mono text-xs">{c.claim_ref || "—"}</TableCell>
                     <TableCell className="font-medium">{c.title}</TableCell>
                     <TableCell>{typeLabel(c.type)}</TableCell>

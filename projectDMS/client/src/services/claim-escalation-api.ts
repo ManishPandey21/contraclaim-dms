@@ -39,6 +39,17 @@ export interface EscalationTarget {
   new_case?: { title: string; case_reference?: string; party_perspective: "claimant" | "respondent" };
   /** One key per "Escalate" action: a repeated click extends the case the first one made (D-18). */
   idempotency_key?: string;
+  /** Claims whose unlocked board is weak, acknowledged by the user (D-18). */
+  acknowledged_weak?: string[];
+}
+
+export interface UndoResult {
+  claim_id: string;
+  case_id: string;
+  status: string;
+  rows_archived: number;
+  freeze_lifted: boolean;
+  case_discarded: boolean;
 }
 
 export async function previewEscalation(claimIds: string[], caseId?: string): Promise<EscalationPreview> {
@@ -51,5 +62,11 @@ export async function previewEscalation(claimIds: string[], caseId?: string): Pr
 
 export async function runEscalation(claimIds: string[], target: EscalationTarget): Promise<EscalationResult> {
   const { data } = await api.post<EscalationResult>("/claims/escalation/run", { claim_ids: claimIds, ...target });
+  return data;
+}
+
+/** Undo one claim's escalation, until the case's first pleading version (4B-37). */
+export async function undoEscalation(claimId: string, caseId: string, reason: string): Promise<UndoResult> {
+  const { data } = await api.post<UndoResult>("/claims/escalation/undo", { claim_id: claimId, case_id: caseId, reason });
   return data;
 }

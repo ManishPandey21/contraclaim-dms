@@ -41,7 +41,7 @@ const preview = (over: Partial<EscalationPreview> = {}): EscalationPreview => ({
 const mount = (onEscalated = vi.fn()) =>
   render(
     <MemoryRouter>
-      <EscalateDialog claimId="c1" claimTitle="Delayed handover" projectId="proj-A" open onOpenChange={vi.fn()} onEscalated={onEscalated} />
+      <EscalateDialog claimIds={["c1"]} claimTitle="Delayed handover" projectId="proj-A" open onOpenChange={vi.fn()} onEscalated={onEscalated} />
     </MemoryRouter>
   );
 
@@ -82,8 +82,14 @@ describe("Escalate to arbitration", () => {
     expect(escalate).toBeDisabled();
     await userEvent.selectOptions(screen.getByLabelText("Arbitration case"), "case-1");
     expect(screen.queryByLabelText("Case title")).not.toBeInTheDocument();
+    // The board is not locked and the record is weak: Escalate waits for the acknowledgement (D-18).
+    await waitFor(() => expect(escalate).toBeDisabled());
+    await userEvent.click(await screen.findByRole("checkbox", { name: /board of CLM-014 is not locked/ }));
+    await waitFor(() => expect(escalate).toBeEnabled());
     await userEvent.click(escalate);
-    await waitFor(() => expect(api.runEscalation).toHaveBeenCalledWith(["c1"], { case_id: "case-1" }));
+    await waitFor(() =>
+      expect(api.runEscalation).toHaveBeenCalledWith(["c1"], { case_id: "case-1", acknowledged_weak: ["c1"] })
+    );
     expect(await screen.findByRole("status")).toHaveTextContent("Case extended: ABC v. Authority. 2 rows added, all awaiting review. 3 were already there");
     expect(screen.getByRole("link", { name: "Open the case" })).toHaveAttribute("href", "/arbitration/cases/case-1");
     expect(onEscalated).toHaveBeenCalled();
@@ -103,6 +109,7 @@ describe("Escalate to arbitration", () => {
     });
     mount();
     const escalate = await screen.findByRole("button", { name: "Escalate" });
+    await userEvent.click(await screen.findByRole("checkbox", { name: /board of CLM-014 is not locked/ }));
     await userEvent.click(escalate);
     await waitFor(() => expect(api.runEscalation).toHaveBeenCalledTimes(1));
     await userEvent.click(await screen.findByRole("button", { name: "Escalate" }));
@@ -111,6 +118,35 @@ describe("Escalate to arbitration", () => {
     expect(first.new_case.title).toBe("Delayed handover");
     expect(first.idempotency_key).toMatch(/^esc-[A-Za-z0-9-]{8,}$/);
     expect(second.idempotency_key).toBe(first.idempotency_key);
+  });
+
+  it("escalates several claims at once, each with its own section and acknowledgement (4B-40)", async () => {
+    const two = preview({
+      claims: [
+        preview().claims[0],
+        { ...preview().claims[0], claim_id: "c2", claim_ref: "CLM-015", title: "Idle plant", board_locked: true },
+      ],
+    });
+    api.previewEscalation.mockResolvedValue(two);
+    api.runEscalation.mockResolvedValue({
+      case_id: "case-1", case_title: "ABC v. Authority", created_case: false, rows_created: {}, rows_already_present: 0, claims: [],
+    });
+    render(
+      <MemoryRouter>
+        <EscalateDialog claimIds={["c1", "c2"]} claimTitle="Two claims" projectId="proj-A" open onOpenChange={vi.fn()} onEscalated={vi.fn()} />
+      </MemoryRouter>
+    );
+    expect(await screen.findByRole("region", { name: "Claim CLM-014" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Claim CLM-015" })).toBeInTheDocument();
+    expect(api.previewEscalation).toHaveBeenCalledWith(["c1", "c2"], undefined);
+    // Only the unlocked, weak claim needs acknowledging.
+    expect(screen.getAllByRole("checkbox")).toHaveLength(1);
+    await userEvent.selectOptions(screen.getByLabelText("Arbitration case"), "case-1");
+    await userEvent.click(await screen.findByRole("checkbox", { name: /board of CLM-014 is not locked/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Escalate" }));
+    await waitFor(() =>
+      expect(api.runEscalation).toHaveBeenCalledWith(["c1", "c2"], { case_id: "case-1", acknowledged_weak: ["c1"] })
+    );
   });
 
   it("will not escalate while the server lists a blocker", async () => {

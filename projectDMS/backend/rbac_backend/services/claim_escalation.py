@@ -108,6 +108,9 @@ class EscalationRequest(BaseModel):
     # Required with new_case: one key per "Escalate" action, so a repeated click or a
     # retried request extends the case the first one created (D-18).
     idempotency_key: Optional[str] = Field(default=None, min_length=8, max_length=120, pattern=r"^[A-Za-z0-9_.:-]+$")
+    # D-18 (4B-40): claims whose board is not locked and whose record is weak are
+    # escalated only when the user has acknowledged what is weak for each, by id.
+    acknowledged_weak: List[str] = Field(default_factory=list, max_length=MAX_CLAIMS)
 
 
 def _conflict(code: str, message: str) -> HTTPException:
@@ -500,6 +503,28 @@ class ClaimEscalation:
                 },
             )
         user_id = str(getattr(current_user, "id", "") or "") or None
+
+        # 0. D-18: an unlocked board with weak points goes only with the user's acknowledgement.
+        unacknowledged: List[str] = []
+        for claim in claims:
+            carry, _rows = await self._carry(
+                claim, documents.get(str(claim["_id"]), set()), notices.get(str(claim["_id"]), set())
+            )
+            if carry.weak and not carry.board_locked and str(claim["_id"]) not in set(request.acknowledged_weak):
+                unacknowledged.append(str(claim.get("claim_ref") or claim["_id"]))
+        if unacknowledged:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "escalation_weak_unacknowledged",
+                    "user_message": (
+                        "Acknowledge what is weak before escalating a claim whose board is not locked: "
+                        + ", ".join(unacknowledged)
+                        + "."
+                    ),
+                    "detail": {"claims": unacknowledged},
+                },
+            )
 
         # 1. Nothing unfreezes a claim, so every freeze is checked before anything is written.
         for claim in claims:

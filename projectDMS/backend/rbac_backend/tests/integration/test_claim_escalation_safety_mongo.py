@@ -89,7 +89,7 @@ def test_five_concurrent_runs_into_one_case_carry_each_row_once(monkeypatch) -> 
             await _prepared(env)
             case_id = await _case(env)
             results = await asyncio.gather(
-                *(env.call("POST", "org_admin", RUN, json={"claim_ids": [CLAIM], "case_id": case_id}) for _ in range(5))
+                *(env.call("POST", "org_admin", RUN, json={"claim_ids": [CLAIM], "acknowledged_weak": [CLAIM], "case_id": case_id}) for _ in range(5))
             )
             assert all(item.status_code == 201 for item in results), [item.text[:200] for item in results]
             rows = await _rows(env, case_id)
@@ -113,7 +113,7 @@ def test_five_concurrent_runs_into_one_case_carry_each_row_once(monkeypatch) -> 
             assert case["claim_ids"] == [CLAIM]
 
             # A re-run is a no-op.
-            again = await env.call("POST", "org_admin", RUN, json={"claim_ids": [CLAIM], "case_id": case_id})
+            again = await env.call("POST", "org_admin", RUN, json={"claim_ids": [CLAIM], "acknowledged_weak": [CLAIM], "case_id": case_id})
             assert again.status_code == 201, again.text[:300]
             assert again.json()["rows_created"] == {} and again.json()["rows_already_present"] == len(rows)
             assert len(await _rows(env, case_id)) == len(rows)
@@ -127,11 +127,11 @@ def test_five_new_case_runs_with_one_key_make_one_case(monkeypatch) -> None:
         async with _env(monkeypatch) as env:
             await _prepared(env)
             missing = await env.call(
-                "POST", "org_admin", RUN, json={"claim_ids": [CLAIM], "new_case": {"title": "No key"}}
+                "POST", "org_admin", RUN, json={"claim_ids": [CLAIM], "acknowledged_weak": [CLAIM], "new_case": {"title": "No key"}}
             )
             assert missing.status_code == 422, missing.text[:300]
             assert await env.db.arbitration_cases.count_documents({}) == 0
-            body = {"claim_ids": [CLAIM], "new_case": {"title": "ABC Infra v. Authority"}, "idempotency_key": "esc-test-one-key"}
+            body = {"claim_ids": [CLAIM], "acknowledged_weak": [CLAIM], "new_case": {"title": "ABC Infra v. Authority"}, "idempotency_key": "esc-test-one-key"}
             results = await asyncio.gather(*(env.call("POST", "org_admin", RUN, json=body) for _ in range(5)))
             assert all(item.status_code == 201 for item in results), [item.text[:200] for item in results]
             case_ids = {item.json()["case_id"] for item in results}
@@ -155,7 +155,7 @@ def test_two_new_case_runs_with_different_keys_leave_one_live_case(monkeypatch) 
                         "POST",
                         "org_admin",
                         RUN,
-                        json={"claim_ids": [CLAIM], "new_case": {"title": f"Case {n}"}, "idempotency_key": f"esc-key-{n:04d}"},
+                        json={"claim_ids": [CLAIM], "acknowledged_weak": [CLAIM], "new_case": {"title": f"Case {n}"}, "idempotency_key": f"esc-key-{n:04d}"},
                     )
                     for n in range(2)
                 )
@@ -185,10 +185,10 @@ def test_a_filed_or_archived_case_takes_no_claims(monkeypatch, closed: str) -> N
             await _prepared(env)
             case_id = await _case(env)
             await env.db.arbitration_cases.update_one({"_id": case_id}, {"$set": {"status": closed}})
-            preview = await env.call("POST", "org_admin", PREVIEW, json={"claim_ids": [CLAIM], "case_id": case_id})
+            preview = await env.call("POST", "org_admin", PREVIEW, json={"claim_ids": [CLAIM], "acknowledged_weak": [CLAIM], "case_id": case_id})
             assert preview.status_code == 200 and preview.json()["can_escalate"] is False
             assert any(closed in blocker for blocker in preview.json()["blockers"])
-            refused = await env.call("POST", "org_admin", RUN, json={"claim_ids": [CLAIM], "case_id": case_id})
+            refused = await env.call("POST", "org_admin", RUN, json={"claim_ids": [CLAIM], "acknowledged_weak": [CLAIM], "case_id": case_id})
             assert refused.status_code == 409, refused.text[:300]
             claim = await _claim(env)
             assert claim.get("arbitration_case_id") is None and claim["status"] == "submitted"
@@ -203,10 +203,10 @@ def test_the_preview_is_for_the_chosen_case(monkeypatch) -> None:
         async with _env(monkeypatch) as env:
             await _prepared(env)
             first, other = await _case(env, "First"), await _case(env, "Other")
-            assert (await env.call("POST", "org_admin", RUN, json={"claim_ids": [CLAIM], "case_id": first})).status_code == 201
-            same = await env.call("POST", "org_admin", PREVIEW, json={"claim_ids": [CLAIM], "case_id": first})
+            assert (await env.call("POST", "org_admin", RUN, json={"claim_ids": [CLAIM], "acknowledged_weak": [CLAIM], "case_id": first})).status_code == 201
+            same = await env.call("POST", "org_admin", PREVIEW, json={"claim_ids": [CLAIM], "acknowledged_weak": [CLAIM], "case_id": first})
             assert same.json()["can_escalate"] is True, same.json()["blockers"]
-            elsewhere = await env.call("POST", "org_admin", PREVIEW, json={"claim_ids": [CLAIM], "case_id": other})
+            elsewhere = await env.call("POST", "org_admin", PREVIEW, json={"claim_ids": [CLAIM], "acknowledged_weak": [CLAIM], "case_id": other})
             assert elsewhere.json()["can_escalate"] is False
             assert any("another arbitration case" in blocker for blocker in elsewhere.json()["blockers"])
 
@@ -222,7 +222,7 @@ def test_a_claim_that_cannot_be_frozen_is_not_escalated_and_nothing_is_written(m
                 {"document_id": DOC_IN_ID}, {"$unset": {"file_object_id": ""}}
             )
             assert changed.modified_count >= 1
-            body = {"claim_ids": [CLAIM], "new_case": {"title": "T"}, "idempotency_key": "esc-unfreezable"}
+            body = {"claim_ids": [CLAIM], "acknowledged_weak": [CLAIM], "new_case": {"title": "T"}, "idempotency_key": "esc-unfreezable"}
             refused = await env.call("POST", "org_admin", RUN, json=body)
             assert refused.status_code == 409, refused.text[:300]
             claim = await _claim(env)
@@ -258,5 +258,32 @@ def test_m05_reports_existing_duplicates_and_leaves_that_collection_unindexed(mo
             assert not clean.warnings
             names = {index["name"] for index in await env.db.arbitration_claim_matrix.list_indexes().to_list(None)}
             assert INDEX_NAME in names
+
+    _run(scenario())
+
+
+def test_an_unlocked_board_with_weak_points_needs_their_acknowledgement(monkeypatch) -> None:
+    """D-18 (4B-40): the user acknowledges each weak claim on an unlocked board, by id."""
+
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            await _prepared(env)
+            case_id = await _case(env)
+            preview = await env.call("POST", "org_admin", PREVIEW, json={"claim_ids": [CLAIM], "case_id": case_id})
+            carry = preview.json()["claims"][0]
+            assert carry["weak"] and carry["board_locked"] is False, carry
+            refused = await env.call("POST", "org_admin", RUN, json={"claim_ids": [CLAIM], "case_id": case_id})
+            assert refused.status_code == 422 and _code(refused) == "escalation_weak_unacknowledged", refused.text[:300]
+            other = await env.call(
+                "POST", "org_admin", RUN, json={"claim_ids": [CLAIM], "case_id": case_id, "acknowledged_weak": ["another-claim"]}
+            )
+            assert other.status_code == 422, other.text[:300]
+            claim = await _claim(env)
+            assert claim.get("arbitration_case_id") is None and claim.get("evidence_frozen_at") is None
+            assert await _rows(env, case_id) == []
+            accepted = await env.call(
+                "POST", "org_admin", RUN, json={"claim_ids": [CLAIM], "case_id": case_id, "acknowledged_weak": [CLAIM]}
+            )
+            assert accepted.status_code == 201, accepted.text[:300]
 
     _run(scenario())

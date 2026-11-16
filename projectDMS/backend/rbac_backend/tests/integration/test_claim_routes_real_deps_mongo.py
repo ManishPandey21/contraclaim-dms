@@ -263,7 +263,8 @@ def test_a_letter_linked_as_the_claims_notice_becomes_each_heads_notice_record(m
 
             run = await env.call(
                 "POST", "org_admin", "/api/claims/escalation/run",
-                json={"claim_ids": [CLAIM], "new_case": {"title": "ABC Infra v. Authority"}, "idempotency_key": "esc-route-test"},
+                json={"claim_ids": [CLAIM], "new_case": {"title": "ABC Infra v. Authority"}, "idempotency_key": "esc-route-test",
+                      "acknowledged_weak": [CLAIM]},
             )
             assert run.status_code == 201, run.text[:300]
             rows = await env.db.arbitration_claim_matrix.find({"source_claim_id": CLAIM}).to_list(length=None)

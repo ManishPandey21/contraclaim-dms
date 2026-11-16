@@ -52,7 +52,10 @@ from rbac_backend.services.claim_delay_lab import ClaimDelayLab, EventDecisionRe
 ACTOR = SimpleNamespace(id=USER, organization_id=ORG)
 DOCS = {CLAIM_ID: {"doc-1", "doc-2"}}
 NEW = EscalationRequest(
-    claim_ids=[CLAIM_ID], new_case=NewCase(title="ABC Infra v. Authority"), idempotency_key="escalate-test-0001"
+    claim_ids=[CLAIM_ID],
+    new_case=NewCase(title="ABC Infra v. Authority"),
+    idempotency_key="escalate-test-0001",
+    acknowledged_weak=[CLAIM_ID],
 )
 
 
@@ -210,7 +213,7 @@ async def test_escalating_again_adds_nothing_twice_and_extends_an_existing_case(
     (case,) = _rows(db, "arbitration_cases")
     counts = {name: len(_rows(db, name)) for name in ("arbitration_claim_matrix", "arbitration_document_index", "arbitration_chronology_matrix")}
     again = await escalation.escalate(
-        [await _claim(db)], DOCS, EscalationRequest(claim_ids=[CLAIM_ID], case_id=case["_id"]), ACTOR, case
+        [await _claim(db)], DOCS, EscalationRequest(claim_ids=[CLAIM_ID], case_id=case["_id"], acknowledged_weak=[CLAIM_ID]), ACTOR, case
     )
     assert not again.created_case and again.rows_created == {} and again.rows_already_present == sum(first.rows_created.values())
     assert counts == {name: len(_rows(db, name)) for name in counts}

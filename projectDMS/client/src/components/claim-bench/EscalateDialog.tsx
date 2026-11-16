@@ -16,7 +16,8 @@ import {
 } from "@/services/claim-escalation-api";
 
 interface Props {
-  claimId: string;
+  /** One claim from the Bench, or several chosen in the register (4B-40). */
+  claimIds: string[];
   claimTitle: string;
   projectId?: string | null;
   open: boolean;
@@ -46,7 +47,8 @@ function newKey(): string {
  * carried into the case, what is weak, and what is left behind and why, before
  * anything is changed.
  */
-const EscalateDialog: React.FC<Props> = ({ claimId, claimTitle, projectId, open, onOpenChange, onEscalated }) => {
+const EscalateDialog: React.FC<Props> = ({ claimIds, claimTitle, projectId, open, onOpenChange, onEscalated }) => {
+  const claimKey = claimIds.join(",");
   const [preview, setPreview] = useState<EscalationPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [cases, setCases] = useState<ArbitrationCase[]>([]);
@@ -58,6 +60,8 @@ const EscalateDialog: React.FC<Props> = ({ claimId, claimTitle, projectId, open,
   // One key per opening of the dialog: a double click, or a retry after a lost
   // response, extends the case the first request created instead of making another.
   const [idempotencyKey, setIdempotencyKey] = useState(newKey);
+  // D-18: claims whose board is not locked and whose record is weak, acknowledged one by one.
+  const [acknowledged, setAcknowledged] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     if (!open) return;
@@ -67,13 +71,14 @@ const EscalateDialog: React.FC<Props> = ({ claimId, claimTitle, projectId, open,
     setTarget(NEW);
     setTitle(claimTitle);
     setIdempotencyKey(newKey());
+    setAcknowledged(new Set());
     listArbitrationCases(projectId ? { project_id: projectId } : {})
       .then((data) => active && setCases((data || []).filter((item) => !projectId || item.project_id === projectId)))
       .catch(() => active && setCases([]));
     return () => {
       active = false;
     };
-  }, [open, claimId, claimTitle, projectId]);
+  }, [open, claimKey, claimTitle, projectId]);
 
   // The preview is worked out for the case chosen: a claim already in that case is
   // a re-run, not a blocker (C-10).
@@ -81,25 +86,33 @@ const EscalateDialog: React.FC<Props> = ({ claimId, claimTitle, projectId, open,
     if (!open) return;
     let active = true;
     setPreview(null);
-    previewEscalation([claimId], target === NEW ? undefined : target)
+    previewEscalation(claimKey.split(","), target === NEW ? undefined : target)
       .then((data) => active && setPreview(data))
       .catch((reason) => active && setError(errorMessage(reason, "The escalation could not be previewed.")));
     return () => {
       active = false;
     };
-  }, [open, claimId, target]);
+  }, [open, claimKey, target]);
 
-  const carry = preview?.claims[0];
-  const ready = Boolean(preview?.can_escalate) && (target !== NEW || title.trim() !== "");
+  const carries = preview?.claims ?? [];
+  const needsAck = carries.filter((item) => item.weak.length > 0 && !item.board_locked);
+  const allAcked = needsAck.every((item) => acknowledged.has(item.claim_id));
+  const ready = Boolean(preview?.can_escalate) && allAcked && (target !== NEW || title.trim() !== "");
+  const several = carries.length > 1;
 
   const escalate = async () => {
     setBusy(true);
     try {
+      const acknowledgedWeak = needsAck.map((item) => item.claim_id);
       const done = await runEscalation(
-        [claimId],
+        claimIds,
         target === NEW
-          ? { new_case: { title: title.trim(), party_perspective: perspective }, idempotency_key: idempotencyKey }
-          : { case_id: target }
+          ? {
+              new_case: { title: title.trim(), party_perspective: perspective },
+              idempotency_key: idempotencyKey,
+              acknowledged_weak: acknowledgedWeak,
+            }
+          : { case_id: target, acknowledged_weak: acknowledgedWeak }
       );
       setResult(done);
       onEscalated();
@@ -139,7 +152,7 @@ const EscalateDialog: React.FC<Props> = ({ claimId, claimTitle, projectId, open,
           </div>
         ) : (
           preview &&
-          carry && (
+          carries.length > 0 && (
             <div className="space-y-4 text-sm">
               {preview.blockers.length > 0 && (
                 <ul role="alert" className="list-disc space-y-1 rounded-md border border-red-700 bg-red-50 p-3 pl-7 text-red-950">
@@ -165,38 +178,64 @@ const EscalateDialog: React.FC<Props> = ({ claimId, claimTitle, projectId, open,
                 </ul>
               </section>
 
-              {carry.weak.length > 0 && (
-                <section aria-labelledby="weak-heading" className="space-y-1">
-                  <h3 id="weak-heading" className="font-semibold">
-                    Carried, but weak on the record
-                  </h3>
-                  <ul className="list-disc space-y-0.5 rounded-md border border-amber-600 bg-amber-50 p-3 pl-7 text-amber-950">
-                    {carry.weak.map((item) => (
-                      <li key={item}>{item}</li>
-                    ))}
-                  </ul>
-                </section>
-              )}
-
-              {carry.not_carried.length > 0 && (
-                <section aria-labelledby="left-heading" className="space-y-1">
-                  <h3 id="left-heading" className="font-semibold">
-                    Left behind
-                  </h3>
-                  <ul className="list-disc space-y-0.5 rounded-md border p-3 pl-7">
-                    {carry.not_carried.map((item) => (
-                      <li key={item}>{item}</li>
-                    ))}
-                  </ul>
-                </section>
-              )}
+              {carries.map((carry) => {
+                const label = carry.claim_ref || carry.title || "This claim";
+                const mustAck = carry.weak.length > 0 && !carry.board_locked;
+                return (
+                  <section key={carry.claim_id} aria-label={several ? `Claim ${label}` : undefined} className="space-y-2">
+                    {several && <h3 className="font-semibold">{label}</h3>}
+                    {carry.weak.length > 0 && (
+                      <div className="space-y-1">
+                        <h4 className="text-sm font-medium">Carried, but weak on the record</h4>
+                        <ul className="list-disc space-y-0.5 rounded-md border border-amber-600 bg-amber-50 p-3 pl-7 text-amber-950">
+                          {carry.weak.map((item) => (
+                            <li key={item}>{item}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    {carry.not_carried.length > 0 && (
+                      <div className="space-y-1">
+                        <h4 className="text-sm font-medium">Left behind</h4>
+                        <ul className="list-disc space-y-0.5 rounded-md border p-3 pl-7">
+                          {carry.not_carried.map((item) => (
+                            <li key={item}>{item}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    <p className="text-xs text-muted-foreground">
+                      {carry.status_after !== carry.status
+                        ? `${several ? `${label}: the` : "The"} claim's status becomes “${carry.status_after}”.`
+                        : `${several ? `${label}: the` : "The"} claim's status does not change.`}{" "}
+                      Its evidence is frozen and its board becomes read-only.
+                    </p>
+                    {mustAck && (
+                      <label className="flex items-start gap-2 rounded-md border border-amber-600 p-2 text-sm">
+                        <input
+                          type="checkbox"
+                          className="mt-0.5"
+                          checked={acknowledged.has(carry.claim_id)}
+                          onChange={(event) =>
+                            setAcknowledged((prev) => {
+                              const next = new Set(prev);
+                              if (event.target.checked) next.add(carry.claim_id);
+                              else next.delete(carry.claim_id);
+                              return next;
+                            })
+                          }
+                        />
+                        <span>
+                          The board of {label} is not locked. I have read what is weak above and escalate it as it is.
+                        </span>
+                      </label>
+                    )}
+                  </section>
+                );
+              })}
 
               <p className="text-xs text-muted-foreground">
                 Internal analysis (simulations and the strategy note) is never carried into a case.
-                {carry.status_after !== carry.status
-                  ? ` The claim's status becomes “${carry.status_after}”.`
-                  : " The claim's status does not change."}{" "}
-                Its evidence is frozen and its board becomes read-only.
               </p>
 
               <section className="grid gap-3 sm:grid-cols-2">

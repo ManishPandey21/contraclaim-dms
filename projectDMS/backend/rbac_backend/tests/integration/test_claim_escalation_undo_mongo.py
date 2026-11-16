@@ -40,7 +40,7 @@ def _code(response: Any) -> str:
 
 async def _escalate_new(env: Any, key: str = "esc-undo-0001") -> str:
     run = await env.call(
-        "POST", "org_admin", RUN, json={"claim_ids": [CLAIM], "new_case": {"title": "ABC v. Authority"}, "idempotency_key": key}
+        "POST", "org_admin", RUN, json={"claim_ids": [CLAIM], "acknowledged_weak": [CLAIM], "new_case": {"title": "ABC v. Authority"}, "idempotency_key": key}
     )
     assert run.status_code == 201, run.text[:300]
     return run.json()["case_id"]
@@ -162,7 +162,7 @@ def test_undo_keeps_an_earlier_freeze_and_an_existing_case(monkeypatch) -> None:
                 {"$set": {"evidence_frozen_at": earlier, "evidence_frozen_by": "someone", "evidence_freeze_reason": "Lifecycle"}},
             )
             case_id = await _case(env)
-            run = await env.call("POST", "org_admin", RUN, json={"claim_ids": [CLAIM], "case_id": case_id})
+            run = await env.call("POST", "org_admin", RUN, json={"claim_ids": [CLAIM], "acknowledged_weak": [CLAIM], "case_id": case_id})
             assert run.status_code == 201, run.text[:300]
             undone = await env.call("POST", "org_admin", UNDO, json={"claim_id": CLAIM, "case_id": case_id, "reason": REASON})
             assert undone.status_code == 200, undone.text[:300]

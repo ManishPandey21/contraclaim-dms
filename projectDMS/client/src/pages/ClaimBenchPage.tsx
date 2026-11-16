@@ -6,6 +6,7 @@ import ClaimStatusPill from "@/components/claims/ClaimStatusPill";
 import DelayTab from "@/components/claim-bench/DelayTab";
 import DeterminationsPanel from "@/components/claim-bench/DeterminationsPanel";
 import EscalateDialog from "@/components/claim-bench/EscalateDialog";
+import UndoEscalationDialog from "@/components/claim-bench/UndoEscalationDialog";
 import InternalAnalysisPanel from "@/components/claim-bench/InternalAnalysisPanel";
 import SubmissionPanel from "@/components/claim-bench/SubmissionPanel";
 import HeadPanel from "@/components/claim-bench/HeadPanel";
@@ -75,6 +76,7 @@ const ClaimBenchPage: React.FC = () => {
   const [tab, setTab] = useState<"elements" | "delay" | "quantum">("elements");
   const [chosenView, setChosenView] = useState<WorkspaceView | null>(null);
   const [escalating, setEscalating] = useState(false);
+  const [undoing, setUndoing] = useState(false);
   // Hides the tab only. The server refuses privileged material to anyone without the permission.
   const mayReadInternal = useHasPermission("dms.claim.strategy.read");
   // Reopening a locked board needs claim-manage rights and a reason (D-22); the server enforces both.
@@ -158,12 +160,19 @@ const ClaimBenchPage: React.FC = () => {
             </Link>
           </Button>
           {data.arbitration_case_id ? (
-            <Button asChild variant="outline" size="sm">
-              <Link to={`/arbitration/cases/${data.arbitration_case_id}`}>
-                <Scale className="mr-2 h-4 w-4" aria-hidden="true" />
-                Open the arbitration case
-              </Link>
-            </Button>
+            <>
+              <Button asChild variant="outline" size="sm">
+                <Link to={`/arbitration/cases/${data.arbitration_case_id}`}>
+                  <Scale className="mr-2 h-4 w-4" aria-hidden="true" />
+                  Open the arbitration case
+                </Link>
+              </Button>
+              {mayReopen && (
+                <Button variant="outline" size="sm" onClick={() => setUndoing(true)}>
+                  Undo escalation
+                </Button>
+              )}
+            </>
           ) : (
             <Button variant="outline" size="sm" onClick={() => setEscalating(true)}>
               <Scale className="mr-2 h-4 w-4" aria-hidden="true" />
@@ -172,8 +181,17 @@ const ClaimBenchPage: React.FC = () => {
           )}
         </div>
       </header>
+      {data.arbitration_case_id && (
+        <UndoEscalationDialog
+          claimId={id}
+          caseId={data.arbitration_case_id}
+          open={undoing}
+          onOpenChange={setUndoing}
+          onUndone={() => void query.refetch()}
+        />
+      )}
       <EscalateDialog
-        claimId={id}
+        claimIds={[id]}
         claimTitle={data.title}
         projectId={data.project_id}
         open={escalating}
