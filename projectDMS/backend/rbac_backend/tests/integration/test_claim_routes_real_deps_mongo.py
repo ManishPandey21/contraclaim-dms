@@ -232,6 +232,46 @@ def test_the_escalation_router_resolves_its_real_dependencies(monkeypatch) -> No
     _run(scenario())
 
 
+def test_a_letter_linked_as_the_claims_notice_becomes_each_heads_notice_record(monkeypatch) -> None:
+    """4B-34 through the real relationship service: role "notice" on the claim is the notice record."""
+    from rbac_backend.tests.integration.test_variation_relationships_cl2_mongo import DOC_IN_ID, DOC_OUT_ID
+
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            assert (await env.call("POST", "org_admin", f"/api/claims/{CLAIM}/bench/open")).status_code == 200
+            weak_text = "No notice letter is linked to the claim"
+
+            async def preview_weak() -> list:
+                response = await env.call("POST", "org_admin", "/api/claims/escalation/preview", json={"claim_ids": [CLAIM]})
+                assert response.status_code == 200, response.text[:300]
+                return response.json()["claims"][0]["weak"]
+
+            # A letter linked as ordinary correspondence is not a notice.
+            linked = await env.call(
+                "POST", "org_admin", f"/api/entities/claim/{CLAIM}/document-links:batch",
+                json={"links": [{"document_id": DOC_OUT_ID, "relationship_role": "correspondence"}]},
+            )
+            assert linked.status_code in (200, 201), linked.text[:300]
+            assert any(weak_text in item for item in await preview_weak())
+
+            linked = await env.call(
+                "POST", "org_admin", f"/api/entities/claim/{CLAIM}/document-links:batch",
+                json={"links": [{"document_id": DOC_IN_ID, "relationship_role": "notice"}]},
+            )
+            assert linked.status_code in (200, 201), linked.text[:300]
+            assert not any(weak_text in item for item in await preview_weak())
+
+            run = await env.call(
+                "POST", "org_admin", "/api/claims/escalation/run",
+                json={"claim_ids": [CLAIM], "new_case": {"title": "ABC Infra v. Authority"}},
+            )
+            assert run.status_code == 201, run.text[:300]
+            rows = await env.db.arbitration_claim_matrix.find({"source_claim_id": CLAIM}).to_list(length=None)
+            assert rows and all(row["notice_ids"] == [DOC_IN_ID] for row in rows), [r.get("notice_ids") for r in rows]
+
+    _run(scenario())
+
+
 # --------------------------------------------------------------------------- #
 # Tenant isolation through the real chain
 # --------------------------------------------------------------------------- #

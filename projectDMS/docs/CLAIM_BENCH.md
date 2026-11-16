@@ -136,6 +136,7 @@ Migration `20261118_0001` adds indexes only.
 
 - A confirmation sheet first shows what would be carried, what is weak on the record, and what is left behind and why. Nothing changes until "Escalate".
 - Carried: heads → claim matrix; notice dates → notice compliance; cost lines with proof → quantum annexures; key dates and delay events → chronology; linked documents → document index; overlaps with no decided treatment → issue matrix as open issues with no figure.
+- Notice letters (4B-34): documents linked to the claim with the role **Notice** become each head's notice record and are named on the notice-compliance row. Only letters the person escalating may see are carried. The preview warns when no notice letter is linked, because each head would then be reported as missing its notice record.
 - Never carried: a notice period not verified against the contract (only the dates go), cost lines without proof, simulations and the strategy note.
 - Every row is created through the case workspace's own row path, so it starts as **needs review** and withdraws any readiness approval already given on the case, exactly as a row added by hand does. Escalation approves nothing.
 - Rows carry their origin (claim, head). Escalating the same claim again adds nothing twice.

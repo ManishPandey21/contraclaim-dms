@@ -1,4 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
+import ClaimHeadLinksPicker from "@/components/arbitration/ClaimHeadLinksPicker";
+import { type ClaimHeadLinks, EMPTY_CLAIM_HEAD_LINKS } from "@/lib/claim-head-links";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -314,6 +316,7 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
   const [activeMatrix, setActiveMatrix] = useState<MatrixSlug>("document-index");
   const [form, setForm] = useState<CaseFormState>(initialCaseForm);
   const [matrixForm, setMatrixForm] = useState<Record<string, string>>({});
+  const [claimLinks, setClaimLinks] = useState<ClaimHeadLinks>(EMPTY_CLAIM_HEAD_LINKS);
   const [reviewRoles, setReviewRoles] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -476,6 +479,7 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
     try {
       const payload: Record<string, unknown> = {
         ...matrixForm,
+        ...(activeMatrix === "claim-matrix" ? claimLinks : {}),
       };
       if (activeMatrix === "document-index") {
         payload.source_type = payload.source_type || "document";
@@ -483,6 +487,7 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
       }
       await createMatrixRow(caseId, activeMatrix, payload);
       setMatrixForm({});
+      setClaimLinks(EMPTY_CLAIM_HEAD_LINKS);
       setRows(await listMatrixRows(caseId, activeMatrix));
       setDashboard(await getArbitrationCaseDashboard(caseId));
       toast.success("Matrix row saved");
@@ -1460,6 +1465,14 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
                     )}
                   </div>
                 ))}
+                {activeMatrix === "claim-matrix" && caseId && (
+                  <ClaimHeadLinksPicker
+                    caseId={caseId}
+                    projectId={caseData?.project_id || ""}
+                    value={claimLinks}
+                    onChange={setClaimLinks}
+                  />
+                )}
                 <p className="text-xs text-muted-foreground">
                   New rows always begin in needs review. Approval is available only through the role-based review action.
                 </p>

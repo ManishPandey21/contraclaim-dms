@@ -10,6 +10,8 @@ What is carried, and where:
 - cost lines with proof linked  -> quantum annexures
 - delay events and key dates    -> chronology matrix
 - documents linked to the claim -> document index
+- documents linked with the role "notice" -> each head's notice records, and
+  the notice-compliance row (4B-34)
 - overlaps with no decided treatment -> issue matrix, as open issues with no figure
 
 What is never carried: a notice period that has not been verified against the
@@ -32,7 +34,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, Iterable, List, Optional, Set
 
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
@@ -129,9 +131,20 @@ def status_after(current: str) -> str:
     return ClaimStatus.DISPUTED.value if ClaimStatus.DISPUTED in allowed or current == ClaimStatus.DISPUTED.value else current
 
 
-def build_carry(claim: Dict[str, Any], record: SubmissionRecord, bench: Optional[ClaimBench]) -> tuple[ClaimCarry, List[tuple[str, Dict[str, Any]]]]:
-    """The rows a claim adds to a case, with what is weak and what is left behind."""
+def build_carry(
+    claim: Dict[str, Any],
+    record: SubmissionRecord,
+    bench: Optional[ClaimBench],
+    notice_ids: Iterable[str] = (),
+) -> tuple[ClaimCarry, List[tuple[str, Dict[str, Any]]]]:
+    """The rows a claim adds to a case, with what is weak and what is left behind.
+
+    ``notice_ids`` are the documents linked to the claim with the role "notice"
+    that the caller may see (4B-34). The notice is given for the claim, so every
+    head carries them; a reviewer still approves each row before it is pleaded.
+    """
     claim_id = str(claim["_id"])
+    notices = sorted({str(item) for item in notice_ids if item})
     reference = str(claim.get("claim_ref") or claim_id)
     rows: List[tuple[str, Dict[str, Any]]] = []
     weak: List[str] = []
@@ -177,8 +190,8 @@ def build_carry(claim: Dict[str, Any], record: SubmissionRecord, bench: Optional
                     "currency": record.currency,
                     "clause_ids": list(head.clause_refs),
                     "facts": head.event_summary,
-                    # Notice records are linked in the case, by a person. None is assumed here.
-                    "notice_ids": [],
+                    # The claim's notice letters (role "notice"), as linked by a person on the claim.
+                    "notice_ids": list(notices),
                     "evidence_ids": evidence_ids,
                     "causation": causation.note if causation.state == "supported" else None,
                     "relief": "; ".join(relief) or None,
@@ -239,6 +252,10 @@ def build_carry(claim: Dict[str, Any], record: SubmissionRecord, bench: Optional
             weak.append(f"{head.head_id}: an overlap between Employer and Contractor delay has no decided treatment")
 
     notice = record.notice
+    if record.heads and not notices:
+        weak.append(
+            "No notice letter is linked to the claim with the role Notice, so each head will be missing its notice record."
+        )
     if notice is None or notice.served_on is None:
         weak.append("No notice is recorded as served.")
     else:
@@ -250,6 +267,7 @@ def build_carry(claim: Dict[str, Any], record: SubmissionRecord, bench: Optional
             "event_date": record.event_date,
             "awareness_date": record.awareness_date,
             "notice_date": notice.served_on,
+            "notice_document_ids": list(notices) or None,
         }
         if notice.period_source == "contract_verified":
             row.update(
@@ -352,11 +370,12 @@ class ClaimEscalation:
         self.bench = bench
         self.cases = ArbitrationCaseWorkspaceService(db)
 
-    async def _carry(self, claim: Dict[str, Any], document_ids: Set[str]):
+    async def _carry(self, claim: Dict[str, Any], document_ids: Set[str], notice_ids: Iterable[str] = ()):
         bench = self.bench._bench_of(claim)
         working = bench or ClaimBench(heads=[initial_head(claim)])
         record = await ClaimSubmissions(self.db, self.bench).gather(claim, working, document_ids)
-        return build_carry(claim, record, bench)
+        # A notice letter is carried only if it is also among the documents the caller may see.
+        return build_carry(claim, record, bench, [item for item in notice_ids if item in document_ids])
 
     @staticmethod
     def _blockers(claims: List[Dict[str, Any]], case: Optional[Dict[str, Any]]) -> List[str]:
@@ -380,9 +399,17 @@ class ClaimEscalation:
         return blockers
 
     async def preview(
-        self, claims: List[Dict[str, Any]], documents: Dict[str, Set[str]], case: Optional[Dict[str, Any]] = None
+        self,
+        claims: List[Dict[str, Any]],
+        documents: Dict[str, Set[str]],
+        case: Optional[Dict[str, Any]] = None,
+        notices: Optional[Dict[str, Set[str]]] = None,
     ) -> EscalationPreview:
-        carries = [(await self._carry(claim, documents.get(str(claim["_id"]), set())))[0] for claim in claims]
+        notices = notices or {}
+        carries = [
+            (await self._carry(claim, documents.get(str(claim["_id"]), set()), notices.get(str(claim["_id"]), set())))[0]
+            for claim in claims
+        ]
         totals: Dict[str, int] = {}
         for carry in carries:
             for slug, count in carry.rows.items():
@@ -403,7 +430,9 @@ class ClaimEscalation:
         request: EscalationRequest,
         current_user: Any,
         case: Optional[Dict[str, Any]] = None,
+        notices: Optional[Dict[str, Set[str]]] = None,
     ) -> EscalationResult:
+        notices = notices or {}
         blockers = self._blockers(claims, case)
         if blockers:
             raise HTTPException(status_code=409, detail="; ".join(blockers))
@@ -427,7 +456,9 @@ class ClaimEscalation:
         present = 0
         carries: List[ClaimCarry] = []
         for claim in claims:
-            carry, rows = await self._carry(claim, documents.get(str(claim["_id"]), set()))
+            carry, rows = await self._carry(
+                claim, documents.get(str(claim["_id"]), set()), notices.get(str(claim["_id"]), set())
+            )
             for slug, row in rows:
                 collection = self.db[MATRIX_COLLECTIONS[slug]]
                 if await collection.find_one({"case_id": case_id, "origin_key": row["origin_key"]}):

@@ -1,0 +1,126 @@
+/**
+ * One vocabulary for what the user reads (plan 4B-11): statuses, engine terms
+ * and error codes in plain English, and API refusals rendered from their
+ * `user_message`. Nothing here may show a database id, an ObjectId, an
+ * internal key or stack text.
+ */
+
+export const CLAIM_STATUS_LABELS = {
+  potential: "Potential claim",
+  draft: "Draft",
+  notified: "Notified",
+  submitted: "Submitted",
+  under_review: "Under review",
+  agreed: "Agreed",
+  rejected: "Rejected",
+  disputed: "Disputed",
+  closed: "Closed",
+} as const;
+
+export const ARBITRATION_CASE_STATUS_LABELS = {
+  intake: "Prepare the case file",
+  matrix_preparation: "Review the matrices",
+  ready_for_drafting: "Approved for drafting",
+  drafting: "Drafting",
+  under_review: "Under review",
+  approved: "Approved",
+  filed: "Filed",
+  archived: "Archived",
+} as const;
+
+export const ARBITRATION_DRAFT_STATUS_LABELS = {
+  draft: "Draft",
+  generating: "Being prepared",
+  under_review: "In review",
+  approved: "Approved",
+  exported: "Exported for filing",
+  superseded: "Replaced by a later version",
+  failed: "Could not be prepared",
+} as const;
+
+export const ENGINE_TERM_LABELS = {
+  source_ledger: "Evidence list",
+  claim_matrix: "Heads of claim",
+  readiness: "Approve for drafting",
+  matrix_review: "Review the matrices",
+  pleaded_head: "Head of claim",
+  degraded: "Prepared without the assistant",
+} as const;
+
+/** Error codes the server sends in `detail.code`, in the words the user reads. */
+export const ERROR_CODE_MESSAGES = {
+  picker_permission_not_supported: "This list cannot be filtered that way.",
+  project_not_found: "That project could not be found.",
+  explicit_grant_required: "This needs a permission granted to you by name. Ask your administrator.",
+  evidence_restricted: "Some evidence is restricted for you, so this cannot be exported.",
+  no_active_subscription: "Your organisation's subscription does not cover this.",
+  missing_permission: "You do not have permission to do this.",
+} as const;
+
+export type StatusKind = "claim" | "arbitration_case" | "arbitration_draft";
+
+const STATUS_MAPS: Record<StatusKind, Record<string, string>> = {
+  claim: CLAIM_STATUS_LABELS,
+  arbitration_case: ARBITRATION_CASE_STATUS_LABELS,
+  arbitration_draft: ARBITRATION_DRAFT_STATUS_LABELS,
+};
+
+/** A status in plain words. An unmapped value is shown humanised, never as a raw key. */
+export function plainStatus(kind: StatusKind, value: string | null | undefined): string {
+  if (!value) return "Not set";
+  return STATUS_MAPS[kind][value] ?? humanise(value);
+}
+
+export function humanise(value: string): string {
+  const words = value.replace(/[_.-]+/g, " ").trim();
+  return words ? words.charAt(0).toUpperCase() + words.slice(1).toLowerCase() : "Not set";
+}
+
+const OBJECT_ID = /\b[0-9a-f]{24}\b/gi;
+const UUID = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
+const STACK = /(Traceback|\bat [\w.$<>]+ \(|File ".*", line \d+)/;
+
+/** Whether text shows something a user must never see: a database id or stack text. */
+export function containsRawId(text: string): boolean {
+  OBJECT_ID.lastIndex = 0;
+  UUID.lastIndex = 0;
+  return OBJECT_ID.test(text) || UUID.test(text);
+}
+
+function scrub(text: string): string {
+  return text.replace(OBJECT_ID, "a record").replace(UUID, "a record");
+}
+
+const FALLBACK = "Something went wrong. Try again, or ask your administrator if it keeps happening.";
+
+/**
+ * The message to show for a failed API call.
+ *
+ * Order: a structured refusal's `user_message`; a known `code`; a plain-string
+ * `detail` (ids scrubbed); the status family; a generic sentence. Stack text is
+ * never shown.
+ */
+export function errorMessage(error: unknown): string {
+  const response = (error as { response?: { status?: number; data?: unknown } } | null)?.response;
+  const data = response?.data as { detail?: unknown; code?: string; user_message?: string } | undefined;
+  const detail = data?.detail ?? data;
+  if (detail && typeof detail === "object") {
+    const structured = detail as { user_message?: unknown; code?: unknown };
+    if (typeof structured.user_message === "string" && structured.user_message.trim()) {
+      return scrub(structured.user_message.trim());
+    }
+    if (typeof structured.code === "string" && structured.code in ERROR_CODE_MESSAGES) {
+      return ERROR_CODE_MESSAGES[structured.code as keyof typeof ERROR_CODE_MESSAGES];
+    }
+  }
+  if (typeof detail === "string" && detail.trim() && !STACK.test(detail)) {
+    const reason = detail.match(/^Not authorized: (\w+)$/)?.[1];
+    if (reason && reason in ERROR_CODE_MESSAGES) return ERROR_CODE_MESSAGES[reason as keyof typeof ERROR_CODE_MESSAGES];
+    if (detail.length <= 300) return scrub(detail.trim());
+  }
+  const status = response?.status;
+  if (status === 403) return ERROR_CODE_MESSAGES.missing_permission;
+  if (status === 404) return "That item could not be found. It may have been removed, or you may not have access.";
+  if (status === 409) return "Someone changed this at the same time. Reload and try again.";
+  return FALLBACK;
+}

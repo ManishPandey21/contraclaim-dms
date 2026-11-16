@@ -81,10 +81,22 @@ async def _db() -> AsyncIterator[Any]:
         client.close()
 
 
-async def _escalated_case(db: Any) -> str:
-    """Escalate a worked claim with the real service, then load every record into MongoDB."""
+async def _escalated_case(db: Any, notices: Dict[str, Any] | None = None, causation: str | None = None) -> str:
+    """Escalate a worked claim with the real service, then load every record into MongoDB.
+
+    ``causation``: decide the head's causation element "supported" with this note first,
+    as a person would on the Claim Bench, so the causal link is carried.
+    """
     fake, service = await _worked_claim()
-    result = await ClaimEscalation(fake, service).escalate([await _claim(fake)], DOCS, NEW, ACTOR)
+    if causation:
+        from rbac_backend.services.claim_bench import ElementDecisionRequest
+
+        claim = await _claim(fake)
+        version = (await service.get(claim)).bench.board_version
+        await service.decide_element(
+            claim, "H1", "causation", ElementDecisionRequest(board_version=version, state="supported", note=causation), "user-1"
+        )
+    result = await ClaimEscalation(fake, service).escalate([await _claim(fake)], DOCS, NEW, ACTOR, None, notices)
     for name, collection in fake._collections.items():
         if collection.docs:
             await db[name].insert_many([dict(doc) for doc in collection.docs])
@@ -171,10 +183,35 @@ def test_an_escalated_and_approved_head_reaches_the_validator_with_its_elements(
             assert gaps[0]["missing"] == _expected_missing(row), (gaps[0]["missing"], _expected_missing(row))
             for element in ("the contractual provision relied on", "the event"):
                 assert element not in gaps[0]["missing"], element
-            # Still reported, honestly: escalation carries no notice record (fixed by 4B-34).
+            # Still reported, honestly: no letter is linked to this claim with the role "notice".
             assert "a notice record" in gaps[0]["missing"]
             assert NO_APPROVED_HEADS not in _blockers(version)
             assert not any("awaiting approval" in item for item in _blockers(version))
+
+    _run(scenario())
+
+
+def test_an_escalated_claim_with_a_linked_notice_reaches_a_statement_of_claim_with_no_head_gaps() -> None:
+    """4B-34 proof: the claim's notice letter (role "notice") becomes the head's notice record."""
+
+    async def scenario() -> None:
+        async with _db() as db:
+            claim_id = next(iter(DOCS))
+            # doc-2 is linked to the claim as its notice; doc-9 is a notice the caller cannot see.
+            case_id = await _escalated_case(
+                db, {claim_id: {"doc-2", "doc-9"}},
+                causation="Handover of the Site was late, so the works started late on the critical path.",
+            )
+            (row,) = await db.arbitration_claim_matrix.find({"case_id": case_id}).to_list(length=None)
+            assert row["notice_ids"] == ["doc-2"], row["notice_ids"]
+            notice_row = await db.arbitration_notice_compliance.find_one({"case_id": case_id})
+            assert notice_row is not None and notice_row.get("notice_document_ids") == ["doc-2"], notice_row
+            assert _expected_missing(row) == [], _expected_missing(row)
+            await _approve_claim_row(db, case_id, row["_id"])
+
+            version = await _statement_of_claim(db, case_id)
+            assert _head_gaps(version) == [], _head_gaps(version)
+            assert not any(is_pleaded_head_blocker(item) for item in _blockers(version)), _blockers(version)
 
     _run(scenario())
 

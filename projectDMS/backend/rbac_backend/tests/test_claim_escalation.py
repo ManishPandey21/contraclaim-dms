@@ -253,6 +253,7 @@ async def test_escalation_routes_ask_for_claim_management_and_the_arbitration_pe
         return set()
 
     monkeypatch.setattr(escalation_router, "_claim_documents", _no_documents)
+    monkeypatch.setattr(escalation_router, "_claim_notice_documents", _no_documents)
 
     def _args(policy: Policy) -> dict:
         return {"db": db, "bench": service, "current_user": ACTOR, "policy": policy, "selection": Selection()}
@@ -486,3 +487,23 @@ async def test_the_legal_review_gate_still_ignores_unrelated_warnings() -> None:
     }
     report = await ArbitrationValidationOrchestrator().evaluate(version, branches=["legal_structure"])
     assert report["blockers"] == []
+
+
+# --------------------------------------------------------------------------- #
+# 4B-34: the claim's notice letters become each head's notice record
+# --------------------------------------------------------------------------- #
+async def test_the_preview_says_when_no_notice_letter_is_linked_and_carries_one_that_is() -> None:
+    db, service = await _worked_claim()
+    escalation = ClaimEscalation(db, service)
+    without = await escalation.preview([await _claim(db)], DOCS)
+    assert any("No notice letter is linked to the claim" in item for item in without.claims[0].weak)
+
+    with_notice = await escalation.preview([await _claim(db)], DOCS, None, {CLAIM_ID: {"doc-1"}})
+    assert not any("No notice letter is linked" in item for item in with_notice.claims[0].weak)
+
+
+async def test_a_notice_letter_the_caller_cannot_see_is_not_carried() -> None:
+    db, service = await _worked_claim()
+    await ClaimEscalation(db, service).escalate([await _claim(db)], DOCS, NEW, ACTOR, None, {CLAIM_ID: {"doc-1", "doc-secret"}})
+    (row,) = _rows(db, "arbitration_claim_matrix")
+    assert row["notice_ids"] == ["doc-1"]
