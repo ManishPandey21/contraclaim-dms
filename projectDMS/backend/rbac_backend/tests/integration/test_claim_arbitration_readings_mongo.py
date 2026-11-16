@@ -54,7 +54,7 @@ def _reader() -> ModuleType:
 #: Strings that must never appear in the output.
 PRIVATE = (
     "asha.rao@example.com", "Asha Rao", "vikram@example.com", "Vikram Shah",
-    "Delayed handover of Site", "CLM-SECRET-7", "claim-private-1", "draft-private-1",
+    "Delayed handover of Site", "CLM-PRIVATE-7", "claim-private-1", "draft-private-1",
     "Particular Conditions clause text",
 )
 
@@ -67,7 +67,7 @@ def _seed(db: Any) -> None:
     db.schema_migrations.create_index("version", unique=True)
     db.claims.insert_many(
         [
-            {"_id": "claim-private-1", "claim_ref": "CLM-SECRET-7", "title": "Delayed handover of Site",
+            {"_id": "claim-private-1", "claim_ref": "CLM-PRIVATE-7", "title": "Delayed handover of Site",
              "type": "eot", "status": "submitted", "amount_claimed": 184500000.0, "eot_days_claimed": 146,
              "created_at": recent, "updated_at": recent},
             {"_id": "c2", "type": "variation", "status": "draft", "amount_claimed": "1,20,000",
