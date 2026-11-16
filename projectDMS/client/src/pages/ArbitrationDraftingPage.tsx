@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import DraftCitationPanel from "@/components/arbitration/DraftCitationPanel";
+import { plainStatus } from "@/lib/plain-language";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -683,7 +684,7 @@ const ArbitrationDraftingPage: React.FC = () => {
             <section className="rounded-md border bg-background p-4">
               <div className="mb-3 flex flex-wrap items-center gap-2">
                 <Badge variant="outline">{pretty(draft?.draft_type)}</Badge>
-                <Badge variant="neutral">{draft?.status}</Badge>
+                <Badge variant="neutral">{plainStatus("arbitration_draft", draft?.status)}</Badge>
                 <Badge variant="outline">Version {draft?.current_version || 0}</Badge>
                 {isLocked && (
                   <Badge variant="outline" className="border-emerald-300 text-emerald-700">
@@ -1237,7 +1238,7 @@ const ArbitrationDraftingPage: React.FC = () => {
                     <TableCell className="font-medium">{item.title}</TableCell>
                     <TableCell>{pretty(item.draft_type)}</TableCell>
                     <TableCell>
-                      <Badge variant="outline">{item.status}</Badge>
+                      <Badge variant="outline">{plainStatus("arbitration_draft", item.status)}</Badge>
                     </TableCell>
                     <TableCell>{item.current_version || 0}</TableCell>
                     <TableCell className="text-right">

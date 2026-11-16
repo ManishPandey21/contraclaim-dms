@@ -102,17 +102,20 @@ export function humanise(value: string): string {
 
 const OBJECT_ID = /\b[0-9a-f]{24}\b/gi;
 const UUID = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
+/** A content hash (SHA-1 or longer): a plan or version fingerprint is no more readable than an id. */
+const HASH = /\b[0-9a-f]{40,}\b/gi;
 const STACK = /(Traceback|\bat [\w.$<>]+ \(|File ".*", line \d+)/;
 
 /** Whether text shows something a user must never see: a database id or stack text. */
 export function containsRawId(text: string): boolean {
   OBJECT_ID.lastIndex = 0;
   UUID.lastIndex = 0;
-  return OBJECT_ID.test(text) || UUID.test(text);
+  HASH.lastIndex = 0;
+  return OBJECT_ID.test(text) || UUID.test(text) || HASH.test(text);
 }
 
 function scrub(text: string): string {
-  return text.replace(OBJECT_ID, "a record").replace(UUID, "a record");
+  return text.replace(HASH, "a record").replace(OBJECT_ID, "a record").replace(UUID, "a record");
 }
 
 const FALLBACK = "Something went wrong. Try again, or ask your administrator if it keeps happening.";

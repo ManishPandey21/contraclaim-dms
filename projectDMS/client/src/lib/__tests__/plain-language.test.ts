@@ -39,5 +39,6 @@ describe("plain-language", () => {
     expect(containsRawId("id 65f0a1b2c3d4e5f6a7b8c9d0")).toBe(true);
     expect(containsRawId("ref 1b4e28ba-2fa1-11d2-883f-0016d3cca427")).toBe(true);
     expect(containsRawId("NHAI/PD/112 · Notice of delay")).toBe(false);
+    expect(containsRawId(`plan ${"a1".repeat(32)}`)).toBe(true); // a SHA-256 fingerprint (4B-40)
   });
 });

@@ -1,5 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import ClaimHeadLinksPicker from "@/components/arbitration/ClaimHeadLinksPicker";
+import WorkflowGateStepper from "@/components/arbitration/WorkflowGateStepper";
+import { humanise, plainStatus } from "@/lib/plain-language";
+import DocumentPicker from "@/components/pickers/DocumentPicker";
+import DraftVersionPicker from "@/components/pickers/DraftVersionPicker";
 import { type ClaimHeadLinks, EMPTY_CLAIM_HEAD_LINKS } from "@/lib/claim-head-links";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { Badge } from "@/components/ui/badge";
@@ -334,7 +338,7 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
   const [workflow, setWorkflow] = useState<ArbitrationWorkflowState | null>(null);
   const [workflowEvents, setWorkflowEvents] = useState<Array<Record<string, unknown>>>([]);
   const [workflowDraftId, setWorkflowDraftId] = useState("");
-  const [workflowDocumentIds, setWorkflowDocumentIds] = useState("");
+  const [workflowDocumentIds, setWorkflowDocumentIds] = useState<string[]>([]);
   const [workflowOpponentDraftId, setWorkflowOpponentDraftId] = useState("");
   const [workflowOpponentVersionId, setWorkflowOpponentVersionId] = useState("");
   const [workflowSecondOpponentDraftId, setWorkflowSecondOpponentDraftId] = useState("");
@@ -651,7 +655,7 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
       setWorkflow(await createArbitrationWorkflow(caseId, {
         draft_id: workflowDraftId,
         pleading_type: pleadingType,
-        selected_document_ids: workflowDocumentIds.split(",").map((item) => item.trim()).filter(Boolean),
+        selected_document_ids: workflowDocumentIds,
         opponent_draft_id: workflowOpponentDraftId || undefined,
         opponent_version_id: workflowOpponentVersionId || undefined,
         opponent_pleadings: pleadingType === "rejoinder" ? [
@@ -675,7 +679,7 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
         setWorkflow(await resumeArbitrationWorkflow(caseId, workflow.run_id, {
           state_version: workflow.state_version,
           gate: "document_selection",
-          selected_document_ids: workflowDocumentIds.split(",").map((item) => item.trim()).filter(Boolean),
+          selected_document_ids: workflowDocumentIds,
         }));
       } else if (workflow.current_node === "material_question_gate") {
         setWorkflow(await resumeArbitrationWorkflow(caseId, workflow.run_id, {
@@ -823,9 +827,12 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
                         <div className="font-medium">{item.title}</div>
                         {item.case_reference && <div className="text-xs text-muted-foreground">{item.case_reference}</div>}
                       </TableCell>
-                      <TableCell>{item.project_id}</TableCell>
                       <TableCell>
-                        <Badge variant="outline">{pretty(item.status)}</Badge>
+                        {/* The project's name, never its id (4B-40). */}
+                        {projects.find((project) => projectId(project) === String(item.project_id))?.name || "Project not available"}
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant="outline">{plainStatus("arbitration_case", item.status)}</Badge>
                       </TableCell>
                       <TableCell className="min-w-[180px]">
                         <div className="mb-1 text-xs text-muted-foreground">{item.readiness_score || 0}%</div>
@@ -990,7 +997,7 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
             <CardTitle className="text-sm">Status</CardTitle>
           </CardHeader>
           <CardContent>
-            <Badge variant="outline">{pretty(currentCase?.status)}</Badge>
+            <Badge variant="outline">{plainStatus("arbitration_case", currentCase?.status)}</Badge>
           </CardContent>
         </Card>
         <Card>
@@ -1141,19 +1148,27 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
                     </SelectContent>
                   </Select>
                 </div>
-                <div className="space-y-1">
-                  <Label>Selected document IDs</Label>
-                  <Input
+                {caseData?.project_id ? (
+                  <DocumentPicker
+                    projectId={String(caseData.project_id)}
                     value={workflowDocumentIds}
-                    onChange={(event) => setWorkflowDocumentIds(event.target.value)}
-                    placeholder="Comma-separated scoped document IDs"
+                    onChange={setWorkflowDocumentIds}
+                    label="Documents for this pleading"
+                    disabled={Boolean(workflow)}
                   />
-                </div>
+                ) : null}
                 {selectedWorkflowDraft && ["statement_of_defence", "rejoinder"].includes(String(selectedWorkflowDraft.draft_type)) ? (
                   <div className="grid gap-2">
                     <div className="space-y-1">
                       <Label>{String(selectedWorkflowDraft.draft_type) === "rejoinder" ? "Statement of Claim draft" : "Opponent draft"}</Label>
-                      <Select value={workflowOpponentDraftId} onValueChange={setWorkflowOpponentDraftId} disabled={Boolean(workflow)}>
+                      <Select
+                        value={workflowOpponentDraftId}
+                        onValueChange={(value) => {
+                          setWorkflowOpponentDraftId(value);
+                          setWorkflowOpponentVersionId("");
+                        }}
+                        disabled={Boolean(workflow)}
+                      >
                         <SelectTrigger><SelectValue placeholder="Select immutable pleading" /></SelectTrigger>
                         <SelectContent>
                           {(dashboard?.drafts || []).filter((draft) =>
@@ -1169,7 +1184,14 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
                       <>
                         <div className="space-y-1">
                           <Label>Statement of Defence draft</Label>
-                          <Select value={workflowSecondOpponentDraftId} onValueChange={setWorkflowSecondOpponentDraftId} disabled={Boolean(workflow)}>
+                          <Select
+                            value={workflowSecondOpponentDraftId}
+                            onValueChange={(value) => {
+                              setWorkflowSecondOpponentDraftId(value);
+                              setWorkflowSecondOpponentVersionId("");
+                            }}
+                            disabled={Boolean(workflow)}
+                          >
                             <SelectTrigger><SelectValue placeholder="Select SoD" /></SelectTrigger>
                             <SelectContent>
                               {(dashboard?.drafts || []).filter((draft) => String(draft.draft_type) === "statement_of_defence").map((draft) => (
@@ -1178,16 +1200,22 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
                             </SelectContent>
                           </Select>
                         </div>
-                        <div className="space-y-1">
-                          <Label>SoD version ID</Label>
-                          <Input value={workflowSecondOpponentVersionId} onChange={(event) => setWorkflowSecondOpponentVersionId(event.target.value)} />
-                        </div>
+                        <DraftVersionPicker
+                          draftId={workflowSecondOpponentDraftId}
+                          value={workflowSecondOpponentVersionId}
+                          onChange={setWorkflowSecondOpponentVersionId}
+                          label="Statement of Defence version"
+                          disabled={Boolean(workflow)}
+                        />
                       </>
                     ) : null}
-                    <div className="space-y-1">
-                      <Label>Opponent version ID</Label>
-                      <Input value={workflowOpponentVersionId} onChange={(event) => setWorkflowOpponentVersionId(event.target.value)} />
-                    </div>
+                    <DraftVersionPicker
+                      draftId={workflowOpponentDraftId}
+                      value={workflowOpponentVersionId}
+                      onChange={setWorkflowOpponentVersionId}
+                      label="Opponent pleading version"
+                      disabled={Boolean(workflow)}
+                    />
                   </div>
                 ) : null}
                 {!workflow ? (
@@ -1199,14 +1227,9 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
                   <div className="space-y-3 rounded-md border p-3">
                     <div className="flex items-center justify-between gap-2">
                       <Badge variant="outline">{pretty(workflow.status)}</Badge>
-                      <span className="text-xs text-muted-foreground">v{workflow.state_version} · {workflow.engine}</span>
                     </div>
-                    <Progress value={workflow.progress} />
-                    <div className="text-sm font-medium">{pretty(workflow.current_node)}</div>
-                    <div className="text-xs text-muted-foreground">
-                      Next: {pretty(workflow.next_action)}
-                      {workflow.required_human_role ? ` · Role: ${pretty(workflow.required_human_role)}` : ""}
-                    </div>
+                    <Progress value={workflow.progress} aria-label="Workflow progress" />
+                    <WorkflowGateStepper workflow={workflow} />
                     {(workflow.blockers || []).length > 0 ? (
                       <div className="text-xs text-amber-700">{workflow.blockers.length} blocker(s) require review.</div>
                     ) : null}
@@ -1240,8 +1263,6 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
                         ))}
                       </div>
                     ) : null}
-                    {workflow.plan_hash ? <div className="break-all text-xs text-muted-foreground">Plan: {workflow.plan_hash}</div> : null}
-                    {workflow.draft_version_hash ? <div className="break-all text-xs text-muted-foreground">Version: {workflow.draft_version_hash}</div> : null}
                     {workflowEvents.length ? (
                       <div className="space-y-1 rounded border bg-muted/30 p-2" aria-label="Workflow timeline">
                         <div className="text-xs font-medium">Workflow timeline</div>
@@ -1386,7 +1407,7 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
                       <div className="font-medium">{pretty(run.agent_type)}</div>
                       <Badge variant="outline">{run.created_records?.length || 0} rows</Badge>
                     </div>
-                    <div className="text-xs text-muted-foreground">{run.status}</div>
+                    <div className="text-xs text-muted-foreground">{humanise(String(run.status || ""))}</div>
                     {run.output_summary ? (
                       <div className="mt-1 text-xs text-muted-foreground">{run.output_summary}</div>
                     ) : null}
@@ -1517,9 +1538,9 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
                           </TableCell>
                           <TableCell>
                             <div className="flex flex-wrap gap-1">
-                              {row.approval_status && <Badge variant="outline">{String(row.approval_status)}</Badge>}
-                              {row.verification_status && <Badge variant="outline">{String(row.verification_status)}</Badge>}
-                              {row.readiness_status && <Badge variant="outline">{String(row.readiness_status)}</Badge>}
+                              {row.approval_status && <Badge variant="outline">{humanise(String(row.approval_status))}</Badge>}
+                              {row.verification_status && <Badge variant="outline">{humanise(String(row.verification_status))}</Badge>}
+                              {row.readiness_status && <Badge variant="outline">{humanise(String(row.readiness_status))}</Badge>}
                               {row.review_status ? <Badge variant="outline">{pretty(String(row.review_status))}</Badge> : null}
                             </div>
                             {stringArray(row.review_required_roles).length > 0 ? (
@@ -1595,7 +1616,7 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
                     <div className="font-medium">{pretty(check.check_key)}</div>
                     <div className="text-sm text-muted-foreground">{check.message}</div>
                   </div>
-                  <Badge variant={check.status === "ready" ? "default" : "outline"}>{pretty(check.status)}</Badge>
+                  <Badge variant={check.status === "ready" ? "success" : "outline"}>{pretty(check.status)}</Badge>
                 </div>
               ))}
             </CardContent>
@@ -1714,7 +1735,7 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
               <div className="rounded-md border p-3 text-sm">
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-medium">{queuedExport.format.toUpperCase()} export</span>
-                  <Badge variant="outline">{queuedExport.status}</Badge>
+                  <Badge variant="outline">{humanise(String(queuedExport.status || ""))}</Badge>
                 </div>
                 <div className="mt-1 text-xs text-muted-foreground">
                   {queuedExport.content_length ? `${queuedExport.content_length} bytes` : queuedExport.background_job_id || "Queued"}
