@@ -14,12 +14,17 @@
 #      expired on 2026-10-15
 #   D. migrations: are the three Letter Bench migrations (20261114_0001 to
 #      _0003) applied, and what does the ledger hold
+#   F. Phase 4b readings P-02 to P-12 (claims, arbitration drafts, reviewer
+#      roles, skills, perspective, usage), counts only, through
+#      scripts/claim_arbitration_readonly_readings.py piped into the backend
 # plus the newest backup manifest and whether it recorded a persistence flush.
 #
 # READ-ONLY, by construction:
-#   - docker: only `ps`, `inspect`, `image inspect`, `network inspect`, and
-#     `exec` of commands that read (redis-cli PING / CONFIG GET / GRAPH.LIST /
-#     GRAPH.RO_QUERY, getent, `migrate_database --list`).
+#   - docker: only `ps`, `inspect`, `image inspect`, `network inspect`, `logs`
+#     (section F counts gateway requests), and `exec` of commands that read
+#     (redis-cli PING / CONFIG GET / GRAPH.LIST / GRAPH.RO_QUERY, getent,
+#     `migrate_database --list`, and the section F reader, whose database access
+#     is limited to find/count/distinct/aggregate by a guard it carries).
 #   - it never runs `docker compose up`, `start`, `stop`, `restart`, `rm`,
 #     `update` or `rename`, and never writes inside a container.
 #   - it writes one report directory under OUT_DIR on the host and nothing else.
@@ -314,6 +319,41 @@ else
   unknown "$BACKUP_ROOT/manifests does not exist or is not readable by this user (set BACKUP_ROOT)"
 fi
 info "a manifest proves a backup was written, not that it restores. Restore evidence is a disposable restore drill, recorded separately."
+
+# --------------------------------------------------------------------------- #
+section "F. Phase 4b readings: claims, arbitration, reviewer roles, skills (P-02 to P-12)"
+# --------------------------------------------------------------------------- #
+# Plan: docs/superpowers/specs/2026-11-16-claim-bench-phase-4b-hardening.md 8.1.
+# Each line is a reading; one that could not be taken says "not_read" and why.
+# An unread value is never zero: record it as "Not read" in the assessment.
+READER="$PROJECT_DIR/scripts/claim_arbitration_readonly_readings.py"
+if [[ -z "$BACKEND" ]]; then
+  unknown "no backend container; readings P-02 to P-12 were not taken"
+elif [[ ! -f "$READER" ]]; then
+  unknown "$READER is not in this checkout; readings P-02 to P-12 were not taken (copy it from main, see section 5 of the assessment)"
+else
+  readings=$(docker exec -i "$BACKEND" python - <"$READER" 2>/dev/null)
+  if [[ -z "$readings" ]]; then
+    unknown "the reader printed nothing inside $BACKEND"
+  else
+    printf '%s\n' "$readings" | sed 's/^/INFO     reading /'
+    not_read=$(printf '%s\n' "$readings" | grep -c '"status": "not_read"')
+    if [[ "$not_read" == "0" ]]; then pass "every Phase 4b reading was taken"; else unknown "$not_read Phase 4b reading(s) could not be taken; see the lines above"; fi
+  fi
+fi
+GATEWAY=$(docker ps --filter 'label=com.docker.compose.service=gateway' --format '{{.Names}}' | head -1)
+if [[ -n "$GATEWAY" ]]; then
+  # Request counts only; no request line is copied into the report.
+  since=2160h
+  info "gateway requests in the last 90 days (P-11, P-12), from docker logs --since $since:"
+  for pattern in "/api/claims" "/api/claims/[^/ ]*/assess" "POST /api/arbitration/drafts " "/api/arbitration/drafts"; do
+    count=$(docker logs --since "$since" "$GATEWAY" 2>&1 | grep -cE "$pattern")
+    info "  $pattern: $count"
+  done
+  info "log retention bounds these counts: a smaller window than 90 days reads as fewer requests, not as no use"
+else
+  unknown "no running container carries the compose label service=gateway; request counts for P-11 and P-12 were not taken"
+fi
 
 printf '\nSUMMARY  pass=%d warn=%d fail=%d unknown=%d\n' "$passes" "$warns" "$fails" "$unknowns"
 printf 'Report   %s\n' "$REPORT"

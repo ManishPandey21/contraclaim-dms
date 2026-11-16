@@ -187,6 +187,8 @@ jobs:
           # Phase 4b (4B-02/4B-47): the Claim Bench, findings and escalation
           # routers through the production app, real factories and real RBAC.
           CLAIM_BENCH_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          # 4B-01: the production readings reader changes nothing and names no one.
+          READONLY_READINGS_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
         # Every real-Mongo module is in this list or excused by name, with a
         # reason, in test_ci_real_mongo_coverage.py: a module in neither is red.
         # That is how the reprojection review, source-mutation and
@@ -226,6 +228,7 @@ jobs:
             backend/rbac_backend/tests/integration/test_arbitration_permission_receipts_mongo.py
             backend/rbac_backend/tests/integration/test_arbitration_permission_decision_race_mongo.py
             backend/rbac_backend/tests/integration/test_claim_routes_real_deps_mongo.py
+            backend/rbac_backend/tests/integration/test_claim_arbitration_readings_mongo.py
           )
           python -m pytest -q -rs --junitxml=real-mongo-relationships.xml "${suites[@]}" \
             | tee real-mongo-relationships.log
