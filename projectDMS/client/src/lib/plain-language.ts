@@ -59,6 +59,15 @@ export const ERROR_CODE_MESSAGES = {
   claim_create_status: "A new claim starts as a draft or as notified.",
   claim_changed_concurrently: "Someone changed this claim at the same time. Reload it and try again.",
   claim_evidence_frozen: "This claim has been escalated to arbitration, so its record can no longer be edited.",
+  claim_amount_from_board: "This claim's amount and days come from its heads on the Claim Bench. Change them there.",
+  head_amount_from_lines: "This head's amount is the total of its quantum lines. Change the lines instead.",
+  bench_not_locked: "The board is not locked.",
+  bench_unlock_reason: "Say why the board is being reopened.",
+  signal_not_eligible: "This record no longer indicates a new claim.",
+  signal_organisation_required: "Select the organisation this record belongs to, then raise the claim.",
+  notice_quote_period: "The quoted contract wording does not state that number of days.",
+  notice_quote_not_in_clause: "The quoted wording is not in that clause of this project's contract.",
+  notice_self_verification: "You recorded this notice period, so someone else must verify it.",
 } as const;
 
 export type StatusKind = "claim" | "arbitration_case" | "arbitration_draft";

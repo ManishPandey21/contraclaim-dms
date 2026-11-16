@@ -57,7 +57,14 @@ def _structured_codes(path: Path) -> Set[str]:
 
 
 def test_every_structured_error_code_from_the_phase_4b_routes_has_a_message() -> None:
-    routes = [BACKEND / "routers" / "pickers.py", BACKEND / "routers" / "claims.py"]
+    routes = [
+        BACKEND / "routers" / "pickers.py",
+        BACKEND / "routers" / "claims.py",
+        # Phase 4b services that raise structured refusals (4B-13, 4B-14, 4B-16, 4B-17).
+        BACKEND / "services" / "claim_signals.py",
+        BACKEND / "services" / "claim_notice_requirements.py",
+        BACKEND / "services" / "claim_bench.py",
+    ]
     codes: Set[str] = set()
     for path in routes:
         codes |= _structured_codes(path)
