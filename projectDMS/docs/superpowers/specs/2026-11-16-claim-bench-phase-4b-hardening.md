@@ -838,6 +838,7 @@ All must hold, each with recorded evidence:
 | AQ-9 | Unlock at `dms.claim.manage`: too strict for small teams? | Keep manage plus reason; revisit after canary feedback |
 | AQ-10 | Where golden-set material lives, and the model budget for evaluation runs | A restricted evaluation store outside the repository; a budget set per run before 4B-42 |
 | AQ-11 | Authorised read-only access for readings P-01 to P-12 on production (and staging), and the operator who takes them | Open: this implementation environment has no production access |
+| AQ-12 | Found in 4B-10: `dms.document.review_extraction` is also meant to be granted only by name, but any `dms.admin` holder passes it, because PolicyService widens `dms.*` checks to `dms.admin`. That includes `contractmgr_org`, which the seed comment says must not have it. Unlike the two claim permissions, this one is live in production, so closing the gap would withdraw access people may use today. | Open. Recommendation: add it to `SUPERADMIN_EXCLUDED_PERMISSIONS` after a production reading of which users hold it only through `dms.admin`. 4B-10 deliberately left it unchanged |
 
 ---
 

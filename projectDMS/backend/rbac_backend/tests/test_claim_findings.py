@@ -32,6 +32,7 @@ from fastapi import HTTPException
 from rbac_backend.core.permissions import (
     CLIENT_DMS_PERMISSIONS,
     EXPLICIT_GRANT_ONLY_PERMISSIONS,
+    SUPERADMIN_EXCLUDED_PERMISSIONS,
     Permissions,
 )
 from rbac_backend.initial_data.default_roles import DEFAULT_ROLES
@@ -148,7 +149,9 @@ def test_determination_authority_and_privileged_access_are_granted_by_name_only(
     for permission in (Permissions.CLAIM_DETERMINE, Permissions.CLAIM_STRATEGY_READ):
         assert permission in CLIENT_DMS_PERMISSIONS and permission in EXPLICIT_GRANT_ONLY_PERMISSIONS
         holders = {role["_id"] for role in DEFAULT_ROLES if permission in (role.get("permissions") or [])}
-        assert holders == {"orgadmin", "projectadmin"}
+        # 4B-10 (plan D-12): in no default role; an administrator grants them by name.
+        assert holders == set()
+        assert permission in SUPERADMIN_EXCLUDED_PERMISSIONS
 
 
 # --------------------------------------------------------------------------- #

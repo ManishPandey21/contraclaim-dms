@@ -366,6 +366,17 @@ EXPLICIT_GRANT_ONLY_PERMISSIONS: frozenset = frozenset(
     }
 )
 
+#: Privileged legal material and determination authority (plan D-12, 4B-10).
+#: Granted only by name on one of the user's own roles. None of these is
+#: implied by Super Admin status, by the ``*`` wildcard, or by ``dms.admin``:
+#: PolicyService checks them against the user's role documents directly.
+SUPERADMIN_EXCLUDED_PERMISSIONS: frozenset = frozenset(
+    {
+        "dms.claim.determine",
+        "dms.claim.strategy.read",
+    }
+)
+
 ORG_TIER_ONLY_PERMISSIONS: frozenset = frozenset(
     {
         "dms.contract.applicability.manage",

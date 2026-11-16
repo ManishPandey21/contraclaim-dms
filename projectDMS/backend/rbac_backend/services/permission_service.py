@@ -908,6 +908,42 @@ class PermissionService:
             logger.error(f"Failed to get permissions for role {role_id}: {str(e)}")
             return []
 
+    async def user_has_explicit_permission(self, user_id: str, permission_name: str) -> bool:
+        """Whether one of the user's own roles names ``permission_name`` (or a label spelling of it).
+
+        For permissions that must be granted deliberately (core.permissions
+        SUPERADMIN_EXCLUDED_PERMISSIONS). Unlike ``user_has_permission`` it does
+        not honour the ``*`` wildcard or the Super Admin role key, does not
+        widen through ``dms.admin``, and never reads or writes the permission
+        cache, so a revocation takes effect on the next request.
+        """
+        permission_key = (permission_name or "").strip()
+        if not permission_key or not user_id:
+            return False
+        lookup_keys = equivalent_permissions(permission_key) or {permission_key}
+        try:
+            db = await self._get_db()
+            try:
+                user_query_id: Any = ObjectId(user_id)
+            except Exception:
+                user_query_id = user_id
+            user_doc = await db.users.find_one({"_id": user_query_id})
+            if not user_doc:
+                return False
+            for rid in user_doc.get("roles", []) or []:
+                resolution = await self._load_role(db, rid)
+                if not resolution.keeps_role_key or not resolution.document:
+                    continue
+                held = {str(p).strip() for p in (resolution.document.get("permissions") or []) if p is not None}
+                held.discard("*")
+                if held & lookup_keys:
+                    return True
+        except Exception as exc:
+            # Fail closed: an error is never a grant of privileged material.
+            logger.error(f"Explicit permission check failed for user {user_id}: {exc}")
+            return False
+        return False
+
     async def user_has_permission(
         self,
         user_id: str,

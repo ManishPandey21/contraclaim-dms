@@ -4,7 +4,7 @@ from typing import Any, Optional
 
 from fastapi import HTTPException, status
 
-from ..core.permissions import Permissions, permission_domain
+from ..core.permissions import SUPERADMIN_EXCLUDED_PERMISSIONS, Permissions, permission_domain
 from ..services.audit_event_service import AuditEventService
 from ..services.entitlement_service import EntitlementService
 from ..services.permission_service import PermissionService
@@ -49,7 +49,15 @@ class PolicyService:
         self.audit_service = audit_service or AuditEventService(db)
         self.usage_metering_service = usage_metering_service or UsageMeteringService(db)
 
+    async def has_explicit_grant(self, current_user: Any, permission: str) -> bool:
+        """A grant held by name on the user's own roles: no Super Admin, wildcard or dms.admin shortcut."""
+        return await self.permission_service.user_has_explicit_permission(
+            str(getattr(current_user, "id", "") or ""), permission
+        )
+
     async def has_permission(self, current_user: Any, permission: str) -> bool:
+        if permission in SUPERADMIN_EXCLUDED_PERMISSIONS:
+            return await self.has_explicit_grant(current_user, permission)
         if self.scope_service.is_superadmin(current_user):
             return True
         # `user_has_permission` applies the alias contract itself. Expanding the
@@ -143,11 +151,17 @@ class PolicyService:
             reason = allow_reason
             return None
 
+        # Privileged legal material (plan D-12): no status confers it.
+        explicit_only = permission in SUPERADMIN_EXCLUDED_PERMISSIONS
         try:
-            if self.scope_service.is_superadmin(current_user):
+            if explicit_only:
+                if not await self.has_explicit_grant(current_user, permission):
+                    reason = "explicit_grant_required"
+                    return await self._deny(reason)
+            elif self.scope_service.is_superadmin(current_user):
                 return await _allow("superadmin")
 
-            if not await self.has_permission(current_user, permission):
+            if not explicit_only and not await self.has_permission(current_user, permission):
                 reason = "missing_permission"
                 return await self._deny(reason)
 
@@ -207,7 +221,7 @@ class PolicyService:
                 return await self._deny(reason)
 
             if domain in {"client_dms", "billing", "system"}:
-                if self.scope_service.is_superadmin(current_user):
+                if not explicit_only and self.scope_service.is_superadmin(current_user):
                     return await _allow("superadmin")
                 if domain == "billing":
                     if organization_id or project_id:

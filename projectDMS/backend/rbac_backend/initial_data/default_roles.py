@@ -395,14 +395,11 @@ _merge_role_permissions(
     ["dms.document.review_extraction"],
 )
 
-# Claim-to-arbitration Phase 3: determination authority and access to privileged
-# claim analysis go to these two roles in the release definitions and to no
-# other. Production role documents do not change until an administrator grants
-# the permissions there.
-_merge_role_permissions(
-    {"orgadmin", "projectadmin"},
-    ["dms.claim.determine", "dms.claim.strategy.read"],
-)
+# Claim-to-arbitration: determination authority (`dms.claim.determine`) and
+# privileged claim analysis (`dms.claim.strategy.read`) are in no default role
+# (plan D-12, 4B-10). They are granted deliberately, by name, on a role an
+# administrator assigns; PolicyService does not let Super Admin status, the `*`
+# wildcard or `dms.admin` stand in for them (SUPERADMIN_EXCLUDED_PERMISSIONS).
 
 _merge_role_permissions(
     {"contraclaim_drafting_manager"},

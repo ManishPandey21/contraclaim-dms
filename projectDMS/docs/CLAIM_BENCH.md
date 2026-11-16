@@ -122,7 +122,13 @@ Behind the same flag as the Bench. When the Bench is on, the claim page gains a 
 
 **The old AI assessment** button is hidden on the register and the record page where the Bench is on. The endpoint and its history are unchanged; where the Bench is off nothing changes.
 
-**Permissions.** `dms.claim.determine` and `dms.claim.strategy.read` are new, and are granted by name only: in the release role definitions to `orgadmin` and `projectadmin`, and not through the bulk role merge. Migration `20261118_0001` adds indexes only; **no existing role document gains either permission**, so in a deployed database nobody can author a determination or open Internal analysis until an administrator grants them.
+**Permissions (revised by Phase 4b, 4B-10).** `dms.claim.determine` and `dms.claim.strategy.read` are granted only deliberately, by name, on a role an administrator assigns:
+
+- They are in **no** default role. The earlier release definitions gave them to `orgadmin` and `projectadmin`, and role-contract alignment would have pushed them to existing role documents. That is withdrawn, and the seed catalogue now fails validation if any default role carries them.
+- **Nothing stands in for them.** Super Admin status, the `*` wildcard and `dms.admin` (which `orgadmin`, `projectadmin` and `contractmgr_org` hold) each used to pass these checks. PolicyService now checks them against the user's own role documents, without the permission cache, so a revocation takes effect on the next request. A refusal is audited with the reason `explicit_grant_required`.
+- Until an administrator grants them, nobody can author or approve a determination or open Internal analysis. Ordinary claim work for admins is unchanged.
+
+Migration `20261118_0001` adds indexes only.
 
 ## Escalation to arbitration and draft evidence controls (Phase 4)
 
