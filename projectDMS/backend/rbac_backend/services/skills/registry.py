@@ -33,12 +33,19 @@ from ...models.skill import (
     SkillVersionSummary,
 )
 from ...utils.datetime import now_utc
-from .approvals import SkillApprovalService, approval_statuses, describe_unsatisfied
+from .approvals import (
+    SkillApprovalService,
+    approval_statuses,
+    describe_unsatisfied,
+    require_acceptable_report,
+    required_reviews,
+)
 from .loader import LoadedSkill
 from .system_skills import (
     AWAITING_APPROVAL_REASON,
     KNOWN_UNINSTALLED_SKILLS,
     system_skill_versions,
+    with_approval_floor,
 )
 
 logger = logging.getLogger(__name__)
@@ -242,7 +249,7 @@ class SkillRegistry:
                     eval_report=item.eval_report,
                     created_at=item.created_at,
                     published_at=item.published_at,
-                    required_approvals=list(item.manifest.required_approvals),
+                    required_approvals=required_reviews(item),
                 )
                 for item in versions
             ],
@@ -270,6 +277,20 @@ class SkillRegistry:
                     "Import the correction as a new version."
                 ),
             )
+        if existing and await SkillApprovalService(self.db).live_approvals(loaded.skill_key, version):
+            # Replacing reviewed text or policy under the same version number
+            # would leave reviewers' names on something they did not see.
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"{loaded.skill_key} {version} has approvals. Import the change as a new version, "
+                    "or have the approvals revoked first."
+                ),
+            )
+        # The server floor (plan D-05): a manifest may add reviews, never drop one.
+        manifest = manifest.model_copy(
+            update={"required_approvals": with_approval_floor(loaded.skill_key, list(manifest.required_approvals))}
+        )
         record = SkillVersion(
             skill_key=loaded.skill_key,
             version=version,
@@ -413,13 +434,9 @@ class SkillRegistry:
     async def _require_approvals(
         self, record: SkillVersion, eval_report: SkillEvalReport, published_by: Optional[str]
     ) -> None:
-        if not record.manifest.required_approvals:
-            return
-        if not eval_report.recorded_by:
-            raise HTTPException(
-                status_code=422,
-                detail="The evaluation report must name who ran it (recorded_by)",
-            )
+        # Every system version needs at least the floor's reviews, whatever was
+        # stored: there is no "no approvals required" path (owner review B1).
+        require_acceptable_report(eval_report)
         publisher = str(published_by or "")
         if not publisher:
             raise HTTPException(status_code=403, detail="Publishing needs an identified publisher")

@@ -89,7 +89,8 @@ const SkillPublishPanel: React.FC<Props> = ({ version, onClose, onPublished }) =
     approvals.data?.required ?? version.required_approvals ?? [],
     approvals.data?.approvals ?? [],
     approvals.data?.content_hash ?? version.content_hash,
-    report
+    report,
+    approvals.data?.policy_hash ?? null
   );
   const blockers = needsApprovals ? publishBlockers(statuses, report, myId) : [];
   if (report && !passing) blockers.unshift("The evaluation is below its threshold, or no cases were run.");

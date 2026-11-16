@@ -8,7 +8,16 @@ import type {
 // presses Publish, which review is missing and why. The server decides; this
 // only explains.
 
-export type RequirementState = "ok" | "missing" | "revoked" | "stale_content" | "stale_evaluation";
+export type RequirementState =
+  | "ok"
+  | "missing"
+  | "revoked"
+  | "stale_content"
+  | "stale_policy"
+  | "stale_evaluation";
+
+/** The server refuses an evaluation that sets its own bar lower than this (SKILL_EVAL_MIN_THRESHOLD). */
+export const MIN_EVAL_THRESHOLD = 0.85;
 
 export interface RequirementStatus {
   requirement: SkillApprovalRequirement;
@@ -33,13 +42,14 @@ export function reviewerRoleLabel(role: string): string {
 const close = (a?: number | null, b?: number | null) =>
   a != null && b != null && Math.abs(a - b) < 1e-6;
 
-/** Was this approval given against the same evaluation result? */
+/** Was this approval given against the same evaluation result, run by the same person? */
 export function sameEvaluation(approval: SkillApproval, report: SkillEvalReport): boolean {
   return (
     approval.eval_suite === report.suite &&
     close(approval.eval_score, report.score) &&
     close(approval.eval_threshold, report.threshold) &&
-    approval.eval_case_count === report.case_count
+    approval.eval_case_count === report.case_count &&
+    (approval.eval_recorded_by ?? "") === (report.recorded_by ?? "")
   );
 }
 
@@ -47,25 +57,32 @@ export function requirementStatuses(
   required: SkillApprovalRequirement[],
   approvals: SkillApproval[],
   contentHash: string,
-  report: SkillEvalReport | null
+  report: SkillEvalReport | null,
+  policyHash: string | null = null
 ): RequirementStatus[] {
+  // Without the version's policy hash nothing can be shown as given: the server
+  // would refuse it, so the screen must not promise it.
+  const samePolicy = (item: SkillApproval) => policyHash !== null && item.policy_hash === policyHash;
   return required.map((requirement) => {
     const candidates = approvals
       .filter((item) => item.kind === requirement.kind && item.reviewer_role === requirement.reviewer_role)
       .sort((a, b) => b.decided_at.localeCompare(a.decided_at));
     const exact = candidates.filter(
-      (item) => item.content_hash === contentHash && (report ? sameEvaluation(item, report) : true)
+      (item) =>
+        item.content_hash === contentHash && samePolicy(item) && (report ? sameEvaluation(item, report) : true)
     );
     const live = exact.find((item) => !item.revoked_at);
     if (live) return { requirement, state: "ok", approval: live };
     if (exact.length) return { requirement, state: "revoked", approval: exact[0] };
     if (candidates.length) {
       const latest = candidates[0];
-      return {
-        requirement,
-        state: latest.content_hash !== contentHash ? "stale_content" : "stale_evaluation",
-        approval: latest,
-      };
+      const state: RequirementState =
+        latest.content_hash !== contentHash
+          ? "stale_content"
+          : !samePolicy(latest)
+            ? "stale_policy"
+            : "stale_evaluation";
+      return { requirement, state, approval: latest };
     }
     return { requirement, state: "missing", approval: null };
   });
@@ -76,6 +93,7 @@ export const REQUIREMENT_STATE_TEXT: Record<RequirementState, string> = {
   missing: "Not given",
   revoked: "Revoked",
   stale_content: "Given for different skill text",
+  stale_policy: "Given before the manifest changed",
   stale_evaluation: "Given for a different evaluation result",
 };
 
@@ -92,6 +110,9 @@ export function publishBlockers(
     return blockers;
   }
   if (!report.recorded_by) blockers.push("Name the person who ran the evaluation.");
+  if (report.threshold < MIN_EVAL_THRESHOLD) {
+    blockers.push(`The evaluation threshold must be at least ${MIN_EVAL_THRESHOLD.toFixed(2)}.`);
+  }
   for (const status of statuses) {
     if (status.state !== "ok") {
       blockers.push(

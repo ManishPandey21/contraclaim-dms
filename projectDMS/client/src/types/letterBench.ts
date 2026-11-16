@@ -267,6 +267,8 @@ export interface SkillApproval {
   skill_key: string;
   version: string;
   content_hash: string;
+  /** Hash of the manifest the approval was given under; absent on approvals recorded before 4B-04. */
+  policy_hash?: string | null;
   eval_suite: string;
   eval_report_hash: string;
   eval_score?: number | null;
@@ -287,6 +289,9 @@ export interface SkillApprovalList {
   skill_key: string;
   version: string;
   content_hash: string;
+  /** The version's manifest hash; an approval must carry the same one. */
+  policy_hash?: string | null;
+  /** Reviews required, the server's floor included. */
   required: SkillApprovalRequirement[];
   approvals: SkillApproval[];
 }

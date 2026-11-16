@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  MIN_EVAL_THRESHOLD,
   publishBlockers,
   requirementStatuses,
   reviewerRoleLabel,
@@ -8,6 +9,7 @@ import {
 import type { SkillApproval, SkillApprovalRequirement, SkillEvalReport } from "@/types/letterBench";
 
 const HASH = "a".repeat(64);
+const POLICY = "p".repeat(64);
 const REQUIRED: SkillApprovalRequirement[] = [
   { kind: "technical", reviewer_role: "chief_contract_expert" },
   { kind: "legal", reviewer_role: "senior_legal_approver" },
@@ -24,11 +26,13 @@ const approval = (over: Partial<SkillApproval>): SkillApproval => ({
   skill_key: "indian-infra-claims",
   version: "1.0.0",
   content_hash: HASH,
+  policy_hash: POLICY,
   eval_suite: "claims-golden-v1",
   eval_report_hash: "b".repeat(64),
   eval_score: 0.92,
   eval_threshold: 0.85,
   eval_case_count: 12,
+  eval_recorded_by: "evaluator",
   kind: "legal",
   reviewer_role: "senior_legal_approver",
   reviewer_user_id: "counsel",
@@ -37,8 +41,44 @@ const approval = (over: Partial<SkillApproval>): SkillApproval => ({
 });
 const technical = approval({ kind: "technical", reviewer_role: "chief_contract_expert", reviewer_user_id: "expert" });
 
-const states = (approvals: SkillApproval[], report: SkillEvalReport | null = REPORT, hash = HASH) =>
-  requirementStatuses(REQUIRED, approvals, hash, report).map((s) => s.state);
+const states = (
+  approvals: SkillApproval[],
+  report: SkillEvalReport | null = REPORT,
+  hash = HASH,
+  policy: string | null = POLICY
+) => requirementStatuses(REQUIRED, approvals, hash, report, policy).map((s) => s.state);
+
+describe("requirementStatuses (4B-04: policy and evaluator are part of what was approved)", () => {
+  it("does not count an approval given under a different manifest", () => {
+    expect(states([technical, approval({})], REPORT, HASH, "q".repeat(64))).toEqual(["stale_policy", "stale_policy"]);
+  });
+
+  it("does not count an approval recorded before policy hashes existed", () => {
+    const legacy = approval({ policy_hash: undefined });
+    expect(states([legacy])[1]).toBe("stale_policy");
+  });
+
+  it("shows nothing as given while the version's policy hash is unknown", () => {
+    expect(states([technical, approval({})], REPORT, HASH, null)).toEqual(["stale_policy", "stale_policy"]);
+  });
+
+  it("treats a different evaluator as a different evaluation", () => {
+    expect(sameEvaluation(approval({}), { ...REPORT, recorded_by: "someone-else" })).toBe(false);
+    expect(states([technical, approval({})], { ...REPORT, recorded_by: "someone-else" })).toEqual([
+      "stale_evaluation",
+      "stale_evaluation",
+    ]);
+  });
+
+  it("names a threshold below the server minimum as a blocker", () => {
+    const statuses = requirementStatuses(REQUIRED, [technical, approval({})], HASH, REPORT, POLICY);
+    const low = { ...REPORT, threshold: 0.5 };
+    expect(publishBlockers(statuses, low, "publisher")).toContain(
+      `The evaluation threshold must be at least ${MIN_EVAL_THRESHOLD.toFixed(2)}.`
+    );
+    expect(publishBlockers(statuses, REPORT, "publisher")).toEqual([]);
+  });
+});
 
 describe("requirementStatuses", () => {
   it("is missing until given, then ok", () => {
@@ -73,14 +113,14 @@ describe("requirementStatuses", () => {
 });
 
 describe("publishBlockers", () => {
-  const ready = requirementStatuses(REQUIRED, [technical, approval({})], HASH, REPORT);
+  const ready = requirementStatuses(REQUIRED, [technical, approval({})], HASH, REPORT, POLICY);
 
   it("is empty when everything is in place and the publisher is a third person", () => {
     expect(publishBlockers(ready, REPORT, "publisher")).toEqual([]);
   });
 
   it("names each missing review", () => {
-    const blockers = publishBlockers(requirementStatuses(REQUIRED, [technical], HASH, REPORT), REPORT, "publisher");
+    const blockers = publishBlockers(requirementStatuses(REQUIRED, [technical], HASH, REPORT, POLICY), REPORT, "publisher");
     expect(blockers).toEqual(["Legal approval by Senior Legal Approver: not given."]);
   });
 

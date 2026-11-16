@@ -24,29 +24,77 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
 
+from ...core.config import settings
 from ...core.permissions import actor_role_names
 from ...models.skill import (
     SkillApproval,
     SkillApprovalRequest,
+    SkillApprovalRequirement,
     SkillApprovalStatus,
     SkillEvalReport,
+    SkillManifest,
     SkillVersion,
 )
 from ...utils.datetime import now_utc
+from .system_skills import with_approval_floor
 
 SKILL_APPROVALS = "skill_approvals"
 
+#: Lowest evaluation threshold a report may set for itself. The client cannot
+#: lower the bar it is measured against (plan D-05).
+DEFAULT_MIN_EVAL_THRESHOLD = 0.85
+
 
 def eval_report_hash(report: SkillEvalReport) -> str:
-    """Identity of an evaluation result: what was run and what it scored."""
+    """Identity of an evaluation result: what was run, by whom, and what it scored.
+
+    ``recorded_by`` is part of it, so a publisher cannot name a different
+    evaluator from the one the approvers saw and keep their approvals.
+    """
     payload = {
         "suite": report.suite,
         "score": round(float(report.score), 6),
         "threshold": round(float(report.threshold), 6),
         "case_count": int(report.case_count),
+        "recorded_by": str(report.recorded_by or ""),
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def manifest_policy_hash(manifest: SkillManifest) -> str:
+    """Identity of a manifest. Text is bound by ``content_hash``; this binds the policy."""
+    encoded = json.dumps(manifest.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def required_reviews(version: SkillVersion) -> List[SkillApprovalRequirement]:
+    """The reviews this version needs: its manifest's, never fewer than the server floor."""
+    return with_approval_floor(version.skill_key, list(version.manifest.required_approvals))
+
+
+def minimum_eval_threshold() -> float:
+    try:
+        configured = float(getattr(settings, "SKILL_EVAL_MIN_THRESHOLD", DEFAULT_MIN_EVAL_THRESHOLD))
+    except (TypeError, ValueError):
+        configured = DEFAULT_MIN_EVAL_THRESHOLD
+    # Configuration may raise the floor, never drop it below the default.
+    return max(DEFAULT_MIN_EVAL_THRESHOLD, configured)
+
+
+def require_acceptable_report(report: SkillEvalReport) -> None:
+    """Refuse a report that sets its own bar too low or names no evaluator."""
+    floor = minimum_eval_threshold()
+    if float(report.threshold) < floor:
+        raise HTTPException(
+            status_code=422,
+            detail=f"The evaluation threshold {report.threshold:.2f} is below the required minimum {floor:.2f}",
+        )
+    if not report.recorded_by:
+        raise HTTPException(
+            status_code=422,
+            detail="The evaluation report must name who ran it (recorded_by)",
+        )
 
 
 def _actor_id(actor: Any) -> str:
@@ -60,8 +108,9 @@ def approval_statuses(
 ) -> List[SkillApprovalStatus]:
     """For each required review, the best matching approval and why it does or does not count."""
     report_hash = eval_report_hash(report)
+    policy_hash = manifest_policy_hash(version.manifest)
     result: List[SkillApprovalStatus] = []
-    for requirement in version.manifest.required_approvals:
+    for requirement in required_reviews(version):
         candidates = sorted(
             (
                 item
@@ -78,7 +127,9 @@ def approval_statuses(
         exact = [
             item
             for item in candidates
-            if item.content_hash == version.content_hash and item.eval_report_hash == report_hash
+            if item.content_hash == version.content_hash
+            and item.policy_hash == policy_hash
+            and item.eval_report_hash == report_hash
         ]
         live = next((item for item in exact if item.revoked_at is None), None)
         if live is not None:
@@ -88,9 +139,12 @@ def approval_statuses(
         elif candidates:
             latest = candidates[0]
             status.approval = latest
-            status.state = (
-                "stale_content" if latest.content_hash != version.content_hash else "stale_evaluation"
-            )
+            if latest.content_hash != version.content_hash:
+                status.state = "stale_content"
+            elif latest.policy_hash != policy_hash:
+                status.state = "stale_policy"
+            else:
+                status.state = "stale_evaluation"
         result.append(status)
     return result
 
@@ -99,6 +153,7 @@ _STATE_TEXT = {
     "missing": "not given",
     "revoked": "revoked",
     "stale_content": "given for different skill text",
+    "stale_policy": "given before the manifest changed",
     "stale_evaluation": "given for a different evaluation result",
 }
 
@@ -132,7 +187,7 @@ class SkillApprovalService:
                 status_code=409,
                 detail=f"{version.skill_key} {version.version} is {version.status}; only a draft is reviewed",
             )
-        required = {(item.kind, item.reviewer_role) for item in version.manifest.required_approvals}
+        required = {(item.kind, item.reviewer_role) for item in required_reviews(version)}
         if (request.kind, request.reviewer_role) not in required:
             raise HTTPException(
                 status_code=422,
@@ -149,15 +204,11 @@ class SkillApprovalService:
                 detail=f"Only a user holding the {request.reviewer_role} role can give this approval",
             )
         report = request.eval_report
+        require_acceptable_report(report)
         if not report.passed:
             raise HTTPException(
                 status_code=422,
                 detail="An approval can only be given against a passing evaluation",
-            )
-        if not report.recorded_by:
-            raise HTTPException(
-                status_code=422,
-                detail="The evaluation report must name who ran it (recorded_by)",
             )
         if str(report.recorded_by) == actor_id:
             raise HTTPException(
@@ -165,11 +216,13 @@ class SkillApprovalService:
                 detail="The person who ran the evaluation cannot approve it",
             )
         report_hash = eval_report_hash(report)
+        policy_hash = manifest_policy_hash(version.manifest)
         existing = [
             item
             for item in await self.list(version.skill_key, version.version)
             if item.revoked_at is None
             and item.content_hash == version.content_hash
+            and item.policy_hash == policy_hash
             and item.eval_report_hash == report_hash
         ]
         for item in existing:
@@ -187,6 +240,7 @@ class SkillApprovalService:
             skill_key=version.skill_key,
             version=version.version,
             content_hash=version.content_hash,
+            policy_hash=policy_hash,
             eval_suite=report.suite,
             eval_report_hash=report_hash,
             eval_score=report.score,
@@ -204,6 +258,9 @@ class SkillApprovalService:
     async def get(self, approval_id: str) -> Optional[SkillApproval]:
         doc = await self.db[SKILL_APPROVALS].find_one({"_id": approval_id})
         return SkillApproval(**doc) if doc else None
+
+    async def live_approvals(self, skill_key: str, version: str) -> List[SkillApproval]:
+        return [item for item in await self.list(skill_key, version) if item.revoked_at is None]
 
     async def revoke(self, approval_id: str, reason: str, actor: Any) -> SkillApproval:
         approval = await self.get(approval_id)
@@ -233,4 +290,8 @@ __all__ = [
     "approval_statuses",
     "describe_unsatisfied",
     "eval_report_hash",
+    "manifest_policy_hash",
+    "minimum_eval_threshold",
+    "require_acceptable_report",
+    "required_reviews",
 ]

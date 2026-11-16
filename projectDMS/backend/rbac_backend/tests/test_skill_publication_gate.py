@@ -133,10 +133,26 @@ async def test_every_technical_reviewer_a_pack_names_is_required() -> None:
     _refused(exc, 422, "technical approval by delay_planning_expert: not given")
 
 
-async def test_approval_for_other_text_does_not_unlock_a_reimported_draft() -> None:
+async def test_an_approved_draft_cannot_be_reimported_under_the_same_version() -> None:
+    """4B-04: reviewers' names cannot be left on text or policy they did not see."""
     db = FakeDB()
-    await _fully_approved(db)
-    await _draft(db, body="method v1, quietly rewritten")  # same version number, new text
+    record = await _fully_approved(db)
+    with pytest.raises(HTTPException) as exc:
+        await _draft(db, body="method v1, quietly rewritten")  # same version number, new text
+    _refused(exc, 409, "has approvals")
+    stored = await SkillRegistry(db).get_version(CLAIMS_SKILL_KEY, "1.1.0")
+    assert stored.content_hash == record.content_hash
+
+
+async def test_approval_for_other_text_does_not_unlock_a_reimported_draft() -> None:
+    """Once its approvals are revoked a draft may be replaced; the old approvals then count for nothing."""
+    db = FakeDB()
+    record = await _fully_approved(db)
+    service = SkillApprovalService(db)
+    for item in await service.list(record.skill_key, record.version):
+        actor = COUNSEL if item.kind == "legal" else CONTRACT_EXPERT
+        await service.revoke(item.id, "text is being rewritten", actor)
+    await _draft(db, body="method v1, quietly rewritten")
     with pytest.raises(HTTPException) as exc:
         await _publish(db)
     _refused(exc, 422, "given for different skill text")
@@ -186,11 +202,133 @@ async def test_publish_needs_a_named_evaluator_when_approvals_are_required() -> 
     _refused(exc, 422, "recorded_by")
 
 
-async def test_a_pack_with_no_required_approvals_publishes_on_evaluation_alone() -> None:
+# --------------------------------------------------------------------------- #
+# B1: the server floor. A client manifest can add reviews, never remove one.
+# --------------------------------------------------------------------------- #
+async def _import_with_manifest(db: FakeDB, key: str, version: str, manifest, body: str = "method"):
+    return await SkillRegistry(db).create_draft(
+        _loaded(key, body), version=version, kind="evaluation", manifest=manifest, created_by="importer"
+    )
+
+
+@pytest.mark.parametrize("version", ["1.0.1", "1.1.0", "9.0.0"])
+async def test_reimporting_a_system_pack_with_no_required_reviews_keeps_the_bundled_ones(version: str) -> None:
+    """The exploit from the audit: import the claims pack as a new version with
+    required_approvals [] and publish it on a self-typed evaluation."""
+    db = FakeDB()
+    stripped = system_skill_version(CLAIMS_SKILL_KEY).manifest.model_copy(update={"required_approvals": []})
+    record = await _import_with_manifest(db, CLAIMS_SKILL_KEY, version, stripped)
+    kept = {(item.kind, item.reviewer_role) for item in record.manifest.required_approvals}
+    assert kept == {("technical", CONTRACT), ("legal", LEGAL)}
+    with pytest.raises(HTTPException) as exc:
+        await SkillRegistry(db).publish(CLAIMS_SKILL_KEY, version, _report(), PUBLISHER)
+    _refused(
+        exc, 422,
+        "technical approval by chief_contract_expert: not given",
+        "legal approval by senior_legal_approver: not given",
+    )
+    resolved, _, _ = await SkillRegistry(db).resolve(CLAIMS_SKILL_KEY, "org1", None)
+    assert resolved is None, "nothing may go live without the reviews"
+
+
+async def test_a_published_letter_pack_needs_the_legal_sign_off_at_its_next_version() -> None:
+    """Decision D-03: the gate applies to the three letter packs from their next version."""
     db = FakeDB()
     await _draft(db, key=VARIATIONS_SKILL_KEY)
-    published = await _publish(db, report=_report(recorded_by=None), key=VARIATIONS_SKILL_KEY)
-    assert published.status == "published"
+    with pytest.raises(HTTPException) as exc:
+        await _publish(db, key=VARIATIONS_SKILL_KEY)
+    _refused(exc, 422, "legal approval by senior_legal_approver: not given")
+    resolved, _, _ = await SkillRegistry(db).resolve(VARIATIONS_SKILL_KEY, "org1", None)
+    assert resolved is not None and resolved.version == "1.0.0"
+
+
+async def test_an_unknown_key_imported_into_the_system_scope_needs_the_legal_sign_off() -> None:
+    db = FakeDB()
+    manifest = system_skill_version(VARIATIONS_SKILL_KEY).manifest.model_copy(update={"required_approvals": []})
+    record = await _import_with_manifest(db, "metro-defence-trial", "0.1.0", manifest)
+    assert [(item.kind, item.reviewer_role) for item in record.manifest.required_approvals] == [("legal", LEGAL)]
+    with pytest.raises(HTTPException) as exc:
+        await SkillRegistry(db).publish("metro-defence-trial", "0.1.0", _report(), PUBLISHER)
+    _refused(exc, 422, "legal approval by senior_legal_approver: not given")
+
+
+async def test_a_manifest_may_add_reviews_to_the_floor() -> None:
+    from rbac_backend.models.skill import SkillApprovalRequirement
+
+    db = FakeDB()
+    base = system_skill_version(CLAIMS_SKILL_KEY).manifest
+    extra = SkillApprovalRequirement(kind="technical", reviewer_role=DELAY)
+    record = await _import_with_manifest(
+        db, CLAIMS_SKILL_KEY, "1.2.0", base.model_copy(update={"required_approvals": [extra]})
+    )
+    assert {(i.kind, i.reviewer_role) for i in record.manifest.required_approvals} == {
+        ("technical", CONTRACT), ("legal", LEGAL), ("technical", DELAY),
+    }
+
+
+async def test_a_manifest_changed_after_approval_makes_the_approvals_stale() -> None:
+    """Text is bound by content_hash; the manifest by policy_hash. Neither can change under an approval."""
+    db = FakeDB()
+    record = await _fully_approved(db)
+    # A change the import path now refuses, made directly in the store.
+    db.skill_versions.docs[-1]["manifest"]["validators"] = ["reservation_of_rights"]
+    with pytest.raises(HTTPException) as exc:
+        await _publish(db)
+    _refused(exc, 422, "given before the manifest changed")
+    assert record.status == "draft"
+
+
+async def test_naming_a_different_evaluator_at_publish_invalidates_the_approvals() -> None:
+    """recorded_by is part of the evaluation's identity: the publisher cannot swap it."""
+    db = FakeDB()
+    await _fully_approved(db)
+    with pytest.raises(HTTPException) as exc:
+        await _publish(db, report=_report(recorded_by="someone-else"))
+    _refused(exc, 422, "given for a different evaluation result")
+
+
+@pytest.mark.parametrize("threshold", [0.0, 0.5, 0.84])
+async def test_an_evaluation_cannot_set_its_own_bar_below_the_server_minimum(threshold: float) -> None:
+    db = FakeDB()
+    record = await _draft(db)
+    low = SkillEvalReport(suite="s", score=1.0, threshold=threshold, case_count=1, recorded_by="evaluator")
+    with pytest.raises(HTTPException) as at_review:
+        await _approve(db, record, "legal", LEGAL, COUNSEL, report=low)
+    _refused(at_review, 422, "below the required minimum 0.85")
+    with pytest.raises(HTTPException) as at_publish:
+        await _publish(db, report=low)
+    _refused(at_publish, 422, "below the required minimum 0.85")
+
+
+async def test_configuration_can_raise_the_evaluation_minimum_but_not_lower_it(monkeypatch) -> None:
+    from rbac_backend.core.config import settings
+    from rbac_backend.services.skills.approvals import minimum_eval_threshold
+
+    monkeypatch.setattr(settings, "SKILL_EVAL_MIN_THRESHOLD", 0.9)
+    assert minimum_eval_threshold() == 0.9
+    monkeypatch.setattr(settings, "SKILL_EVAL_MIN_THRESHOLD", 0.1)
+    assert minimum_eval_threshold() == 0.85
+
+
+async def test_the_approvals_listing_reports_the_floor_and_the_policy_hash() -> None:
+    from rbac_backend.routers import skills as skills_router
+    from rbac_backend.services.skills.approvals import manifest_policy_hash
+
+    db = FakeDB()
+    stripped = system_skill_version(CLAIMS_SKILL_KEY).manifest.model_copy(update={"required_approvals": []})
+    record = await _import_with_manifest(db, CLAIMS_SKILL_KEY, "1.3.0", stripped)
+
+    class Policy:
+        async def authorize(self, *args, **kwargs):
+            return None
+
+    response = await skills_router.list_skill_approvals(
+        CLAIMS_SKILL_KEY, "1.3.0",
+        registry=SkillRegistry(db), approvals=SkillApprovalService(db), policy=Policy(),
+        current_user=SimpleNamespace(id="publisher", roles=["superadmin"]),
+    )
+    assert response.policy_hash == manifest_policy_hash(record.manifest)
+    assert {(i.kind, i.reviewer_role) for i in response.required} == {("technical", CONTRACT), ("legal", LEGAL)}
 
 
 # --------------------------------------------------------------------------- #

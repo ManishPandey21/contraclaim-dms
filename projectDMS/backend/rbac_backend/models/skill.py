@@ -232,6 +232,11 @@ class SkillApproval(BaseModel):
     skill_key: str = Field(..., pattern=SKILL_KEY_PATTERN)
     version: str = Field(..., pattern=SEMVER_PATTERN)
     content_hash: str = Field(..., min_length=64, max_length=64)
+    # Hash of the version's manifest (its policy: required reviews, schema,
+    # chains, validators). An approval given before the manifest changed stops
+    # matching. Absent on approvals recorded before 4B-04, which therefore count
+    # as stale.
+    policy_hash: Optional[str] = Field(default=None, min_length=64, max_length=64)
     eval_suite: str
     eval_report_hash: str = Field(..., min_length=64, max_length=64)
     # The result the reviewer saw, kept readable alongside its hash.
@@ -271,7 +276,7 @@ class SkillApprovalStatus(BaseModel):
     kind: SkillApprovalKind
     reviewer_role: str
     satisfied: bool = False
-    # missing | stale_content | stale_evaluation | revoked | ok
+    # missing | stale_content | stale_policy | stale_evaluation | revoked | ok
     state: str = "missing"
     approval: Optional[SkillApproval] = None
 
@@ -280,6 +285,9 @@ class SkillApprovalListResponse(BaseModel):
     skill_key: str
     version: str
     content_hash: str
+    # The version's manifest hash; approvals must carry the same one.
+    policy_hash: Optional[str] = None
+    # The reviews required, server floor included (not only what the manifest lists).
     required: List[SkillApprovalRequirement] = Field(default_factory=list)
     approvals: List[SkillApproval] = Field(default_factory=list)
 

@@ -288,6 +288,34 @@ def system_skill_version(skill_key: str) -> SkillVersion | None:
     return None
 
 
+def required_approval_floor(skill_key: str) -> List[SkillApprovalRequirement]:
+    """The reviews every version of ``skill_key`` must hold, whatever its manifest says.
+
+    Server-controlled (plan D-05, owner review requirement B1): a manifest sent
+    with an import can add reviews, never remove one. The bundled claim and
+    arbitration packs need their bundled technical and legal reviews. Every
+    other key, the published letter packs at their next version included
+    (decision D-03), and any key imported into the system scope, needs at least
+    the independent legal sign-off.
+    """
+    bundled = _MANIFESTS.get(skill_key)
+    if bundled is not None and bundled.required_approvals:
+        return [item.model_copy() for item in bundled.required_approvals]
+    return _approvals()
+
+
+def with_approval_floor(skill_key: str, requirements: List[SkillApprovalRequirement]) -> List[SkillApprovalRequirement]:
+    """``requirements`` plus every review the floor demands, floor first, no duplicates."""
+    merged: List[SkillApprovalRequirement] = []
+    seen = set()
+    for item in [*required_approval_floor(skill_key), *requirements]:
+        key = (item.kind, item.reviewer_role)
+        if key not in seen:
+            seen.add(key)
+            merged.append(item)
+    return merged
+
+
 __all__ = [
     "ANALYSIS_SKILL_KEY",
     "AWAITING_APPROVAL_REASON",
@@ -304,6 +332,8 @@ __all__ = [
     "LETTERS_SKILL_KEY",
     "SYSTEM_SKILL_VERSION",
     "VARIATIONS_SKILL_KEY",
+    "required_approval_floor",
     "system_skill_version",
     "system_skill_versions",
+    "with_approval_floor",
 ]

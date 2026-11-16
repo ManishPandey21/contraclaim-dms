@@ -34,7 +34,7 @@ from ..models.skill import (
 )
 from ..services.ai_guardrails import AIOutputGuardrailService
 from ..services.policy_service import PolicyService
-from ..services.skills.approvals import SkillApprovalService
+from ..services.skills.approvals import SkillApprovalService, manifest_policy_hash, required_reviews
 from ..services.skills.loader import MAX_BUNDLE_BYTES, SkillBundleError, load_skill_zip
 from ..services.skills.registry import SkillRegistry
 from ..services.upload_streaming import read_upload_within_limit
@@ -59,7 +59,7 @@ async def get_approval_service() -> SkillApprovalService:
 
 def _is_named_reviewer(record: SkillVersion, current_user: CurrentUser) -> bool:
     """True when the user holds a reviewer role this version asks an approval from."""
-    wanted = {item.reviewer_role for item in record.manifest.required_approvals}
+    wanted = {item.reviewer_role for item in required_reviews(record)}
     return bool(wanted & actor_role_names(current_user))
 
 
@@ -214,7 +214,8 @@ async def list_skill_approvals(
         skill_key=record.skill_key,
         version=record.version,
         content_hash=record.content_hash,
-        required=list(record.manifest.required_approvals),
+        policy_hash=manifest_policy_hash(record.manifest),
+        required=required_reviews(record),
         approvals=await approvals.list(skill_key, version),
     )
 
