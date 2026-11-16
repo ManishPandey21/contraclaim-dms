@@ -1,14 +1,15 @@
-From 1d5e2573a086dbd2f5b95b897a17d72cb2dfe578 Mon Sep 17 00:00:00 2001
+From 62899bfcf6b8c8d408e5ee17eeb3e78af03e5a75 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
-Date: Mon, 16 Nov 2026 11:10:56 +0000
-Subject: [PATCH] C-25/C-26 hotfix proposal
+Date: Mon, 16 Nov 2026 14:37:05 +0000
+Subject: [PATCH] C-25/C-26/C-27 hotfix proposal
 
 ---
  .github/workflows/ci.yml                      |   1 +
  .../routers/arbitration_drafting.py           |   4 +-
+ .../backend/rbac_backend/routers/sla.py       |   5 +-
  .../arbitration_drafting/case_workspace.py    |   8 +-
- ...st_arbitration_case_lookup_hotfix_mongo.py | 256 ++++++++++++++++++
- 4 files changed, 263 insertions(+), 6 deletions(-)
+ ...st_arbitration_case_lookup_hotfix_mongo.py | 286 ++++++++++++++++++
+ 5 files changed, 296 insertions(+), 8 deletions(-)
  create mode 100644 projectDMS/backend/rbac_backend/tests/integration/test_arbitration_case_lookup_hotfix_mongo.py
 
 diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
@@ -45,6 +46,33 @@ index ca70d24..b34fcd1 100644
          project_id=project_id,
          audit=False,
      )
+diff --git a/projectDMS/backend/rbac_backend/routers/sla.py b/projectDMS/backend/rbac_backend/routers/sla.py
+index 2a90d49..d19cf3f 100644
+--- a/projectDMS/backend/rbac_backend/routers/sla.py
++++ b/projectDMS/backend/rbac_backend/routers/sla.py
+@@ -35,11 +35,12 @@ async def _scoped_items(
+     current_user: CurrentUser,
+     policy: PolicyService,
+ ) -> List[SlaItem]:
++    active_org = organization_id or getattr(current_user, "organization_id", None)  # C-27
+     await policy.authorize(
+         current_user,
+         Permissions.CLAIM_VIEW,
+         resource_type="claims",
+-        organization_id=organization_id,
++        organization_id=active_org,
+         project_id=project_id,
+         audit=False,
+     )
+@@ -48,7 +49,7 @@ async def _scoped_items(
+         scope,
+         days=days,
+         only_breached=only_breached,
+-        organization_id=organization_id,
++        organization_id=active_org,  # C-27
+     )
+     return [SlaItem(**i) for i in items]
+ 
 diff --git a/projectDMS/backend/rbac_backend/services/arbitration_drafting/case_workspace.py b/projectDMS/backend/rbac_backend/services/arbitration_drafting/case_workspace.py
 index eeaa2e2..cc6e2ab 100644
 --- a/projectDMS/backend/rbac_backend/services/arbitration_drafting/case_workspace.py
@@ -87,10 +115,10 @@ index eeaa2e2..cc6e2ab 100644
                      "status": ArbitrationCaseStatus.READY_FOR_DRAFTING.value,
 diff --git a/projectDMS/backend/rbac_backend/tests/integration/test_arbitration_case_lookup_hotfix_mongo.py b/projectDMS/backend/rbac_backend/tests/integration/test_arbitration_case_lookup_hotfix_mongo.py
 new file mode 100644
-index 0000000..7e14251
+index 0000000..7726c15
 --- /dev/null
 +++ b/projectDMS/backend/rbac_backend/tests/integration/test_arbitration_case_lookup_hotfix_mongo.py
-@@ -0,0 +1,256 @@
+@@ -0,0 +1,286 @@
 +"""C-25 / C-26 hotfix for the production release: arbitration cases are found again.
 +
 +Hotfix proposal docs/C25_HOTFIX_PROPOSAL.md (on the Phase 4b branch). Over real
@@ -345,6 +373,36 @@ index 0000000..7e14251
 +                assert case_id not in _ids(other)
 +            else:
 +                _never_leaks(other)
++
++    _run(scenario())
++
++
++def test_the_sla_pages_answer_tenant_users_and_apply_their_organisation_windows(monkeypatch) -> None:
++    """C-27: /sla/upcoming and /sla/breached gave the subscription check no organisation when the
++    page sent none (the SLA tracker and the claims register send none), so every tenant user got
++    403, and the organisation's own notice windows were never looked up."""
++    from datetime import timedelta
++
++    async def scenario() -> None:
++        async with _env(monkeypatch) as env:
++            await env.db.sla_rules.insert_one({"organization_id": ORG_A, "notice_windows": {"eot": 40}})
++            event = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=20)
++            await env.db.claims.insert_one(
++                {"_id": "claim-sla", "title": "Late access", "type": "eot", "status": "draft",
++                 "organization_id": ORG_A, "project_id": PROJ_A1, "event_date": event, "notice_date": None}
++            )
++            for persona in ("org_admin", "project_admin"):
++                for path in ("/api/sla/upcoming?days=30", "/api/sla/breached"):
++                    response = await env.call("GET", persona, path)
++                    assert response.status_code == 200, (persona, path, response.status_code, response.text[:200])
++            items = (await env.call("GET", "org_admin", "/api/sla/upcoming?days=30")).json()
++            bar = [item for item in items if item.get("claim_id") == "claim-sla" and item.get("kind") == "time_bar"]
++            assert bar and bar[0]["days_remaining"] in (19, 20), items  # the organisation's 40, not the default
++            foreign = await env.call("GET", "foreign_org_admin", "/api/sla/upcoming?days=30")
++            if foreign.status_code == 200:
++                assert all(item.get("claim_id") != "claim-sla" for item in foreign.json())
++            else:
++                _never_leaks(foreign)
 +
 +    _run(scenario())
 -- 
