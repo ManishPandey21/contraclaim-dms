@@ -57,6 +57,7 @@ from .claim_delay_lab import ClaimDelayLab, DelayView, build_view
 from .claim_quantum import ClaimQuantum, QuantumView
 from .docx_xml import w_paragraph, w_table
 from .letter_drafting.prompts import UNTRUSTED_CONTENT_GUARD, register_default_template
+from .submission_figures import clauses_in, invented_figures, reserves_rights
 from .skills.executor import canonical_hash
 from .skills.system_skills import CLAIMS_SKILL_KEY
 from .sla_service import _as_datetime
@@ -170,19 +171,26 @@ def numbers_in(text: str) -> Set[str]:
 
 
 def validate_section_text(key: str, proposed: List[str], record: List[str], cited_clauses: Set[str]) -> List[str]:
-    """Reasons a skill's section text cannot be used. Empty means it can."""
+    """Reasons a skill's section text cannot be used. Empty means it can.
+
+    4B-28: figures are typed and scaled (money, days, plain numbers; lakh, crore
+    and number words), checked per head where a paragraph is about one head; a
+    clause may be written "Cl." or "Article"; the reservation must be stated, not
+    negated (``submission_figures``).
+    """
     reasons: List[str] = []
-    text, base = "\n".join(proposed), "\n".join(record)
+    text = "\n".join(proposed)
     if not text.strip():
         return ["no text was returned"]
-    invented = sorted(numbers_in(text) - numbers_in(base))
+    invented = invented_figures(proposed, record)
     if invented:
-        reasons.append("no_invented_amounts: figures not on the record (" + ", ".join(invented[:6]) + ")")
-    uncited = sorted({ref for ref in _CLAUSE.findall(text)} - cited_clauses - {ref for ref in _CLAUSE.findall(base)})
+        reasons.append("no_invented_amounts: figures not on the record (" + "; ".join(invented[:6]) + ")")
+    base_clauses = set().union(*(clauses_in(paragraph) for paragraph in record)) if record else set()
+    uncited = sorted(clauses_in(text) - set(cited_clauses) - base_clauses)
     if uncited:
         reasons.append("exact_sub_clause_cited: clauses the heads do not cite (" + ", ".join(uncited[:6]) + ")")
-    if key == "relief_and_reservation" and "reserv" not in text.lower():
-        reasons.append("reservation_of_rights: the reservation of rights is missing")
+    if key == "relief_and_reservation" and not reserves_rights(text):
+        reasons.append("reservation_of_rights: the reservation of rights is missing or negated")
     return reasons
 
 

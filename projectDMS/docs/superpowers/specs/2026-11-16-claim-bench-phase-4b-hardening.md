@@ -617,6 +617,11 @@ Each ticket is independently testable and lands in its own commit. "Proof" names
 - Production-visible change, for review under AQ-7: the arbitration fallback writer, which production uses because python-docx is not installed, now writes real tables where it used to write tab-joined lines. 4B-30 (python-docx) is not started.
 - Not changed: the letter-drafting Word writer (`services/letter_drafting/service.py`) builds its own XML with the same escaping gap. It is outside 4B-29's two writers and is live in production; noted for a follow-up.
 
+**As built, 4B-28 (2026-11-16).**
+
+- `services/submission_figures.py`; `validate_section_text` uses it. Figures are typed: money (INR, Rs or ₹, or a lakh/crore/million scale, applied), days, or plain numbers. Amounts and days written in words are read. A money or day figure must match a record figure of the same value and type, so digits borrowed from a date or another figure no longer pass. Where a paragraph names one head, its money and day figures must be that head's own (from record paragraphs naming that head), which closes cross-head swaps. Clause references are read in "Clause", "Sub-Clause", "Cl.", "Article" and "Art." forms, and a four-digit year is not a clause. The reservation must appear in a sentence without a negation ("not", "no", "without", "waive").
+- Corpus: 13 bypasses rejected, 10 faithful rewrites accepted (`tests/test_submission_validator_corpus.py`). Limitation: a currency written with no space before its digits ("INR1,20") is read as a plain number.
+
 **C-25 (owner decision 4).** High priority. The read-only assessment is reading P-13 in 4B-01. The fix is verified on a real MongoDB for create, list, get, update, soft-delete, tenant isolation and case-driven drafting. If P-13 shows production is affected, a minimal, independently tested hotfix proposal against the production release branch is ready (`docs/C25_HOTFIX_PROPOSAL.md`); it is not deployed without separate approval. The proposal also carries C-26 (found while verifying C-25), and its tests exercise every operation listed above.
 
 Critical path: 4B-02 → 4B-47 → 4B-04 → 4B-05 → 4B-07 → 4B-26 → 4B-33 → 4B-36 → 4B-39 → 4B-43 → 4B-44. Waves 4 and 5 run beside Waves 1 and 2 once 4B-02 lands. 4B-48 is off the critical path.

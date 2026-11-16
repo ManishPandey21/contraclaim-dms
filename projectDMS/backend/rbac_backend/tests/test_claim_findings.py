@@ -577,7 +577,7 @@ def test_skill_text_is_refused_when_it_goes_beyond_the_record() -> None:
     clause = validate_section_text("contractual_basis", ["Under Sub-Clause 13.7 the Contractor is entitled."], ["Head H1 relies on Sub-Clause 8.4."], {"8.4"})
     assert any(reason.startswith("exact_sub_clause_cited") and "13.7" in reason for reason in clause)
     dropped = validate_section_text("relief_and_reservation", ["The Contractor seeks 146 days."], record, {"8.4"})
-    assert dropped == ["reservation_of_rights: the reservation of rights is missing"]
+    assert dropped == ["reservation_of_rights: the reservation of rights is missing or negated"]
     assert validate_section_text("quantum", ["  "], record, set()) == ["no text was returned"]
 
 
