@@ -368,7 +368,7 @@ for (const [collection, name, key, unique, partial] of expectedIndexes) {
   );
 }
 const partials = expectedIndexes.filter((e) => e[4] !== null).length;
-check("partial unique indexes expected", partials === 5, partials + " declared");
+check("partial unique indexes expected", partials === 6, partials + " declared");
 
 const expectedSkills = ["indian-infra-contract-letters", "indian-infra-letter-analysis", "indian-infra-variations"];
 // Stored by 20261115_0001 as DRAFTS: unreviewed method text that must not be
