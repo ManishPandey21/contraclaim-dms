@@ -8,7 +8,7 @@ already authorized for the org/project it operates on.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from ..core.database import get_database
 from ..models.claim import Claim, ClaimCreate
@@ -73,16 +73,33 @@ class ClaimService:
         return [claim async for claim in cursor]
 
     async def update(
-        self, claim_id: str, update: Dict[str, Any], current_user: Any, *, before: Optional[Dict[str, Any]] = None
+        self,
+        claim_id: str,
+        update: Dict[str, Any],
+        current_user: Any,
+        *,
+        before: Optional[Dict[str, Any]] = None,
+        expected: Optional[Dict[str, Any]] = None,
+        clear: Iterable[str] = (),
     ) -> Optional[Dict[str, Any]]:
+        """Write ``update`` to the claim.
+
+        ``expected``: fields the stored claim must still hold (compare-and-set, 4B-12);
+        if it no longer does, nothing is written and None is returned.
+        ``clear``: fields to store as null, which a None in ``update`` alone never does.
+        """
         db = await self._get_db()
         update.pop("linked_document_ids", None)
         update = {k: v for k, v in update.items() if v is not None}
+        for key in clear:
+            update[key] = None
         update["updated_at"] = datetime.utcnow()
         update["updated_by"] = getattr(current_user, "id", None)
         updated = await db.claims.find_one_and_update(
-            {"_id": claim_id}, {"$set": update}, return_document=True
+            {"_id": claim_id, **(expected or {})}, {"$set": update}, return_document=True
         )
+        if updated is None and expected:
+            return None
         await self.audit.emit(
             action="claim.updated",
             actor_id=getattr(current_user, "id", None),

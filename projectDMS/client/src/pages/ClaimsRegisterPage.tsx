@@ -254,17 +254,20 @@ const ClaimsRegisterPage: React.FC = () => {
     }
     try {
       setSaving(true);
+      // When editing, an emptied field is sent as null so the server clears it
+      // (4B-12); left out, the old value would silently stay.
+      const cleared = editingId ? null : undefined;
       const payload: ClaimPayload = {
         title: form.title.trim(),
         type: form.type,
         claim_ref: form.claim_ref || undefined,
-        description: form.description || undefined,
+        description: form.description || cleared,
         amount_claimed: form.amount_claimed,
         currency: form.currency.trim().toUpperCase() || undefined,
-        event_date: fromDateInput(form.event_date),
-        awareness_date: fromDateInput(form.awareness_date),
-        notice_date: fromDateInput(form.notice_date),
-        response_due_date: fromDateInput(form.response_due_date),
+        event_date: fromDateInput(form.event_date) ?? cleared,
+        awareness_date: fromDateInput(form.awareness_date) ?? cleared,
+        notice_date: fromDateInput(form.notice_date) ?? cleared,
+        response_due_date: fromDateInput(form.response_due_date) ?? cleared,
         eot_days_claimed: form.eot_days_claimed,
         contract_clauses: parseClauseList(form.contract_clauses),
         project_id: form.project_id || undefined,

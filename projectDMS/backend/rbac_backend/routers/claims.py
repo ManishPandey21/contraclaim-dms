@@ -145,6 +145,31 @@ async def mark_bench_tests_stale(db, claim: dict) -> Optional[dict]:
     return await db.claims.find_one({"_id": claim["_id"]})
 
 
+#: Statuses a claim may be created in through the register (4B-12, C-13). Later
+#: statuses are reached by the lifecycle; "potential" only by a signal.
+CREATABLE_STATUSES = frozenset({ClaimStatus.DRAFT, ClaimStatus.NOTIFIED})
+
+#: Fields an update may clear with an explicit null. Others ignore a null.
+CLEARABLE_FIELDS = frozenset(
+    {
+        "claim_ref", "description", "event_date", "awareness_date", "notice_date", "submission_date",
+        "response_due_date", "amount_agreed", "eot_days_granted", "responsible_party_id",
+    }
+)
+
+
+def _refuse(code: int, error_code: str, message: str) -> HTTPException:
+    return HTTPException(status_code=code, detail={"code": error_code, "user_message": message, "detail": message})
+
+
+def _status_conflict() -> HTTPException:
+    return _refuse(
+        status.HTTP_409_CONFLICT,
+        "claim_changed_concurrently",
+        "Someone changed this claim's status at the same time. Reload it and try again.",
+    )
+
+
 def _require_status_transition(claim: dict, target: ClaimStatus) -> None:
     """Refuse a status move the lifecycle does not allow. Same status is a no-op."""
     current = str(claim.get("status") or ClaimStatus.DRAFT.value)
@@ -214,6 +239,20 @@ async def create_claim(
     # The body's project must BE the selection: refused, never rewritten. A claim
     # without a project cannot be created while the selection is a project.
     await selection.require_project(payload.project_id, payload.organization_id)
+    if payload.origin is not None:
+        # The origin ties a claim to the signal it was raised from, under a unique
+        # index; only the signal path may set it (C-13).
+        raise _refuse(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "claim_origin_server_owned",
+            "A claim's origin is recorded by the system when a potential claim is raised; it cannot be set here.",
+        )
+    if ClaimStatus(payload.status) not in CREATABLE_STATUSES:
+        raise _refuse(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "claim_create_status",
+            "A new claim starts as a draft or as notified. Later statuses are reached by moving it on.",
+        )
     org = payload.organization_id or getattr(current_user, "organization_id", None)
     await policy.authorize(
         current_user,
@@ -275,13 +314,27 @@ async def update_claim(
     selection: ActiveScope = Depends(active_scope),
 ):
     claim = await _load_authorized(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection)
+    if claim.get("evidence_frozen_at"):
+        raise _refuse(
+            status.HTTP_409_CONFLICT,
+            "claim_evidence_frozen",
+            "This claim's record is frozen (it has been escalated to arbitration), so it cannot be edited.",
+        )
     changes = payload.model_dump(exclude_unset=True)
+    clear = sorted(key for key, value in changes.items() if value is None and key in CLEARABLE_FIELDS)
+    expected = None
     if changes.get("status") is not None:
         # The edit form carries a status too: the same lifecycle rule applies here.
         _require_status_transition(claim, ClaimStatus(changes["status"]))
+        if changes["status"] != claim.get("status"):
+            expected = {"status": claim.get("status")}
     legacy_ids = changes.pop("linked_document_ids", None)
     claim_service = ClaimService(db)
-    updated = await claim_service.update(claim_id, changes, current_user, before=claim)
+    updated = await claim_service.update(
+        claim_id, changes, current_user, before=claim, expected=expected, clear=clear
+    )
+    if updated is None and expected:
+        raise _status_conflict()
     if updated and any(
         key in changes and changes[key] != claim.get(key) for key in BENCH_FACT_FIELDS
     ):
@@ -311,10 +364,16 @@ async def set_claim_status(
 ):
     claim = await _load_authorized(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection)
     _require_status_transition(claim, body.status)
+    if claim.get("status") == body.status.value:
+        return await _present_claim(claim, db, current_user)
+    # Compare-and-set on the status the move was checked against (C-13): of two
+    # concurrent moves, one writes and the other answers 409.
     updated = await ClaimService(db).update(
-        claim_id, {"status": body.status.value}, current_user, before=claim
+        claim_id, {"status": body.status.value}, current_user, before=claim, expected={"status": claim.get("status")}
     )
-    return await _present_claim(updated or claim, db, current_user)
+    if updated is None:
+        raise _status_conflict()
+    return await _present_claim(updated, db, current_user)
 
 
 @router.delete("/claims/{claim_id}", status_code=status.HTTP_204_NO_CONTENT)

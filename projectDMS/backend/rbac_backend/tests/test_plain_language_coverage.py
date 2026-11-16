@@ -49,7 +49,7 @@ def _structured_codes(path: Path) -> Set[str]:
                 if isinstance(key, ast.Constant) and key.value == "code" and isinstance(value, ast.Constant):
                     if isinstance(value.value, str):
                         codes.add(value.value)
-        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "_refusal" and len(node.args) >= 2:
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) in {"_refusal", "_refuse"} and len(node.args) >= 2:
             arg = node.args[1]
             if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
                 codes.add(arg.value)
@@ -57,7 +57,7 @@ def _structured_codes(path: Path) -> Set[str]:
 
 
 def test_every_structured_error_code_from_the_phase_4b_routes_has_a_message() -> None:
-    routes = [BACKEND / "routers" / "pickers.py"]
+    routes = [BACKEND / "routers" / "pickers.py", BACKEND / "routers" / "claims.py"]
     codes: Set[str] = set()
     for path in routes:
         codes |= _structured_codes(path)

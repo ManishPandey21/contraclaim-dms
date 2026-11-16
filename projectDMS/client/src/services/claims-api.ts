@@ -88,14 +88,15 @@ export interface ClaimPayload {
   title: string;
   type?: ClaimType;
   claim_ref?: string;
-  description?: string;
+  /** null clears the field on an update (4B-12); undefined leaves it unchanged. */
+  description?: string | null;
   status?: ClaimStatus;
   amount_claimed?: number;
   currency?: string;
-  event_date?: string;
-  awareness_date?: string;
-  notice_date?: string;
-  response_due_date?: string;
+  event_date?: string | null;
+  awareness_date?: string | null;
+  notice_date?: string | null;
+  response_due_date?: string | null;
   eot_days_claimed?: number;
   contract_clauses?: string[];
   project_id?: string;

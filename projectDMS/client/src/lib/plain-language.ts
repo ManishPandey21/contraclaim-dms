@@ -55,6 +55,10 @@ export const ERROR_CODE_MESSAGES = {
   evidence_restricted: "Some evidence is restricted for you, so this cannot be exported.",
   no_active_subscription: "Your organisation's subscription does not cover this.",
   missing_permission: "You do not have permission to do this.",
+  claim_origin_server_owned: "A claim's origin is recorded by the system; it cannot be set here.",
+  claim_create_status: "A new claim starts as a draft or as notified.",
+  claim_changed_concurrently: "Someone changed this claim at the same time. Reload it and try again.",
+  claim_evidence_frozen: "This claim has been escalated to arbitration, so its record can no longer be edited.",
 } as const;
 
 export type StatusKind = "claim" | "arbitration_case" | "arbitration_draft";

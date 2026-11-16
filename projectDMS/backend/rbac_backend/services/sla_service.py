@@ -80,6 +80,29 @@ def _item(claim: Dict[str, Any], kind: str, due: datetime, days_remaining: int, 
     }
 
 
+def window_days(value: Any) -> Optional[int]:
+    """A notice window as whole days (1 to 365), or None.
+
+    ``sla_rules`` is edited by hand and has held strings ("28"); ``timedelta(days="28")``
+    raised and took the SLA routes down (C-13). Numbers and numeric strings are
+    accepted; anything else is ignored with a warning, and the default applies.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+    elif isinstance(value, str) and value.strip():
+        try:
+            number = float(value.strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    if not number.is_integer() or not 1 <= number <= 365:
+        return None
+    return int(number)
+
+
 def compute_sla_items(
     claims: Iterable[Dict[str, Any]],
     *,
@@ -134,7 +157,17 @@ class SlaService:
             rule = await db.sla_rules.find_one({"organization_id": organization_id})
         except Exception:  # pragma: no cover - defensive (collection optional)
             rule = None
-        return dict((rule or {}).get("notice_windows") or {})
+        windows: Dict[str, int] = {}
+        for claim_type, value in dict((rule or {}).get("notice_windows") or {}).items():
+            days = window_days(value)
+            if days is None:
+                logger.warning(
+                    "sla_rules notice window ignored: organization=%s type=%s value is not a whole number of days",
+                    organization_id, claim_type,
+                )
+                continue
+            windows[str(claim_type)] = days
+        return windows
 
     async def notice_windows_for(self, organization_id: Optional[str]) -> Dict[str, int]:
         """Default windows overlaid with any per-org override in ``sla_rules``."""
