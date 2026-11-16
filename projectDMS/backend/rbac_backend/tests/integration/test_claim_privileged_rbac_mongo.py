@@ -154,6 +154,41 @@ def test_revoking_the_grant_takes_effect_on_the_next_request(monkeypatch) -> Non
     _run(scenario())
 
 
+def test_a_grant_saved_by_catalogue_id_is_a_grant_by_name(monkeypatch) -> None:
+    """4B-49: the Permissions page saves a role's permissions by catalogue id.
+
+    Ticking ``dms.claim.strategy.read`` there stores the permission document's
+    ObjectId. That is a deliberate grant on the user's own role and must count as
+    one; before 4B-49 it passed ``has_permission`` but failed the explicit check, so
+    no grant made through the product could open the strategy note. The id of a
+    different permission still grants nothing privileged.
+    """
+
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            await _prepare(env, "contractor")
+
+            async def catalogue_id(name: str) -> str:
+                document = await env.db.permissions.find_one({"name": name})
+                assert document is not None and not isinstance(document["_id"], str), name
+                return str(document["_id"])
+
+            ordinary = [await catalogue_id(n) for n in ("dms.claim.view", "dms.claim.edit")]
+            await _add_actor(env.db, "counsel_by_id", "counsel_by_id", [*ordinary, await catalogue_id("dms.claim.strategy.read")])
+            await _add_actor(env.db, "manager_by_id", "manager_by_id", [*ordinary, await catalogue_id("dms.claim.manage")])
+
+            granted = await env.call("GET", "counsel_by_id", STRATEGY)
+            assert granted.status_code == 200, granted.text[:300]
+            refused = await env.call("GET", "manager_by_id", STRATEGY)
+            assert refused.status_code == 403, refused.text[:300]
+            # Determination authority was never ticked for either.
+            for persona in ("counsel_by_id", "manager_by_id"):
+                response = await env.call("POST", persona, DETERMINE, json={"origin": "authored"})
+                assert response.status_code == 403, (persona, response.status_code)
+
+    _run(scenario())
+
+
 def test_the_release_role_contract_no_longer_carries_the_privileged_permissions() -> None:
     from rbac_backend.services.role_contract_alignment import release_contract
 

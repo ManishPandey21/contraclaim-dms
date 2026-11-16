@@ -908,6 +908,32 @@ class PermissionService:
             logger.error(f"Failed to get permissions for role {role_id}: {str(e)}")
             return []
 
+    async def _catalogue_spellings(self, db: Any, lookup_keys: set) -> set:
+        """Other role entries that name one of `lookup_keys` through its permission document.
+
+        The Permissions page saves a role's permissions by catalogue id (an ObjectId
+        string), and `get_user_permissions` reads such an entry, or a document's own
+        `name` where that is a label, as the permission the document stands for. Both
+        are the permission held by name on the role (4B-49): a grant an administrator
+        ticked is deliberate whichever spelling was stored.
+        """
+        keys = sorted(lookup_keys)
+        cursor = db.permissions.find(
+            {"$or": [{"name": {"$in": keys}}, {"id": {"$in": keys}}, {"code": {"$in": keys}}, {"_id": {"$in": keys}}]}
+        )
+        spellings: set = set()
+        for document in await cursor.to_list(length=None):
+            if self._build_permission_from_doc(document).name not in lookup_keys:
+                continue
+            raw_id = document.get("_id")
+            if isinstance(raw_id, ObjectId):
+                spellings.add(str(raw_id))
+            name = document.get("name")
+            if isinstance(name, str) and name.strip():
+                spellings.add(name.strip())
+        spellings.discard("*")
+        return spellings
+
     async def user_has_explicit_permission(self, user_id: str, permission_name: str) -> bool:
         """Whether one of the user's own roles names ``permission_name`` (or a label spelling of it).
 
@@ -930,13 +956,14 @@ class PermissionService:
             user_doc = await db.users.find_one({"_id": user_query_id})
             if not user_doc:
                 return False
+            named = set(lookup_keys) | await self._catalogue_spellings(db, lookup_keys)
             for rid in user_doc.get("roles", []) or []:
                 resolution = await self._load_role(db, rid)
                 if not resolution.keeps_role_key or not resolution.document:
                     continue
                 held = {str(p).strip() for p in (resolution.document.get("permissions") or []) if p is not None}
                 held.discard("*")
-                if held & lookup_keys:
+                if held & named:
                     return True
         except Exception as exc:
             # Fail closed: an error is never a grant of privileged material.

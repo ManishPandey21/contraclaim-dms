@@ -55,7 +55,7 @@ def _reader() -> ModuleType:
 PRIVATE = (
     "asha.rao@example.com", "Asha Rao", "vikram@example.com", "Vikram Shah",
     "Delayed handover of Site", "CLM-PRIVATE-7", "claim-private-1", "draft-private-1",
-    "Particular Conditions clause text",
+    "Particular Conditions clause text", "Private Manager", "u3@example.com",
 )
 
 
@@ -79,7 +79,8 @@ def _seed(db: Any) -> None:
     db.sla_rules.insert_one({"organization_id": "org-a", "notice_windows": {"eot": "28", "variation": 14}})
     db.roles.insert_many(
         [
-            {"_id": "orgadmin", "name": "orgadmin"},
+            {"_id": "orgadmin", "name": "orgadmin", "permissions": ["dms.admin", "dms.document.review_extraction"]},
+            {"_id": "contractmgr_org", "name": "contractmgr_org", "permissions": ["dms.admin"]},
             {"_id": "senior_legal_approver", "name": "senior_legal_approver"},
             {"_id": "65f000000000000000000001", "name": "Chief_Contract_Expert"},
         ]
@@ -89,6 +90,7 @@ def _seed(db: Any) -> None:
             {"_id": "u1", "email": "asha.rao@example.com", "full_name": "Asha Rao",
              "roles": ["orgadmin", "senior_legal_approver"]},
             {"_id": "u2", "email": "vikram@example.com", "full_name": "Vikram Shah", "roles": ["orgadmin"]},
+            {"_id": "u3", "email": "u3@example.com", "full_name": "Private Manager", "roles": ["contractmgr_org"]},
         ]
     )
     db.projects.insert_many([{"_id": "p1", "name": "NH-48"}, {"_id": "p2", "name": "Metro", "contractual_capacity": "engineer"}])
@@ -166,7 +168,7 @@ def test_the_readings_are_right_change_nothing_and_name_no_one() -> None:
         assert after == before, "the readings changed the database"
 
         by_code = {row["reading"]: row for row in rows}
-        assert [row["reading"] for row in rows] == ["DB"] + [f"P-{n:02d}" for n in range(2, 15)]
+        assert [row["reading"] for row in rows] == ["DB"] + [f"P-{n:02d}" for n in range(2, 16)]
         assert by_code["DB"]["initialised"] is True and by_code["DB"]["database"] == name
         assert all(row["status"] == "read" for row in rows), [r for r in rows if r["status"] != "read"]
 
@@ -191,7 +193,7 @@ def test_the_readings_are_right_change_nothing_and_name_no_one() -> None:
         assert roles["chief_contract_expert"]["role_documents_with_this_name"] == 1
         assert roles["chief_contract_expert"]["role_documents_with_this_id"] == 0
 
-        assert by_code["P-06"] == {"reading": "P-06", "status": "read", "users_total": 2, "users_with_more_than_one_role": 1}
+        assert by_code["P-06"] == {"reading": "P-06", "status": "read", "users_total": 3, "users_with_more_than_one_role": 1}
 
         p07 = by_code["P-07"]
         assert p07["drafts_total"] == 4 and p07["drafts_without_case"] == 3
@@ -224,10 +226,19 @@ def test_the_readings_are_right_change_nothing_and_name_no_one() -> None:
         assert p14["organisations_with_current_requirements"] == 2
         assert "nr-1" not in json.dumps(p14) and "org-a" not in json.dumps(p14)
 
+        p15 = by_code["P-15"]
+        assert p15["users"] == {
+            "by_name": 2, "by_name_through_a_catalogue_id_only": 0, "only_by_inheritance": 1, "not_holding": 0,
+        }
+        assert p15["only_by_inheritance_by_path"] == {"dms_admin": 1}
+        assert p15["only_by_inheritance_by_seed_role"] == {"contractmgr_org": 1}
+        assert p15["role_documents_by_path"] == {"named": 1, "dms_admin": 2}
+        assert "u3" not in json.dumps(p15)
+
         text = json.dumps(rows, default=str)
         for secret in PRIVATE:
             assert secret not in text, secret
-        for user_id in ("u1", "u2"):
+        for user_id in ("u1", "u2", "u3"):
             assert f'"{user_id}"' not in text
     finally:
         client.drop_database(name)

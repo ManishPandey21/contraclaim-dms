@@ -1,4 +1,4 @@
-"""Phase 4b readings P-02 to P-14: claims, arbitration, roles and skills, read-only.
+"""Phase 4b readings P-02 to P-15: claims, arbitration, roles and skills, read-only.
 
 Plan: docs/superpowers/specs/2026-11-16-claim-bench-phase-4b-hardening.md, §8.1.
 
@@ -424,6 +424,181 @@ def read_notice_requirements(db: ReadOnlyDatabase) -> Dict[str, Any]:
     )
 
 
+#: 4B-49 (AQ-12): the permission audited by P-15, and the grants that stand in for it.
+REVIEW_EXTRACTION = "dms.document.review_extraction"
+DMS_ADMIN = "dms.admin"
+WILDCARD = "*"
+SUPER_ADMIN_KEY = "superadmin"
+
+#: How a user can come to hold REVIEW_EXTRACTION. The two named paths survive
+#: explicit-grant-only (PolicyService.has_explicit_grant): the permission's name on one
+#: of the user's roles, or its catalogue id there (the Permissions page saves ids). The
+#: rest are inheritance.
+NAMED = "named"
+NAMED_BY_PERMISSION_DOCUMENT = "named_by_permission_document"
+NAMED_PATHS = (NAMED, NAMED_BY_PERMISSION_DOCUMENT)
+DMS_ADMIN_WIDENING = "dms_admin"
+WILDCARD_GRANT = "wildcard"
+SUPER_ADMIN_SHORTCUT = "superadmin"
+INHERITED_PATHS = (DMS_ADMIN_WIDENING, WILDCARD_GRANT, SUPER_ADMIN_SHORTCUT)
+
+
+def _is_object_id_text(value: str) -> bool:
+    return len(value) == 24 and all(ch in "0123456789abcdefABCDEF" for ch in value)
+
+
+def permission_document_references(permission_documents: Iterable[Dict[str, Any]], permission: str) -> set:
+    """Role-permission entries other than the name that PermissionService reads as `permission`.
+
+    PermissionService.get_user_permissions looks a role's entry up in `permissions` by
+    ObjectId (an entry that parses as one) or by `name`, and names the document by the
+    first of name, id/code or string _id that contains "." or ":". So the document
+    `{"_id": "dms.document.review_extraction", "name": "Review DMS Document Extraction"}`
+    makes the label a grant, and a document's ObjectId is one too.
+    """
+    references = set()
+    for document in permission_documents:
+        name = document.get("name")
+        legacy = document.get("id") if isinstance(document.get("id"), str) else None
+        code = document.get("code") if isinstance(document.get("code"), str) else None
+        raw_id = document.get("_id")
+        canonical = None
+        for candidate in (name, legacy or code, raw_id if isinstance(raw_id, str) else None):
+            if isinstance(candidate, str) and ("." in candidate or ":" in candidate):
+                canonical = candidate.strip()
+                break
+        if canonical != permission:
+            continue
+        if isinstance(name, str) and name.strip() and not _is_object_id_text(name):
+            references.add(name)
+        if raw_id is not None and not isinstance(raw_id, str) and _is_object_id_text(str(raw_id)):
+            references.add(str(raw_id))
+    references.discard(permission)
+    return references
+
+
+def review_extraction_grant_paths(
+    references: Iterable[Any],
+    role_documents: List[Dict[str, Any]],
+    by_document: set,
+    resolve: Callable[[Any, List[Dict[str, Any]]], Any],
+) -> frozenset:
+    """Every path by which PolicyService.has_permission grants REVIEW_EXTRACTION to these role references.
+
+    Mirrors PolicyService.has_permission for a `dms.*` permission outside
+    SUPERADMIN_EXCLUDED_PERMISSIONS, as of 4B-49: the Super Admin key on the
+    principal; the name, `dms.admin` or `*` on a role document the reference
+    resolves to (core.role_reference, one hop); or a permission document that
+    names it (`permission_document_references`). Users' own `permissions` field is
+    not read by the check and is not a path. Pinned against the real PolicyService
+    by tests/integration/test_review_extraction_inheritance_mongo.py.
+    """
+    paths = set()
+    for reference in references or ():
+        resolution = resolve(reference, role_documents)
+        if not resolution.keeps_role_key:
+            continue
+        if resolution.key == SUPER_ADMIN_KEY:
+            paths.add(SUPER_ADMIN_SHORTCUT)
+        document = resolution.document
+        if not document:
+            continue
+        held = {str(entry).strip() for entry in (document.get("permissions") or []) if entry is not None}
+        if REVIEW_EXTRACTION in held:
+            paths.add(NAMED)
+        if DMS_ADMIN in held:
+            paths.add(DMS_ADMIN_WIDENING)
+        if WILDCARD in held:
+            paths.add(WILDCARD_GRANT)
+        if held & by_document:
+            paths.add(NAMED_BY_PERMISSION_DOCUMENT)
+    return frozenset(paths)
+
+
+def read_review_extraction_holders(db: ReadOnlyDatabase) -> Dict[str, Any]:
+    """AQ-12 / 4B-49: who holds dms.document.review_extraction only by inheritance.
+
+    Counts by role key and by path, never a name or id. A user is counted under each
+    role key they carry. "Only by inheritance" means the check passes and no role
+    the user holds names the permission, so explicit-grant-only would withdraw it.
+    """
+    try:
+        from rbac_backend.core.role_reference import resolve_role_reference
+    except ImportError:
+        return _not_read("P-15", "this image has no core.role_reference; the roles cannot be resolved as the server does")
+    names = set(db.list_collection_names())
+    role_documents = list(db["roles"].find({}, {"permissions": 1, "name": 1, "is_active": 1, "scope": 1}))
+    permission_documents = (
+        list(db["permissions"].find({}, {"name": 1, "id": 1, "code": 1})) if "permissions" in names else []
+    )
+    by_document = permission_document_references(permission_documents, REVIEW_EXTRACTION)
+
+    roles_by_path: Dict[str, int] = {}
+    for document in role_documents:
+        if document.get("is_active") is False:
+            continue
+        held = {str(entry).strip() for entry in (document.get("permissions") or []) if entry is not None}
+        for path, present in (
+            (NAMED, REVIEW_EXTRACTION in held),
+            (DMS_ADMIN_WIDENING, DMS_ADMIN in held),
+            (WILDCARD_GRANT, WILDCARD in held),
+            (NAMED_BY_PERMISSION_DOCUMENT, bool(held & by_document)),
+        ):
+            if present:
+                roles_by_path[path] = roles_by_path.get(path, 0) + 1
+
+    holders = {"by_name": 0, "by_name_through_a_catalogue_id_only": 0, "only_by_inheritance": 0, "not_holding": 0}
+    inherited_by_path: Dict[str, int] = {}
+    inherited_by_role: Dict[str, int] = {}
+    inherited_by_account_type: Dict[str, int] = {}
+    inherited_disabled = 0
+    for user in db["users"].find({}, {"roles": 1, "account_type": 1, "disabled": 1, "is_active": 1}):
+        references = list(user.get("roles") or [])
+        paths = review_extraction_grant_paths(references, role_documents, by_document, resolve_role_reference)
+        if paths & set(NAMED_PATHS):
+            holders["by_name"] += 1
+            if NAMED not in paths:
+                holders["by_name_through_a_catalogue_id_only"] += 1
+            continue
+        if not paths:
+            holders["not_holding"] += 1
+            continue
+        holders["only_by_inheritance"] += 1
+        if user.get("disabled") or user.get("is_active") is False:
+            inherited_disabled += 1
+        for path in paths:
+            inherited_by_path[path] = inherited_by_path.get(path, 0) + 1
+        account_type = str(user.get("account_type") or "client_user")
+        inherited_by_account_type[account_type] = inherited_by_account_type.get(account_type, 0) + 1
+        for key in {resolve_role_reference(ref, role_documents).key for ref in references}:
+            if key:
+                inherited_by_role[key] = inherited_by_role.get(key, 0) + 1
+    known = set(_SEED_ROLE_KEYS)
+    custom_roles = sum(count for key, count in inherited_by_role.items() if key not in known)
+    return _reading(
+        "P-15",
+        permission=REVIEW_EXTRACTION,
+        role_documents_by_path=roles_by_path,
+        permission_document_spellings=len(by_document),
+        users=holders,
+        only_by_inheritance_by_path=inherited_by_path,
+        only_by_inheritance_by_seed_role={k: v for k, v in sorted(inherited_by_role.items()) if k in known},
+        only_by_inheritance_holding_custom_roles=custom_roles,
+        only_by_inheritance_by_account_type=inherited_by_account_type,
+        only_by_inheritance_disabled=inherited_disabled,
+        note="a user counts under every role key they carry; custom role keys are counted, not named",
+    )
+
+
+#: Seed role keys (initial_data/default_roles.py) P-15 may name; any other key is a
+#: custom role, whose name is the organisation's and is not printed.
+_SEED_ROLE_KEYS = (
+    "superadmin", "superuser", "orgadmin", "orguser", "contractmgr_org", "projectadmin", "projectuser",
+    "doccontroller", "reporter", "settings_manager", "limited_user", "contraclaim_drafting_manager",
+    "contraclaim_expert_drafter", "contraclaim_expert_reviewer", "contraclaim_billing_admin",
+)
+
+
 def database_check(db: ReadOnlyDatabase, database_name: Optional[str]) -> Dict[str, Any]:
     """Whether this is the application database: it must hold users and roles."""
     names = set(db.list_collection_names())
@@ -468,6 +643,7 @@ def collect(
         ("P-12", lambda: read_caseless_drafts(guarded, moment)),
         ("P-13", lambda: read_case_visibility(guarded)),
         ("P-14", lambda: read_notice_requirements(guarded)),
+        ("P-15", lambda: read_review_extraction_holders(guarded)),
     ]
     out: List[Dict[str, Any]] = [check]
     if not check.get("initialised"):
