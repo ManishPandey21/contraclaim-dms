@@ -10,8 +10,12 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0
     hooks:
+      # A git patch keeps trailing whitespace on its context lines and ends with a
+      # signature line; normalising either corrupts it (docs/hotfix/*.patch).
       - id: trailing-whitespace
+        exclude: ^projectDMS/docs/hotfix/.*\.patch$
       - id: end-of-file-fixer
+        exclude: ^projectDMS/docs/hotfix/.*\.patch$
       - id: check-yaml
       - id: check-added-large-files
 
