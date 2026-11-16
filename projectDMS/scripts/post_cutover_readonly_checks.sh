@@ -14,7 +14,7 @@
 #      expired on 2026-10-15
 #   D. migrations: are the three Letter Bench migrations (20261114_0001 to
 #      _0003) applied, and what does the ledger hold
-#   F. Phase 4b readings P-02 to P-13 (claims, arbitration drafts, reviewer
+#   F. Phase 4b readings P-02 to P-14 (claims, arbitration drafts, reviewer
 #      roles, skills, perspective, usage), counts only, through
 #      scripts/claim_arbitration_readonly_readings.py piped into the backend
 # plus the newest backup manifest and whether it recorded a persistence flush.
@@ -321,16 +321,16 @@ fi
 info "a manifest proves a backup was written, not that it restores. Restore evidence is a disposable restore drill, recorded separately."
 
 # --------------------------------------------------------------------------- #
-section "F. Phase 4b readings: claims, arbitration, reviewer roles, skills (P-02 to P-13)"
+section "F. Phase 4b readings: claims, arbitration, reviewer roles, skills (P-02 to P-14)"
 # --------------------------------------------------------------------------- #
 # Plan: docs/superpowers/specs/2026-11-16-claim-bench-phase-4b-hardening.md 8.1.
 # Each line is a reading; one that could not be taken says "not_read" and why.
 # An unread value is never zero: record it as "Not read" in the assessment.
 READER="$PROJECT_DIR/scripts/claim_arbitration_readonly_readings.py"
 if [[ -z "$BACKEND" ]]; then
-  unknown "no backend container; readings P-02 to P-13 were not taken"
+  unknown "no backend container; readings P-02 to P-14 were not taken"
 elif [[ ! -f "$READER" ]]; then
-  unknown "$READER is not in this checkout; readings P-02 to P-13 were not taken (copy it from main, see section 5 of the assessment)"
+  unknown "$READER is not in this checkout; readings P-02 to P-14 were not taken (copy it from main, see section 5 of the assessment)"
 else
   readings=$(docker exec -i "$BACKEND" python - <"$READER" 2>/dev/null)
   if [[ -z "$readings" ]]; then

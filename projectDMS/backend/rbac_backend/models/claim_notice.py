@@ -2,7 +2,13 @@
 
 A requirement is always tied to a clause of this project's contract, with the
 wording it was read from. It starts ``extracted_unverified`` and becomes
-``verified`` only when a person confirms the period against that wording.
+``verified`` only when a second person confirms the period against that wording
+(D-08, plan 4B-14): the recorder cannot verify their own entry.
+
+``origin`` is the server's finding, never the client's: ``clause_index`` when the
+clause resolved in this project's clause index and the quote is in its text;
+``entered_from_contract`` otherwise. ``entered`` is the value written before 4B-14,
+kept readable.
 Records are never edited in place: a change supersedes the current record and
 writes a new one, so what a past assessment relied on stays readable.
 """
@@ -16,11 +22,20 @@ from typing import Any, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..utils.datetime import now_utc
+from .claim import ClaimType
 
 NoticeTrigger = Literal["awareness", "event"]
 NoticeVerification = Literal["extracted_unverified", "verified"]
 NoticeRequirementStatus = Literal["current", "superseded"]
-NoticeRequirementOrigin = Literal["clause_index", "entered"]
+NoticeRequirementOrigin = Literal["clause_index", "entered_from_contract", "entered"]
+CLAIM_TYPES = tuple(item.value for item in ClaimType)
+
+
+def _claim_type(value: Any) -> str:
+    text = str(getattr(value, "value", value) or "").strip()
+    if text not in CLAIM_TYPES:
+        raise ValueError(f"claim_type must be one of: {', '.join(CLAIM_TYPES)}")
+    return text
 
 
 class NoticeRequirement(BaseModel):
@@ -69,7 +84,13 @@ class NoticeRequirementCreate(BaseModel):
     document_id: Optional[str] = None
     document_type: Optional[str] = None
     clause_uid: Optional[str] = None
-    origin: NoticeRequirementOrigin = "entered"
+    # Ignored: the server decides the origin (D-08). Accepted so older clients still post.
+    origin: Optional[str] = None
+
+    @field_validator("claim_type", mode="before")
+    @classmethod
+    def _known_claim_type(cls, value: Any) -> str:
+        return _claim_type(value)
 
 
 class NoticePeriodCandidate(BaseModel):

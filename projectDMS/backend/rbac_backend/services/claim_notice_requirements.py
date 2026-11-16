@@ -9,6 +9,23 @@ Two halves, kept apart on purpose:
 - :class:`NoticeRequirementService` records the period a person chose, and
   separately records a person verifying it against the quoted wording. Only a
   verified requirement is ever reported as the contract's period.
+
+D-08 (plan 4B-14, C-08). Before it, a typed quote that merely contained the day
+number became a "contract, verified" period: the client supplied the clause,
+the quote, the document and ``origin=clause_index``, and the recorder could
+verify their own entry. Now:
+
+- the server resolves the clause in this project's clause index, by
+  ``clause_uid`` and then by normalised clause number. When it resolves, the
+  normalised quote must be in that clause's text (422 otherwise) and the clause
+  number, title, document and uid are the index's; ``origin`` is
+  ``clause_index``. When it does not, the record is ``entered_from_contract``
+  and carries none of the client's document or uid claims;
+- ``claim_type`` is one of the claim types (model validation, 422);
+- the verifier cannot be the recorder (403 ``notice_self_verification``), and
+  verification is a compare-and-set on the unverified current record;
+- both actions write an audit event. Clause-read rights are checked by the
+  routes on both actions.
 """
 
 from __future__ import annotations
@@ -26,6 +43,7 @@ from ..models.claim_notice import (
     NoticeRequirementCreate,
 )
 from ..utils.datetime import now_utc
+from .audit_event_service import AuditEventService
 from .letter_drafting.clause_checker import _MODIFIER_TYPES, ClauseCheckingAgent, normalize_cited_clause
 
 logger = logging.getLogger(__name__)
@@ -46,6 +64,62 @@ _AWARENESS = re.compile(r"\baware\b|\bbecame aware\b|\bshould have become aware\
 _RELEVANT_TITLE = re.compile(
     r"\bclaim|\bnotice|\bextension of time|\bdelay|\bvariation|\bdispute", re.IGNORECASE
 )
+
+
+_QUOTE_FOLD = str.maketrans({"\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"', "\u2013": "-", "\u2014": "-", "\u00a0": " "})
+
+
+def normalise_wording(text: Any) -> str:
+    """Wording compared for containment: case, whitespace, curly quotes and dashes folded."""
+    return " ".join(str(text or "").translate(_QUOTE_FOLD).lower().split())
+
+
+def _clause_text(record: Dict[str, Any]) -> str:
+    return str(record.get("text") or record.get("cleaned_text") or "")
+
+
+def resolve_clause(
+    records: Iterable[Dict[str, Any]],
+    *,
+    clause_uid: Optional[str],
+    clause_no: str,
+    document_id: Optional[str],
+    quote: str,
+) -> tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+    """``(the clause the quote is in, every clause the reference resolved to)``.
+
+    By ``clause_uid`` first; else every clause with the same normalised number,
+    the named document's first. The first resolved clause whose text contains
+    the quote is returned; if the reference resolved but no text contains the
+    quote, the first value is None and the second is not empty.
+    """
+    pool = list(records)
+    resolved: List[Dict[str, Any]] = []
+    if clause_uid:
+        resolved = [record for record in pool if str(record.get("clause_uid") or "") == str(clause_uid)]
+    if not resolved:
+        wanted = normalize_cited_clause(clause_no)
+        resolved = [
+            record
+            for record in pool
+            if wanted and normalize_cited_clause(str(record.get("clause_no") or "")) == wanted
+        ]
+        if document_id:
+            resolved.sort(key=lambda record: str(record.get("document_id") or "") != str(document_id))
+    needle = normalise_wording(quote)
+    for record in resolved:
+        if needle and needle in normalise_wording(_clause_text(record)):
+            return record, resolved
+    return None, resolved
+
+
+def _audit_view(record: "NoticeRequirement") -> Dict[str, Any]:
+    return record.model_dump(
+        include={
+            "id", "claim_type", "period_days", "trigger", "clause_no", "clause_uid", "document_id",
+            "origin", "verification", "status", "created_by", "verified_by",
+        }
+    )
 
 
 def _is_modifier(document_type: Optional[str]) -> bool:
@@ -115,6 +189,7 @@ def find_notice_periods(
 class NoticeRequirementService:
     def __init__(self, db: Any) -> None:
         self.db = db
+        self.audit = AuditEventService(db)
 
     @property
     def _collection(self) -> Any:
@@ -164,30 +239,72 @@ class NoticeRequirementService:
     async def set(
         self, organization_id: str, payload: NoticeRequirementCreate, user_id: Optional[str]
     ) -> NoticeRequirement:
-        """Record the period for a claim type. Starts unverified; supersedes the current one."""
+        """Record the period for a claim type. Starts unverified; supersedes the current one.
+
+        The clause is resolved here, never taken from the client (D-08).
+        """
         quote = " ".join(payload.quote.split())
         if not re.search(rf"(?<![\d.]){payload.period_days}(?![\d.])", quote):
             raise HTTPException(
                 status_code=422,
-                detail=(
-                    f"The quoted contract wording does not state {payload.period_days} days. "
-                    "Quote the sentence the period is read from."
-                ),
+                detail={
+                    "code": "notice_quote_period",
+                    "user_message": (
+                        f"The quoted contract wording does not state {payload.period_days} days. "
+                        "Quote the sentence the period is read from."
+                    ),
+                    "detail": None,
+                },
             )
+        records = await self.clause_records(str(organization_id), str(payload.project_id))
+        clause, resolved = resolve_clause(
+            records,
+            clause_uid=payload.clause_uid,
+            clause_no=payload.clause_no,
+            document_id=payload.document_id,
+            quote=quote,
+        )
+        if resolved and clause is None:
+            numbers = sorted({str(item.get("clause_no") or "") for item in resolved})
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "notice_quote_not_in_clause",
+                    "user_message": (
+                        f"The quoted wording is not in clause {', '.join(numbers)} of this project's contract. "
+                        "Copy the sentence from the clause as it is indexed."
+                    ),
+                    "detail": {"clause_no": numbers},
+                },
+            )
+        if clause is not None:
+            provenance: Dict[str, Any] = {
+                "clause_no": str(clause.get("clause_no") or payload.clause_no).strip()[:40],
+                "clause_title": (str(clause.get("clause_title") or "")[:300] or None),
+                "document_id": str(clause.get("document_id") or "") or None,
+                "document_type": clause.get("document_type"),
+                "clause_uid": clause.get("clause_uid"),
+                "origin": "clause_index",
+            }
+        else:
+            # Not in the index: the person's own reading of the contract, shown as such.
+            provenance = {
+                "clause_no": normalize_cited_clause(payload.clause_no) or payload.clause_no,
+                "clause_title": payload.clause_title,
+                "document_id": None,
+                "document_type": None,
+                "clause_uid": None,
+                "origin": "entered_from_contract",
+            }
         record = NoticeRequirement(
             organization_id=str(organization_id),
             project_id=str(payload.project_id),
             claim_type=payload.claim_type,
             period_days=payload.period_days,
             trigger=payload.trigger,
-            clause_no=normalize_cited_clause(payload.clause_no) or payload.clause_no,
-            clause_title=payload.clause_title,
             quote=quote,
-            document_id=payload.document_id,
-            document_type=payload.document_type,
-            clause_uid=payload.clause_uid,
-            origin=payload.origin,
             created_by=user_id,
+            **provenance,
         )
         previous = await self.current(organization_id, payload.project_id, payload.claim_type)
         if previous is not None:
@@ -203,6 +320,17 @@ class NoticeRequirementService:
                 status_code=409,
                 detail="The notice period for this claim type was just changed by someone else. Reload and try again.",
             ) from exc
+        await self.audit.emit(
+            action="claim.notice_requirement.set",
+            actor_id=user_id,
+            resource_type="claim_notice_requirement",
+            resource_id=record.id,
+            organization_id=record.organization_id,
+            project_id=record.project_id,
+            before=_audit_view(previous) if previous is not None else None,
+            after=_audit_view(record),
+            metadata={"superseded_id": previous.id if previous is not None else None},
+        )
         return record
 
     async def get(self, requirement_id: str) -> Optional[NoticeRequirement]:
@@ -219,12 +347,37 @@ class NoticeRequirementService:
             return requirement
         if not user_id:
             raise HTTPException(status_code=403, detail="Verification needs an identified user")
-        await self._collection.update_one(
-            {"_id": requirement.id, "status": "current"},
+        if requirement.created_by and str(requirement.created_by) == str(user_id):
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "notice_self_verification",
+                    "user_message": "You recorded this notice period, so someone else must verify it against the contract.",
+                    "detail": None,
+                },
+            )
+        result = await self._collection.update_one(
+            {"_id": requirement.id, "status": "current", "verification": "extracted_unverified"},
             {"$set": {"verification": "verified", "verified_by": user_id, "verified_at": now_utc()}},
         )
-        refreshed = await self.get(requirement.id)
-        return refreshed or requirement
+        refreshed = await self.get(requirement.id) or requirement
+        if not getattr(result, "modified_count", 0):
+            if refreshed.status != "current":
+                raise HTTPException(
+                    status_code=409, detail="This notice period has been replaced; verify the current one"
+                )
+            return refreshed  # verified by someone else a moment ago
+        await self.audit.emit(
+            action="claim.notice_requirement.verified",
+            actor_id=user_id,
+            resource_type="claim_notice_requirement",
+            resource_id=requirement.id,
+            organization_id=requirement.organization_id,
+            project_id=requirement.project_id,
+            before=_audit_view(requirement),
+            after=_audit_view(refreshed),
+        )
+        return refreshed
 
 
-__all__ = ["COLLECTION", "NoticeRequirementService", "find_notice_periods"]
+__all__ = ["COLLECTION", "NoticeRequirementService", "find_notice_periods", "normalise_wording", "resolve_clause"]

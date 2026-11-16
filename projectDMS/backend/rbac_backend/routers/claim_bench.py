@@ -278,9 +278,18 @@ async def set_notice_requirement(
     """Record the notice period for a claim type, with the clause wording it is read from.
 
     It starts unverified and replaces any current one, which is kept as history.
+    The clause is resolved against the project's clause index, so recording one
+    also needs clause-read rights (D-08).
     """
-    org, _project = await _project_scope(
+    org, project = await _project_scope(
         selection, policy, current_user, Permissions.CLAIM_EDIT, payload.organization_id, payload.project_id
+    )
+    await policy.authorize(
+        current_user,
+        Permissions.CONTRACT_CLAUSE_READ,
+        resource_type="contract_clause",
+        organization_id=org,
+        project_id=project,
     )
     return await NoticeRequirementService(db).set(org, payload, _user_id(current_user))
 
@@ -294,7 +303,11 @@ async def verify_notice_requirement(
     policy: PolicyService = Depends(get_policy),
     selection: ActiveScope = Depends(active_scope),
 ):
-    """Confirm a recorded period against its quoted clause. Needs claim-manage rights."""
+    """Confirm a recorded period against its quoted clause.
+
+    Needs claim-manage and clause-read rights, and a person other than the one
+    who recorded it (D-08).
+    """
     service = NoticeRequirementService(db)
     requirement = await service.get(requirement_id)
     if requirement is None:
@@ -305,6 +318,13 @@ async def verify_notice_requirement(
         Permissions.CLAIM_MANAGE,
         resource_type="claim_notice_requirement",
         resource_id=requirement.id,
+        organization_id=requirement.organization_id,
+        project_id=requirement.project_id,
+    )
+    await policy.authorize(
+        current_user,
+        Permissions.CONTRACT_CLAUSE_READ,
+        resource_type="contract_clause",
         organization_id=requirement.organization_id,
         project_id=requirement.project_id,
     )

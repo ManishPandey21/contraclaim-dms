@@ -124,6 +124,18 @@ def _seed(db: Any) -> None:
         ]
     )
     db.documents.insert_one({"_id": "doc-1", "text": "Particular Conditions clause text"})
+    db.claim_notice_requirements.insert_many(
+        [
+            {"_id": "nr-1", "organization_id": "org-a", "status": "current", "claim_type": "eot", "origin": "clause_index",
+             "verification": "verified", "created_by": "u1", "verified_by": "u1"},
+            {"_id": "nr-2", "organization_id": "org-a", "status": "current", "claim_type": "Delay claim",
+             "origin": "entered", "verification": "extracted_unverified", "created_by": "u1"},
+            {"_id": "nr-3", "organization_id": "org-b", "status": "current", "claim_type": "variation",
+             "origin": "clause_index", "verification": "verified", "created_by": "u1", "verified_by": "u2"},
+            {"_id": "nr-4", "organization_id": "org-a", "status": "superseded", "claim_type": "eot",
+             "origin": "entered", "verification": "verified", "created_by": "u2", "verified_by": "u2"},
+        ]
+    )
 
 
 def _fingerprint(db: Any) -> Dict[str, str]:
@@ -154,7 +166,7 @@ def test_the_readings_are_right_change_nothing_and_name_no_one() -> None:
         assert after == before, "the readings changed the database"
 
         by_code = {row["reading"]: row for row in rows}
-        assert [row["reading"] for row in rows] == ["DB"] + [f"P-{n:02d}" for n in range(2, 14)]
+        assert [row["reading"] for row in rows] == ["DB"] + [f"P-{n:02d}" for n in range(2, 15)]
         assert by_code["DB"]["initialised"] is True and by_code["DB"]["database"] == name
         assert all(row["status"] == "read" for row in rows), [r for r in rows if r["status"] != "read"]
 
@@ -202,6 +214,15 @@ def test_the_readings_are_right_change_nothing_and_name_no_one() -> None:
         assert p13["records_referencing_affected_cases"]["arbitration_clause_matrix"] == 2
         assert p13["records_referencing_affected_cases"]["arbitration_drafts"] == 0
         assert "case-null-1" not in json.dumps(p13) and "org-b" not in json.dumps(p13)
+        p14 = by_code["P-14"]
+        assert p14["requirements_total"] == 4
+        assert p14["by_status"] == {"current": 3, "superseded": 1}
+        assert p14["current_by_origin"] == {"clause_index": 2, "entered": 1}
+        assert p14["current_by_verification"] == {"extracted_unverified": 1, "verified": 2}
+        assert p14["current_verified_by_their_recorder"] == 1  # nr-1; nr-4 is superseded
+        assert p14["current_with_unknown_claim_type"] == 1
+        assert p14["organisations_with_current_requirements"] == 2
+        assert "nr-1" not in json.dumps(p14) and "org-a" not in json.dumps(p14)
 
         text = json.dumps(rows, default=str)
         for secret in PRIVATE:

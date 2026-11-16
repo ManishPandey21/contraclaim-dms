@@ -240,6 +240,7 @@ jobs:
             backend/rbac_backend/tests/integration/test_claim_integrity_mongo.py
             backend/rbac_backend/tests/integration/test_delay_cost_basis_mongo.py
             backend/rbac_backend/tests/integration/test_claim_signals_mongo.py
+            backend/rbac_backend/tests/integration/test_notice_verification_mongo.py
             backend/rbac_backend/tests/integration/test_skill_publication_transactions_mongo.py
             backend/rbac_backend/tests/integration/test_pleaded_heads_end_to_end_mongo.py
           )

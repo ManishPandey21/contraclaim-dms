@@ -182,7 +182,6 @@ const NoticePeriodDialog: React.FC<DialogProps> = ({
       document_id: candidate.document_id,
       document_type: candidate.document_type,
       clause_uid: candidate.clause_uid,
-      origin: "clause_index",
     });
   const days = Number(manual.period_days);
   const manualReady =
@@ -210,6 +209,11 @@ const NoticePeriodDialog: React.FC<DialogProps> = ({
                 {requirement.document_type ? ` (${requirement.document_type})` : ""}.
               </p>
               <blockquote className="border-l-2 pl-3 text-sm italic text-muted-foreground">{requirement.quote}</blockquote>
+              <p className="text-xs text-muted-foreground">
+                {requirement.origin === "clause_index"
+                  ? "Matched to the clause in this project's clause index."
+                  : "Entered from the contract: the clause was not found in this project's clause index."}
+              </p>
               {requirement.verification === "verified" ? (
                 <p className="text-sm font-medium text-green-800">
                   Verified against the clause on {formatDateIN(requirement.verified_at)}.
@@ -217,12 +221,13 @@ const NoticePeriodDialog: React.FC<DialogProps> = ({
               ) : (
                 <div className="flex flex-wrap items-center gap-3">
                   <p className="text-sm text-amber-800">
-                    Not yet verified. Until it is, claims show this period as unverified.
+                    Not yet verified. Until it is, claims show this period as unverified. It must be verified by
+                    someone other than the person who recorded it, with claim-manage and clause-read rights.
                   </p>
                   <Button
                     size="sm"
                     disabled={readOnly || verify.isPending || !requirementId}
-                    title="Confirm that the quoted wording is the contract's and states this period. Needs claim-manage rights."
+                    title="Confirm that the quoted wording is the contract's and states this period. Needs claim-manage and clause-read rights; the person who recorded it cannot verify it."
                     onClick={() => verify.mutate()}
                   >
                     I have checked it against the contract
@@ -324,7 +329,6 @@ const NoticePeriodDialog: React.FC<DialogProps> = ({
                 trigger: manual.trigger,
                 clause_no: manual.clause_no.trim(),
                 quote: manual.quote.trim(),
-                origin: "entered",
               })
             }
           >

@@ -81,7 +81,8 @@ export interface NoticeRequirement {
   clause_title?: string | null;
   quote: string;
   document_type?: string | null;
-  origin: "clause_index" | "entered";
+  /** Set by the server (D-08). "entered" is the value written before 4B-14. */
+  origin: "clause_index" | "entered_from_contract" | "entered";
   verification: "extracted_unverified" | "verified";
   status: "current" | "superseded";
   created_by?: string | null;
@@ -122,7 +123,6 @@ export interface NoticeRequirementInput {
   document_id?: string | null;
   document_type?: string | null;
   clause_uid?: string | null;
-  origin: "clause_index" | "entered";
 }
 
 export interface ClaimBenchResponse {

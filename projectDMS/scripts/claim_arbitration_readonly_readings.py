@@ -1,4 +1,4 @@
-"""Phase 4b readings P-02 to P-13: claims, arbitration, roles and skills, read-only.
+"""Phase 4b readings P-02 to P-14: claims, arbitration, roles and skills, read-only.
 
 Plan: docs/superpowers/specs/2026-11-16-claim-bench-phase-4b-hardening.md, §8.1.
 
@@ -389,6 +389,41 @@ def read_case_visibility(db: ReadOnlyDatabase) -> Dict[str, Any]:
     )
 
 
+CLAIM_TYPES = ("eot", "variation", "payment_ipc", "loss_expense", "acceleration", "defect", "other")
+
+
+def read_notice_requirements(db: ReadOnlyDatabase) -> Dict[str, Any]:
+    """C-08 / D-08 (4B-14): notice periods recorded under the rules before 4B-14.
+
+    Before 4B-14 the client supplied ``origin`` and the clause, and the recorder could
+    verify their own entry. Counts only: how many current periods are verified by the
+    person who recorded them, how many claim an origin the server never checked, and
+    how many carry a claim type outside the claim types.
+    """
+    if "claim_notice_requirements" not in db.list_collection_names():
+        return _reading("P-14", claim_notice_requirements_collection_present=False)
+    rows = db["claim_notice_requirements"]
+    current = {"status": "current"}
+    self_verified = {
+        "status": "current",
+        "verification": "verified",
+        "created_by": {"$nin": [None, ""]},
+        "$expr": {"$eq": ["$verified_by", "$created_by"]},
+    }
+    return _reading(
+        "P-14",
+        claim_notice_requirements_collection_present=True,
+        requirements_total=rows.count_documents({}),
+        by_status=_group_count(rows, "status"),
+        current_by_origin=_group_count(rows, "origin", current),
+        current_by_verification=_group_count(rows, "verification", current),
+        current_verified_by_their_recorder=rows.count_documents(self_verified),
+        current_with_unknown_claim_type=rows.count_documents({**current, "claim_type": {"$nin": list(CLAIM_TYPES)}}),
+        organisations_with_current_requirements=len(rows.distinct("organization_id", current)),
+        note="written before 4B-14: origin was client-supplied and self-verification was allowed",
+    )
+
+
 def database_check(db: ReadOnlyDatabase, database_name: Optional[str]) -> Dict[str, Any]:
     """Whether this is the application database: it must hold users and roles."""
     names = set(db.list_collection_names())
@@ -432,6 +467,7 @@ def collect(
         ("P-11", lambda: read_usage(guarded, moment)),
         ("P-12", lambda: read_caseless_drafts(guarded, moment)),
         ("P-13", lambda: read_case_visibility(guarded)),
+        ("P-14", lambda: read_notice_requirements(guarded)),
     ]
     out: List[Dict[str, Any]] = [check]
     if not check.get("initialised"):
