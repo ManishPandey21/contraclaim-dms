@@ -606,6 +606,7 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
     try {
       const created = await createArbitrationDraft({
         case_id: caseData._id,
+        scratch: false,
         organization_id: caseData.organization_id,
         project_id: caseData.project_id,
         contract_id: caseData.contract_id,

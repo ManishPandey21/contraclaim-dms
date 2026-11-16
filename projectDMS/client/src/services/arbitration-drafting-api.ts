@@ -38,8 +38,9 @@ export interface ArbitrationClaimHeadInput {
 
 export interface ArbitrationDraftCreatePayload {
   case_id?: string | null;
-  /** Required to be true when there is no case: a scratch draft is asked for by name. */
-  scratch?: boolean;
+  /** Always sent (D-26, 4B-45): true for a draft with no case, a scratch draft asked for by
+   * name; false with a case. Required here so no caller can leave it out. */
+  scratch: boolean;
   organization_id?: string | null;
   project_id: string;
   contract_id?: string | null;

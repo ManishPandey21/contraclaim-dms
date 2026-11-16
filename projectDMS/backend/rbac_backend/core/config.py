@@ -302,6 +302,13 @@ class Settings(BaseSettings):
     # Claim Bench rollout, same shape as the Letter Bench: off | canary | primary.
     CLAIM_BENCH_ROLLOUT_MODE: str = Field(default="off", validation_alias="CLAIM_BENCH_ROLLOUT_MODE")
     CLAIM_BENCH_CANARY_TENANT_IDS: str = Field(default="", validation_alias="CLAIM_BENCH_CANARY_TENANT_IDS")
+    # D-26 (4B-45): a POST /arbitration/drafts with neither a case nor scratch=true.
+    # implicit_scratch (default): created as a scratch draft, with a Deprecation header,
+    # a warning and a logged caller. strict: 422 scratch_required. Switching to strict
+    # needs the owner's approval after reading P-12 shows no remaining legacy callers.
+    ARBITRATION_CASELESS_DRAFT_MODE: str = Field(
+        default="implicit_scratch", validation_alias="ARBITRATION_CASELESS_DRAFT_MODE"
+    )
     # Model used for skill steps (letters, claims, arbitration). Empty keeps the built-in default.
     SKILL_MODEL: str = Field(default="", validation_alias="SKILL_MODEL")
     # Lowest threshold an evaluation report may set for itself before a skill
@@ -775,6 +782,9 @@ class Settings(BaseSettings):
         claim_bench_rollout = str(getattr(self, "CLAIM_BENCH_ROLLOUT_MODE", "off") or "off").strip().lower()
         if claim_bench_rollout not in {"off", "canary", "primary"}:
             raise ValueError("CLAIM_BENCH_ROLLOUT_MODE must be off, canary, or primary")
+        caseless_mode = str(getattr(self, "ARBITRATION_CASELESS_DRAFT_MODE", "implicit_scratch") or "").strip().lower()
+        if caseless_mode not in {"implicit_scratch", "strict"}:
+            raise ValueError("ARBITRATION_CASELESS_DRAFT_MODE must be implicit_scratch or strict")
 
         environment = str(getattr(self, "ENVIRONMENT", "development") or "development").lower()
         if environment == "production":

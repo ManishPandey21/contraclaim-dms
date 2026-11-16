@@ -375,15 +375,22 @@ def test_incomplete_heads_block_a_statement_of_claim_and_only_that() -> None:
         assert bool(report["pleaded_head_gaps"]) is blocked
 
 
-async def test_a_draft_with_no_case_must_be_asked_for_as_a_scratch_draft() -> None:
+async def test_in_strict_mode_a_draft_with_no_case_must_be_asked_for_as_a_scratch_draft(monkeypatch) -> None:
+    """D-26 strict mode; the default implicit_scratch mode is covered against MongoDB
+    (integration/test_caseless_draft_compat_mongo.py, 4B-45)."""
+    from rbac_backend.core.config import settings
+
+    monkeypatch.setattr(settings, "ARBITRATION_CASELESS_DRAFT_MODE", "strict")
     payload = ArbitrationDraftCreate(
         project_id=PROJECT, organization_id=ORG, draft_type="statement_of_claim", party_role="claimant", title="SoC"
     )
     with pytest.raises(HTTPException) as exc:
         await arbitration_router.create_arbitration_draft(
-            payload, db=FakeDB(), current_user=ACTOR, policy=Policy(Permissions.ARBITRATION_CREATE)
+            payload, SimpleNamespace(headers={}), SimpleNamespace(headers={}),
+            db=FakeDB(), current_user=ACTOR, policy=Policy(Permissions.ARBITRATION_CREATE),
         )
-    assert exc.value.status_code == 422 and "scratch draft" in exc.value.detail
+    assert exc.value.status_code == 422 and exc.value.detail["code"] == "scratch_required"
+    assert "scratch draft" in exc.value.detail["user_message"]
     assert ArbitrationDraftCreate(**{**payload.model_dump(), "scratch": True}).scratch is True
 
 

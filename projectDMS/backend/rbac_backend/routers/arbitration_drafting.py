@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
@@ -57,6 +59,7 @@ from ..utils.error_handler import BaseDomainError
 from ..services.step_up_service import require_step_up
 from ..services.arbitration_drafting.workflow_service import ArbitrationWorkflowService
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/arbitration", tags=["arbitration-drafting"])
 
 
@@ -664,9 +667,24 @@ async def list_arbitration_drafts(
     return [ArbitrationDraft(**row) for row in await ArbitrationDraftingService(db).list_drafts(scope, filters, skip=skip, limit=limit)]
 
 
+IMPLICIT_SCRATCH_WARNING = (
+    "This draft was created as a scratch draft because the request named no case. A scratch draft can be "
+    "neither approved nor exported for filing. Send scratch=true, or a case_id, explicitly: requests without "
+    "either will be refused once this compatibility mode ends."
+)
+
+
+def _caseless_mode() -> str:
+    from ..core.config import settings
+
+    return str(getattr(settings, "ARBITRATION_CASELESS_DRAFT_MODE", "implicit_scratch") or "implicit_scratch").strip().lower()
+
+
 @router.post("/drafts", response_model=ArbitrationDraftDetail, status_code=status.HTTP_201_CREATED)
 async def create_arbitration_draft(
     payload: ArbitrationDraftCreate,
+    request: Request,
+    response: Response,
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
@@ -682,15 +700,36 @@ async def create_arbitration_draft(
     if payload.case_id:
         # Attaching is editing the case's set of drafts (4B-38).
         await _load_case_and_authorize(payload.case_id, Permissions.ARBITRATION_EDIT, db, current_user, policy)
-    if not payload.case_id and not payload.scratch:
+    implicit = not payload.case_id and not payload.scratch
+    if implicit and _caseless_mode() == "strict":
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=(
-                "Select the arbitration case this draft belongs to. A draft with no case is a scratch draft: "
-                "it can be neither approved nor exported for filing, and must be asked for explicitly."
-            ),
+            detail={
+                "code": "scratch_required",
+                "user_message": (
+                    "Select the arbitration case this draft belongs to. A draft with no case is a scratch draft: "
+                    "it can be neither approved nor exported for filing, and must be asked for explicitly."
+                ),
+                "detail": "Send scratch=true, or a case_id.",
+            },
         )
-    return ArbitrationDraftDetail(**await ArbitrationDraftingService(db).create_draft(payload, current_user))
+    created = ArbitrationDraftDetail(**await ArbitrationDraftingService(db).create_draft(payload, current_user))
+    if implicit:
+        # D-26 (4B-45): an older caller that names neither. It gets a scratch draft (no gate is
+        # bypassed: a scratch draft cannot be approved or filed), told so, and is logged.
+        response.headers["Deprecation"] = "true"
+        response.headers["Warning"] = '299 - "Case-less draft created as scratch; send scratch=true or case_id"'
+        created.warnings.append(IMPLICIT_SCRATCH_WARNING)
+        logger.warning(
+            "arbitration.caseless_draft.implicit_scratch draft_id=%s user_id=%s organization_id=%s "
+            "project_id=%s user_agent=%r",
+            created.id,
+            getattr(current_user, "id", None),
+            org,
+            payload.project_id,
+            (request.headers.get("user-agent") or "")[:200],
+        )
+    return created
 
 
 @router.get("/drafts/{draft_id}", response_model=ArbitrationDraftDetail)

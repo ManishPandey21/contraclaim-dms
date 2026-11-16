@@ -789,6 +789,8 @@ class ArbitrationGenerationRun(BaseModel):
 
 
 class ArbitrationDraftDetail(ArbitrationDraft):
+    # D-26: e.g. "created as a scratch draft because the request named no case".
+    warnings: List[str] = Field(default_factory=list)
     selected_references: List[ArbitrationSelectedReference] = Field(default_factory=list)
     claim_heads: List[ArbitrationClaimHead] = Field(default_factory=list)
     paragraph_responses: List[ArbitrationParagraphResponse] = Field(default_factory=list)

@@ -141,3 +141,25 @@ def test_the_signal_routes_declare_the_bench_dependency() -> None:
         parameter = inspect.signature(route).parameters["bench"]
         assert parameter.default.dependency is claim_bench.get_bench
     assert Permissions.CLAIM_VIEW  # the list route still authorises before the flag is read
+
+
+def _with_caseless(mode: str) -> Settings:
+    settings = _settings("off")
+    settings.ARBITRATION_CASELESS_DRAFT_MODE = mode
+    return settings
+
+
+@pytest.mark.parametrize("mode", ["implicit_scratch", "strict", " STRICT "])
+def test_the_configuration_gate_accepts_the_two_caseless_draft_modes(mode: str) -> None:
+    """D-26 (4B-45)."""
+    _with_caseless(mode).validate_runtime_configuration()
+
+
+@pytest.mark.parametrize("mode", ["off", "implicit", "lenient", ""])
+def test_the_configuration_gate_refuses_any_other_caseless_draft_mode(mode: str) -> None:
+    with pytest.raises(ValueError, match="ARBITRATION_CASELESS_DRAFT_MODE must be implicit_scratch or strict"):
+        _with_caseless(mode).validate_runtime_configuration()
+
+
+def test_the_caseless_draft_mode_defaults_to_implicit_scratch() -> None:
+    assert _settings("off").ARBITRATION_CASELESS_DRAFT_MODE == "implicit_scratch"

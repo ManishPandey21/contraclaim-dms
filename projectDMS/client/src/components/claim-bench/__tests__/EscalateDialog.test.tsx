@@ -1,6 +1,7 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
+import type { DraftCitations } from "@/services/arbitration-drafting-api";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import DraftCitationPanel from "@/components/arbitration/DraftCitationPanel";
@@ -178,7 +179,7 @@ describe("Draft citation panel", () => {
   });
 
   it("uses the page's copy of the citations instead of fetching again", async () => {
-    render(<DraftCitationPanel draftId="d1" version={3} data={citations()} />);
+    render(<DraftCitationPanel draftId="d1" version={3} data={citations() as unknown as DraftCitations} />);
     expect(await screen.findByRole("region", { name: "Citation states" })).toBeInTheDocument();
     expect(drafts.getArbitrationDraftCitations).not.toHaveBeenCalled();
   });
