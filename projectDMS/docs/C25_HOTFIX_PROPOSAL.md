@@ -57,7 +57,7 @@ so the coverage rule is satisfied):
 | Hotfix module on `6d65bc3` with the patch, plus the CI coverage rule | 17 passed |
 | The same on `6d65bc3` without the application change | 5 failed, 1 passed |
 | `34d664a` with the patch, existing arbitration, case-workspace, route-inventory, real-Mongo coverage and domain-error tests | 459 passed, 22 skipped (opt-in process-kill and load suites), 0 failed |
-| `34d664a` with the patch, full backend suite | recorded in the Phase 4b report for this batch |
+| `34d664a` with the patch, full backend suite | 7028 passed, 0 failed, 806 skipped (opt-in suites whose environment variables were not set), 4 xfailed |
 
 The same fix, with the same tests in `test_arbitration_case_lookup_mongo.py`, is on the
 Phase 4b branch (C-25 in `9fbeecc`, C-26 in this batch).
