@@ -131,7 +131,7 @@ export function useClaimBench(claimId: string) {
     "The head could not be tested"
   );
   const lock = edit<void>(() => lockClaimBench(claimId, version), "The board could not be locked", "Board locked");
-  const unlock = edit<void>(() => unlockClaimBench(claimId, version), "The board could not be reopened", "Board reopened");
+  const unlock = edit<string>((reason) => unlockClaimBench(claimId, version, reason), "The board could not be reopened", "Board reopened");
 
   const perspective = useMutation({
     mutationFn: (value: Perspective) => {

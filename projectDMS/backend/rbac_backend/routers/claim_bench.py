@@ -36,6 +36,7 @@ from ..services.claim_bench import (
     HeadCreateRequest,
     HeadPatchRequest,
     HeadTestRequest,
+    UnlockRequest,
 )
 from ..services.claim_delay_lab import (
     DETERMINATIONS,
@@ -481,14 +482,15 @@ async def lock_claim_bench(
 @handle_exceptions
 async def unlock_claim_bench(
     claim_id: str,
-    payload: BoardVersionRequest,
+    payload: UnlockRequest,
     db=Depends(get_db),
     bench: ClaimBenchService = Depends(get_bench),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
     selection: ActiveScope = Depends(active_scope),
 ):
-    claim = await _claim(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection, bench)
+    """Reopen a locked board: claim-manage rights and a reason, kept in the audit trail (D-22)."""
+    claim = await _claim(claim_id, Permissions.CLAIM_MANAGE, db, current_user, policy, selection, bench)
     return await bench.unlock(claim, payload, _user_id(current_user))
 
 

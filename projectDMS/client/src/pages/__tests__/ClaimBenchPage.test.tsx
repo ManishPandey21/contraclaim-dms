@@ -208,7 +208,26 @@ describe("Claim Bench page", () => {
     renderPage();
     expect(await screen.findByRole("heading", { name: "Board locked" })).toBeInTheDocument();
     expect(screen.getByLabelText("Head of claim")).toBeDisabled();
-    await userEvent.click(screen.getByRole("button", { name: "Reopen the board" }));
-    expect(api.unlockClaimBench).toHaveBeenCalledWith("claim-1", 9);
+    // Without claim-manage rights the button is shown but disabled (the server refuses too).
+    expect(screen.getByRole("button", { name: "Reopen the board" })).toBeDisabled();
+  });
+
+  it("asks a claim manager for a reason before reopening", async () => {
+    permission.granted = true;
+    api.fetchClaimBench.mockResolvedValue(
+      response({
+        bench: { board_version: 9, stage: "locked", heads: [head({ classification: "excusable" })] },
+        gate: { undecided_elements: 0, unclassified_heads: 0, stale_tests: 0, blockers: [], can_lock: false },
+      }),
+    );
+    api.unlockClaimBench.mockResolvedValue(response());
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Reopen the board" }));
+    const confirm = screen.getByRole("button", { name: "Reopen" });
+    expect(confirm).toBeDisabled();
+    await userEvent.type(screen.getByLabelText("Why is the board being reopened?"), "Engineer changed the event date");
+    await userEvent.click(confirm);
+    expect(api.unlockClaimBench).toHaveBeenCalledWith("claim-1", 9, "Engineer changed the event date");
+    permission.granted = false;
   });
 });

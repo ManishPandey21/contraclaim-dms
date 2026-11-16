@@ -21,7 +21,7 @@ from fastapi import HTTPException
 
 from rbac_backend.models.claim import ELEMENT_KEYS, ClaimBench, ClaimHead, NoticeAssessment
 from rbac_backend.models.claim_skill_outputs import ClaimHeadTestOutput, ElementFinding
-from rbac_backend.routers.claims import _read_model, mark_bench_tests_stale
+from rbac_backend.routers.claims import _read_model
 from rbac_backend.services.claim_bench import (
     CLAIM_HEAD_TEST_PROMPT,
     BoardVersionRequest,
@@ -514,19 +514,8 @@ async def test_the_register_sees_an_outline_of_the_board_not_the_board() -> None
     assert untouched.head_count == 0 and untouched.bench_stage is None
 
 
-async def test_changing_a_date_on_the_claim_marks_tested_heads_stale_and_reopens_the_board() -> None:
-    db, service, _ = _setup(llm=StubLLM(reply=_all_supported()), published=True)
-    await _opened(service, db)
-    await _tested(service, db)
-    decided = await _decide_all(service, db)
-    await service.lock(await _claim(db), BoardVersionRequest(board_version=decided.bench.board_version), USER)
-    refreshed = await mark_bench_tests_stale(db, await _claim(db))
-    assert refreshed is not None
-    bench = ClaimBench(**refreshed["bench"])
-    assert bench.stage == "heads" and bench.heads[0].test_stale and bench.board_version == decided.bench.board_version + 2
-    assert bench.heads[0].elements["event"].state == "weak"
-    assert (await db.skill_steps.find_one({}))["stale"] is True
-    assert await mark_bench_tests_stale(db, {"_id": "none", "bench": None}) is None
+# Marking tested heads stale after a fact change is one array-filtered update; it is
+# tested against a real MongoDB (integration/test_bench_lock_stale_mongo.py, 4B-16).
 
 
 # --------------------------------------------------------------------------- #

@@ -116,7 +116,10 @@ class FakeCollection:
         for key, value in update.get("$inc", {}).items():
             doc[key] = (doc.get(key) or 0) + value
 
-    async def update_one(self, query: Dict[str, Any], update: Dict[str, Any], upsert: bool = False, **_: Any) -> _Result:
+    async def update_one(self, query: Dict[str, Any], update: Dict[str, Any], upsert: bool = False, **options: Any) -> _Result:
+        if options.get("array_filters"):
+            # Not modelled: a fake that ignored them would set a literal "$[name]" key and pass.
+            raise NotImplementedError("array_filters: test this write against a real MongoDB")
         for doc in self.docs:
             if _match(doc, query):
                 self._apply(doc, update)

@@ -41,6 +41,7 @@ from ..models.claim_notice import NoticeRequirement
 from ..models.claim_skill_outputs import CLAIM_HEAD_TEST_SCHEMA_KEY, ClaimHeadTestOutput, ElementFinding
 from ..models.skill import SkillRunStep
 from ..utils.datetime import now_utc
+from .audit_event_service import AuditEventService
 from .claim_notice_requirements import NoticeRequirementService
 from .claims_notice import assess_notice
 from .letter_drafting.clause_checker import normalize_cited_clause
@@ -138,6 +139,13 @@ class ElementDecisionRequest(BaseModel):
 
 class BoardVersionRequest(BaseModel):
     board_version: int = Field(..., ge=0)
+
+
+class UnlockRequest(BaseModel):
+    """Reopening a locked board (D-22): claim-manage rights and a reason, kept in the audit trail."""
+
+    board_version: int = Field(..., ge=0)
+    reason: str = Field(..., min_length=10, max_length=1000)
 
 
 class HeadTestRequest(BaseModel):
@@ -284,6 +292,12 @@ def compute_gate(bench: ClaimBench) -> BenchGate:
         blockers.append(
             f"{unclassified} head{'' if unclassified == 1 else 's'} not yet classified "
             "(excusable, compensable or contractor risk)"
+        )
+    if stale:
+        # D-22 (4B-16, C-17): a test that no longer matches the facts is not a basis for a lock.
+        blockers.append(
+            f"{stale} head{'' if stale == 1 else 's'} tested against facts that have since changed: re-test "
+            + ("it" if stale == 1 else "them")
         )
     return BenchGate(
         undecided_elements=undecided,
@@ -901,10 +915,62 @@ class ClaimBenchService:
             bench.locked_by = user_id
             bench.perspective = perspective or bench.perspective  # type: ignore[assignment]
 
-        return await self._change(claim, request.board_version, user_id, _apply)
+        response = await self._change(claim, request.board_version, user_id, _apply)
+        await self._audit(claim, "claim.bench.locked", user_id, request.board_version + 1)
+        return response
 
-    async def unlock(self, claim: Dict[str, Any], request: BoardVersionRequest, user_id: Optional[str]) -> ClaimBenchResponse:
-        return await self._change(claim, request.board_version, user_id, self._unlock)
+    async def unlock(self, claim: Dict[str, Any], request: UnlockRequest, user_id: Optional[str]) -> ClaimBenchResponse:
+        """Reopen a locked board. The route checks claim-manage rights; the reason is audited (D-22, AQ-9)."""
+        reason = " ".join(request.reason.split())
+        if len(reason.strip(" .,;:-")) < 10:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "bench_unlock_reason",
+                    "user_message": "Say why the board is being reopened (at least 10 characters).",
+                    "detail": None,
+                },
+            )
+        bench = self._require_bench(claim)
+        self._ensure_writable(claim, bench, request.board_version)  # frozen and version first
+        if bench.stage != "locked":
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "bench_not_locked", "user_message": "The board is not locked.", "detail": None},
+            )
+        response = await self._change(claim, request.board_version, user_id, self._unlock)
+        await self._audit(
+            claim,
+            "claim.bench.unlocked",
+            user_id,
+            request.board_version + 1,
+            reason=reason,
+            before={"stage": "locked", "locked_by": bench.locked_by, "locked_at": bench.locked_at},
+        )
+        return response
+
+    async def _audit(
+        self,
+        claim: Dict[str, Any],
+        action: str,
+        user_id: Optional[str],
+        board_version: int,
+        *,
+        reason: Optional[str] = None,
+        before: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Append-only: audit events are inserted, and no route edits or deletes them."""
+        await AuditEventService(self.db).emit(
+            action=action,
+            actor_id=user_id,
+            resource_type="claim",
+            resource_id=str(claim["_id"]),
+            organization_id=claim.get("organization_id"),
+            project_id=claim.get("project_id"),
+            reason=reason,
+            before=before,
+            metadata={"board_version": board_version},
+        )
 
     async def test_head(
         self, claim: Dict[str, Any], head_id: str, request: HeadTestRequest, user_id: Optional[str]
@@ -987,6 +1053,7 @@ __all__ = [
     "HeadCreateRequest",
     "HeadPatchRequest",
     "HeadTestRequest",
+    "UnlockRequest",
     "apply_fact_guards",
     "claim_bench_rollout",
     "compute_gate",

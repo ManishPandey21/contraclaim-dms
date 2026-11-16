@@ -119,30 +119,41 @@ BENCH_FACT_FIELDS = ("type", "event_date", "awareness_date", "notice_date")
 
 async def mark_bench_tests_stale(db, claim: dict) -> Optional[dict]:
     """After a change to a fact the heads were tested against: mark every tested
-    head stale and reopen a locked board. Decisions people made are kept."""
-    bench = claim.get("bench")
-    if not isinstance(bench, dict) or not bench.get("heads"):
+    head stale and reopen a locked board. Decisions people made are kept.
+
+    One atomic update on the board as it now is (D-22, 4B-16, C-17). The earlier
+    version compared the board version read before the fact change; a board write
+    in between made it miss silently, leaving a locked board on tests that no
+    longer matched. Array filters mark whichever heads are tested at the moment of
+    the write, and the version bump makes any board save prepared before it fail
+    with the usual "the Bench changed" conflict. There is no miss to retry.
+    """
+    if not isinstance(claim.get("bench"), dict):
         return None
-    heads = [
-        {**head, "test_stale": True} if head.get("step_id") else head for head in bench["heads"]
-    ]
-    version = int(bench.get("board_version") or 0)
-    update = {
-        "bench.heads": heads,
-        "bench.stage": "heads",
-        "bench.locked_at": None,
-        "bench.locked_by": None,
-        "bench.board_version": version + 1,
-    }
     result = await db.claims.update_one(
-        {"_id": claim["_id"], "bench.board_version": version}, {"$set": update}
+        {"_id": claim["_id"], "bench": {"$type": "object"}},
+        {
+            "$set": {
+                "bench.heads.$[tested].test_stale": True,
+                "bench.stage": "heads",
+                "bench.locked_at": None,
+                "bench.locked_by": None,
+            },
+            "$inc": {"bench.board_version": 1},
+        },
+        array_filters=[{"tested.step_id": {"$nin": [None, ""]}}],
     )
     if not getattr(result, "matched_count", 0):
         return None
-    step_ids = [head["step_id"] for head in bench["heads"] if head.get("step_id")]
+    updated = await db.claims.find_one({"_id": claim["_id"]})
+    step_ids = [
+        head["step_id"]
+        for head in ((updated or {}).get("bench") or {}).get("heads") or []
+        if head.get("step_id")
+    ]
     if step_ids:
         await db.skill_steps.update_many({"step_id": {"$in": step_ids}}, {"$set": {"stale": True}})
-    return await db.claims.find_one({"_id": claim["_id"]})
+    return updated
 
 
 #: Statuses a claim may be created in through the register (4B-12, C-13). Later

@@ -13,7 +13,9 @@ import QuantumTab from "@/components/claim-bench/QuantumTab";
 import NoticeClockCard from "@/components/claim-bench/NoticeClockCard";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Textarea } from "@/components/ui/textarea";
 import { useClaimBench } from "@/hooks/useClaimBench";
 import useHasPermission from "@/hooks/useHasPermission";
 import { errorMessage } from "@/hooks/useLetterBench";
@@ -75,6 +77,9 @@ const ClaimBenchPage: React.FC = () => {
   const [escalating, setEscalating] = useState(false);
   // Hides the tab only. The server refuses privileged material to anyone without the permission.
   const mayReadInternal = useHasPermission("dms.claim.strategy.read");
+  // Reopening a locked board needs claim-manage rights and a reason (D-22); the server enforces both.
+  const mayReopen = useHasPermission("dms.claim.manage");
+  const [reopenReason, setReopenReason] = useState<string | null>(null);
   const data = query.data;
 
   if (query.isLoading) {
@@ -375,12 +380,43 @@ const ClaimBenchPage: React.FC = () => {
               )}
               {gate.stale_tests > 0 && !locked && (
                 <p className="text-xs text-amber-800">
-                  {gate.stale_tests} head{gate.stale_tests === 1 ? " was" : "s were"} edited after being tested. The
-                  proposals shown describe the earlier version.
+                  {gate.stale_tests} head{gate.stale_tests === 1 ? " was" : "s were"} edited, or the claim's dates
+                  changed, after being tested. The proposals shown describe the earlier facts; re-test before locking.
                 </p>
               )}
-              {locked ? (
-                <Button variant="outline" size="sm" className="w-full" disabled={data.read_only || busy} onClick={() => unlock.mutate()}>
+              {locked && reopenReason !== null ? (
+                <div className="space-y-2">
+                  <Label htmlFor="bench-reopen-reason">Why is the board being reopened?</Label>
+                  <Textarea
+                    id="bench-reopen-reason"
+                    rows={3}
+                    value={reopenReason}
+                    onChange={(event) => setReopenReason(event.target.value)}
+                  />
+                  <p className="text-xs text-muted-foreground">Kept in the claim's audit trail. At least 10 characters.</p>
+                  <div className="flex gap-2">
+                    <Button
+                      size="sm"
+                      disabled={busy || reopenReason.trim().length < 10}
+                      onClick={() => unlock.mutate(reopenReason.trim(), { onSuccess: () => setReopenReason(null) })}
+                    >
+                      <LockOpen className="mr-2 h-4 w-4" aria-hidden="true" />
+                      Reopen
+                    </Button>
+                    <Button size="sm" variant="outline" disabled={busy} onClick={() => setReopenReason(null)}>
+                      Cancel
+                    </Button>
+                  </div>
+                </div>
+              ) : locked ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="w-full"
+                  disabled={data.read_only || busy || !mayReopen}
+                  title={mayReopen ? undefined : "Reopening a locked board needs claim-manage rights."}
+                  onClick={() => setReopenReason("")}
+                >
                   <LockOpen className="mr-2 h-4 w-4" aria-hidden="true" />
                   Reopen the board
                 </Button>

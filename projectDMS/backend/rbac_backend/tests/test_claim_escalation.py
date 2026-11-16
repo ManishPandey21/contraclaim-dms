@@ -37,7 +37,7 @@ from rbac_backend.services.arbitration_drafting.citation_states import (
     pleaded_head_gaps,
 )
 from rbac_backend.services.arbitration_drafting.validator import ArbitrationDraftValidator
-from rbac_backend.services.claim_bench import BoardVersionRequest
+from rbac_backend.services.claim_bench import UnlockRequest
 from rbac_backend.services.claim_escalation import ClaimEscalation, EscalationRequest, NewCase, status_after
 from rbac_backend.services.claim_privileged import ClaimPrivileged, StrategyNoteRequest
 from rbac_backend.services.claim_quantum import ClaimQuantum, QuantumLineRequest
@@ -154,7 +154,9 @@ async def test_escalation_creates_the_case_seeds_needs_review_rows_and_freezes_t
     assert claim["evidence_frozen_at"] is not None and claim["evidence_freeze_reason"] == "Escalated to arbitration"
     # Frozen evidence makes the board read-only from here on.
     with pytest.raises(HTTPException) as frozen:
-        await service.unlock(claim, BoardVersionRequest(board_version=claim["bench"]["board_version"]), USER)
+        await service.unlock(
+            claim, UnlockRequest(board_version=claim["bench"]["board_version"], reason="Reopen to revise a head"), USER
+        )
     assert frozen.value.status_code == 409 and "frozen" in frozen.value.detail
 
 

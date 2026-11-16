@@ -99,8 +99,9 @@ export async function lockClaimBench(claimId: string, boardVersion: number): Pro
   return data;
 }
 
-export async function unlockClaimBench(claimId: string, boardVersion: number): Promise<ClaimBenchResponse> {
-  const { data } = await api.post<ClaimBenchResponse>(`${bench(claimId)}/unlock`, { board_version: boardVersion });
+/** Reopening needs claim-manage rights and a reason, which is kept in the audit trail (D-22). */
+export async function unlockClaimBench(claimId: string, boardVersion: number, reason: string): Promise<ClaimBenchResponse> {
+  const { data } = await api.post<ClaimBenchResponse>(`${bench(claimId)}/unlock`, { board_version: boardVersion, reason });
   return data;
 }
 
