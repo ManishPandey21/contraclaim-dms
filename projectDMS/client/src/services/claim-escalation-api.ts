@@ -37,6 +37,8 @@ export interface EscalationResult {
 export interface EscalationTarget {
   case_id?: string;
   new_case?: { title: string; case_reference?: string; party_perspective: "claimant" | "respondent" };
+  /** One key per "Escalate" action: a repeated click extends the case the first one made (D-18). */
+  idempotency_key?: string;
 }
 
 export async function previewEscalation(claimIds: string[], caseId?: string): Promise<EscalationPreview> {

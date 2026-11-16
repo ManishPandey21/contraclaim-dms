@@ -471,7 +471,11 @@ class ArbitrationCaseWorkspaceService:
             try:
                 await self._collection(matrix_slug).insert_one(_jsonable(row))
                 break
-            except DuplicateKeyError:
+            except DuplicateKeyError as exc:
+                if "origin_key" in (((exc.details or {}).get("keyPattern")) or {}):
+                    # M-05 / 4B-36: this (case, origin) row exists already. Escalation reads
+                    # that as "already carried"; it is not an exhibit-number clash.
+                    raise
                 # D-17 / 4B-35: exhibit numbers are unique per case (a unique index on
                 # case_id + exhibit_id). A number the user chose is refused; a number
                 # this service assigned lost a race and is re-assigned from the new maximum.

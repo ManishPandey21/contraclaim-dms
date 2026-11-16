@@ -562,6 +562,79 @@ class DocumentRelationshipService:
         )
         return None
 
+    async def _prepare_frozen_links(
+        self,
+        actor: Any,
+        context: EntityContext,
+        stored_links: Iterable[dict[str, Any]],
+        *,
+        session: Any = None,
+    ) -> list[tuple[dict[str, Any], dict[str, Any], str]]:
+        """Each link with its Document and current version; refuses (409) what cannot be frozen."""
+        prepared: list[tuple[dict[str, Any], dict[str, Any], str]] = []
+        for stored in stored_links:
+            document = await self._document(
+                actor,
+                context,
+                str(stored.get("document_id") or ""),
+                session=session,
+            )
+            version_id = str((document or {}).get("current_version_id") or "")
+            if not version_id:
+                raise DocumentRelationshipError(
+                    "Every frozen relationship requires a current Document version",
+                    409,
+                )
+            version = await self.db.document_versions.find_one(
+                {
+                    "_id": version_id,
+                    "document_id": str(stored.get("document_id") or ""),
+                },
+                session=session,
+            )
+            if not version:
+                raise DocumentRelationshipError(
+                    "Current Document version is missing or does not belong to Document",
+                    409,
+                )
+            if not version.get("file_object_id"):
+                raise DocumentRelationshipError(
+                    "Current Document version has no immutable file artifact",
+                    409,
+                )
+            prepared.append((stored, document or {}, version_id))
+        return prepared
+
+    async def freeze_preflight(self, actor: Any, target_type: str, target_id: str) -> None:
+        """Every check ``freeze`` makes before it writes, without writing (4B-36).
+
+        A caller that must not leave a half-done change (escalation reserves a
+        claim for a case before freezing it, and nothing unfreezes) runs this
+        first. Legacy document ids are checked as the links ``freeze`` would
+        create from them. Already frozen passes: the caller decides.
+        """
+        context = await self._target(actor, target_type, target_id, manage=True, freeze=True)
+        adapter = self.registry.get(context.target_type)
+        if context.frozen:
+            return
+        if not adapter.supports_freeze:
+            raise DocumentRelationshipError(f"{context.target_type} evidence freeze is not supported", 409)
+        legacy_ids = list(context.entity.get("linked_document_ids") or [])
+        if legacy_ids and context.target_type != "claim":
+            raise DocumentRelationshipError("Legacy relationship intent is ambiguous and requires manual review", 409)
+        links = await self.db.entity_document_links.find(
+            {
+                "organization_id": context.organization_id,
+                "project_id": context.project_id,
+                "target_type": context.target_type,
+                "target_id": context.target_id,
+                "removed_at": None,
+            }
+        ).to_list(length=None)
+        linked = {str(link.get("document_id") or "") for link in links}
+        links.extend({"document_id": str(item)} for item in legacy_ids if str(item) not in linked)
+        await self._prepare_frozen_links(actor, context, links)
+
     async def freeze(
         self,
         actor: Any,
@@ -621,39 +694,7 @@ class DocumentRelationshipService:
             *,
             session: Any = None,
         ) -> list[tuple[dict[str, Any], dict[str, Any], str]]:
-            prepared: list[tuple[dict[str, Any], dict[str, Any], str]] = []
-            for stored in stored_links:
-                document = await self._document(
-                    actor,
-                    context,
-                    str(stored.get("document_id") or ""),
-                    session=session,
-                )
-                version_id = str((document or {}).get("current_version_id") or "")
-                if not version_id:
-                    raise DocumentRelationshipError(
-                        "Every frozen relationship requires a current Document version",
-                        409,
-                    )
-                version = await self.db.document_versions.find_one(
-                    {
-                        "_id": version_id,
-                        "document_id": str(stored.get("document_id") or ""),
-                    },
-                    session=session,
-                )
-                if not version:
-                    raise DocumentRelationshipError(
-                        "Current Document version is missing or does not belong to Document",
-                        409,
-                    )
-                if not version.get("file_object_id"):
-                    raise DocumentRelationshipError(
-                        "Current Document version has no immutable file artifact",
-                        409,
-                    )
-                prepared.append((stored, document or {}, version_id))
-            return prepared
+            return await self._prepare_frozen_links(actor, context, stored_links, session=session)
 
         preflight_links = await self.db.entity_document_links.find(
             {

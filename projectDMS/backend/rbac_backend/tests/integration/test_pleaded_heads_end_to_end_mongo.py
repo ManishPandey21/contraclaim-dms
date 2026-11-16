@@ -42,9 +42,8 @@ from rbac_backend.models.arbitration_drafting import (
 from rbac_backend.services.arbitration_drafting.case_workspace import ArbitrationCaseWorkspaceService
 from rbac_backend.services.arbitration_drafting.citation_states import NO_APPROVED_HEADS, is_pleaded_head_blocker
 from rbac_backend.services.arbitration_drafting.service import ArbitrationDraftingService
-from rbac_backend.services.claim_escalation import ClaimEscalation
 from rbac_backend.tests.test_claim_bench import ORG, PROJECT
-from rbac_backend.tests.test_claim_escalation import ACTOR, DOCS, NEW, _claim, _worked_claim
+from rbac_backend.tests.test_claim_escalation import ACTOR, DOCS, NEW, _claim, _escalation, _worked_claim
 
 pytestmark = pytest.mark.integration
 
@@ -96,7 +95,7 @@ async def _escalated_case(db: Any, notices: Dict[str, Any] | None = None, causat
         await service.decide_element(
             claim, "H1", "causation", ElementDecisionRequest(board_version=version, state="supported", note=causation), "user-1"
         )
-    result = await ClaimEscalation(fake, service).escalate([await _claim(fake)], DOCS, NEW, ACTOR, None, notices)
+    result = await _escalation(fake, service).escalate([await _claim(fake)], DOCS, NEW, ACTOR, None, notices)
     for name, collection in fake._collections.items():
         if collection.docs:
             await db[name].insert_many([dict(doc) for doc in collection.docs])

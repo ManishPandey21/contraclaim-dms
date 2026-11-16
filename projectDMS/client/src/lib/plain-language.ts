@@ -68,6 +68,11 @@ export const ERROR_CODE_MESSAGES = {
   notice_quote_period: "The quoted contract wording does not state that number of days.",
   notice_quote_not_in_clause: "The quoted wording is not in that clause of this project's contract.",
   notice_self_verification: "You recorded this notice period, so someone else must verify it.",
+  escalation_key_required: "This request could not be matched to your escalation. Reload the page and try again.",
+  escalation_claim_taken: "Someone changed or escalated this claim at the same time. Nothing was escalated; reload and try again.",
+  escalation_key_released: "The earlier attempt did not finish. Try again.",
+  escalation_key_reused: "This escalation was started for different claims. Reload the page and try again.",
+  escalation_in_progress: "This escalation is still running. Try again in a moment.",
 } as const;
 
 export type StatusKind = "claim" | "arbitration_case" | "arbitration_draft";

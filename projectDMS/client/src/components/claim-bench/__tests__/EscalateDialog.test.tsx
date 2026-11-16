@@ -88,6 +88,30 @@ describe("Escalate to arbitration", () => {
     expect(onEscalated).toHaveBeenCalled();
   });
 
+  it("works the preview out for the case chosen (C-10)", async () => {
+    mount();
+    await screen.findByRole("button", { name: "Escalate" });
+    expect(api.previewEscalation).toHaveBeenLastCalledWith(["c1"], undefined);
+    await userEvent.selectOptions(screen.getByLabelText("Arbitration case"), "case-1");
+    await waitFor(() => expect(api.previewEscalation).toHaveBeenLastCalledWith(["c1"], "case-1"));
+  });
+
+  it("sends a new case with one idempotency key, the same on a repeat (D-18)", async () => {
+    api.runEscalation.mockRejectedValueOnce(new Error("network")).mockResolvedValue({
+      case_id: "case-2", case_title: "Delayed handover", created_case: true, rows_created: {}, rows_already_present: 0, claims: [],
+    });
+    mount();
+    const escalate = await screen.findByRole("button", { name: "Escalate" });
+    await userEvent.click(escalate);
+    await waitFor(() => expect(api.runEscalation).toHaveBeenCalledTimes(1));
+    await userEvent.click(await screen.findByRole("button", { name: "Escalate" }));
+    await waitFor(() => expect(api.runEscalation).toHaveBeenCalledTimes(2));
+    const [first, second] = api.runEscalation.mock.calls.map((call) => call[1]);
+    expect(first.new_case.title).toBe("Delayed handover");
+    expect(first.idempotency_key).toMatch(/^esc-[A-Za-z0-9-]{8,}$/);
+    expect(second.idempotency_key).toBe(first.idempotency_key);
+  });
+
   it("will not escalate while the server lists a blocker", async () => {
     api.previewEscalation.mockResolvedValue(
       preview({ can_escalate: false, blockers: ["CLM-014 is already in another arbitration case."] })

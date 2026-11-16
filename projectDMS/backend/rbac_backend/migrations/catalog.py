@@ -135,6 +135,10 @@ from .v20261119_0001_claim_escalation_and_scratch_drafts import DESCRIPTION as C
 from .v20261119_0001_claim_escalation_and_scratch_drafts import NAME as CLAIM_ESCALATION_NAME
 from .v20261119_0001_claim_escalation_and_scratch_drafts import VERSION as CLAIM_ESCALATION_VERSION
 from .v20261119_0001_claim_escalation_and_scratch_drafts import upgrade as upgrade_claim_escalation
+from .v20261120_0001_arbitration_matrix_origin_unique import DESCRIPTION as MATRIX_ORIGIN_DESCRIPTION
+from .v20261120_0001_arbitration_matrix_origin_unique import NAME as MATRIX_ORIGIN_NAME
+from .v20261120_0001_arbitration_matrix_origin_unique import VERSION as MATRIX_ORIGIN_VERSION
+from .v20261120_0001_arbitration_matrix_origin_unique import upgrade as upgrade_matrix_origin
 
 
 MIGRATIONS = [
@@ -299,5 +303,11 @@ MIGRATIONS = [
         name=CLAIM_ESCALATION_NAME,
         description=CLAIM_ESCALATION_DESCRIPTION,
         upgrade=upgrade_claim_escalation,
+    ),
+    Migration(
+        version=MATRIX_ORIGIN_VERSION,
+        name=MATRIX_ORIGIN_NAME,
+        description=MATRIX_ORIGIN_DESCRIPTION,
+        upgrade=upgrade_matrix_origin,
     ),
 ]

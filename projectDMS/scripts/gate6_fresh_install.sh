@@ -38,7 +38,7 @@
 #   GATE6_BACKEND_IMAGE        use this image instead of building one. Its
 #                              org.opencontainers.image.revision label must
 #                              equal the checked-out commit.
-#   GATE6_EXPECTED_MIGRATIONS  catalogue size this run must find (default 27)
+#   GATE6_EXPECTED_MIGRATIONS  catalogue size this run must find (default 28)
 #   GATE6_MONGO_IMAGE          default mongo:8.0, the image CI uses
 #   GATE6_OUT_DIR              where step logs go (default: a new temp dir)
 #   GATE6_KEEP=1               leave the containers and network up afterwards
@@ -48,7 +48,7 @@
 set -Eeuo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-EXPECTED=${GATE6_EXPECTED_MIGRATIONS:-27}
+EXPECTED=${GATE6_EXPECTED_MIGRATIONS:-28}
 MONGO_IMAGE=${GATE6_MONGO_IMAGE:-mongo:8.0}
 # Lower case throughout: the name is also the server's hostname, and URL parsers
 # fold hostnames to lower case.
@@ -359,6 +359,9 @@ const expectedIndexes = [
   ["claims", "claim_arbitration_case", { organization_id: 1, arbitration_case_id: 1 }, false,
     { arbitration_case_id: { $type: "string" } }],
   ["arbitration_cases", "arbitration_case_claim_ids", { organization_id: 1, claim_ids: 1 }, false, null],
+  // 20261120_0001 (M-05): one matrix row per case and escalation origin, in every matrix collection.
+  ...["arbitration_chronology_matrix", "arbitration_claim_matrix", "arbitration_clause_matrix", "arbitration_counterclaim_matrix", "arbitration_defence_matrix", "arbitration_document_index", "arbitration_expert_alignment", "arbitration_issue_matrix", "arbitration_jurisdiction_matrix", "arbitration_notice_compliance", "arbitration_quantum_annexures", "arbitration_rejoinder_matrix"].map((name) =>
+    [name, "matrix_case_origin_unique", { case_id: 1, origin_key: 1 }, true, { origin_key: { $type: "string" } }]),
 ];
 for (const [collection, name, key, unique, partial] of expectedIndexes) {
   const found = db.getCollection(collection).getIndexes().find((i) => i.name === name);
@@ -372,7 +375,8 @@ for (const [collection, name, key, unique, partial] of expectedIndexes) {
   );
 }
 const partials = expectedIndexes.filter((e) => e[4] !== null).length;
-check("partial indexes expected", partials === 7, partials + " declared");
+// 7 before 20261120_0001, which adds one per matrix collection (12).
+check("partial indexes expected", partials === 19, partials + " declared");
 
 const expectedSkills = ["indian-infra-contract-letters", "indian-infra-letter-analysis", "indian-infra-variations"];
 // Stored by 20261115_0001 as DRAFTS: unreviewed method text that must not be
@@ -529,7 +533,20 @@ check("first submission for a claim is accepted", attempt(subs, { _id: "u1", org
 r = attempt(subs, { _id: "u2", organization_id: org, claim_id: "gate6-claim" });
 check("a second submission for the claim is refused", r === "E11000 claim_submission_claim_unique", r);
 
-for (const name of [dets, priv, subs]) db.getCollection(name).deleteMany({ organization_id: org });
+// 20261120_0001 (M-05). One row per case and escalation origin; rows added by hand
+// (no origin) are unconstrained; the same origin in another case is another row.
+const matrix = "arbitration_claim_matrix";
+const mrow = { organization_id: org, case_id: "gate6-case", origin_key: "claim:gate6-claim:head:H1" };
+check("first escalated row is accepted", attempt(matrix, { _id: "m1", ...mrow }) === "inserted");
+r = attempt(matrix, { _id: "m2", ...mrow });
+check("the same origin in the same case is refused", r === "E11000 matrix_case_origin_unique", r);
+check("rows added by hand are unconstrained",
+  attempt(matrix, { _id: "m3", organization_id: org, case_id: "gate6-case" }) === "inserted" &&
+  attempt(matrix, { _id: "m4", organization_id: org, case_id: "gate6-case" }) === "inserted");
+check("the same origin in another case is accepted",
+  attempt(matrix, { _id: "m5", ...mrow, case_id: "gate6-case-2" }) === "inserted");
+
+for (const name of [dets, priv, subs, matrix]) db.getCollection(name).deleteMany({ organization_id: org });
 db.getCollection(boards).deleteMany({ organization_id: org });
 db.skill_versions.deleteMany({ owner_scope: "gate6-probe" });
 db.getCollection(links).deleteMany({ organization_id: org });
@@ -539,7 +556,8 @@ db.skill_steps.deleteMany({ subject_id: "gate6:H1" });
 const left = db.getCollection(boards).countDocuments({}) + db.skill_versions.countDocuments({ owner_scope: "gate6-probe" }) +
   db.getCollection(notice).countDocuments({}) + db.claims.countDocuments({}) + db.skill_steps.countDocuments({}) +
   db.getCollection(links).countDocuments({}) + db.getCollection(dets).countDocuments({}) +
-  db.getCollection(priv).countDocuments({}) + db.getCollection(subs).countDocuments({});
+  db.getCollection(priv).countDocuments({}) + db.getCollection(subs).countDocuments({}) +
+  db.getCollection(matrix).countDocuments({});
 check("probe rows removed", left === 0, left + " left");
 if (failed) { print("PROBE FAILED=" + failed); quit(1); }
 print("PROBE=PASS");
@@ -630,7 +648,7 @@ RUN="docker run --rm --network <private> -e DATABASE_URL=mongodb://<disposable>:
   echo "  5. ${MIGRATE} --list"
   echo "       exit ${LIST_AFTER_RC}   ${LIST_AFTER_COUNTS}"
   echo
-  echo "Skill and claim migrations 20261114_0001 to 20261119_0001, read with mongosh: ${BENCH_PASSES} passed, 0 failed"
+  echo "Skill and claim migrations 20261114_0001 to 20261120_0001, read with mongosh: ${BENCH_PASSES} passed, 0 failed"
   grep -E '^(PASS|FAIL)' "$OUT_DIR/07-bench.stdout" | sed 's/^/  /'
   echo "Seeded skills (key, version, content hash) - equal to the files bundled in the image: YES"
   echo "$SEEDED" | sed 's/^SEED  /  /'

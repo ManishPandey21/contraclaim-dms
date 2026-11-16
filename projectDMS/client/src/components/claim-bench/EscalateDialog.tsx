@@ -36,6 +36,11 @@ const MATRIX_LABEL: Record<string, string> = {
 const select = "h-9 w-full rounded-md border border-input bg-background px-2 text-sm disabled:opacity-50";
 const NEW = "__new__";
 
+function newKey(): string {
+  const random = globalThis.crypto?.randomUUID?.();
+  return `esc-${random ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`}`;
+}
+
 /**
  * Confirmation sheet for escalating a claim. It shows exactly what would be
  * carried into the case, what is weak, and what is left behind and why, before
@@ -50,18 +55,18 @@ const EscalateDialog: React.FC<Props> = ({ claimId, claimTitle, projectId, open,
   const [perspective, setPerspective] = useState<"claimant" | "respondent">("claimant");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<EscalationResult | null>(null);
+  // One key per opening of the dialog: a double click, or a retry after a lost
+  // response, extends the case the first request created instead of making another.
+  const [idempotencyKey, setIdempotencyKey] = useState(newKey);
 
   useEffect(() => {
     if (!open) return;
     let active = true;
-    setPreview(null);
     setError(null);
     setResult(null);
     setTarget(NEW);
     setTitle(claimTitle);
-    previewEscalation([claimId])
-      .then((data) => active && setPreview(data))
-      .catch((reason) => active && setError(errorMessage(reason, "The escalation could not be previewed.")));
+    setIdempotencyKey(newKey());
     listArbitrationCases(projectId ? { project_id: projectId } : {})
       .then((data) => active && setCases((data || []).filter((item) => !projectId || item.project_id === projectId)))
       .catch(() => active && setCases([]));
@@ -69,6 +74,20 @@ const EscalateDialog: React.FC<Props> = ({ claimId, claimTitle, projectId, open,
       active = false;
     };
   }, [open, claimId, claimTitle, projectId]);
+
+  // The preview is worked out for the case chosen: a claim already in that case is
+  // a re-run, not a blocker (C-10).
+  useEffect(() => {
+    if (!open) return;
+    let active = true;
+    setPreview(null);
+    previewEscalation([claimId], target === NEW ? undefined : target)
+      .then((data) => active && setPreview(data))
+      .catch((reason) => active && setError(errorMessage(reason, "The escalation could not be previewed.")));
+    return () => {
+      active = false;
+    };
+  }, [open, claimId, target]);
 
   const carry = preview?.claims[0];
   const ready = Boolean(preview?.can_escalate) && (target !== NEW || title.trim() !== "");
@@ -78,7 +97,9 @@ const EscalateDialog: React.FC<Props> = ({ claimId, claimTitle, projectId, open,
     try {
       const done = await runEscalation(
         [claimId],
-        target === NEW ? { new_case: { title: title.trim(), party_perspective: perspective } } : { case_id: target }
+        target === NEW
+          ? { new_case: { title: title.trim(), party_perspective: perspective }, idempotency_key: idempotencyKey }
+          : { case_id: target }
       );
       setResult(done);
       onEscalated();

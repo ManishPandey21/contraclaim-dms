@@ -42,6 +42,7 @@ from rbac_backend.services.claim_escalation import ClaimEscalation, EscalationRe
 from rbac_backend.services.claim_privileged import ClaimPrivileged, StrategyNoteRequest
 from rbac_backend.services.claim_quantum import ClaimQuantum, QuantumLineRequest
 from rbac_backend.tests.bench_fakes import FakeDB
+from rbac_backend.utils.datetime import now_utc
 from rbac_backend.tests.test_claim_bench import CLAIM_ID, ORG, PROJECT, USER, _setup
 from rbac_backend.tests.test_claim_delay_quantum import _hindrance
 from rbac_backend.tests.test_claim_findings import _decide_all, _documents, _version
@@ -50,7 +51,33 @@ from rbac_backend.services.claim_delay_lab import ClaimDelayLab, EventDecisionRe
 
 ACTOR = SimpleNamespace(id=USER, organization_id=ORG)
 DOCS = {CLAIM_ID: {"doc-1", "doc-2"}}
-NEW = EscalationRequest(claim_ids=[CLAIM_ID], new_case=NewCase(title="ABC Infra v. Authority"))
+NEW = EscalationRequest(
+    claim_ids=[CLAIM_ID], new_case=NewCase(title="ABC Infra v. Authority"), idempotency_key="escalate-test-0001"
+)
+
+
+class _Freezer:
+    """The document-relationship freeze, as the claim adapter applies it. The real service
+    (transactions, document versions) is exercised against MongoDB in
+    integration/test_claim_escalation_safety_mongo.py (4B-36)."""
+
+    def __init__(self, db) -> None:
+        self.db = db
+        self.preflights: list = []
+
+    async def freeze_preflight(self, actor, target_type, target_id) -> None:
+        self.preflights.append(target_id)
+
+    async def freeze(self, actor, target_type, target_id, *, reason, allow_already_frozen=False):
+        await self.db.claims.update_one(
+            {"_id": target_id, "evidence_frozen_at": None},
+            {"$set": {"evidence_frozen_at": now_utc(), "evidence_frozen_by": actor.id, "evidence_freeze_reason": reason}},
+        )
+        return []
+
+
+def _escalation(db, service) -> ClaimEscalation:
+    return ClaimEscalation(db, service, _Freezer(db))
 
 
 async def _claim(db: FakeDB) -> dict:
@@ -104,7 +131,7 @@ async def test_the_preview_says_what_is_carried_what_is_weak_and_what_is_left_be
     db, service = await _worked_claim()
     await _with_overlap(db, service)
     before = copy.deepcopy(await _claim(db))
-    preview = await ClaimEscalation(db, service).preview([await _claim(db)], DOCS)
+    preview = await _escalation(db, service).preview([await _claim(db)], DOCS)
     (carry,) = preview.claims
     assert preview.can_escalate and preview.blockers == []
     assert carry.rows == {
@@ -123,7 +150,7 @@ async def test_the_preview_says_what_is_carried_what_is_weak_and_what_is_left_be
 async def test_escalation_creates_the_case_seeds_needs_review_rows_and_freezes_the_claim() -> None:
     db, service = await _worked_claim()
     await _with_overlap(db, service)
-    result = await ClaimEscalation(db, service).escalate([await _claim(db)], DOCS, NEW, ACTOR)
+    result = await _escalation(db, service).escalate([await _claim(db)], DOCS, NEW, ACTOR)
     assert result.created_case and result.rows_already_present == 0
     assert result.rows_created["claim-matrix"] == 1 and result.rows_created["document-index"] == 2
     (case,) = _rows(db, "arbitration_cases")
@@ -170,7 +197,7 @@ async def test_a_verified_notice_period_is_carried_with_its_clause() -> None:
             "created_by": USER, "created_at": datetime(2026, 5, 1),
         }
     )
-    await ClaimEscalation(db, service).escalate([await _claim(db)], DOCS, NEW, ACTOR)
+    await _escalation(db, service).escalate([await _claim(db)], DOCS, NEW, ACTOR)
     (notice,) = _rows(db, "arbitration_notice_compliance")
     assert notice["period_status"] == "verified against the contract"
     assert notice["notice_period_days"] == 28 and notice["notice_clause"] == "20.1" and notice["compliant"] is False
@@ -178,7 +205,7 @@ async def test_a_verified_notice_period_is_carried_with_its_clause() -> None:
 
 async def test_escalating_again_adds_nothing_twice_and_extends_an_existing_case() -> None:
     db, service = await _worked_claim()
-    escalation = ClaimEscalation(db, service)
+    escalation = _escalation(db, service)
     first = await escalation.escalate([await _claim(db)], DOCS, NEW, ACTOR)
     (case,) = _rows(db, "arbitration_cases")
     counts = {name: len(_rows(db, name)) for name in ("arbitration_claim_matrix", "arbitration_document_index", "arbitration_chronology_matrix")}
@@ -192,7 +219,7 @@ async def test_escalating_again_adds_nothing_twice_and_extends_an_existing_case(
 
 async def test_a_claim_with_no_board_carries_one_head_from_its_register_entry_and_says_so() -> None:
     db, service, _ = _setup(capacity="contractor")
-    result = await ClaimEscalation(db, service).escalate([await _claim(db)], {}, NEW, ACTOR)
+    result = await _escalation(db, service).escalate([await _claim(db)], {}, NEW, ACTOR)
     (carry,) = result.claims
     assert not carry.has_board and any("not been worked head by head" in item for item in carry.weak)
     (head,) = _rows(db, "arbitration_claim_matrix")
@@ -203,10 +230,10 @@ async def test_a_claim_with_no_board_carries_one_head_from_its_register_entry_an
 async def test_claims_that_cannot_be_escalated_are_refused_with_the_reason() -> None:
     db, service, _ = _setup(capacity="contractor", claim={"status": "closed"})
     with pytest.raises(HTTPException) as closed:
-        await ClaimEscalation(db, service).escalate([await _claim(db)], {}, NEW, ACTOR)
+        await _escalation(db, service).escalate([await _claim(db)], {}, NEW, ACTOR)
     assert closed.value.status_code == 409 and "is closed" in closed.value.detail
     db2, service2, _ = _setup(capacity="contractor", claim={"arbitration_case_id": "case-other"})
-    preview = await ClaimEscalation(db2, service2).preview([await _claim(db2)], {})
+    preview = await _escalation(db2, service2).preview([await _claim(db2)], {})
     assert not preview.can_escalate and "already in another arbitration case" in preview.blockers[0]
     other = {**(await _claim(db2)), "_id": "claim-2", "project_id": "proj-B", "arbitration_case_id": None}
     mixed = ClaimEscalation._blockers([{**(await _claim(db2)), "arbitration_case_id": None}, other], None)
@@ -214,7 +241,7 @@ async def test_claims_that_cannot_be_escalated_are_refused_with_the_reason() -> 
     assert status_after("submitted") == "disputed" and status_after("draft") == "draft" and status_after("disputed") == "disputed"
     with pytest.raises(HTTPException) as no_target:
         db3, service3, _ = _setup(capacity="contractor")
-        await ClaimEscalation(db3, service3).escalate([await _claim(db3)], {}, EscalationRequest(claim_ids=[CLAIM_ID]), ACTOR)
+        await _escalation(db3, service3).escalate([await _claim(db3)], {}, EscalationRequest(claim_ids=[CLAIM_ID]), ACTOR)
     assert no_target.value.status_code == 422
 
 
@@ -223,7 +250,7 @@ async def test_privileged_material_never_reaches_a_case() -> None:
     await ClaimPrivileged(db, service).save_note(
         await _claim(db), StrategyNoteRequest(version=0, weaknesses=["ZEBRA-WEAKNESS"], notes="ZEBRA-FLOOR"), USER
     )
-    await ClaimEscalation(db, service).escalate([await _claim(db)], DOCS, NEW, ACTOR)
+    await _escalation(db, service).escalate([await _claim(db)], DOCS, NEW, ACTOR)
     for name, collection in db._collections.items():
         if name.startswith("arbitration_"):
             assert "ZEBRA" not in repr(collection.docs), name
@@ -364,7 +391,7 @@ async def test_the_migration_marks_caseless_drafts_as_scratch_and_deletes_nothin
     from rbac_backend.migrations import v20261119_0001_claim_escalation_and_scratch_drafts as migration
     from rbac_backend.migrations.catalog import MIGRATIONS
 
-    assert MIGRATIONS[-1].version == migration.VERSION
+    assert migration.VERSION in [item.version for item in MIGRATIONS]
     db = FakeDB()
     db.arbitration_drafts.docs.extend(
         [
@@ -496,7 +523,7 @@ async def test_the_legal_review_gate_still_ignores_unrelated_warnings() -> None:
 # --------------------------------------------------------------------------- #
 async def test_the_preview_says_when_no_notice_letter_is_linked_and_carries_one_that_is() -> None:
     db, service = await _worked_claim()
-    escalation = ClaimEscalation(db, service)
+    escalation = _escalation(db, service)
     without = await escalation.preview([await _claim(db)], DOCS)
     assert any("No notice letter is linked to the claim" in item for item in without.claims[0].weak)
 
@@ -506,6 +533,6 @@ async def test_the_preview_says_when_no_notice_letter_is_linked_and_carries_one_
 
 async def test_a_notice_letter_the_caller_cannot_see_is_not_carried() -> None:
     db, service = await _worked_claim()
-    await ClaimEscalation(db, service).escalate([await _claim(db)], DOCS, NEW, ACTOR, None, {CLAIM_ID: {"doc-1", "doc-secret"}})
+    await _escalation(db, service).escalate([await _claim(db)], DOCS, NEW, ACTOR, None, {CLAIM_ID: {"doc-1", "doc-secret"}})
     (row,) = _rows(db, "arbitration_claim_matrix")
     assert row["notice_ids"] == ["doc-1"]

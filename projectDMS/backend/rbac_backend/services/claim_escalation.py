@@ -28,16 +28,36 @@ Escalating marks the claim's evidence as frozen and records the case on the
 claim. Adding rows withdraws any readiness approval already given on the
 case, because the case workspace does that for every new row. Authorisation is
 the router's job.
+
+Safety (D-18, plan 4B-36, C-10). An escalation run:
+
+1. refuses a filed or archived case, and checks that every claim not yet frozen
+   can be frozen, before it writes anything (nothing unfreezes a claim);
+2. for a new case, takes its idempotency key (a unique ``_id`` in
+   ``claim_escalation_keys``): a second run with the same key waits for the
+   first run's case and extends it, so two clicks never make two cases;
+3. reserves each claim with one conditional update on ``{arbitration_case_id:
+   null, status}`` that moves the status through the lifecycle and records what
+   it changed (prior status, freeze state, case, key) under ``escalation``. A
+   claim already in this case is left as it is (a re-run is a no-op); a claim
+   taken by another case meanwhile undoes this run's reservations, discards a
+   case this run created, and answers 409;
+4. freezes each claim's evidence through ``DocumentRelationshipService.freeze``;
+5. seeds the rows. Migration 20261120_0001 (M-05) makes (case, origin) unique,
+   and a duplicate-key refusal counts as "already carried";
+6. audits each claim's move and the case.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Set
 
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
+from pymongo.errors import DuplicateKeyError
 
 from ..models.arbitration_drafting import ArbitrationCaseCreate, ArbitrationMatrixRowCreate
 from ..models.claim import ALLOWED_STATUS_TRANSITIONS, ELEMENT_KEYS, ClaimBench, ClaimStatus, HeadElement
@@ -47,11 +67,17 @@ from .arbitration_drafting.matrix_registry import MATRIX_COLLECTIONS
 from .audit_event_service import AuditEventService
 from .claim_bench import initial_head
 from .claim_submission import ClaimSubmissions, SubmissionRecord, format_amount, head_amount, head_days
+from .document_relationship_service import DocumentRelationshipError, DocumentRelationshipService
 
 logger = logging.getLogger(__name__)
 
 MAX_CLAIMS = 20
 FREEZE_REASON = "Escalated to arbitration"
+KEYS = "claim_escalation_keys"
+#: A case in these states takes no more claims.
+CLOSED_CASE_STATUSES = {"filed", "archived"}
+#: How long a run waits for another run holding the same idempotency key.
+KEY_WAIT_SECONDS = 10.0
 _ELEMENT_LABEL = {
     "event": "event",
     "notice": "notice",
@@ -79,6 +105,13 @@ class EscalationRequest(BaseModel):
     claim_ids: List[str] = Field(..., min_length=1, max_length=MAX_CLAIMS)
     case_id: Optional[str] = None
     new_case: Optional[NewCase] = None
+    # Required with new_case: one key per "Escalate" action, so a repeated click or a
+    # retried request extends the case the first one created (D-18).
+    idempotency_key: Optional[str] = Field(default=None, min_length=8, max_length=120, pattern=r"^[A-Za-z0-9_.:-]+$")
+
+
+def _conflict(code: str, message: str) -> HTTPException:
+    return HTTPException(status_code=409, detail={"code": code, "user_message": message, "detail": None})
 
 
 class ClaimCarry(BaseModel):
@@ -366,10 +399,11 @@ def build_carry(
 # Service
 # --------------------------------------------------------------------------- #
 class ClaimEscalation:
-    def __init__(self, db: Any, bench: Any) -> None:
+    def __init__(self, db: Any, bench: Any, relationships: Any = None) -> None:
         self.db = db
         self.bench = bench
         self.cases = ArbitrationCaseWorkspaceService(db)
+        self.relationships = relationships or DocumentRelationshipService(db)
 
     async def _carry(self, claim: Dict[str, Any], document_ids: Set[str], notice_ids: Iterable[str] = ()):
         bench = self.bench._bench_of(claim)
@@ -397,6 +431,8 @@ class ClaimEscalation:
                 )
         if case is not None and projects and str(case.get("project_id") or "") not in projects:
             blockers.append("The case belongs to a different project from the claims.")
+        if case is not None and str(case.get("status") or "") in CLOSED_CASE_STATUSES:
+            blockers.append(f"The case is {case.get('status')}; claims cannot be added to it.")
         return blockers
 
     async def preview(
@@ -439,20 +475,52 @@ class ClaimEscalation:
             raise HTTPException(status_code=409, detail="; ".join(blockers))
         if case is None and request.new_case is None:
             raise HTTPException(status_code=422, detail="Choose an existing case or give the new case a title.")
-        user_id = str(getattr(current_user, "id", "") or "") or None
-        created = case is None
-        if case is None:
-            case = await self.cases.create_case(
-                ArbitrationCaseCreate(
-                    organization_id=claims[0].get("organization_id"),
-                    project_id=str(claims[0].get("project_id")),
-                    title=request.new_case.title.strip(),  # type: ignore[union-attr]
-                    case_reference=request.new_case.case_reference,  # type: ignore[union-attr]
-                    party_perspective=request.new_case.party_perspective,  # type: ignore[union-attr,arg-type]
-                ),
-                current_user,
+        if case is None and not request.idempotency_key:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "escalation_key_required",
+                    "user_message": "This request is missing its idempotency key. Reload the page and try again.",
+                    "detail": None,
+                },
             )
+        user_id = str(getattr(current_user, "id", "") or "") or None
+
+        # 1. Nothing unfreezes a claim, so every freeze is checked before anything is written.
+        for claim in claims:
+            if not claim.get("evidence_frozen_at"):
+                await self.relationships.freeze_preflight(current_user, "claim", str(claim["_id"]))
+
+        # 2. The case: the chosen one, or the one this request's key created.
+        created = False
+        if case is None:
+            case, created = await self._new_case(claims, request, current_user, user_id)
+            blockers = self._blockers(claims, case)
+            if blockers:
+                raise HTTPException(status_code=409, detail="; ".join(blockers))
         case_id = str(case["_id"])
+
+        # 3. Reserve every claim for this case, or none.
+        reserved: List[Dict[str, Any]] = []
+        for claim in claims:
+            outcome = await self._reserve(claim, case_id, created, request.idempotency_key, user_id)
+            if outcome == "conflict":
+                await self._release(reserved, case_id)
+                if created:
+                    await self._discard_case(case, request.idempotency_key)
+                raise _conflict(
+                    "escalation_claim_taken",
+                    f"{claim.get('claim_ref') or claim['_id']} was changed or escalated by someone else at the same "
+                    "time. Nothing was escalated; reload and try again.",
+                )
+            if outcome == "reserved":
+                reserved.append(claim)
+
+        # 4. Freeze the evidence (checked in step 1).
+        for claim in claims:
+            await self._freeze(claim, current_user)
+
+        # 5. Seed the rows; a row already carried is refused by the unique index (M-05).
         created_rows: Dict[str, int] = {}
         present = 0
         carries: List[ClaimCarry] = []
@@ -460,40 +528,65 @@ class ClaimEscalation:
             carry, rows = await self._carry(
                 claim, documents.get(str(claim["_id"]), set()), notices.get(str(claim["_id"]), set())
             )
+            seeded: List[Dict[str, str]] = []
             for slug, row in rows:
                 collection = self.db[MATRIX_COLLECTIONS[slug]]
                 if await collection.find_one({"case_id": case_id, "origin_key": row["origin_key"]}):
                     present += 1
                     continue
                 payload = {key: value for key, value in row.items() if value is not None}
-                await self.cases.create_matrix_row(case_id, slug, ArbitrationMatrixRowCreate(**payload), current_user)
+                try:
+                    stored = await self.cases.create_matrix_row(
+                        case_id, slug, ArbitrationMatrixRowCreate(**payload), current_user
+                    )
+                except DuplicateKeyError:
+                    present += 1  # a concurrent run carried it first
+                    continue
                 created_rows[slug] = created_rows.get(slug, 0) + 1
-            update: Dict[str, Any] = {
-                "arbitration_case_id": case_id,
-                "status": carry.status_after,
-                "updated_at": datetime.utcnow(),
-                "updated_by": user_id,
-            }
-            if not claim.get("evidence_frozen_at"):
-                update.update(
-                    {"evidence_frozen_at": now_utc(), "evidence_frozen_by": user_id, "evidence_freeze_reason": FREEZE_REASON}
+                seeded.append({"matrix": slug, "row_id": str((stored or {}).get("_id") or "")})
+            if seeded:
+                await self.db.claims.update_one(
+                    {"_id": claim["_id"], "escalation.case_id": case_id},
+                    {"$push": {"escalation.seeded_rows": {"$each": seeded}}},
                 )
-            await self.db.claims.update_one({"_id": claim["_id"]}, {"$set": update})
             carries.append(carry)
-        claim_ids = list(dict.fromkeys([*(case.get("claim_ids") or []), *[str(claim["_id"]) for claim in claims]]))
+
+        # 6. The case lists its claims; each move is audited.
         await self.db.arbitration_cases.update_one(
-            {"_id": case["_id"]}, {"$set": {"claim_ids": claim_ids, "updated_at": datetime.utcnow(), "updated_by": user_id}}
+            {"_id": case["_id"]},
+            {
+                "$addToSet": {"claim_ids": {"$each": [str(claim["_id"]) for claim in claims]}},
+                "$set": {"updated_at": datetime.utcnow(), "updated_by": user_id},
+            },
         )
+        audit = AuditEventService(self.db)
+        for claim in reserved:
+            await audit.emit(
+                action="claim.escalated",
+                actor_id=user_id,
+                resource_type="claim",
+                resource_id=str(claim["_id"]),
+                organization_id=claim.get("organization_id"),
+                project_id=claim.get("project_id"),
+                before={"status": claim.get("status"), "arbitration_case_id": None},
+                after={"status": status_after(str(claim.get("status") or "")), "arbitration_case_id": case_id},
+                metadata={"created_case": created, "idempotency_key": request.idempotency_key},
+            )
         # Creating a row through the case workspace withdraws any readiness approval
         # already given on the case, as it does for a row added by hand.
-        await AuditEventService(self.db).emit(
+        await audit.emit(
             action="claim.escalated_to_arbitration",
             actor_id=user_id,
             resource_type="arbitration_case",
             resource_id=case_id,
             organization_id=case.get("organization_id"),
             project_id=case.get("project_id"),
-            after={"claim_ids": [str(claim["_id"]) for claim in claims], "rows_created": created_rows, "created_case": created},
+            after={
+                "claim_ids": [str(claim["_id"]) for claim in claims],
+                "claims_reserved": [str(claim["_id"]) for claim in reserved],
+                "rows_created": created_rows,
+                "created_case": created,
+            },
         )
         logger.info("claims escalated: case=%s claims=%s rows=%s", case_id, len(claims), created_rows)
         return EscalationResult(
@@ -504,6 +597,113 @@ class ClaimEscalation:
             rows_already_present=present,
             claims=carries,
         )
+
+    # ------------------------------------------------------------ helpers
+    async def _new_case(
+        self, claims: List[Dict[str, Any]], request: EscalationRequest, current_user: Any, user_id: Optional[str]
+    ) -> tuple[Dict[str, Any], bool]:
+        """The case this request's idempotency key names: created once, found by every repeat."""
+        organization_id = claims[0].get("organization_id")
+        claim_ids = sorted(str(claim["_id"]) for claim in claims)
+        key_id = f"{organization_id}:{request.idempotency_key}"
+        try:
+            await self.db[KEYS].insert_one(
+                {"_id": key_id, "case_id": None, "claim_ids": claim_ids, "created_by": user_id, "created_at": now_utc()}
+            )
+        except DuplicateKeyError:
+            return await self._case_for_key(key_id, claim_ids), False
+        try:
+            case = await self.cases.create_case(
+                ArbitrationCaseCreate(
+                    organization_id=organization_id,
+                    project_id=str(claims[0].get("project_id")),
+                    title=request.new_case.title.strip(),  # type: ignore[union-attr]
+                    case_reference=request.new_case.case_reference,  # type: ignore[union-attr]
+                    party_perspective=request.new_case.party_perspective,  # type: ignore[union-attr,arg-type]
+                ),
+                current_user,
+            )
+        except BaseException:
+            await self.db[KEYS].delete_one({"_id": key_id, "case_id": None})
+            raise
+        await self.db[KEYS].update_one({"_id": key_id}, {"$set": {"case_id": str(case["_id"])}})
+        return case, True
+
+    async def _case_for_key(self, key_id: str, claim_ids: List[str]) -> Dict[str, Any]:
+        waited = 0.0
+        while True:
+            held = await self.db[KEYS].find_one({"_id": key_id})
+            if held is None:
+                raise _conflict("escalation_key_released", "The earlier attempt did not finish. Try again.")
+            if held.get("claim_ids") != claim_ids:
+                raise _conflict(
+                    "escalation_key_reused", "This escalation key was used for different claims. Reload and try again."
+                )
+            if held.get("case_id"):
+                return await self.cases.get_case(str(held["case_id"]))
+            if waited >= KEY_WAIT_SECONDS:
+                raise _conflict("escalation_in_progress", "This escalation is still running. Try again in a moment.")
+            await asyncio.sleep(0.1)
+            waited += 0.1
+
+    async def _reserve(
+        self, claim: Dict[str, Any], case_id: str, created_case: bool, key: Optional[str], user_id: Optional[str]
+    ) -> str:
+        """``reserved``, ``already`` (in this case: a re-run) or ``conflict``."""
+        prior = str(claim.get("status") or "")
+        result = await self.db.claims.update_one(
+            {"_id": claim["_id"], "arbitration_case_id": None, "status": claim.get("status")},
+            {
+                "$set": {
+                    "arbitration_case_id": case_id,
+                    "status": status_after(prior),
+                    "updated_at": datetime.utcnow(),
+                    "updated_by": user_id,
+                    "escalation": {
+                        "case_id": case_id,
+                        "prior_status": prior,
+                        "was_frozen": bool(claim.get("evidence_frozen_at")),
+                        "created_case": created_case,
+                        "idempotency_key": key,
+                        "escalated_by": user_id,
+                        "escalated_at": now_utc(),
+                        "seeded_rows": [],
+                    },
+                }
+            },
+        )
+        if getattr(result, "matched_count", 0):
+            return "reserved"
+        fresh = await self.db.claims.find_one({"_id": claim["_id"]}) or {}
+        return "already" if fresh.get("arbitration_case_id") == case_id else "conflict"
+
+    async def _freeze(self, claim: Dict[str, Any], current_user: Any) -> None:
+        try:
+            await self.relationships.freeze(
+                current_user, "claim", str(claim["_id"]), reason=FREEZE_REASON, allow_already_frozen=True
+            )
+        except DocumentRelationshipError:
+            # A concurrent run of the same escalation froze it a moment earlier: that is the
+            # state this run wants. Anything else is a real refusal.
+            fresh = await self.db.claims.find_one({"_id": claim["_id"]}) or {}
+            if not fresh.get("evidence_frozen_at"):
+                raise
+
+    async def _release(self, reserved: List[Dict[str, Any]], case_id: str) -> None:
+        for claim in reserved:
+            await self.db.claims.update_one(
+                {"_id": claim["_id"], "arbitration_case_id": case_id, "escalation.case_id": case_id},
+                {"$set": {"arbitration_case_id": None, "status": claim.get("status")}, "$unset": {"escalation": ""}},
+            )
+
+    async def _discard_case(self, case: Dict[str, Any], key: Optional[str]) -> None:
+        """A case this run created and could not use: soft-deleted, and its key released."""
+        await self.db.arbitration_cases.update_one(
+            {"_id": case["_id"]},
+            {"$set": {"deleted_at": now_utc(), "deleted_reason": "Escalation did not complete; no claim was added"}},
+        )
+        if key:
+            await self.db[KEYS].delete_one({"_id": f"{case.get('organization_id')}:{key}"})
 
 
 __all__ = [

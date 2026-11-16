@@ -111,8 +111,21 @@ class FakeCollection:
                     target[part] = {}
                 target = target[part]
             target[leaf] = copy.deepcopy(value)
-        for key, value in update.get("$push", {}).items():
-            doc.setdefault(key, []).append(copy.deepcopy(value))
+        for operator in ("$push", "$addToSet"):
+            for key, value in update.get(operator, {}).items():
+                # Dotted paths and {"$each": [...]}, as Mongo applies them.
+                target = doc
+                *parents, leaf = key.split(".")
+                for part in parents:
+                    if not isinstance(target.get(part), dict):
+                        target[part] = {}
+                    target = target[part]
+                items = value["$each"] if isinstance(value, dict) and "$each" in value else [value]
+                current = target.setdefault(leaf, [])
+                for item in items:
+                    if operator == "$addToSet" and item in current:
+                        continue
+                    current.append(copy.deepcopy(item))
         for key, value in update.get("$inc", {}).items():
             doc[key] = (doc.get(key) or 0) + value
 
