@@ -191,6 +191,8 @@ jobs:
           READONLY_READINGS_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
           # 4B-05: publish / revoke / record serialised and atomic, forced races and injected faults.
           SKILL_PUBLICATION_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          # 4B-33 (B2): escalation -> matrix -> ledger -> pleading validator, and case lookup.
+          CLAIM_ESCALATION_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
         # Every real-Mongo module is in this list or excused by name, with a
         # reason, in test_ci_real_mongo_coverage.py: a module in neither is red.
         # That is how the reprojection review, source-mutation and
@@ -233,6 +235,7 @@ jobs:
             backend/rbac_backend/tests/integration/test_claim_arbitration_readings_mongo.py
             backend/rbac_backend/tests/integration/test_claim_privileged_rbac_mongo.py
             backend/rbac_backend/tests/integration/test_skill_publication_transactions_mongo.py
+            backend/rbac_backend/tests/integration/test_pleaded_heads_end_to_end_mongo.py
           )
           python -m pytest -q -rs --junitxml=real-mongo-relationships.xml "${suites[@]}" \
             | tee real-mongo-relationships.log

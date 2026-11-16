@@ -286,6 +286,7 @@ PRODUCIBLE_QUALITY_FLAGS = frozenset(
 class ArbitrationContextBuilder:
     def __init__(self, db: Any) -> None:
         self.db = db
+        self._claim_head_counts: Dict[str, int] = {"approved": 0, "awaiting_approval": 0}
 
     async def build(
         self,
@@ -302,6 +303,7 @@ class ArbitrationContextBuilder:
             draft, references, current_user=current_user
         )
         source_ledger = [self._ledger_row(ref, idx) for idx, ref in enumerate(references, start=1)]
+        self._claim_head_counts = {"approved": 0, "awaiting_approval": 0}
         source_ledger.extend(
             await self._case_workspace_sources(
                 draft,
@@ -336,6 +338,7 @@ class ArbitrationContextBuilder:
             "draft": draft,
             "source_ledger": source_ledger,
             "matrix_context": matrix_context,
+            "claim_head_counts": dict(self._claim_head_counts),
             "claim_heads": claim_heads,
             "paragraph_responses": paragraph_responses,
             "missing_evidence": missing,
@@ -1346,6 +1349,9 @@ class ArbitrationContextBuilder:
         include_review_sources: bool,
         context_warnings: List[str],
     ) -> List[Dict[str, Any]]:
+        # Counted for the Statement of Claim gate: a head still awaiting
+        # approval is not in the ledger, and must not disappear silently.
+        self._claim_head_counts = {"approved": 0, "awaiting_approval": 0}
         matrix_specs = [
             ("claim-matrix", self.db.arbitration_claim_matrix, "claim_matrix", "claim_no", "claim_head", "facts", "claim"),
             ("defence-matrix", self.db.arbitration_defence_matrix, "defence_matrix", "source_claim_no", "defence", "positive_case", "fact"),
@@ -1362,6 +1368,10 @@ class ArbitrationContextBuilder:
             # receipt backs it; the stored flag alone is not enough.
             permission_states = await rejoinder_permission_states(self.db, rows) if slug == "rejoinder-matrix" else {}
             for row in rows:
+                if slug == "claim-matrix":
+                    # Counted by the row's own approval, whatever this request includes.
+                    approved_head = _is_verified_source(row, include_review_sources=False)
+                    self._claim_head_counts["approved" if approved_head else "awaiting_approval"] += 1
                 if not _is_verified_source(row, include_review_sources=include_review_sources):
                     continue
                 if slug == "claim-matrix":
@@ -1398,6 +1408,13 @@ class ArbitrationContextBuilder:
                         "notice_ids": row.get("notice_ids") or [],
                         "calculation_id": row.get("calculation_id"),
                         "amount_or_days": row.get("amount_or_days"),
+                        # The four elements a pleaded head is checked for
+                        # (citation_states.pleaded_head_gaps). Read by the
+                        # validator only; no prompt uses them.
+                        "clause_ids": _string_list(row.get("clause_ids")),
+                        "facts": row.get("facts"),
+                        "causation": row.get("causation"),
+                        "relief": row.get("relief"),
                         "new_matter": row.get("new_matter"),
                         "permission_required": row.get("permission_required"),
                         "permission_obtained": (

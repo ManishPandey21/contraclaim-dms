@@ -312,6 +312,16 @@ from ..publication_policy import (
 )
 
 
+#: A case that has not been soft-deleted. ``ArbitrationCase.deleted_at`` defaults
+#: to None and is stored as null, so ``{"$exists": False}`` matched no case
+#: created through ``create_case``: on a real MongoDB every such case answered
+#: 404 and the register listed none (found by the Phase 4b end-to-end test,
+#: reproduced on 34d664a). ``None`` matches a missing field and an explicit null;
+#: a soft-deleted case carries a timestamp and stays excluded. Matrix rows and
+#: drafts declare no ``deleted_at`` field, so their ``$exists`` queries are right.
+CASE_NOT_DELETED: Dict[str, Any] = {"deleted_at": None}
+
+
 class ArbitrationCaseWorkspaceService:
     def __init__(self, db: Any) -> None:
         self.db = db
@@ -338,7 +348,7 @@ class ArbitrationCaseWorkspaceService:
         limit: int = 100,
     ) -> List[Dict[str, Any]]:
         query = dict(scope or {})
-        query["deleted_at"] = {"$exists": False}
+        query.update(CASE_NOT_DELETED)
         for key in ["project_id", "contract_id", "status"]:
             if filters.get(key):
                 query[key] = filters[key]
@@ -359,7 +369,7 @@ class ArbitrationCaseWorkspaceService:
         instead of leaking existence. Internal service calls omit it because the
         route has already verified access.
         """
-        query: Dict[str, Any] = {"_id": case_id, "deleted_at": {"$exists": False}}
+        query: Dict[str, Any] = {"_id": case_id, **CASE_NOT_DELETED}
         if scope:
             query.update(scope)
         case = await self.db.arbitration_cases.find_one(query)
@@ -373,7 +383,7 @@ class ArbitrationCaseWorkspaceService:
         update["updated_by"] = _actor_id(current_user)
         update["updated_at"] = datetime.utcnow()
         updated = await self.db.arbitration_cases.find_one_and_update(
-            {"_id": case_id, "deleted_at": {"$exists": False}},
+            {"_id": case_id, **CASE_NOT_DELETED},
             {"$set": _jsonable(update)},
             return_document=True,
         )
@@ -1102,7 +1112,7 @@ class ArbitrationCaseWorkspaceService:
         ).model_dump(by_alias=True)
         await self.db.arbitration_workflow_approvals.insert_one(_jsonable(receipt))
         updated = await self.db.arbitration_cases.find_one_and_update(
-            {"_id": case_id, "deleted_at": {"$exists": False}},
+            {"_id": case_id, **CASE_NOT_DELETED},
             {
                 "$set": {
                     "status": ArbitrationCaseStatus.READY_FOR_DRAFTING.value,
@@ -1606,7 +1616,7 @@ class ArbitrationCaseWorkspaceService:
         case_id = row.get("case_id")
         if not row.get("source_id") or not case_id:
             return None
-        case = await self.db.arbitration_cases.find_one({"_id": case_id, "deleted_at": {"$exists": False}})
+        case = await self.db.arbitration_cases.find_one({"_id": case_id, **CASE_NOT_DELETED})
         found = await self._case_scoped_source(case or {}, row.get("source_id"))
         if not found:
             return None

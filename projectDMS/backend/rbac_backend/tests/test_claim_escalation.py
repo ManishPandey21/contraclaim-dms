@@ -450,3 +450,39 @@ async def test_the_drafting_prompt_is_unchanged_without_a_skill_and_carries_the_
         assert skilled["ai_prompt_version"] == f"{LLM_DRAFT_PROMPT_VERSION}+skill.abababababab"
         assert skilled["structured_output"]["skill"] == {key: skill[key] for key in ("skill_key", "version", "content_hash", "role")}
     assert LLMDraftGenerator.prompt_version_for(None) == LLM_DRAFT_PROMPT_VERSION
+
+
+# --------------------------------------------------------------------------- #
+# 4B-33: the legal-review gate counts pleaded-head blockers
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "blocker",
+    [
+        "Claim CLM-014/H1 does not carry: the contractual provision relied on; the event.",
+        "A Statement of Claim needs at least one approved claim head in this case's claim matrix, and none is approved.",
+        "2 claim heads in this case are still awaiting approval. Approve or remove them before this Statement of Claim can be approved.",
+    ],
+)
+async def test_the_legal_review_gate_blocks_on_pleaded_head_gaps(blocker: str) -> None:
+    """Before 4B-33 the gate matched keywords; these messages name none of them, so it passed them."""
+    from rbac_backend.services.arbitration_drafting.workflow_validation import ArbitrationValidationOrchestrator
+
+    version = {
+        "draft_id": "d1", "version": 1, "full_markdown": "# STATEMENT OF CLAIM\n\n1. Text. [Evidence required]",
+        "source_ledger": [], "structured_output": {"approval_blockers": [blocker]},
+        "validation_status": "blocked",
+    }
+    report = await ArbitrationValidationOrchestrator().evaluate(version, branches=["legal_structure"])
+    assert report["status"] == "blocked"
+    assert [issue["message"] for issue in report["blockers"]] == [blocker]
+
+
+async def test_the_legal_review_gate_still_ignores_unrelated_warnings() -> None:
+    from rbac_backend.services.arbitration_drafting.workflow_validation import ArbitrationValidationOrchestrator
+
+    version = {
+        "draft_id": "d1", "version": 1, "full_markdown": "# STATEMENT OF CLAIM\n\n1. Text.",
+        "source_ledger": [], "structured_output": {"approval_blockers": [], "validation_warnings": ["Duplicate claim heads."]},
+    }
+    report = await ArbitrationValidationOrchestrator().evaluate(version, branches=["legal_structure"])
+    assert report["blockers"] == []

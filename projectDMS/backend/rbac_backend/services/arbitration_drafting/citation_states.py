@@ -22,7 +22,7 @@ Neither check reads anything but its arguments. Neither calls a model.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 SOURCE_CITATION_RE = re.compile(r"\[(S\d+):[^\]]+\]")
 UNVERIFIED_SOURCE_STATUSES = {"draft", "needs_review", "pending", "selected", "unverified"}
@@ -118,11 +118,63 @@ def pleaded_head_blockers(matrix_context: Dict[str, Any]) -> List[str]:
     return [f"Claim {gap['claim']} does not carry: {'; '.join(gap['missing'])}." for gap in pleaded_head_gaps(matrix_context)]
 
 
+NO_APPROVED_HEADS = (
+    "A Statement of Claim needs at least one approved claim head in this case's claim matrix, "
+    "and none is approved."
+)
+
+
+def awaiting_heads_blocker(count: int) -> str:
+    return (
+        f"{count} claim head{'' if count == 1 else 's'} in this case "
+        f"{'is' if count == 1 else 'are'} still awaiting approval. Approve or remove "
+        f"{'it' if count == 1 else 'them'} before this Statement of Claim can be approved."
+    )
+
+
+def claim_head_set_blockers(matrix_context: Dict[str, Any], counts: Optional[Dict[str, int]]) -> List[str]:
+    """A Statement of Claim pleads the case's approved heads: there must be some, and none left in review.
+
+    ``counts`` comes from the context builder ({"approved": n, "awaiting_approval": m}).
+    When it is absent (an older caller), the approved heads are read from the
+    matrix context and nothing is known to be awaiting approval.
+    """
+    approved = len((matrix_context or {}).get("claims") or [])
+    awaiting = 0
+    if counts:
+        approved = int(counts.get("approved", approved) or 0)
+        awaiting = int(counts.get("awaiting_approval", 0) or 0)
+    blockers: List[str] = []
+    if approved == 0:
+        blockers.append(NO_APPROVED_HEADS)
+    if awaiting:
+        blockers.append(awaiting_heads_blocker(awaiting))
+    return blockers
+
+
+def is_pleaded_head_blocker(message: str) -> bool:
+    """Whether a blocker comes from the pleaded-head checks above.
+
+    The legal-review gate classifies blockers by keyword; these messages name
+    provisions, causal links and approval, not its keywords, so it asks here
+    instead of guessing.
+    """
+    text = str(message or "")
+    return (
+        (text.startswith("Claim ") and " does not carry: " in text)
+        or text == NO_APPROVED_HEADS
+        or ("claim head" in text and "still awaiting approval" in text)
+    )
+
+
 __all__ = [
     "SOURCE_CITATION_RE",
     "UNVERIFIED_SOURCE_STATUSES",
+    "NO_APPROVED_HEADS",
     "citation_blockers",
+    "claim_head_set_blockers",
     "classify_citations",
+    "is_pleaded_head_blocker",
     "is_unverified_source",
     "pleaded_head_blockers",
     "pleaded_head_gaps",

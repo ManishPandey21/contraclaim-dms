@@ -3,7 +3,13 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List
 
-from .citation_states import classify_citations, is_unverified_source, pleaded_head_blockers, pleaded_head_gaps
+from .citation_states import (
+    claim_head_set_blockers,
+    classify_citations,
+    is_unverified_source,
+    pleaded_head_blockers,
+    pleaded_head_gaps,
+)
 
 
 _SOURCE_CITATION_RE = re.compile(r"\[(S\d+):[^\]]+\]")
@@ -151,7 +157,10 @@ class ArbitrationDraftValidator:
             # Each pleaded head must carry provision, event, causal link, quantified
             # relief and notice, and the records behind any figure it pleads.
             head_gaps = pleaded_head_gaps(matrix_context)
-            for message in pleaded_head_blockers(matrix_context):
+            for message in [
+                *claim_head_set_blockers(matrix_context, context.get("claim_head_counts")),
+                *pleaded_head_blockers(matrix_context),
+            ]:
                 warnings.append(message)
                 approval_blockers.append(message)
         self._duplication_warnings(matrix_context, warnings)

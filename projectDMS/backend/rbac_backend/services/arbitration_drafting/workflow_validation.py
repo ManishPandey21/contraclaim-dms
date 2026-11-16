@@ -5,6 +5,7 @@ import re
 from typing import Any, Dict, Iterable, List, Optional
 
 from ...core.config import settings
+from .citation_states import is_pleaded_head_blocker
 from .context import PRODUCIBLE_QUALITY_FLAGS
 from .workflow_repository import artifact_hash
 
@@ -213,7 +214,10 @@ class ArbitrationValidationOrchestrator:
             elif branch == "legal_structure":
                 for item in combined:
                     lower = item.lower()
-                    if any(token in lower for token in ("paragraph", "jurisdiction", "limitation", "notice", "relief", "section", "case workspace")):
+                    if is_pleaded_head_blocker(item) or any(
+                        token in lower
+                        for token in ("paragraph", "jurisdiction", "limitation", "notice", "relief", "section", "case workspace")
+                    ):
                         severity = "blocker" if item in existing_blockers else "warning"
                         issues.append(_issue(branch, "legal_structure_review", item, severity=severity))
                 if not markdown.strip():
