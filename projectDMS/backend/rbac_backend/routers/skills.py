@@ -258,17 +258,15 @@ async def revoke_skill_approval(
     policy: PolicyService = Depends(get_policy_service),
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    """Withdraw an approval. A published version that relied on it is deprecated."""
+    """Withdraw an approval. A published version that relied on it is deprecated.
+
+    The deprecation is made in the same transaction as the revocation
+    (SkillApprovalService.revoke), so neither can happen without the other.
+    """
     await policy.authorize(current_user, "drafting.skill.read", resource_type="skill")
     await skill_admin_limiter.check_user_limit(_user_id(current_user))
     revoked = await approvals.revoke(approval_id, payload.reason, current_user)
-    record = await registry.get_version(revoked.skill_key, revoked.version)
-    if (
-        record is not None
-        and record.status == "published"
-        and record.content_hash == revoked.content_hash
-    ):
-        await registry.deprecate(revoked.skill_key, revoked.version, _user_id(current_user))
+    await registry.refresh_published_pointer(revoked.skill_key, revoked.version)
     return revoked
 
 

@@ -533,3 +533,39 @@ async def test_a_fresh_install_publishes_only_the_letter_packs() -> None:
     pointers = await db.skills.find({}).to_list(length=100)
     assert len(pointers) == 3 and not {doc["skill_key"] for doc in pointers} & set(DRAFT_SKILL_KEYS)
     assert all(doc["latest_published_version"] == "1.0.0" for doc in pointers)
+
+
+# --------------------------------------------------------------------------- #
+# 4B-05: a server that cannot run transactions refuses publication decisions
+# --------------------------------------------------------------------------- #
+async def test_a_standalone_server_refuses_instead_of_writing_unserialised() -> None:
+    from pymongo.errors import OperationFailure
+
+    from rbac_backend.services.skills.transactions import run_in_transaction
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def with_transaction(self, callback):
+            raise OperationFailure(
+                "Transaction numbers are only allowed on a replica set member or mongos", code=20
+            )
+
+    class Client:
+        async def start_session(self):
+            return Session()
+
+    db = SimpleNamespace(client=Client())
+    called = []
+
+    async def callback(session):
+        called.append(session)
+
+    with pytest.raises(HTTPException) as exc:
+        await run_in_transaction(db, callback)
+    _refused(exc, 503, "needs a MongoDB replica set")
+    assert called == [], "nothing may be written outside a transaction"

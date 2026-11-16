@@ -24,6 +24,7 @@ from ...models.skill import (
     Skill,
     SkillAdminListResponse,
     SkillBinding,
+    SkillApproval,
     SkillBindingRequest,
     SkillEvalReport,
     SkillKind,
@@ -39,7 +40,9 @@ from .approvals import (
     describe_unsatisfied,
     require_acceptable_report,
     required_reviews,
+    revision_filter,
 )
+from .transactions import run_in_transaction, session_kwargs
 from .loader import LoadedSkill
 from .system_skills import (
     AWAITING_APPROVAL_REASON,
@@ -327,48 +330,76 @@ class SkillRegistry:
         eval_report: SkillEvalReport,
         published_by: Optional[str],
     ) -> SkillVersion:
-        record = await self._require_db_version(skill_key, version)
-        if record.status != "draft":
+        """Publish a draft, in one transaction with the approval check (plan D-05a).
+
+        The version and its approvals are read inside the transaction, and the
+        version is written only if ``approval_revision`` is still the value read.
+        A concurrent record or revoke writes the same document, so one of the two
+        is aborted and retried: a publish can never commit on approvals that
+        were revoked or added after it looked.
+        """
+        require_acceptable_report(eval_report)
+        publisher = str(published_by or "")
+        if not publisher:
+            raise HTTPException(status_code=403, detail="Publishing needs an identified publisher")
+        if publisher == str(eval_report.recorded_by):
             raise HTTPException(
-                status_code=409, detail=f"{skill_key} {version} is already {record.status}"
+                status_code=409,
+                detail="The person who ran the evaluation cannot publish the version",
             )
-        if any(
-            str(finding.get("severity")) == "critical" for finding in record.guardrail_findings
-        ):
-            raise HTTPException(
-                status_code=422,
-                detail="This version contains text flagged as instruction manipulation and cannot be published.",
+        approvals_service = SkillApprovalService(self.db)
+
+        async def decide(session: Optional[Any]) -> SkillVersion:
+            kw = session_kwargs(session)
+            doc = await self.db[SKILL_VERSIONS].find_one({"skill_key": skill_key, "version": version}, **kw)
+            if not doc:
+                raise HTTPException(status_code=404, detail="Skill version not found")
+            record = SkillVersion(**doc)
+            if record.status != "draft":
+                raise HTTPException(
+                    status_code=409, detail=f"{skill_key} {version} is already {record.status}"
+                )
+            if any(
+                str(finding.get("severity")) == "critical" for finding in record.guardrail_findings
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail="This version contains text flagged as instruction manipulation and cannot be published.",
+                )
+            if not eval_report.passed:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Evaluation gate not met: score {eval_report.score:.2f} is below the "
+                        f"threshold {eval_report.threshold:.2f}, or no cases were run."
+                    ),
+                )
+            approvals = await approvals_service._list_in(skill_key, version, kw)
+            _require_approvals(record, eval_report, publisher, approvals)
+            result = await self.db[SKILL_VERSIONS].update_one(
+                {
+                    "skill_key": skill_key,
+                    "version": version,
+                    "status": "draft",
+                    "content_hash": record.content_hash,
+                    **revision_filter(record.approval_revision),
+                },
+                {
+                    "$set": {
+                        "status": "published",
+                        "eval_report": eval_report.model_dump(),
+                        "published_by": publisher,
+                        "published_at": now_utc(),
+                    },
+                    "$inc": {"approval_revision": 1},
+                },
+                **kw,
             )
-        if not eval_report.passed:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"Evaluation gate not met: score {eval_report.score:.2f} is below the "
-                    f"threshold {eval_report.threshold:.2f}, or no cases were run."
-                ),
-            )
-        await self._require_approvals(record, eval_report, published_by)
-        now = now_utc()
-        result = await self.db[SKILL_VERSIONS].update_one(
-            # The hash filter makes the publish a no-op if the draft text was
-            # replaced after its approvals were checked.
-            {
-                "skill_key": skill_key,
-                "version": version,
-                "status": "draft",
-                "content_hash": record.content_hash,
-            },
-            {
-                "$set": {
-                    "status": "published",
-                    "eval_report": eval_report.model_dump(),
-                    "published_by": published_by,
-                    "published_at": now,
-                }
-            },
-        )
-        if not getattr(result, "matched_count", 0):
-            raise HTTPException(status_code=409, detail="Version changed while publishing; retry")
+            if not getattr(result, "matched_count", 0):
+                raise HTTPException(status_code=409, detail="Version changed while publishing; retry")
+            return record
+
+        record = await run_in_transaction(self.db, decide)
         await self._refresh_skill(record)
         return await self._require_db_version(skill_key, version)
 
@@ -392,7 +423,8 @@ class SkillRegistry:
                     "status": "deprecated",
                     "deprecated_by": deprecated_by,
                     "deprecated_at": now_utc(),
-                }
+                },
+                "$inc": {"approval_revision": 1},
             },
         )
         await self._refresh_skill(record)
@@ -431,42 +463,17 @@ class SkillRegistry:
         return binding
 
     # ---------------------------------------------------------------- helpers
-    async def _require_approvals(
-        self, record: SkillVersion, eval_report: SkillEvalReport, published_by: Optional[str]
-    ) -> None:
-        # Every system version needs at least the floor's reviews, whatever was
-        # stored: there is no "no approvals required" path (owner review B1).
-        require_acceptable_report(eval_report)
-        publisher = str(published_by or "")
-        if not publisher:
-            raise HTTPException(status_code=403, detail="Publishing needs an identified publisher")
-        if publisher == str(eval_report.recorded_by):
-            raise HTTPException(
-                status_code=409,
-                detail="The person who ran the evaluation cannot publish the version",
-            )
-        approvals = await SkillApprovalService(self.db).list(record.skill_key, record.version)
-        statuses = approval_statuses(record, eval_report, approvals)
-        unsatisfied = describe_unsatisfied(statuses)
-        if unsatisfied:
-            raise HTTPException(
-                status_code=422,
-                detail="Approval gate not met: " + "; ".join(unsatisfied),
-            )
-        if any(
-            item.kind == "legal" and item.approval and item.approval.reviewer_user_id == publisher
-            for item in statuses
-        ):
-            raise HTTPException(
-                status_code=409,
-                detail="The legal signatory cannot publish the version they approved",
-            )
-
     async def _require_db_version(self, skill_key: str, version: str) -> SkillVersion:
         doc = await self.db[SKILL_VERSIONS].find_one({"skill_key": skill_key, "version": version})
         if not doc:
             raise HTTPException(status_code=404, detail="Skill version not found")
         return SkillVersion(**doc)
+
+    async def refresh_published_pointer(self, skill_key: str, version: str) -> None:
+        """Recompute the skill's latest-published pointer after a status change made elsewhere."""
+        record = await self.get_version(skill_key, version)
+        if record is not None:
+            await self._refresh_skill(record)
 
     async def _refresh_skill(self, record: SkillVersion) -> None:
         published = [
@@ -490,6 +497,36 @@ class SkillRegistry:
                 }
             },
             upsert=True,
+        )
+
+
+def _require_approvals(
+    record: SkillVersion, eval_report: SkillEvalReport, publisher: str, approvals: List[SkillApproval]
+) -> None:
+    """Every required review satisfied, by different people, none of them the publisher's legal sign-off."""
+    statuses = approval_statuses(record, eval_report, approvals)
+    unsatisfied = describe_unsatisfied(statuses)
+    if unsatisfied:
+        raise HTTPException(
+            status_code=422,
+            detail="Approval gate not met: " + "; ".join(unsatisfied),
+        )
+    reviewers = [item.approval.reviewer_user_id for item in statuses if item.approval is not None]
+    if len(set(reviewers)) != len(reviewers):
+        # Plan D-07: two required reviews from one person are one review.
+        raise HTTPException(
+            status_code=409,
+            detail="Each required review must come from a different person",
+        )
+    if str(eval_report.recorded_by) in reviewers:
+        raise HTTPException(status_code=409, detail="The person who ran the evaluation cannot also approve it")
+    if any(
+        item.kind == "legal" and item.approval and item.approval.reviewer_user_id == publisher
+        for item in statuses
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="The legal signatory cannot publish the version they approved",
         )
 
 

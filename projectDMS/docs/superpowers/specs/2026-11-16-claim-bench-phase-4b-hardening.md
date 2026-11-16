@@ -172,7 +172,7 @@ Each decision: context, decision, consequences. "Amended" marks a change from th
   - Deployment precondition: these paths need a replica set. Production and CI both run one (`docker-compose.mongo-replicaset.yml`; CI `rs0` on port 27018). On a standalone server the service refuses to publish rather than falling back to a non-transactional path.
   - Proof: a real-replica-set concurrency suite that interleaves record, revoke and publish (including fault injection that aborts after the first write), and after every run checks the invariant "no published version has a revoked, stale or missing required approval".
   - Independence (distinct users across live approvals; legal ≠ evaluator ≠ publisher; two different people for the two EOT technical approvals) is checked at publish as well as at record.
-  - A partial unique index ensures one live approval per (skill, version, kind, reviewer_role).
+  - ~~A partial unique index ensures one live approval per (skill, version, kind, reviewer_role).~~ **As built (4B-05):** no index. The duplicate and independence checks run inside the record transaction, which writes the version document. Two records on one version therefore conflict, and the retried one sees the first. This gives the guarantee without a migration, so the Gate 6 count is unchanged. Proven on a replica set by a race between two reviews by one person.
   - Revoke deprecates a published version only if the revoked approval was one the publication relied on.
 
 **D-06 — Reviewer roles are seeded role identities held through scoped, audited assignments (amended).**

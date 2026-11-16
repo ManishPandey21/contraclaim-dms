@@ -108,6 +108,12 @@ class SkillVersion(BaseModel):
     status: SkillVersionStatus = "draft"
     bundle_file_id: Optional[str] = None
     eval_report: Optional[SkillEvalReport] = None
+    # Serialisation point for publication decisions (plan D-05a, 4B-05): every
+    # approval recorded or revoked, and every publish, increments or checks it
+    # inside one transaction. Absent on versions stored before 4B-05 (reads as 0).
+    approval_revision: int = 0
+    # Hash of the live approval ids after the last decision. Display and audit only.
+    approvals_digest: Optional[str] = None
     guardrail_findings: List[Dict[str, Any]] = Field(default_factory=list)
     created_by: Optional[str] = None
     created_at: datetime = Field(default_factory=now_utc)

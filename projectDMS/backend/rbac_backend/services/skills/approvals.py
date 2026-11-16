@@ -37,6 +37,7 @@ from ...models.skill import (
 )
 from ...utils.datetime import now_utc
 from .system_skills import with_approval_floor
+from .transactions import SKILL_VERSIONS, run_in_transaction, session_kwargs
 
 SKILL_APPROVALS = "skill_approvals"
 
@@ -217,43 +218,73 @@ class SkillApprovalService:
             )
         report_hash = eval_report_hash(report)
         policy_hash = manifest_policy_hash(version.manifest)
-        existing = [
-            item
-            for item in await self.list(version.skill_key, version.version)
-            if item.revoked_at is None
-            and item.content_hash == version.content_hash
-            and item.policy_hash == policy_hash
-            and item.eval_report_hash == report_hash
-        ]
-        for item in existing:
-            if item.reviewer_user_id != actor_id:
-                continue
-            if item.kind == request.kind and item.reviewer_role == request.reviewer_role:
-                return item  # already given; recording twice changes nothing
-            if "legal" in {item.kind, request.kind}:
+
+        async def decide(session: Optional[Any]) -> SkillApproval:
+            kw = session_kwargs(session)
+            current = await self._version_in(version.skill_key, version.version, kw)
+            if (
+                current is None
+                or current.status != "draft"
+                or current.content_hash != version.content_hash
+                or manifest_policy_hash(current.manifest) != policy_hash
+            ):
                 raise HTTPException(
                     status_code=409,
-                    detail="Legal approval must be independent: the legal signatory cannot also give a technical approval",
+                    detail=f"{version.skill_key} {version.version} changed while it was being reviewed; reload",
                 )
-        approval = SkillApproval(
-            _id=str(uuid.uuid4()),
-            skill_key=version.skill_key,
-            version=version.version,
-            content_hash=version.content_hash,
-            policy_hash=policy_hash,
-            eval_suite=report.suite,
-            eval_report_hash=report_hash,
-            eval_score=report.score,
-            eval_threshold=report.threshold,
-            eval_case_count=report.case_count,
-            eval_recorded_by=str(report.recorded_by),
-            kind=request.kind,
-            reviewer_role=request.reviewer_role,
-            reviewer_user_id=actor_id,
-            comment=request.comment,
-        )
-        await self.db[SKILL_APPROVALS].insert_one(approval.model_dump(by_alias=True))
-        return approval
+            matching = [
+                item
+                for item in await self._list_in(version.skill_key, version.version, kw)
+                if item.revoked_at is None
+                and item.content_hash == version.content_hash
+                and item.policy_hash == policy_hash
+                and item.eval_report_hash == report_hash
+            ]
+            for item in matching:
+                if item.reviewer_user_id != actor_id:
+                    continue
+                if item.kind == request.kind and item.reviewer_role == request.reviewer_role:
+                    return item  # already given; recording twice changes nothing
+                if "legal" in {item.kind, request.kind}:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Legal approval must be independent: the legal signatory cannot also "
+                            "give a technical approval"
+                        ),
+                    )
+                # One person, one review per version: two technical reviews by
+                # the same person are one review (plan D-07).
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Each required review must come from a different person: you have already "
+                        f"approved this version as {item.reviewer_role}"
+                    ),
+                )
+            approval = SkillApproval(
+                _id=str(uuid.uuid4()),
+                skill_key=version.skill_key,
+                version=version.version,
+                content_hash=version.content_hash,
+                policy_hash=policy_hash,
+                eval_suite=report.suite,
+                eval_report_hash=report_hash,
+                eval_score=report.score,
+                eval_threshold=report.threshold,
+                eval_case_count=report.case_count,
+                eval_recorded_by=str(report.recorded_by),
+                kind=request.kind,
+                reviewer_role=request.reviewer_role,
+                reviewer_user_id=actor_id,
+                comment=request.comment,
+            )
+            await self.db[SKILL_APPROVALS].insert_one(approval.model_dump(by_alias=True), **kw)
+            live_ids = sorted([*(i.id or "" for i in matching), approval.id or ""])
+            await self._bump(current, kw, {"approvals_digest": approvals_digest(live_ids)})
+            return approval
+
+        return await run_in_transaction(self.db, decide)
 
     async def get(self, approval_id: str) -> Optional[SkillApproval]:
         doc = await self.db[SKILL_APPROVALS].find_one({"_id": approval_id})
@@ -263,25 +294,96 @@ class SkillApprovalService:
         return [item for item in await self.list(skill_key, version) if item.revoked_at is None]
 
     async def revoke(self, approval_id: str, reason: str, actor: Any) -> SkillApproval:
-        approval = await self.get(approval_id)
-        if approval is None:
-            raise HTTPException(status_code=404, detail="Approval not found")
+        """Withdraw an approval. If the published version relied on it, it is deprecated in the same transaction."""
         actor_id = _actor_id(actor)
-        if approval.reviewer_user_id != actor_id and approval.reviewer_role not in actor_role_names(actor):
-            raise HTTPException(
-                status_code=403,
-                detail=f"Only the reviewer or another {approval.reviewer_role} can revoke this approval",
+        holds_role = actor_role_names(actor)
+
+        async def decide(session: Optional[Any]) -> SkillApproval:
+            kw = session_kwargs(session)
+            doc = await self.db[SKILL_APPROVALS].find_one({"_id": approval_id}, **kw)
+            if not doc:
+                raise HTTPException(status_code=404, detail="Approval not found")
+            approval = SkillApproval(**doc)
+            if approval.reviewer_user_id != actor_id and approval.reviewer_role not in holds_role:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Only the reviewer or another {approval.reviewer_role} can revoke this approval",
+                )
+            if approval.revoked_at is not None:
+                return approval
+            now = now_utc()
+            await self.db[SKILL_APPROVALS].update_one(
+                {"_id": approval_id, "revoked_at": None},
+                {"$set": {"revoked_at": now, "revoked_by": actor_id, "revoke_reason": reason}},
+                **kw,
             )
-        if approval.revoked_at is not None:
-            return approval
-        update: Dict[str, Any] = {
-            "revoked_at": now_utc(),
-            "revoked_by": actor_id,
-            "revoke_reason": reason,
-        }
-        await self.db[SKILL_APPROVALS].update_one({"_id": approval_id}, {"$set": update})
-        refreshed = await self.get(approval_id)
-        return refreshed or approval
+            current = await self._version_in(approval.skill_key, approval.version, kw)
+            if current is not None:
+                fields: Dict[str, Any] = {}
+                if current.status == "published" and relied_on(current, approval):
+                    fields.update(
+                        {"status": "deprecated", "deprecated_by": actor_id, "deprecated_at": now}
+                    )
+                live_ids = sorted(
+                    item.id or ""
+                    for item in await self._list_in(approval.skill_key, approval.version, kw)
+                    if item.revoked_at is None
+                )
+                fields["approvals_digest"] = approvals_digest(live_ids)
+                await self._bump(current, kw, fields)
+            return approval.model_copy(update={"revoked_at": now, "revoked_by": actor_id, "revoke_reason": reason})
+
+        return await run_in_transaction(self.db, decide)
+
+    # ----------------------------------------------------------------- helpers
+    async def _version_in(self, skill_key: str, version: str, kw: Dict[str, Any]) -> Optional[SkillVersion]:
+        doc = await self.db[SKILL_VERSIONS].find_one({"skill_key": skill_key, "version": version}, **kw)
+        return SkillVersion(**doc) if doc else None
+
+    async def _list_in(self, skill_key: str, version: str, kw: Dict[str, Any]) -> List[SkillApproval]:
+        docs = await self.db[SKILL_APPROVALS].find({"skill_key": skill_key, "version": version}, **kw).to_list(
+            length=1000
+        )
+        return sorted((SkillApproval(**doc) for doc in docs), key=lambda item: item.decided_at)
+
+    async def _bump(self, current: SkillVersion, kw: Dict[str, Any], fields: Dict[str, Any]) -> None:
+        """Write the version document: the serialisation point every decision shares."""
+        result = await self.db[SKILL_VERSIONS].update_one(
+            {
+                "skill_key": current.skill_key,
+                "version": current.version,
+                "status": current.status,
+                "content_hash": current.content_hash,
+                **revision_filter(current.approval_revision),
+            },
+            {"$inc": {"approval_revision": 1}, "$set": fields},
+            **kw,
+        )
+        if not getattr(result, "matched_count", 0):
+            raise HTTPException(status_code=409, detail="The version changed at the same time; reload and retry")
+
+
+def revision_filter(revision: int) -> Dict[str, Any]:
+    """Match the revision read. A version stored before 4B-05 has no field, which reads as 0."""
+    return {"approval_revision": revision} if revision else {"approval_revision": {"$in": [0, None]}}
+
+
+def approvals_digest(live_ids: List[str]) -> str:
+    """Display and audit only: which approvals were live after the last decision."""
+    return hashlib.sha256("|".join(sorted(live_ids)).encode("utf-8")).hexdigest()
+
+
+def relied_on(version: SkillVersion, approval: SkillApproval) -> bool:
+    """Whether a published version's gate was satisfied by this approval."""
+    if version.eval_report is None:
+        return False
+    return (
+        approval.content_hash == version.content_hash
+        and approval.policy_hash == manifest_policy_hash(version.manifest)
+        and approval.eval_report_hash == eval_report_hash(version.eval_report)
+        and (approval.kind, approval.reviewer_role)
+        in {(item.kind, item.reviewer_role) for item in required_reviews(version)}
+    )
 
 
 __all__ = [
@@ -289,8 +391,11 @@ __all__ = [
     "SkillApprovalService",
     "approval_statuses",
     "describe_unsatisfied",
+    "approvals_digest",
     "eval_report_hash",
     "manifest_policy_hash",
+    "relied_on",
+    "revision_filter",
     "minimum_eval_threshold",
     "require_acceptable_report",
     "required_reviews",

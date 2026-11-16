@@ -1,7 +1,9 @@
 """In-memory Mongo stand-in for skill-registry and Letter Bench tests.
 
 Supports what those services use: equality, ``$in``, dotted keys, ``$set`` /
-``$setOnInsert`` / ``$push``, upsert and sort. Not a general Mongo emulator.
+``$setOnInsert`` / ``$push`` / ``$inc``, upsert and sort. A ``session`` keyword
+is accepted and ignored (no concurrency to serialise). Not a general Mongo
+emulator.
 """
 
 from __future__ import annotations
@@ -82,20 +84,20 @@ class FakeCollection:
     def __init__(self, docs: Optional[List[Dict[str, Any]]] = None) -> None:
         self.docs: List[Dict[str, Any]] = docs or []
 
-    async def insert_one(self, doc: Dict[str, Any]) -> _Result:
+    async def insert_one(self, doc: Dict[str, Any], **_: Any) -> _Result:
         stored = copy.deepcopy(doc)
         stored.setdefault("_id", ObjectId())
         self.docs.append(stored)
         return _Result(inserted_id=stored["_id"])
 
-    async def find_one(self, query: Dict[str, Any], projection: Any = None, sort: Any = None):
+    async def find_one(self, query: Dict[str, Any], projection: Any = None, sort: Any = None, **_: Any):
         matches = [doc for doc in self.docs if _match(doc, query)]
         if sort:
             key, direction = sort[0]
             matches.sort(key=lambda d: (d.get(key) is None, d.get(key)), reverse=direction < 0)
         return copy.deepcopy(matches[0]) if matches else None
 
-    def find(self, query: Optional[Dict[str, Any]] = None, projection: Any = None) -> _Cursor:
+    def find(self, query: Optional[Dict[str, Any]] = None, projection: Any = None, **_: Any) -> _Cursor:
         return _Cursor([doc for doc in self.docs if _match(doc, query or {})])
 
     @staticmethod
@@ -111,6 +113,8 @@ class FakeCollection:
             target[leaf] = copy.deepcopy(value)
         for key, value in update.get("$push", {}).items():
             doc.setdefault(key, []).append(copy.deepcopy(value))
+        for key, value in update.get("$inc", {}).items():
+            doc[key] = (doc.get(key) or 0) + value
 
     async def update_one(self, query: Dict[str, Any], update: Dict[str, Any], upsert: bool = False, **_: Any) -> _Result:
         for doc in self.docs:
