@@ -55,6 +55,7 @@ from ..models.claim_skill_outputs import SUBMISSION_SECTION_SCHEMA_KEY, Submissi
 from ..utils.datetime import now_utc
 from .claim_delay_lab import ClaimDelayLab, DelayView, build_view
 from .claim_quantum import ClaimQuantum, QuantumView
+from .docx_xml import w_paragraph, w_table
 from .letter_drafting.prompts import UNTRUSTED_CONTENT_GUARD, register_default_template
 from .skills.executor import canonical_hash
 from .skills.system_skills import CLAIMS_SKILL_KEY
@@ -532,21 +533,13 @@ _DOCX_RELS = (
 
 
 def _w_paragraph(text: str, *, size: int = 22, bold: bool = False, space_before: int = 0) -> str:
-    properties = f'<w:pPr><w:spacing w:before="{space_before}" w:after="120"/></w:pPr>'
-    run = f'<w:rPr>{"<w:b/>" if bold else ""}<w:sz w:val="{size}"/></w:rPr>'
-    return f'<w:p>{properties}<w:r>{run}<w:t xml:space="preserve">{escape(text)}</w:t></w:r></w:p>'
+    # 4B-29: the shared writer removes XML-forbidden characters as well as escaping.
+    return w_paragraph(text, size=size, bold=bold, space_before=space_before)
 
 
 def _w_table(rows: List[List[str]]) -> str:
-    border = "".join(
-        f'<w:{side} w:val="single" w:sz="4" w:space="0" w:color="808080"/>'
-        for side in ("top", "left", "bottom", "right", "insideH", "insideV")
-    )
-    body = ""
-    for index, row in enumerate(rows):
-        cells = "".join(f"<w:tc>{_w_paragraph(cell, size=18, bold=index == 0)}</w:tc>" for cell in row)
-        body += f"<w:tr>{cells}</w:tr>"
-    return f'<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/><w:tblBorders>{border}</w:tblBorders></w:tblPr>{body}</w:tbl>'
+    # 4B-29: with a w:tblGrid, which Word requires, and equal-length rows.
+    return w_table(rows, header=True, size=18)
 
 
 def submission_docx(submission: ClaimSubmission, heading: str, approved: bool) -> bytes:
