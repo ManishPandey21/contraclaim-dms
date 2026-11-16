@@ -53,6 +53,9 @@ import {
   ArbitrationReferenceInput,
   addArbitrationDraftReferences,
   approveArbitrationDraft,
+  getArbitrationDraftCitations,
+  type DraftActionGate,
+  type DraftCitations,
   createArbitrationDraft,
   exportArbitrationDraft,
   exportArbitrationFilingDraft,
@@ -200,6 +203,8 @@ const ArbitrationDraftingPage: React.FC = () => {
   const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState("");
   const [approving, setApproving] = useState(false);
+  // B4 (4B-39): Approve and filing Export follow the server's gates for this draft and caller.
+  const [citations, setCitations] = useState<DraftCitations | null>(null);
   const [draftMode, setDraftMode] = useState<"deterministic" | "llm">("deterministic");
   const [evidenceQuery, setEvidenceQuery] = useState("");
   const [evidenceResults, setEvidenceResults] = useState<ArbitrationReferenceInput[]>([]);
@@ -415,6 +420,20 @@ const ArbitrationDraftingPage: React.FC = () => {
     }
   };
 
+  useEffect(() => {
+    if (!draft?._id) {
+      setCitations(null);
+      return;
+    }
+    let active = true;
+    getArbitrationDraftCitations(draft._id)
+      .then((data) => active && setCitations(data))
+      .catch(() => active && setCitations(null));
+    return () => {
+      active = false;
+    };
+  }, [draft?._id, draft?.current_version, draft?.status, draft?.is_locked]);
+
   const approveDraft = async () => {
     if (!draft) return;
     setApproving(true);
@@ -526,6 +545,14 @@ const ArbitrationDraftingPage: React.FC = () => {
     const displayedVersion = viewedVersion || latestVersion;
     const displayedMarkdown = displayedVersion?.full_markdown || "";
     const selectedReferences = draft?.selected_references || [];
+    const approveGate = citations?.action_gates?.approve;
+    const exportGate = citations?.action_gates?.filing_export;
+    // Disabled until the gate is known: a click the server would refuse is not offered.
+    const mayApprove = Boolean(approveGate?.allowed);
+    const mayExport = Boolean(exportGate?.allowed);
+    const shownGate: { label: string; gate: DraftActionGate } | null = isLocked
+      ? exportGate && draft?.case_id ? { label: "Export for filing", gate: exportGate } : null
+      : approveGate ? { label: "Approve", gate: approveGate } : null;
     return (
       <div className="space-y-6 p-6">
         <div className="flex flex-wrap items-start justify-between gap-4">
@@ -561,7 +588,12 @@ const ArbitrationDraftingPage: React.FC = () => {
                 Return for Revision
               </Button>
             ) : (
-              <Button variant="outline" onClick={approveDraft} disabled={approving || !draft || !markdown}>
+              <Button
+                variant="outline"
+                onClick={approveDraft}
+                disabled={approving || !draft || !markdown || !mayApprove}
+                aria-describedby={!mayApprove ? "draft-action-gate" : undefined}
+              >
                 {approving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CheckCircle2 className="mr-2 h-4 w-4" />}
                 Approve
               </Button>
@@ -576,11 +608,21 @@ const ArbitrationDraftingPage: React.FC = () => {
             </Button>
             {isLocked && draft.case_id ? (
               <>
-                <Button variant="outline" onClick={() => exportDraft("docx", true)} disabled={!markdown}>
+                <Button
+                  variant="outline"
+                  onClick={() => exportDraft("docx", true)}
+                  disabled={!markdown || !mayExport}
+                  aria-describedby={!mayExport ? "draft-action-gate" : undefined}
+                >
                   <Download className="mr-2 h-4 w-4" />
                   Filing DOCX
                 </Button>
-                <Button variant="outline" onClick={() => exportDraft("pdf", true)} disabled={!markdown}>
+                <Button
+                  variant="outline"
+                  onClick={() => exportDraft("pdf", true)}
+                  disabled={!markdown || !mayExport}
+                  aria-describedby={!mayExport ? "draft-action-gate" : undefined}
+                >
                   <Download className="mr-2 h-4 w-4" />
                   Filing PDF
                 </Button>
@@ -589,8 +631,36 @@ const ArbitrationDraftingPage: React.FC = () => {
           </div>
         </div>
 
+        {shownGate && (
+          <div
+            id="draft-action-gate"
+            role="status"
+            className={`rounded-md border p-3 text-sm ${
+              shownGate.gate.allowed ? "border-slate-200 bg-slate-50" : "border-red-300 bg-red-50 text-red-950"
+            }`}
+          >
+            {shownGate.gate.allowed ? (
+              <p>
+                {shownGate.label} is available. Checked when you {shownGate.label.toLowerCase()}:{" "}
+                {shownGate.gate.checked_on_action.join(", ")}.
+              </p>
+            ) : (
+              <>
+                <p className="font-medium">{shownGate.label} is not available yet:</p>
+                <ul className="list-disc pl-5">
+                  {shownGate.gate.reasons.map((reason) => (
+                    <li key={reason.code}>
+                      {reason.anchor ? <a className="underline" href={`#${reason.anchor}`}>{reason.message}</a> : reason.message}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+          </div>
+        )}
+
         {!loading && draft && !draft.case_id && (
-          <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+          <div id="draft-case" className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
             <div>
               <span className="font-medium">Scratch draft.</span> This draft has no case workspace. It cannot be
@@ -767,7 +837,7 @@ const ArbitrationDraftingPage: React.FC = () => {
               )}
 
               {versions.length > 0 && (
-                <Card>
+                <Card id="draft-versions">
                   <CardHeader>
                     <CardTitle className="text-base">Version History</CardTitle>
                     <CardDescription>Every generation and manual edit is an immutable version</CardDescription>
@@ -846,13 +916,13 @@ const ArbitrationDraftingPage: React.FC = () => {
                 </Card>
               )}
 
-              <Card>
+              <Card id="draft-citations">
                 <CardHeader>
                   <CardTitle className="text-base">Evidence Status</CardTitle>
                   <CardDescription>Source ledger and missing proof markers</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-3 text-sm">
-                  {draft && <DraftCitationPanel draftId={draft._id} version={draft.current_version} />}
+                  {draft && <DraftCitationPanel draftId={draft._id} version={draft.current_version} data={citations} />}
                   <div className="text-xs text-muted-foreground">
                     Sources in the ledger: {sourceLedger.length || draft?.selected_references?.length || 0}
                   </div>
@@ -919,7 +989,7 @@ const ArbitrationDraftingPage: React.FC = () => {
               </Card>
 
               {(approvalBlockers.length > 0 || safetyWarnings.length > 0) && (
-                <Card>
+                <Card id="draft-validation">
                   <CardHeader>
                     <CardTitle className="flex items-center gap-2 text-base">
                       <AlertTriangle className="h-4 w-4 text-amber-600" />

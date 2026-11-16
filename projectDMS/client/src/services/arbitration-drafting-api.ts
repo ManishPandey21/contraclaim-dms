@@ -386,12 +386,23 @@ export async function cancelArbitrationWorkflow(caseId: string, runId: string, s
 // unverified or unresolved, by the same computation the approval gate uses.
 export type CitationState = "verified" | "unverified" | "unresolved";
 
+/** Whether Approve or filing Export would be accepted, and why not (4B-39, B4). Every
+ * reason is one the action itself refuses on; `checked_on_action` names what is checked
+ * only when the action is taken. */
+export interface DraftActionGate {
+  allowed: boolean;
+  reasons: { code: string; message: string; anchor?: string | null }[];
+  checked_on_action: string[];
+}
+
 export interface DraftCitations {
   draft_id: string;
   version: number | null;
   scratch: boolean;
   counts: { verified: number; unverified: number; unresolved: number; cited: number; ledger: number };
   items: {
+    kind?: "source" | "exhibit";
+    exhibit_id?: string | null;
     source_key: string;
     state: CitationState;
     uses: number;
@@ -403,6 +414,7 @@ export interface DraftCitations {
   missing_evidence: string[];
   can_be_approved: boolean;
   cannot_be_approved_reason?: string | null;
+  action_gates?: { approve: DraftActionGate; filing_export: DraftActionGate };
 }
 
 export async function getArbitrationDraftCitations(draftId: string) {

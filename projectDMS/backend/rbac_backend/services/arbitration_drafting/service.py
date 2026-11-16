@@ -42,6 +42,7 @@ from .case_workspace import ArbitrationCaseWorkspaceService
 from .repository import ArbitrationDraftingRepository, _jsonable
 from .citation_states import classify_citations
 from .validator import ArbitrationDraftValidator
+from .action_gates import approve_gate, export_gate, refuse_unless
 from .approval_policy import REVOKED_REJOINDER_PERMISSION, enforce_author_approver_separation, resolve_gate_role
 from .workflow_governance import (
     require_approved_plan_for_generation,
@@ -859,6 +860,19 @@ class ArbitrationDraftingService:
             "cannot_be_approved_reason": reason,
         }
 
+    async def action_gates(
+        self, draft_id: str, actor_id: Optional[str], *, may_approve: bool, may_export: bool
+    ) -> Dict[str, Any]:
+        """Approve and filing Export: allowed, or why not (4B-39, B4). See action_gates.py."""
+        draft = await self._load(draft_id)
+        latest = await self.repo.latest_version(draft_id)
+        approved_no = draft.get("approved_version")
+        approved = await self.repo.get_version(draft_id, int(approved_no)) if approved_no else None
+        return {
+            "approve": approve_gate(draft, latest, actor_id, may_approve=may_approve),
+            "filing_export": export_gate(draft, approved, actor_id, may_export=may_export),
+        }
+
     async def approve(
         self,
         draft_id: str,
@@ -867,6 +881,9 @@ class ArbitrationDraftingService:
         workflow_run: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         draft = await self._load(draft_id)
+        # B4 (4B-39): the same gate the screen shows, first, so a disabled Approve is
+        # exactly a refused approval. The router has checked the permission.
+        refuse_unless(approve_gate(draft, await self.repo.latest_version(draft_id), _actor_id(current_user), may_approve=True))
         resolve_gate_role("draft", current_user)
         await self.case_workspace.assert_case_ready_for_draft(draft)
         if draft.get("current_version", 0) < 1:
@@ -946,6 +963,15 @@ class ArbitrationDraftingService:
 
     async def export(self, draft_id: str, fmt: str, current_user: Any) -> bytes:
         draft = await self._load(draft_id)
+        approved_no = draft.get("approved_version")
+        refuse_unless(
+            export_gate(
+                draft,
+                await self.repo.get_version(draft_id, int(approved_no)) if approved_no else None,
+                _actor_id(current_user),
+                may_export=True,
+            )
+        )
         resolve_gate_role("export", current_user)
         if not draft.get("case_id"):
             raise HTTPException(

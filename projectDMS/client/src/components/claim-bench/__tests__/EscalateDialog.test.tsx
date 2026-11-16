@@ -158,6 +158,31 @@ describe("Draft citation panel", () => {
     expect(blocked).toHaveTextContent("Evidence required: Baseline programme");
   });
 
+  it("shows an exhibit chip with its number, title and state, and why an unresolved one is not found (4B-39)", async () => {
+    drafts.getArbitrationDraftCitations.mockResolvedValue(
+      citations({
+        counts: { verified: 1, unverified: 0, unresolved: 1, cited: 2, ledger: 1 },
+        items: [
+          { kind: "exhibit", source_key: "Ex. C-1", exhibit_id: "C-1", state: "verified", uses: 1, label: "Letter of 3 May 2026" },
+          { kind: "exhibit", source_key: "Ex. C-12", exhibit_id: "C-12", state: "unresolved", uses: 1,
+            reason: "Exhibit C-12 is not in this case's exhibit list for this draft." },
+        ],
+      })
+    );
+    render(<DraftCitationPanel draftId="d1" version={3} />);
+    const list = await screen.findByRole("list", { name: "Citations in this version" });
+    const chips = within(list).getAllByRole("listitem").map((item) => item.textContent);
+    expect(chips[0]).toBe("✓ Ex. C-1: Letter of 3 May 2026: Verified");
+    expect(chips[1]).toContain("Ex. C-12");
+    expect(chips[1]).toContain("not in this case's exhibit list");
+  });
+
+  it("uses the page's copy of the citations instead of fetching again", async () => {
+    render(<DraftCitationPanel draftId="d1" version={3} data={citations()} />);
+    expect(await screen.findByRole("region", { name: "Citation states" })).toBeInTheDocument();
+    expect(drafts.getArbitrationDraftCitations).not.toHaveBeenCalled();
+  });
+
   it("says so when nothing in the evidence blocks approval, without claiming the workflow gates are passed", async () => {
     drafts.getArbitrationDraftCitations.mockResolvedValue(
       citations({ counts: { verified: 1, unverified: 0, unresolved: 0, cited: 1, ledger: 1 }, items: [{ source_key: "S1", state: "verified", uses: 1 }], approval_blockers: [], missing_evidence: [], can_be_approved: true, cannot_be_approved_reason: null })

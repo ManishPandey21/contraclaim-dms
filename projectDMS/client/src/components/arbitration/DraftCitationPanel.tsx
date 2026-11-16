@@ -6,6 +6,8 @@ interface Props {
   draftId: string;
   /** Reloads when the draft gets a new version. */
   version?: number;
+  /** The page's own copy of the same response, so it is fetched once (4B-39). */
+  data?: DraftCitations | null;
 }
 
 const STATE_LABEL: Record<CitationState, string> = {
@@ -27,16 +29,18 @@ const STATE_MARK: Record<CitationState, string> = { verified: "✓", unverified:
  * unresolved, with everything that stands between the draft and approval. The
  * figures are the server's, from the computation the approval gate itself uses.
  */
-const DraftCitationPanel: React.FC<Props> = ({ draftId, version }) => {
-  const [data, setData] = useState<DraftCitations | null>(null);
+const DraftCitationPanel: React.FC<Props> = ({ draftId, version, data: given }) => {
+  const [fetched, setFetched] = useState<DraftCitations | null>(null);
   const [failed, setFailed] = useState(false);
+  const data = given ?? fetched;
 
   useEffect(() => {
+    if (given !== undefined) return;
     let active = true;
     setFailed(false);
     getArbitrationDraftCitations(draftId)
       .then((result) => {
-        if (active) setData(result);
+        if (active) setFetched(result);
       })
       .catch(() => {
         if (active) setFailed(true);
@@ -44,7 +48,7 @@ const DraftCitationPanel: React.FC<Props> = ({ draftId, version }) => {
     return () => {
       active = false;
     };
-  }, [draftId, version]);
+  }, [draftId, version, given]);
 
   if (failed) return <p role="alert">Citation states could not be loaded.</p>;
   if (!data) return <p className="text-muted-foreground">Checking citations…</p>;
@@ -75,12 +79,16 @@ const DraftCitationPanel: React.FC<Props> = ({ draftId, version }) => {
           {data.items.map((item) => (
             <li
               key={item.source_key}
-              title={item.reason ?? item.label ?? undefined}
+              title={item.reason ?? undefined}
               className={`rounded-full border px-2 py-0.5 text-xs ${STATE_CLASS[item.state]}`}
             >
               <span aria-hidden="true">{STATE_MARK[item.state]} </span>
               {item.source_key}
+              {item.label ? <span>: {item.label}</span> : null}
               <span className="sr-only">: {STATE_LABEL[item.state]}</span>
+              {item.kind === "exhibit" && item.state !== "verified" && item.reason ? (
+                <span className="block">{item.reason}</span>
+              ) : null}
             </li>
           ))}
         </ul>

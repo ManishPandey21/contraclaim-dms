@@ -246,6 +246,7 @@ jobs:
             backend/rbac_backend/tests/integration/test_claim_escalation_safety_mongo.py
             backend/rbac_backend/tests/integration/test_draft_case_attach_mongo.py
             backend/rbac_backend/tests/integration/test_claim_escalation_undo_mongo.py
+            backend/rbac_backend/tests/integration/test_arbitration_ui_api_parity.py
             backend/rbac_backend/tests/integration/test_skill_publication_transactions_mongo.py
             backend/rbac_backend/tests/integration/test_pleaded_heads_end_to_end_mongo.py
           )

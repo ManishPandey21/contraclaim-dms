@@ -53,6 +53,7 @@ from ..services.arbitration_drafting import ArbitrationCaseWorkspaceService, Arb
 from ..services.arbitration_drafting.case_workspace import MATRIX_COLLECTIONS
 from ..services.arbitration_drafting.permission_receipts import annotate_permission_states
 from ..services.policy_service import PolicyService
+from ..utils.error_handler import BaseDomainError
 from ..services.step_up_service import require_step_up
 from ..services.arbitration_drafting.workflow_service import ArbitrationWorkflowService
 
@@ -77,6 +78,15 @@ async def _load_and_authorize(draft_id: str, permission: str, db, current_user, 
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Arbitration draft not found")
     await policy.authorize_document(current_user, permission, draft, resource_type="arbitration_draft")
     return draft
+
+
+async def _may(policy: PolicyService, current_user: Any, permission: str, draft: Dict[str, Any]) -> bool:
+    """Whether the caller holds ``permission`` on the draft, asked as the action asks it, without raising."""
+    try:
+        await policy.authorize_document(current_user, permission, draft, resource_type="arbitration_draft")
+    except (BaseDomainError, HTTPException):
+        return False
+    return True
 
 
 async def _load_case_and_authorize(case_id: str, permission: str, db, current_user, policy) -> Dict[str, Any]:
@@ -759,8 +769,18 @@ async def get_arbitration_draft_citations(
 ):
     """Each citation in the latest version as verified, unverified or unresolved,
     with what blocks approval. The same computation the approval gate uses."""
-    await _load_and_authorize(draft_id, Permissions.ARBITRATION_VIEW, db, current_user, policy)
-    return await ArbitrationDraftingService(db).citation_view(draft_id)
+    draft = await _load_and_authorize(draft_id, Permissions.ARBITRATION_VIEW, db, current_user, policy)
+    service = ArbitrationDraftingService(db)
+    view = await service.citation_view(draft_id)
+    # 4B-39 (B4): what stands between this draft and Approve or filing Export, for this
+    # caller. Every reason listed is one the action itself refuses on.
+    view["action_gates"] = await service.action_gates(
+        draft_id,
+        str(getattr(current_user, "id", "") or "") or None,
+        may_approve=await _may(policy, current_user, Permissions.ARBITRATION_APPROVE, draft),
+        may_export=await _may(policy, current_user, Permissions.ARBITRATION_EXPORT, draft),
+    )
+    return view
 
 
 @router.get("/drafts/{draft_id}/source-ledger")
