@@ -185,8 +185,12 @@ class ClaimQuantum:
     @staticmethod
     def _roll_up(head: ClaimHead) -> None:
         # Once a head has a build-up, its amount is the build-up, not a typed figure.
+        # Removing the last line clears it: the old total is no longer supported by
+        # anything (D-14, 4B-17, C-07). Only line operations call this.
         if head.quantum_lines:
             head.amount_claimed = round(sum(line.amount for line in head.quantum_lines), 2)
+        else:
+            head.amount_claimed = None
 
     async def add_line(
         self, claim: Dict[str, Any], head_id: str, request: QuantumLineRequest, allowed_documents: Set[str], user_id: Optional[str]

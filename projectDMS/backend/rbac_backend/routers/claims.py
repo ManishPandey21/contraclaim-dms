@@ -161,6 +161,27 @@ async def mark_bench_tests_stale(db, claim: dict) -> Optional[dict]:
 CREATABLE_STATUSES = frozenset({ClaimStatus.DRAFT, ClaimStatus.NOTIFIED})
 
 #: Fields an update may clear with an explicit null. Others ignore a null.
+#: Once a claim has a Claim Bench board, these come from its heads (D-14, 4B-17, C-07).
+BOARD_DERIVED_FIELDS = ("amount_claimed", "eot_days_claimed")
+
+
+def _board_derived_changes(claim: dict, changes: dict) -> list:
+    """Board-derived fields the request would change. Unchanged values (the register
+    form sends every field on each save) are dropped from ``changes`` instead."""
+    if not isinstance(claim.get("bench"), dict):
+        return []
+    refused = []
+    for key in BOARD_DERIVED_FIELDS:
+        if key not in changes:
+            continue
+        sent, stored = changes[key], claim.get(key)
+        if sent is None or (stored is not None and float(sent) == float(stored)):
+            changes.pop(key)
+        else:
+            refused.append(key)
+    return refused
+
+
 CLEARABLE_FIELDS = frozenset(
     {
         "claim_ref", "description", "event_date", "awareness_date", "notice_date", "submission_date",
@@ -332,6 +353,14 @@ async def update_claim(
             "This claim's record is frozen (it has been escalated to arbitration), so it cannot be edited.",
         )
     changes = payload.model_dump(exclude_unset=True)
+    derived = _board_derived_changes(claim, changes)
+    if derived:
+        raise _refuse(
+            status.HTTP_409_CONFLICT,
+            "claim_amount_from_board",
+            "This claim's amount and days come from its heads on the Claim Bench "
+            f"({', '.join(derived)}). Change them there.",
+        )
     clear = sorted(key for key, value in changes.items() if value is None and key in CLEARABLE_FIELDS)
     expected = None
     if changes.get("status") is not None:

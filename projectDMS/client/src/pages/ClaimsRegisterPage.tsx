@@ -165,6 +165,8 @@ const ClaimsRegisterPage: React.FC = () => {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingClaim, setEditingClaim] = useState<ClaimDTO | null>(null);
+  // A claim with a Claim Bench board takes its amount and days from the heads (D-14, 4B-17).
+  const fromBoard = Boolean(editingId && editingClaim?.bench_stage);
   const [deleteTarget, setDeleteTarget] = useState<ClaimDTO | null>(null);
   const [form, setForm] = useState<ClaimForm>({ ...EMPTY_FORM });
   const [saving, setSaving] = useState(false);
@@ -257,18 +259,20 @@ const ClaimsRegisterPage: React.FC = () => {
       // When editing, an emptied field is sent as null so the server clears it
       // (4B-12); left out, the old value would silently stay.
       const cleared = editingId ? null : undefined;
+      // With a Claim Bench board the amount and days come from its heads (D-14); the
+      // server refuses a change, so they are not sent.
       const payload: ClaimPayload = {
         title: form.title.trim(),
         type: form.type,
         claim_ref: form.claim_ref || undefined,
         description: form.description || cleared,
-        amount_claimed: form.amount_claimed,
+        amount_claimed: fromBoard ? undefined : form.amount_claimed,
         currency: form.currency.trim().toUpperCase() || undefined,
         event_date: fromDateInput(form.event_date) ?? cleared,
         awareness_date: fromDateInput(form.awareness_date) ?? cleared,
         notice_date: fromDateInput(form.notice_date) ?? cleared,
         response_due_date: fromDateInput(form.response_due_date) ?? cleared,
-        eot_days_claimed: form.eot_days_claimed,
+        eot_days_claimed: fromBoard ? undefined : form.eot_days_claimed,
         contract_clauses: parseClauseList(form.contract_clauses),
         project_id: form.project_id || undefined,
         status: form.status,
@@ -599,6 +603,8 @@ const ClaimsRegisterPage: React.FC = () => {
                   id="claim-amount"
                   type="number"
                   min={0}
+                  disabled={fromBoard}
+                  aria-describedby={fromBoard ? "claim-from-board" : undefined}
                   value={form.amount_claimed ?? ""}
                   onChange={(e) =>
                     setForm({ ...form, amount_claimed: e.target.value === "" ? undefined : Number(e.target.value) })
@@ -606,6 +612,11 @@ const ClaimsRegisterPage: React.FC = () => {
                 />
                 {form.amount_claimed != null && (
                   <p className="pt-1 text-xs text-muted-foreground">{formatCrore(form.amount_claimed, form.currency)}</p>
+                )}
+                {fromBoard && (
+                  <p id="claim-from-board" className="pt-1 text-xs text-muted-foreground">
+                    Comes from the heads on the Claim Bench. Change it there.
+                  </p>
                 )}
               </div>
               <div>
@@ -619,6 +630,8 @@ const ClaimsRegisterPage: React.FC = () => {
                   type="number"
                   min={0}
                   step={1}
+                  disabled={fromBoard}
+                  aria-describedby={fromBoard ? "claim-from-board" : undefined}
                   value={form.eot_days_claimed ?? ""}
                   onChange={(e) =>
                     setForm({ ...form, eot_days_claimed: e.target.value === "" ? undefined : Math.trunc(Number(e.target.value)) })

@@ -584,10 +584,10 @@ class ClaimBenchService:
         bench.updated_by = user_id
         update: Dict[str, Any] = {"bench": bench.model_dump(mode="python"), "updated_at": datetime.utcnow(), "updated_by": user_id}
         amounts = [head.amount_claimed for head in bench.heads if head.amount_claimed is not None]
-        if amounts:
-            # The register's figure follows the heads. Days are not summed: heads
-            # can overlap in time, and adding them would overstate the claim.
-            update["amount_claimed"] = float(sum(amounts))
+        # The register's figure follows the heads, including when every head amount
+        # is cleared: then the claim has no amount (D-14, 4B-17, C-07). Days are not
+        # summed: heads can overlap in time, and adding them would overstate the claim.
+        update["amount_claimed"] = float(sum(amounts)) if amounts else None
         condition: Dict[str, Any] = {"_id": claim["_id"]}
         if expected_version is None:
             condition["bench"] = None
@@ -826,6 +826,22 @@ class ClaimBenchService:
                 refs = clean_clause_refs(request.clause_refs)
                 if refs != head.clause_refs:
                     head.clause_refs, facts_changed = refs, True
+            amount_change = request.clear_amount or (
+                request.amount_claimed is not None and request.amount_claimed != head.amount_claimed
+            )
+            if amount_change and head.quantum_lines:
+                # D-14: a head with a build-up takes its amount from the build-up.
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "head_amount_from_lines",
+                        "user_message": (
+                            "This head's amount is the total of its quantum lines. Change the lines on the "
+                            "Quantum tab instead."
+                        ),
+                        "detail": None,
+                    },
+                )
             if request.clear_amount:
                 facts_changed = facts_changed or head.amount_claimed is not None
                 head.amount_claimed = None
