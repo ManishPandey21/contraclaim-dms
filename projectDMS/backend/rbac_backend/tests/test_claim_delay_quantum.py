@@ -22,17 +22,21 @@ from rbac_backend.services.claim_delay_lab import (
     DelaySettingsRequest,
     EventDecisionRequest,
     LinkCreateRequest,
+    CostBasisRequest,
+    CostReviewRequest,
     LinkRemoveRequest,
     OverlapDecisionRequest,
     hindrance_snapshot,
     register_proposal,
 )
+from rbac_backend.services.claim_delay_engine import EMPLOYER_CONTRACTOR, overlap_identity
 from rbac_backend.services.claim_quantum import ClaimQuantum, QuantumLineRequest, line_lock_reasons
 from rbac_backend.tests.bench_fakes import FakeDB
 
 ORG, PROJECT, CLAIM_ID, USER = "org-A", "proj-A", "claim-1", "user-1"
 ON = SimpleNamespace(CLAIM_BENCH_ROLLOUT_MODE="primary", CLAIM_BENCH_CANARY_TENANT_IDS="")
-OVERLAP = "2026-03-20_2026-03-31"
+# 4B-22 (D-16): an overlap is identified by its kind, dates and events.
+OVERLAP = overlap_identity(EMPLOYER_CONTRACTOR, date(2026, 3, 20), date(2026, 3, 31), ["E1", "C1"])
 
 
 def _hindrance(_id: str, start: str, end: Optional[str], responsibility: str = "employer", critical: bool = True, **over: Any) -> dict:
@@ -575,13 +579,28 @@ async def test_prolongation_counts_only_inside_periods_decided_as_compensable() 
         "6 of the 11 days in this period are not in a period decided as compensable "
         "in the delay assessment (Employer critical delay, not concurrent or decided as carrying cost)."
     ]
-    # Deciding that the overlap carries cost unlocks it, with no change to the line.
+    # Deciding that the overlap carries cost is not enough (D-16, AQ-4: no automatic money).
     await lab.decide_overlap(
         await _claim(db), "H1", OVERLAP,
         OverlapDecisionRequest(board_version=await _version(db), treatment="eot_granted_with_cost",
                                basis="Costs separated: Employer delay alone caused them."),
         USER,
     )
+    assert (await quantum.view(await _claim(db), "H1")).lines[1].locked
+    # The cost basis, recorded by one person ...
+    recorded = await lab.record_cost_basis(
+        await _claim(db), "H1", OVERLAP,
+        CostBasisRequest(board_version=await _version(db), contractual_basis="Sub-Clause 8.4 with 8.5 cost.",
+                         causation="Idle plant stood only for want of access.", evidence_document_ids=["doc-1"]),
+        USER, DOCS,
+    )
+    assert (await quantum.view(await _claim(db), "H1")).lines[1].locked
+    assert "reviewer" in recorded.overlaps[0].cost_status
+    # ... and reviewed by another, unlocks it, with no change to the line.
+    reviewed = await lab.review_cost_basis(
+        await _claim(db), "H1", OVERLAP, CostReviewRequest(board_version=await _version(db)), "determiner-1"
+    )
+    assert reviewed.overlaps[0].cost_established and reviewed.overlaps[0].cost_status is None
     assert not (await quantum.view(await _claim(db), "H1")).lines[1].locked
 
 
@@ -654,3 +673,108 @@ async def test_link_index_migration_keeps_one_active_link_and_free_history() -> 
     assert active["unique"] and active["partialFilterExpression"] == {"status": "active"}
     dry = await upgrade(FakeDB(), True)
     assert dry.status == "dry_run" and len(dry.operations) == len(INDEXES) and len(dry.notices) == 1
+
+
+# --------------------------------------------------------------------------- #
+# 4B-22 (D-16): neutral concurrency, cost basis, reversed dates
+# --------------------------------------------------------------------------- #
+async def _cost_ready(db: FakeDB, bench: ClaimBenchService, lab: ClaimDelayLab, treatment: str = "not_true_concurrency"):
+    await _two_events(db, bench, lab)
+    return await lab.decide_overlap(
+        await _claim(db), "H1", OVERLAP,
+        OverlapDecisionRequest(board_version=await _version(db), treatment=treatment,
+                               basis="Not true concurrency: the Contractor delay was not critical in fact."),
+        USER,
+    )
+
+
+def _cost_request(version: int, evidence=("doc-1",)) -> CostBasisRequest:
+    return CostBasisRequest(board_version=version, contractual_basis="Sub-Clause 8.4 with Sub-Clause 8.5 cost.",
+                            causation="The plant stood idle only for want of access.", evidence_document_ids=list(evidence))
+
+
+async def test_not_true_concurrency_is_time_only_until_its_cost_basis_is_recorded_and_reviewed() -> None:
+    db, bench, lab, _ = _setup()
+    view = await _cost_ready(db, bench, lab)
+    (overlap,) = view.overlaps
+    assert overlap.finding.event_ids == ["C1", "E1"]  # the finding records the events it was made on
+    assert view.net.days == 31  # time
+    assert sum(period.days for period in view.compensable_periods) == 19  # no money for the 12 overlap days
+    assert not overlap.cost_established and "contractual basis" in overlap.cost_status
+
+
+async def test_a_cost_basis_needs_evidence_linked_to_the_claim_and_an_independent_reviewer() -> None:
+    db, bench, lab, _ = _setup()
+    await _cost_ready(db, bench, lab)
+    with pytest.raises(HTTPException) as foreign:
+        await lab.record_cost_basis(await _claim(db), "H1", OVERLAP, _cost_request(await _version(db), ("not-linked",)), USER, DOCS)
+    _refused(foreign, 422, "linked to this claim")
+    with pytest.raises(HTTPException) as early:
+        await lab.review_cost_basis(await _claim(db), "H1", OVERLAP, CostReviewRequest(board_version=await _version(db)), "determiner-1")
+    _refused(early, 422, "Record the cost basis")
+    await lab.record_cost_basis(await _claim(db), "H1", OVERLAP, _cost_request(await _version(db)), USER, DOCS)
+    with pytest.raises(HTTPException) as self_review:
+        await lab.review_cost_basis(await _claim(db), "H1", OVERLAP, CostReviewRequest(board_version=await _version(db)), USER)
+    _refused(self_review, 403, "someone other than the person who recorded it")
+    reviewed = await lab.review_cost_basis(
+        await _claim(db), "H1", OVERLAP, CostReviewRequest(board_version=await _version(db)), "determiner-1"
+    )
+    assert reviewed.overlaps[0].cost_established
+    assert sum(period.days for period in reviewed.compensable_periods) == 31
+
+
+async def test_re_deciding_the_treatment_withdraws_the_cost_basis() -> None:
+    db, bench, lab, _ = _setup()
+    await _cost_ready(db, bench, lab)
+    await lab.record_cost_basis(await _claim(db), "H1", OVERLAP, _cost_request(await _version(db)), USER, DOCS)
+    await lab.review_cost_basis(await _claim(db), "H1", OVERLAP, CostReviewRequest(board_version=await _version(db)), "determiner-1")
+    again = await lab.decide_overlap(
+        await _claim(db), "H1", OVERLAP,
+        OverlapDecisionRequest(board_version=await _version(db), treatment="eot_granted_with_cost",
+                               basis="Re-decided after the programme analysis was revised."),
+        USER,
+    )
+    assert again.overlaps[0].finding.cost_basis is None and not again.overlaps[0].cost_established
+
+
+async def test_a_time_only_treatment_takes_no_cost_basis() -> None:
+    db, bench, lab, _ = _setup()
+    await _cost_ready(db, bench, lab, treatment="eot_granted_no_cost")
+    with pytest.raises(HTTPException) as exc:
+        await lab.record_cost_basis(await _claim(db), "H1", OVERLAP, _cost_request(await _version(db)), USER, DOCS)
+    _refused(exc, 422, "carrying cost")
+
+
+async def test_neutral_and_contractor_concurrency_is_shown_and_must_be_decided_once_neutral_time_is_given() -> None:
+    db, bench, lab, _ = _setup()
+    db.delay_events.docs.extend([_hindrance("N1", "2026-03-25", "2026-04-05", "neutral")])
+    await _two_events(db, bench, lab)
+    await _link(db, lab, "N1")
+    await _decide(db, lab, "N1", "neutral")
+    before = await lab.view(await _claim(db), "H1")
+    assert [o.kind for o in before.overlaps] == ["employer_contractor"]  # no neutral entitlement recorded yet
+    view = await lab.set_settings(
+        await _claim(db), "H1",
+        DelaySettingsRequest(board_version=await _version(db), include_neutral=True,
+                             neutral_basis="Sub-Clause 8.4(c): exceptionally adverse climatic conditions."),
+        USER,
+    )
+    kinds = sorted(o.kind for o in view.overlaps)
+    assert kinds == ["employer_contractor", "neutral_contractor"]
+    neutral = next(o for o in view.overlaps if o.kind == "neutral_contractor")
+    assert neutral.neutral_event_ids == ["N1"] and neutral.contractor_event_ids == ["C1"]
+    assert neutral.cost_status == "Neutral delay carries time only, never cost."
+    blockers = await lab.blockers(await _claim(db), (await bench.get(await _claim(db))).bench)
+    assert any("between neutral and Contractor delay need a decided treatment" in item for item in blockers)
+
+
+async def test_an_event_ending_before_it_starts_says_so_and_not_to_set_the_as_of_date() -> None:
+    """C-06: it said "set the date the analysis runs to", which cannot fix a wrong date."""
+    db, bench, lab, _ = _setup()
+    db.delay_events.docs.append(_hindrance("R1", "2026-03-10", "2026-03-01"))
+    await bench.open(await _claim(db), USER)
+    await _link(db, lab, "R1")
+    await _decide(db, lab, "R1", "employer")
+    blockers = await lab.blockers(await _claim(db), (await bench.get(await _claim(db))).bench)
+    assert any("ends before it starts; correct the dates on the register" in item for item in blockers), blockers
+    assert not any("set the date the analysis runs to" in item for item in blockers)

@@ -9,6 +9,8 @@ import {
   addHeadLink,
   decideDelayEvent,
   decideDelayOverlap,
+  recordOverlapCostBasis,
+  reviewOverlapCostBasis,
   decideElement,
   fetchHeadDelay,
   fetchHeadQuantum,
@@ -225,6 +227,21 @@ export function useHeadAnalysis(claimId: string, headId: string, boardVersion: n
       ({ overlapId, ...decision }) => decideDelayOverlap(claimId, headId, overlapId, boardVersion, decision),
       "The treatment could not be saved",
       "Treatment recorded"
+    ),
+    recordCostBasis: delayEdit<{
+      overlapId: string;
+      contractual_basis: string;
+      causation: string;
+      evidence_document_ids: string[];
+    }>(
+      ({ overlapId, ...cost }) => recordOverlapCostBasis(claimId, headId, overlapId, boardVersion, cost),
+      "The cost basis could not be saved",
+      "Cost basis recorded: it needs a review before the days carry cost"
+    ),
+    reviewCostBasis: delayEdit<{ overlapId: string }>(
+      ({ overlapId }) => reviewOverlapCostBasis(claimId, headId, overlapId, boardVersion),
+      "The cost basis could not be reviewed",
+      "Cost basis reviewed"
     ),
     saveLine: quantumEdit<{ line: QuantumLineInput; lineId?: string }>(
       ({ line, lineId }) => saveQuantumLine(claimId, headId, boardVersion, line, lineId),

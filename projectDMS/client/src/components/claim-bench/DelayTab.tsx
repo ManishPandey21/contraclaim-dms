@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { headKeys, useHeadAnalysis } from "@/hooks/useClaimBench";
+import OverlapCostBasis from "@/components/claim-bench/OverlapCostBasis";
 import {
   CRITICALITY_LABEL,
   LANES,
@@ -110,12 +111,18 @@ const Timeline: React.FC<{ view: DelayView }> = ({ view }) => {
   );
 };
 
+const COST_CARRYING: ReadonlySet<string> = new Set(["eot_granted_with_cost", "not_true_concurrency"]);
+
 const OverlapCard: React.FC<{
+  claimId: string;
   overlap: OverlapView;
   index: number;
   disabled: boolean;
   onDecide: (decision: { treatment?: string; days_to_eot?: number; basis?: string; clear?: boolean }) => void;
-}> = ({ overlap, index, disabled, onDecide }) => {
+  onRecordCost: (cost: { contractual_basis: string; causation: string; evidence_document_ids: string[] }) => void;
+  onReviewCost: () => void;
+}> = ({ claimId, overlap, index, disabled, onDecide, onRecordCost, onReviewCost }) => {
+  const neutral = overlap.kind === "neutral_contractor";
   const [treatment, setTreatment] = useState<OverlapTreatment | "">(overlap.finding?.treatment ?? "");
   const [basis, setBasis] = useState(overlap.finding?.basis ?? "");
   const [days, setDays] = useState(overlap.finding?.days_to_eot != null ? String(overlap.finding.days_to_eot) : "");
@@ -138,9 +145,19 @@ const OverlapCard: React.FC<{
         )}
       </div>
       <p className="text-xs text-muted-foreground">
-        Employer delay ({overlap.employer_event_ids.length} event{overlap.employer_event_ids.length === 1 ? "" : "s"})
-        and Contractor delay ({overlap.contractor_event_ids.length}) were both critical on these days. This is not
-        deducted or added until you decide how the contract treats it.
+        {neutral ? (
+          <>
+            Neutral delay ({overlap.neutral_event_ids?.length ?? 0} event{overlap.neutral_event_ids?.length === 1 ? "" : "s"})
+            and Contractor delay ({overlap.contractor_event_ids.length}) were both critical on these days. Decide whether the
+            contract's neutral entitlement gives time for them. Neutral delay never carries cost.
+          </>
+        ) : (
+          <>
+            Employer delay ({overlap.employer_event_ids.length} event{overlap.employer_event_ids.length === 1 ? "" : "s"})
+            and Contractor delay ({overlap.contractor_event_ids.length}) were both critical on these days. This is not
+            deducted or added until you decide how the contract treats it.
+          </>
+        )}
       </p>
       <div className="grid gap-2 sm:grid-cols-[220px_1fr]">
         <div>
@@ -198,6 +215,15 @@ const OverlapCard: React.FC<{
           </Button>
         )}
       </div>
+      {!neutral && overlap.finding && COST_CARRYING.has(overlap.finding.treatment) && (
+        <OverlapCostBasis
+          claimId={claimId}
+          overlap={overlap}
+          disabled={disabled}
+          onRecord={onRecordCost}
+          onReview={onReviewCost}
+        />
+      )}
     </li>
   );
 };
@@ -208,7 +234,11 @@ const OverlapCard: React.FC<{
  * overlap changes nothing until its treatment is recorded with a basis.
  */
 const DelayTab: React.FC<Props> = ({ claimId, headId, boardVersion, readOnly }) => {
-  const { delay, link, unlink, settings, decideEvent, decideOverlap } = useHeadAnalysis(claimId, headId, boardVersion);
+  const { delay, link, unlink, settings, decideEvent, decideOverlap, recordCostBasis, reviewCostBasis } = useHeadAnalysis(
+    claimId,
+    headId,
+    boardVersion
+  );
   const [picking, setPicking] = useState(false);
   const [milestones, setMilestones] = useState<Record<string, string>>({});
   const candidates = useQuery({
@@ -220,7 +250,14 @@ const DelayTab: React.FC<Props> = ({ claimId, headId, boardVersion, readOnly }) 
   if (delay.isLoading) return <p className="p-4 text-sm text-muted-foreground">Loading the delay assessment…</p>;
   if (!view) return <p role="alert" className="p-4 text-sm text-destructive">The delay assessment could not be loaded.</p>;
 
-  const busy = link.isPending || unlink.isPending || settings.isPending || decideEvent.isPending || decideOverlap.isPending;
+  const busy =
+    link.isPending ||
+    unlink.isPending ||
+    settings.isPending ||
+    decideEvent.isPending ||
+    decideOverlap.isPending ||
+    recordCostBasis.isPending ||
+    reviewCostBasis.isPending;
   const disabled = readOnly || busy;
   const linked = new Set([...view.events.map((e) => `hindrance:${e.event_id}`), ...view.records.map((r) => `${r.target_type}:${r.target_id}`)]);
   const available = (candidates.data ?? []).filter((c) => !linked.has(`${c.target_type}:${c.target_id}`));
@@ -489,7 +526,7 @@ const DelayTab: React.FC<Props> = ({ claimId, headId, boardVersion, readOnly }) 
       {view.overlaps.length > 0 && (
         <section aria-labelledby="delay-overlaps-heading" className="space-y-3 rounded-lg border bg-card p-4">
           <h2 id="delay-overlaps-heading" className="text-sm font-semibold">
-            Overlaps between Employer and Contractor delay ({view.overlaps.length})
+            Overlaps of concurrent delay ({view.overlaps.length})
           </h2>
           <ul className="space-y-2">
             {view.overlaps.map((overlap, index) => (
@@ -498,7 +535,10 @@ const DelayTab: React.FC<Props> = ({ claimId, headId, boardVersion, readOnly }) 
                 overlap={overlap}
                 index={index}
                 disabled={disabled}
+                claimId={claimId}
                 onDecide={(decision) => decideOverlap.mutate({ overlapId: overlap.overlap_id, ...decision })}
+                onRecordCost={(cost) => recordCostBasis.mutate({ overlapId: overlap.overlap_id, ...cost })}
+                onReviewCost={() => reviewCostBasis.mutate({ overlapId: overlap.overlap_id })}
               />
             ))}
           </ul>

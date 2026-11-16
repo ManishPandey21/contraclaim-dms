@@ -18,6 +18,7 @@ how each overlap is treated, are inputs.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Dict, Iterable, List, Optional, Set, Tuple
@@ -25,9 +26,16 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 RISK_OWNERS = ("employer", "contractor", "neutral")
 # Treatments under which the overlap's days count towards the extension in full.
 FULL_TIME_TREATMENTS = {"eot_granted_no_cost", "eot_granted_with_cost", "not_true_concurrency"}
-# Treatments under which the overlap's days are also compensable.
+# Treatments under which the overlap's days MAY also carry cost. They carry it only
+# when the finding's cost basis is established (D-16, AQ-4): contractual basis,
+# causation, linked cost evidence and an authorised review. Never automatically.
 COMPENSABLE_TREATMENTS = {"eot_granted_with_cost", "not_true_concurrency"}
 TREATMENTS = FULL_TIME_TREATMENTS | {"apportioned", "no_eot"}
+
+#: The two concurrencies a person decides (D-16).
+EMPLOYER_CONTRACTOR = "employer_contractor"
+NEUTRAL_CONTRACTOR = "neutral_contractor"
+_KIND_CODE = {EMPLOYER_CONTRACTOR: "ec", NEUTRAL_CONTRACTOR: "nc"}
 
 
 @dataclass(frozen=True)
@@ -47,12 +55,20 @@ class Overlap:
     days: int
     employer_event_ids: Tuple[str, ...]
     contractor_event_ids: Tuple[str, ...]
+    kind: str = EMPLOYER_CONTRACTOR
+    neutral_event_ids: Tuple[str, ...] = ()
+
+    @property
+    def day_set(self) -> Set[date]:
+        return _span(self.start, self.end)
 
 
 @dataclass(frozen=True)
 class Treatment:
     treatment: str
     days_to_eot: Optional[int] = None  # required for "apportioned"
+    # True only when the finding's cost basis is complete and reviewed (D-16).
+    cost_established: bool = False
 
 
 @dataclass
@@ -61,17 +77,23 @@ class DelayFacts:
     counted_event_ids: List[str] = field(default_factory=list)
     uncounted_event_ids: List[str] = field(default_factory=list)
     open_ended_event_ids: List[str] = field(default_factory=list)
+    # Events with no usable end: open-ended with no as-of date.
     invalid_event_ids: List[str] = field(default_factory=list)
+    # Events whose end date is before their start date (a data error, not a duration).
+    reversed_event_ids: List[str] = field(default_factory=list)
     employer_critical_days: int = 0
     contractor_critical_days: int = 0
     neutral_critical_days: int = 0
-    # Neutral critical days that are not also Employer critical days.
+    # Neutral critical days with no Contractor critical delay on the same day.
     neutral_only_days: int = 0
     # Contractor critical days with no Employer critical delay on the same day.
     contractor_only_days: int = 0
     overlaps: List[Overlap] = field(default_factory=list)
     overlap_days: int = 0
     employer_only_days: int = 0
+    # Day sets behind the counts, for the arithmetic in net_eot.
+    employer_only: Set[date] = field(default_factory=set)
+    neutral_only: Set[date] = field(default_factory=set)
 
 
 @dataclass
@@ -118,14 +140,54 @@ def event_days(event: EngineEvent, as_of: Optional[date]) -> Optional[Set[date]]
     return _span(event.start, end)
 
 
-def compute_facts(events: Iterable[EngineEvent], as_of: Optional[date] = None) -> DelayFacts:
+def overlap_identity(kind: str, start: date, end: date, event_ids: Iterable[str]) -> str:
+    """An overlap is its kind, its dates and the events in it (D-16, C-03).
+
+    Two different pairs of events on the same dates are two overlaps, and a change
+    to either the dates or the events gives a new id, which orphans the old finding.
+    """
+    digest = hashlib.sha256("|".join(sorted(event_ids)).encode("utf-8")).hexdigest()[:10]
+    return f"{_KIND_CODE[kind]}:{start.isoformat()}_{end.isoformat()}:{digest}"
+
+
+def _segments(
+    days: Set[date], left: Dict[str, Set[date]], right: Dict[str, Set[date]]
+) -> List[Tuple[date, date, Tuple[str, ...], Tuple[str, ...]]]:
+    """Split ``days`` into consecutive runs over which the same events are active on each side.
+
+    Adjacent events of one owner (Ca 1-5, Cb 6-10 against E1 1-10) give separate
+    overlaps, each decided on its own; they are not merged automatically.
+    """
+    segments: List[Tuple[date, date, Tuple[str, ...], Tuple[str, ...]]] = []
+    for day in sorted(days):
+        active_left = tuple(sorted(eid for eid, span in left.items() if day in span))
+        active_right = tuple(sorted(eid for eid, span in right.items() if day in span))
+        if (
+            segments
+            and (day - segments[-1][1]).days == 1
+            and segments[-1][2] == active_left
+            and segments[-1][3] == active_right
+        ):
+            first, _last, a, b = segments[-1]
+            segments[-1] = (first, day, a, b)
+        else:
+            segments.append((day, day, active_left, active_right))
+    return segments
+
+
+def compute_facts(
+    events: Iterable[EngineEvent], as_of: Optional[date] = None, *, include_neutral: bool = False
+) -> DelayFacts:
+    """Facts on the events as decided. Neutral x Contractor overlaps are surfaced only when the
+    head records that the contract gives time for neutral events (``include_neutral``)."""
     facts = DelayFacts(as_of=as_of)
-    by_owner: Dict[str, Set[date]] = {owner: set() for owner in RISK_OWNERS}
-    spans: Dict[str, Set[date]] = {}
-    owners: Dict[str, str] = {}
+    spans: Dict[str, Dict[str, Set[date]]] = {owner: {} for owner in RISK_OWNERS}
     for event in events:
         if event.end is None:
             facts.open_ended_event_ids.append(event.event_id)
+        if event.end is not None and event.end < event.start:
+            facts.reversed_event_ids.append(event.event_id)
+            continue
         days = event_days(event, as_of)
         if days is None:
             facts.invalid_event_ids.append(event.event_id)
@@ -134,35 +196,55 @@ def compute_facts(events: Iterable[EngineEvent], as_of: Optional[date] = None) -
             facts.uncounted_event_ids.append(event.event_id)
             continue
         facts.counted_event_ids.append(event.event_id)
-        by_owner[event.risk_owner] |= days
-        spans[event.event_id] = days
-        owners[event.event_id] = event.risk_owner
+        spans[event.risk_owner][event.event_id] = days
 
-    employer, contractor, neutral = by_owner["employer"], by_owner["contractor"], by_owner["neutral"]
-    shared = employer & contractor
+    def union(owner: str) -> Set[date]:
+        result: Set[date] = set()
+        for span in spans[owner].values():
+            result |= span
+        return result
+
+    employer, contractor, neutral = union("employer"), union("contractor"), union("neutral")
     facts.employer_critical_days = len(employer)
     facts.contractor_critical_days = len(contractor)
     facts.neutral_critical_days = len(neutral)
-    facts.neutral_only_days = len(neutral - employer)
+    facts.employer_only = employer - contractor
+    facts.neutral_only = neutral - contractor
+    facts.neutral_only_days = len(facts.neutral_only)
     facts.contractor_only_days = len(contractor - employer)
+    facts.employer_only_days = len(facts.employer_only)
+    shared = employer & contractor
     facts.overlap_days = len(shared)
-    facts.employer_only_days = len(employer - contractor)
-    for first, last in _runs(shared):
-        run = _span(first, last)
+
+    for first, last, emp_ids, con_ids in _segments(shared, spans["employer"], spans["contractor"]):
         facts.overlaps.append(
             Overlap(
-                overlap_id=f"{first.isoformat()}_{last.isoformat()}",
+                overlap_id=overlap_identity(EMPLOYER_CONTRACTOR, first, last, emp_ids + con_ids),
                 start=first,
                 end=last,
-                days=len(run),
-                employer_event_ids=tuple(
-                    sorted(eid for eid, days in spans.items() if owners[eid] == "employer" and days & run)
-                ),
-                contractor_event_ids=tuple(
-                    sorted(eid for eid, days in spans.items() if owners[eid] == "contractor" and days & run)
-                ),
+                days=(last - first).days + 1,
+                employer_event_ids=emp_ids,
+                contractor_event_ids=con_ids,
+                kind=EMPLOYER_CONTRACTOR,
             )
         )
+    if include_neutral:
+        # Every day neutral and contractor delay run together is a decided fact, whether or
+        # not an Employer event also covers it: the neutral entitlement is its own question.
+        for first, last, neu_ids, con_ids in _segments(neutral & contractor, spans["neutral"], spans["contractor"]):
+            facts.overlaps.append(
+                Overlap(
+                    overlap_id=overlap_identity(NEUTRAL_CONTRACTOR, first, last, neu_ids + con_ids),
+                    start=first,
+                    end=last,
+                    days=(last - first).days + 1,
+                    employer_event_ids=(),
+                    contractor_event_ids=con_ids,
+                    kind=NEUTRAL_CONTRACTOR,
+                    neutral_event_ids=neu_ids,
+                )
+            )
+    facts.overlaps.sort(key=lambda overlap: (overlap.start, overlap.kind, overlap.overlap_id))
     return facts
 
 
@@ -184,58 +266,77 @@ def net_eot(
 ) -> NetEot:
     """Extension of time on the facts and the treatments decided so far.
 
-    An overlap with no treatment contributes nothing to ``low`` and all of its
-    days to ``high``. Days already granted are taken off both, never below zero.
+    Days are counted as a set, so a day is never counted twice and never lost because
+    another rule also covers it (D-16, C-02): Employer days with no Contractor delay;
+    neutral days with no Contractor delay, where the contract gives time for them; and
+    the days of every overlap decided as carrying time. An apportioned overlap adds its
+    number of days, capped at the days of it not already counted. An overlap with no
+    treatment adds nothing to ``low`` and its uncounted days to ``high``. Days already
+    granted come off both, never below zero.
     """
-    decided = 0
-    undecided_days = 0
-    undecided: List[str] = []
-    for overlap in facts.overlaps:
+    counted: Set[date] = set(facts.employer_only)
+    neutral_days = set(facts.neutral_only) if include_neutral else set()
+    counted |= neutral_days
+    relevant = [o for o in facts.overlaps if o.kind == EMPLOYER_CONTRACTOR or include_neutral]
+    undecided: List[Overlap] = []
+    apportioned: List[Tuple[Overlap, int]] = []
+    for overlap in relevant:
         treatment = treatments.get(overlap.overlap_id)
         if treatment is None or treatment.treatment not in TREATMENTS:
-            undecided.append(overlap.overlap_id)
-            undecided_days += overlap.days
-        else:
-            decided += treatment_days(overlap, treatment)
-    neutral = facts.neutral_only_days if include_neutral else 0
-    base = facts.employer_only_days + decided + neutral
+            undecided.append(overlap)
+        elif treatment.treatment in FULL_TIME_TREATMENTS:
+            counted |= overlap.day_set
+        elif treatment.treatment == "apportioned":
+            apportioned.append((overlap, treatment_days(overlap, treatment)))
+    def apportioned_extra(covered: Set[date]) -> int:
+        # Each apportioned overlap adds at most its own uncounted days, and all of them
+        # together at most the uncounted days of their union: no day is counted twice.
+        per_overlap = sum(min(days, len(overlap.day_set - covered)) for overlap, days in apportioned)
+        union: Set[date] = set()
+        for overlap, _days in apportioned:
+            union |= overlap.day_set
+        return min(per_overlap, len(union - covered))
+
+    low_days = len(counted) + apportioned_extra(counted)
+    high_set = set(counted)
+    for overlap in undecided:
+        high_set |= overlap.day_set
+    high_days = max(low_days, len(high_set) + apportioned_extra(high_set))
     granted = max(0, int(previously_granted))
+    overlap_to_eot = low_days - len(facts.employer_only | neutral_days)
     return NetEot(
-        low=max(0, base - granted),
-        high=max(0, base + undecided_days - granted),
-        undecided_overlap_ids=undecided,
+        low=max(0, low_days - granted),
+        high=max(0, high_days - granted),
+        undecided_overlap_ids=[overlap.overlap_id for overlap in undecided],
         previously_granted=granted,
-        neutral_days_included=neutral,
+        neutral_days_included=len(neutral_days),
         employer_only_days=facts.employer_only_days,
-        overlap_days_to_eot=decided,
+        overlap_days_to_eot=max(0, overlap_to_eot),
     )
 
 
 def compensable_days(
-    events: Iterable[EngineEvent], as_of: Optional[date], treatments: Dict[str, Treatment]
+    events: Iterable[EngineEvent],
+    as_of: Optional[date],
+    treatments: Dict[str, Treatment],
+    *,
+    include_neutral: bool = False,
 ) -> Set[date]:
     """Days on which prolongation cost may be claimed, on the decisions recorded.
 
-    Employer critical days with no Contractor critical delay, plus the days of
-    any overlap decided as carrying cost. An undecided overlap is not
-    compensable, and neither is an apportioned one: which of its days carry
-    cost is not something a day count can tell.
+    Employer critical days with no Contractor critical delay, plus the days of an
+    Employer x Contractor overlap decided as carrying cost **and** whose cost basis is
+    established (D-16, AQ-4: no automatic money, not even for not_true_concurrency).
+    Undecided and apportioned overlaps are not compensable, nor is neutral delay.
     """
-    employer: Set[date] = set()
-    contractor: Set[date] = set()
-    for event in events:
-        days = event_days(event, as_of)
-        if days is None or event.criticality != "critical":
+    facts = compute_facts(events, as_of, include_neutral=include_neutral)
+    result = set(facts.employer_only)
+    for overlap in facts.overlaps:
+        if overlap.kind != EMPLOYER_CONTRACTOR:
             continue
-        if event.risk_owner == "employer":
-            employer |= days
-        elif event.risk_owner == "contractor":
-            contractor |= days
-    result = employer - contractor
-    for first, last in _runs(employer & contractor):
-        treatment = treatments.get(f"{first.isoformat()}_{last.isoformat()}")
-        if treatment is not None and treatment.treatment in COMPENSABLE_TREATMENTS:
-            result |= _span(first, last)
+        treatment = treatments.get(overlap.overlap_id)
+        if treatment is not None and treatment.treatment in COMPENSABLE_TREATMENTS and treatment.cost_established:
+            result |= overlap.day_set
     return result
 
 
@@ -249,6 +350,9 @@ def days_outside(period_start: date, period_end: date, allowed: Set[date]) -> Tu
 
 __all__ = [
     "COMPENSABLE_TREATMENTS",
+    "EMPLOYER_CONTRACTOR",
+    "NEUTRAL_CONTRACTOR",
+    "overlap_identity",
     "FULL_TIME_TREATMENTS",
     "TREATMENTS",
     "DelayFacts",

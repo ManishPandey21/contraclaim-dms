@@ -139,7 +139,10 @@ class ClaimQuantum:
 
     async def _compensable(self, claim: Dict[str, Any], head: ClaimHead) -> Set[date]:
         links = [link for link in await self.delay.links_for_claim(str(claim["_id"])) if link.head_id == head.head_id]
-        return compensable_days(engine_events(head, links), _day(head.delay.as_of_date), head_treatments(head.delay))
+        return compensable_days(
+            engine_events(head, links), _day(head.delay.as_of_date), head_treatments(head.delay),
+            include_neutral=head.delay.include_neutral,
+        )
 
     async def view(self, claim: Dict[str, Any], head_id: str) -> QuantumView:
         bench = self.bench._require_bench(claim)

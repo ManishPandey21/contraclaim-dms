@@ -223,23 +223,43 @@ export interface DelayEventView {
   decision: EventDecision;
 }
 
+/** Why an overlap's days carry cost (4B-22, D-16). Nothing is compensable without it. */
+export interface CostBasis {
+  contractual_basis: string;
+  causation: string;
+  evidence_document_ids: string[];
+  recorded_by?: string | null;
+  recorded_at?: string | null;
+  reviewed_by?: string | null;
+  reviewed_at?: string | null;
+}
+
 export interface ConcurrencyFinding {
   treatment: OverlapTreatment;
   days_to_eot?: number | null;
   basis: string;
   decided_by?: string | null;
   decided_at?: string | null;
+  event_ids?: string[];
+  cost_basis?: CostBasis | null;
 }
+
+export type OverlapKind = "employer_contractor" | "neutral_contractor";
 
 export interface OverlapView {
   overlap_id: string;
   start_date: string;
   end_date: string;
   days: number;
+  kind?: OverlapKind;
   employer_event_ids: string[];
   contractor_event_ids: string[];
+  neutral_event_ids?: string[];
   finding?: ConcurrencyFinding | null;
   days_to_eot?: number | null;
+  /** Whether its days carry cost; if not, cost_status says what is missing. */
+  cost_established?: boolean;
+  cost_status?: string | null;
 }
 
 export interface LinkedRecordView {

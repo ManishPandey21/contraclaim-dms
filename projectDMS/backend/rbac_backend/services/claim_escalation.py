@@ -239,8 +239,9 @@ def build_carry(
                         **_origin(claim_id, f"head:{head.head_id}:overlap:{overlap.overlap_id}"),
                         "origin": {"claim_id": claim_id, "head_id": head.head_id},
                         "issue": (
-                            f"Concurrent delay under {reference}/{head.head_id}: Employer and Contractor delay ran "
-                            "together and the treatment of the period has not been decided."
+                            f"Concurrent delay under {reference}/{head.head_id}: "
+                            f"{'Neutral' if getattr(overlap, 'kind', '') == 'neutral_contractor' else 'Employer'} and "
+                            "Contractor delay ran together and the treatment of the period has not been decided."
                         ),
                         "issue_type": "concurrent_delay",
                         "period_start": overlap.start_date,
@@ -249,7 +250,7 @@ def build_carry(
                     },
                 )
             )
-            weak.append(f"{head.head_id}: an overlap between Employer and Contractor delay has no decided treatment")
+            weak.append(f"{head.head_id}: an overlap of concurrent delay has no decided treatment")
 
     notice = record.notice
     if record.heads and not notices:

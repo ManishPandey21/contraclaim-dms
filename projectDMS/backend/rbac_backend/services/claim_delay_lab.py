@@ -30,6 +30,7 @@ from ..models.claim_delay import (
     UNAVAILABLE_METHODS,
     ClaimHeadLink,
     ConcurrencyFinding,
+    CostBasis,
     EventDecision,
     HeadDelay,
 )
@@ -37,6 +38,10 @@ from ..utils.datetime import now_utc
 from .claim_delay_engine import (
     EngineEvent,
     Treatment,
+    COMPENSABLE_TREATMENTS,
+    EMPLOYER_CONTRACTOR,
+    NEUTRAL_CONTRACTOR,
+    DelayFacts,
     compensable_days,
     compute_facts,
     net_eot,
@@ -128,10 +133,43 @@ class OverlapView(BaseModel):
     start_date: datetime
     end_date: datetime
     days: int
+    # employer_contractor | neutral_contractor (D-16).
+    kind: str = EMPLOYER_CONTRACTOR
     employer_event_ids: List[str] = Field(default_factory=list)
     contractor_event_ids: List[str] = Field(default_factory=list)
+    neutral_event_ids: List[str] = Field(default_factory=list)
     finding: Optional[ConcurrencyFinding] = None
     days_to_eot: Optional[int] = None
+    # Whether its days carry cost, and if not, what is missing (no automatic money).
+    cost_established: bool = False
+    cost_status: Optional[str] = None
+
+
+class CostBasisRequest(BaseModel):
+    board_version: int = Field(..., ge=0)
+    contractual_basis: str = Field(..., min_length=10, max_length=2000)
+    causation: str = Field(..., min_length=10, max_length=2000)
+    evidence_document_ids: List[str] = Field(..., min_length=1, max_length=50)
+
+
+class CostReviewRequest(BaseModel):
+    board_version: int = Field(..., ge=0)
+
+
+def _cost_status(kind: str, finding: Optional[ConcurrencyFinding]) -> Optional[str]:
+    """Why an overlap's days carry no cost yet, in plain words; None when they do or cannot."""
+    if kind != EMPLOYER_CONTRACTOR:
+        return "Neutral delay carries time only, never cost."
+    if finding is None or finding.treatment not in COMPENSABLE_TREATMENTS:
+        return None
+    if finding.cost_established():
+        return None
+    cost = finding.cost_basis
+    if cost is None:
+        return "Time only until the contractual basis, causation and cost evidence are recorded and reviewed."
+    if not cost.reviewed_by:
+        return "Time only until a reviewer with determination authority, other than the person who recorded it, reviews the cost basis."
+    return "Time only: the cost basis must be reviewed by someone other than the person who recorded it."
 
 
 class LinkedRecordView(BaseModel):
@@ -267,9 +305,17 @@ def engine_events(head: ClaimHead, links: List[ClaimHeadLink]) -> List[EngineEve
 
 def head_treatments(delay: HeadDelay) -> Dict[str, Treatment]:
     return {
-        overlap_id: Treatment(finding.treatment, finding.days_to_eot)
+        overlap_id: Treatment(finding.treatment, finding.days_to_eot, finding.cost_established())
         for overlap_id, finding in delay.findings.items()
     }
+
+
+def head_facts(head: ClaimHead, links: List[ClaimHeadLink]) -> DelayFacts:
+    """The facts for a head, with Neutral x Contractor overlaps when its neutral entitlement is recorded."""
+    return compute_facts(engine_events(head, links), _day(head.delay.as_of_date), include_neutral=head.delay.include_neutral)
+
+
+_KIND_LABEL = {EMPLOYER_CONTRACTOR: "Employer and Contractor", NEUTRAL_CONTRACTOR: "neutral and Contractor"}
 
 
 def granted_days_of(link: ClaimHeadLink) -> tuple[int, bool, Optional[str]]:
@@ -330,19 +376,29 @@ def delay_blockers(head: ClaimHead, links: List[ClaimHeadLink]) -> List[str]:
         blockers.append(
             f"{head.head_id}: {count} delay event{'' if count == 1 else 's'} need a risk owner and a call on criticality"
         )
-    facts = compute_facts(events, as_of)
+    facts = compute_facts(events, as_of, include_neutral=head.delay.include_neutral)
+    if facts.reversed_event_ids:
+        # C-06: an end before the start is a wrong date on the record, not a missing as-of date.
+        count = len(facts.reversed_event_ids)
+        blockers.append(
+            f"{head.head_id}: {count} delay event{'' if count == 1 else 's'} end{'s' if count == 1 else ''} before "
+            f"{'it starts' if count == 1 else 'they start'}; correct the dates on the register"
+        )
     if facts.invalid_event_ids:
         blockers.append(
             f"{head.head_id}: set the date the analysis runs to; "
-            f"{len(facts.invalid_event_ids)} event(s) have no usable end date"
+            f"{len(facts.invalid_event_ids)} event(s) have no end date"
         )
-    open_overlaps = net_eot(facts, head_treatments(head.delay)).undecided_overlap_ids
-    if open_overlaps:
-        count = len(open_overlaps)
-        blockers.append(
-            f"{head.head_id}: {count} overlap{'' if count == 1 else 's'} between Employer and Contractor "
-            "delay need a decided treatment"
-        )
+    open_ids = set(
+        net_eot(facts, head_treatments(head.delay), include_neutral=head.delay.include_neutral).undecided_overlap_ids
+    )
+    for kind in (EMPLOYER_CONTRACTOR, NEUTRAL_CONTRACTOR):
+        count = sum(1 for overlap in facts.overlaps if overlap.kind == kind and overlap.overlap_id in open_ids)
+        if count:
+            blockers.append(
+                f"{head.head_id}: {count} overlap{'' if count == 1 else 's'} between {_KIND_LABEL[kind]} "
+                "delay need a decided treatment"
+            )
     if head.delay.include_neutral and not (head.delay.neutral_basis or "").strip():
         blockers.append(f"{head.head_id}: state the contractual basis for giving time for neutral events")
     return blockers
@@ -355,7 +411,7 @@ def build_view(
     active = [link for link in links if link.status == "active" and link.head_id == head.head_id]
     as_of = _day(head.delay.as_of_date)
     events = engine_events(head, active)
-    facts = compute_facts(events, as_of)
+    facts = compute_facts(events, as_of, include_neutral=head.delay.include_neutral)
     treatments = head_treatments(head.delay)
     granted = previously_granted(active)
     net = net_eot(facts, treatments, previously_granted=granted, include_neutral=head.delay.include_neutral)
@@ -424,14 +480,18 @@ def build_view(
                 days=overlap.days,
                 employer_event_ids=list(overlap.employer_event_ids),
                 contractor_event_ids=list(overlap.contractor_event_ids),
+                neutral_event_ids=list(overlap.neutral_event_ids),
+                kind=overlap.kind,
                 finding=finding,
                 days_to_eot=treatment_days(overlap, treatments[overlap.overlap_id]) if finding else None,
+                cost_established=bool(finding and finding.cost_established()),
+                cost_status=_cost_status(overlap.kind, finding),
             )
         )
 
     periods: List[DelayPeriod] = []
     run: List[date] = []
-    for day in sorted(compensable_days(events, as_of, treatments)):
+    for day in sorted(compensable_days(events, as_of, treatments, include_neutral=head.delay.include_neutral)):
         if run and (day - run[-1]).days != 1:
             periods.append(DelayPeriod(start_date=_midnight(run[0]), end_date=_midnight(run[-1]), days=len(run)))
             run = []
@@ -713,7 +773,7 @@ class ClaimDelayLab:
         bench = self.bench._require_bench(claim)
         head = _head(bench, head_id)
         links = [link for link in await self.links_for_claim(str(claim["_id"])) if link.head_id == head_id]
-        live = {overlap.overlap_id for overlap in compute_facts(engine_events(head, links), _day(head.delay.as_of_date)).overlaps}
+        live = {overlap.overlap_id for overlap in head_facts(head, links).overlaps}
         if not set(head.delay.findings) - live:
             return
 
@@ -788,7 +848,7 @@ class ClaimDelayLab:
         bench = self.bench._require_bench(claim)
         head = _head(bench, head_id)
         links = [link for link in await self.links_for_claim(str(claim["_id"])) if link.head_id == head_id]
-        overlaps = {o.overlap_id: o for o in compute_facts(engine_events(head, links), _day(head.delay.as_of_date)).overlaps}
+        overlaps = {o.overlap_id: o for o in head_facts(head, links).overlaps}
         overlap = overlaps.get(overlap_id)
         if overlap is None:
             raise HTTPException(status_code=404, detail="There is no such overlap on the events as now decided")
@@ -816,6 +876,7 @@ class ClaimDelayLab:
                 basis=basis,
                 decided_by=user_id,
                 decided_at=now_utc(),
+                event_ids=sorted(overlap.employer_event_ids + overlap.contractor_event_ids + overlap.neutral_event_ids),
             )
 
         def _apply(fresh: ClaimBench) -> None:
@@ -829,6 +890,85 @@ class ClaimDelayLab:
         await self.bench._change(claim, request.board_version, user_id, _apply)
         return await self.view(await self._reload(claim), head_id)
 
+
+    async def _live_finding(
+        self, claim: Dict[str, Any], head_id: str, overlap_id: str
+    ) -> tuple[ClaimHead, ConcurrencyFinding]:
+        bench = self.bench._require_bench(claim)
+        head = _head(bench, head_id)
+        links = [link for link in await self.links_for_claim(str(claim["_id"])) if link.head_id == head_id]
+        overlap = {o.overlap_id: o for o in head_facts(head, links).overlaps}.get(overlap_id)
+        if overlap is None:
+            raise HTTPException(status_code=404, detail="There is no such overlap on the events as now decided")
+        finding = head.delay.findings.get(overlap_id)
+        if overlap.kind != EMPLOYER_CONTRACTOR:
+            raise HTTPException(status_code=422, detail="Neutral delay carries time only, never cost")
+        if finding is None or finding.treatment not in COMPENSABLE_TREATMENTS:
+            raise HTTPException(
+                status_code=422,
+                detail="Only an overlap decided as carrying cost (time with cost, or not true concurrency) takes a cost basis",
+            )
+        return head, finding
+
+    async def record_cost_basis(
+        self,
+        claim: Dict[str, Any],
+        head_id: str,
+        overlap_id: str,
+        request: "CostBasisRequest",
+        user_id: Optional[str],
+        claim_documents: set,
+    ) -> DelayView:
+        """Record why an overlap's days carry cost (D-16). Any earlier review is withdrawn."""
+        await self._live_finding(claim, head_id, overlap_id)
+        evidence = sorted({str(item) for item in request.evidence_document_ids})
+        unknown = [item for item in evidence if item not in claim_documents]
+        if unknown:
+            raise HTTPException(
+                status_code=422,
+                detail="Cost evidence must be documents linked to this claim that you can see",
+            )
+        cost = CostBasis(
+            contractual_basis=request.contractual_basis.strip(),
+            causation=request.causation.strip(),
+            evidence_document_ids=evidence,
+            recorded_by=user_id,
+            recorded_at=now_utc(),
+        )
+
+        def _apply(fresh: ClaimBench) -> None:
+            finding = _head(fresh, head_id).delay.findings.get(overlap_id)
+            if finding is None:
+                raise HTTPException(status_code=409, detail="The overlap's treatment changed; reload and retry")
+            finding.cost_basis = cost
+            self.bench._unlock(fresh)
+
+        await self.bench._change(claim, request.board_version, user_id, _apply)
+        return await self.view(await self._reload(claim), head_id)
+
+    async def review_cost_basis(
+        self, claim: Dict[str, Any], head_id: str, overlap_id: str, request: "CostReviewRequest", user_id: Optional[str]
+    ) -> DelayView:
+        """Accept a recorded cost basis. The router admits only a holder of the claim's
+        determination authority by name; here, the reviewer must not be who recorded it."""
+        _head_obj, finding = await self._live_finding(claim, head_id, overlap_id)
+        cost = finding.cost_basis
+        if cost is None:
+            raise HTTPException(status_code=422, detail="Record the cost basis before it is reviewed")
+        if not user_id or user_id == cost.recorded_by:
+            raise HTTPException(status_code=403, detail="The cost basis must be reviewed by someone other than the person who recorded it")
+        recorded_at = cost.recorded_at
+
+        def _apply(fresh: ClaimBench) -> None:
+            target = _head(fresh, head_id).delay.findings.get(overlap_id)
+            if target is None or target.cost_basis is None or target.cost_basis.recorded_at != recorded_at:
+                raise HTTPException(status_code=409, detail="The cost basis changed; reload and review it again")
+            target.cost_basis.reviewed_by = user_id
+            target.cost_basis.reviewed_at = now_utc()
+            self.bench._unlock(fresh)
+
+        await self.bench._change(claim, request.board_version, user_id, _apply)
+        return await self.view(await self._reload(claim), head_id)
 
 def _head(bench: ClaimBench, head_id: str) -> ClaimHead:
     for head in bench.heads:

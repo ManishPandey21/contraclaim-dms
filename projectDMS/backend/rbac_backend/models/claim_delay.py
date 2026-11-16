@@ -87,6 +87,23 @@ class EventDecision(BaseModel):
     decided_at: Optional[datetime] = None
 
 
+class CostBasis(BaseModel):
+    """What makes an overlap's days carry cost (D-16, AQ-4). Nothing is compensable without it.
+
+    Recorded by one person and reviewed by another who holds the claim's determination
+    authority by name (or, once 4B-07 lands, a delay_planning_expert assignment).
+    """
+
+    contractual_basis: str = Field(..., min_length=10, max_length=2000)
+    causation: str = Field(..., min_length=10, max_length=2000)
+    # Documents linked to the claim that evidence the cost.
+    evidence_document_ids: List[str] = Field(..., min_length=1, max_length=50)
+    recorded_by: Optional[str] = None
+    recorded_at: Optional[datetime] = None
+    reviewed_by: Optional[str] = None
+    reviewed_at: Optional[datetime] = None
+
+
 class ConcurrencyFinding(BaseModel):
     """The treatment a person decided for one overlap, with its contractual basis."""
 
@@ -95,6 +112,19 @@ class ConcurrencyFinding(BaseModel):
     basis: str = Field(..., min_length=10, max_length=2000)
     decided_by: Optional[str] = None
     decided_at: Optional[datetime] = None
+    # The events the finding was made on (D-16): a change to them orphans it.
+    event_ids: List[str] = Field(default_factory=list)
+    cost_basis: Optional[CostBasis] = None
+
+    def cost_established(self) -> bool:
+        cost = self.cost_basis
+        return bool(
+            cost
+            and cost.evidence_document_ids
+            and cost.reviewed_by
+            and cost.recorded_by
+            and cost.reviewed_by != cost.recorded_by
+        )
 
 
 class HeadDelay(BaseModel):
@@ -127,6 +157,7 @@ class QuantumLine(BaseModel):
 
 __all__ = [
     "UNAVAILABLE_METHODS",
+    "CostBasis",
     "ClaimHeadLink",
     "ConcurrencyFinding",
     "Criticality",

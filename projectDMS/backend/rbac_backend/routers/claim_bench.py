@@ -42,6 +42,8 @@ from ..services.claim_delay_lab import (
     HINDRANCES,
     SUBMISSIONS,
     ClaimDelayLab,
+    CostBasisRequest,
+    CostReviewRequest,
     DelaySettingsRequest,
     DelayView,
     EventDecisionRequest,
@@ -679,6 +681,50 @@ async def decide_head_delay_overlap(
     return await ClaimDelayLab(db, bench).decide_overlap(
         claim, head_id, overlap_id, payload, _user_id(current_user)
     )
+
+
+@router.put(
+    "/claims/{claim_id}/bench/heads/{head_id}/delay/overlaps/{overlap_id}/cost-basis", response_model=DelayView
+)
+@handle_exceptions
+async def record_head_overlap_cost_basis(
+    claim_id: str,
+    head_id: str,
+    overlap_id: str,
+    payload: CostBasisRequest,
+    db=Depends(get_db),
+    bench: ClaimBenchService = Depends(get_bench),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
+):
+    """Record why an overlap's days carry cost (D-16): basis, causation and cost evidence."""
+    claim = await _claim(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection, bench)
+    return await ClaimDelayLab(db, bench).record_cost_basis(
+        claim, head_id, overlap_id, payload, _user_id(current_user), await _claim_documents(claim, db, current_user)
+    )
+
+
+@router.post(
+    "/claims/{claim_id}/bench/heads/{head_id}/delay/overlaps/{overlap_id}/cost-basis/review", response_model=DelayView
+)
+@handle_exceptions
+async def review_head_overlap_cost_basis(
+    claim_id: str,
+    head_id: str,
+    overlap_id: str,
+    payload: CostReviewRequest,
+    db=Depends(get_db),
+    bench: ClaimBenchService = Depends(get_bench),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
+):
+    """Accept a recorded cost basis. Only a holder of the claim's determination authority by name
+    may review (D-16; a delay_planning_expert assignment will also qualify once 4B-07 lands)."""
+    claim = await _claim(claim_id, Permissions.CLAIM_VIEW, db, current_user, policy, selection, bench)
+    await policy.authorize_document(current_user, Permissions.CLAIM_DETERMINE, claim, resource_type="claim")
+    return await ClaimDelayLab(db, bench).review_cost_basis(claim, head_id, overlap_id, payload, _user_id(current_user))
 
 
 # --------------------------------------------------------------------------- #

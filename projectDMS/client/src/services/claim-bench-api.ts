@@ -231,6 +231,33 @@ export async function decideDelayOverlap(
   return data;
 }
 
+export async function recordOverlapCostBasis(
+  claimId: string,
+  headId: string,
+  overlapId: string,
+  boardVersion: number,
+  cost: { contractual_basis: string; causation: string; evidence_document_ids: string[] }
+): Promise<DelayView> {
+  const { data } = await api.put<DelayView>(
+    `${headPath(claimId, headId)}/delay/overlaps/${encodeURIComponent(overlapId)}/cost-basis`,
+    { board_version: boardVersion, ...cost }
+  );
+  return data;
+}
+
+export async function reviewOverlapCostBasis(
+  claimId: string,
+  headId: string,
+  overlapId: string,
+  boardVersion: number
+): Promise<DelayView> {
+  const { data } = await api.post<DelayView>(
+    `${headPath(claimId, headId)}/delay/overlaps/${encodeURIComponent(overlapId)}/cost-basis/review`,
+    { board_version: boardVersion }
+  );
+  return data;
+}
+
 export async function fetchHeadQuantum(claimId: string, headId: string): Promise<QuantumView> {
   const { data } = await api.get<QuantumView>(`${headPath(claimId, headId)}/quantum`);
   return data;
