@@ -27,7 +27,7 @@ const ClaimSignalsStrip: React.FC<{ onRaised: () => void }> = ({ onRaised }) => 
     mutationFn: (signal: ClaimSignal) => raisePotentialClaim(signal.source_type, signal.source_id),
     onSuccess: ({ claim, created }) => {
       toast.success(created ? "Potential claim raised" : "A claim had already been raised from this record");
-      void client.invalidateQueries({ queryKey: claimBenchKeys.signals });
+      void client.invalidateQueries({ queryKey: claimBenchKeys.signalsAll });
       onRaised();
       navigate(`/claims/${claim.id}`);
     },

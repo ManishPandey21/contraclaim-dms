@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { isAxiosError } from "axios";
 import { toast } from "sonner";
 
+import { useOptionalTenant } from "@/contexts/TenantContext";
 import { errorMessage } from "@/hooks/useLetterBench";
 import {
   addClaimHead,
@@ -38,16 +39,35 @@ import type {
   QuantumView,
 } from "@/types/claimBench";
 
+/**
+ * Availability and signals depend on the navbar selection: the rollout can be
+ * on for one organisation and off for another, and signals are listed for the
+ * selected project. Their keys therefore carry the selection, so switching
+ * organisation never serves the previous one's cached answer.
+ */
 export const claimBenchKeys = {
-  availability: ["claim-bench", "availability"] as const,
+  availabilityAll: ["claim-bench", "availability"] as const,
+  availability: (organizationId: string) => ["claim-bench", "availability", organizationId] as const,
   bench: (claimId: string) => ["claim-bench", "board", claimId] as const,
-  signals: ["claim-bench", "signals"] as const,
+  signalsAll: ["claim-bench", "signals"] as const,
+  signals: (organizationId: string, projectId: string) =>
+    ["claim-bench", "signals", organizationId, projectId] as const,
 };
+
+/** The navbar selection, or empty strings outside a tenant provider. */
+export function useClaimBenchSelection(): { organizationId: string; projectId: string } {
+  const tenant = useOptionalTenant();
+  return {
+    organizationId: tenant?.selectedOrganizationId ?? "",
+    projectId: tenant?.selectedProjectId ?? "",
+  };
+}
 
 /** The server decides whether the Claim Bench is on. */
 export function useClaimBenchAvailability() {
+  const { organizationId } = useClaimBenchSelection();
   return useQuery({
-    queryKey: claimBenchKeys.availability,
+    queryKey: claimBenchKeys.availability(organizationId),
     queryFn: fetchClaimBenchAvailability,
     staleTime: 60_000,
     retry: false,
@@ -55,7 +75,13 @@ export function useClaimBenchAvailability() {
 }
 
 export function useClaimSignals(enabled: boolean) {
-  return useQuery({ queryKey: claimBenchKeys.signals, queryFn: fetchClaimSignals, enabled, retry: false });
+  const { organizationId, projectId } = useClaimBenchSelection();
+  return useQuery({
+    queryKey: claimBenchKeys.signals(organizationId, projectId),
+    queryFn: fetchClaimSignals,
+    enabled,
+    retry: false,
+  });
 }
 
 const isConflict = (error: unknown) => isAxiosError(error) && error.response?.status === 409;

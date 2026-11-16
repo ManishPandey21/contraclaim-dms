@@ -1,9 +1,9 @@
 """Claim Bench and Notice Clock API.
 
 Every route is under the claim permissions and the navbar selection, exactly
-as the claim register is. The Bench itself is behind a server-side rollout
-flag; the notice-requirement routes are not, because the register's notice
-column uses them whether or not the Bench is on.
+as the claim register is. The Bench and its signal routes are behind a
+server-side rollout flag; the notice-requirement routes are not, because the
+register's notice column uses them whether or not the Bench is on.
 
 Static paths here have two segments after ``/claims`` (``/claims/bench/...``,
 ``/claims/notice/...``) so they can never be read as ``/claims/{claim_id}``.
@@ -148,12 +148,14 @@ async def list_claim_signals(
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
     selection: ActiveScope = Depends(active_scope),
+    bench: ClaimBenchService = Depends(get_bench),
 ):
     """Records that indicate a claim nobody has raised yet, with the notice clock each is on.
 
     A source the caller may not read contributes nothing; it is not an error.
     """
     org, project = await _project_scope(selection, policy, current_user, Permissions.CLAIM_VIEW, organization_id, project_id)
+    bench.ensure_enabled(org or getattr(current_user, "organization_id", None))
     scope = build_scope_query(current_user, organization_id=org, project_id=project)
     hindrances = scope if await _may(policy, current_user, Permissions.HINDRANCE_VIEW, org, project) else None
     boards = scope if await _may(policy, current_user, Permissions.DRAFTING_REQUEST_VIEW, org, project) else None
@@ -170,6 +172,7 @@ async def raise_potential_claim(
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
     selection: ActiveScope = Depends(active_scope),
+    bench: ClaimBenchService = Depends(get_bench),
 ):
     """Accept a signal: create its potential claim, or return the one already raised from it."""
     signals = ClaimSignalService(db)
@@ -177,6 +180,7 @@ async def raise_potential_claim(
     if not source:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source record not found")
     await selection.require_record(source)
+    bench.ensure_enabled(str(source.get("organization_id") or "") or getattr(current_user, "organization_id", None))
     source_permission = (
         Permissions.HINDRANCE_VIEW if payload.source_type == "hindrance" else Permissions.DRAFTING_REQUEST_VIEW
     )

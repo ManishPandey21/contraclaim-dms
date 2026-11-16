@@ -41,7 +41,9 @@ Nothing else about the Bench depends on the skill.
 | `CLAIM_BENCH_ROLLOUT_MODE` | `off`, `canary`, `primary` | `off` |
 | `CLAIM_BENCH_CANARY_TENANT_IDS` | comma-separated organisation ids | empty |
 
-The server decides. With the Bench off, `/claims/{id}` shows the claim record page as before and the board routes answer 404. The notice-requirement routes and the register's notice column work in every mode.
+The server decides. With the Bench off, `/claims/{id}` shows the claim record page as before, and the board routes and the two signal routes (`/claims/bench/signals`, `/claims/bench/potential`) answer 404. The notice-requirement routes and the register's notice column work in every mode.
+
+Any other value, including `shadow` (named in the original plan but never built), stops the backend at startup with "CLAIM_BENCH_ROLLOUT_MODE must be off, canary, or primary". Before this check an unknown value silently meant `off`.
 
 **Rollback:** set `CLAIM_BENCH_ROLLOUT_MODE=off` and restart the backend. Boards already created stay stored on their claims and reappear when the flag is turned back on.
 

@@ -208,7 +208,7 @@ class ClaimBenchResponse(BaseModel):
 
 def claim_bench_rollout(tenant_id: Optional[str], config: Any = settings) -> ClaimBenchAvailability:
     """Server-authoritative rollout decision. No client flag can bypass it."""
-    mode = str(getattr(config, "CLAIM_BENCH_ROLLOUT_MODE", "off") or "off").lower()
+    mode = str(getattr(config, "CLAIM_BENCH_ROLLOUT_MODE", "off") or "off").strip().lower()
     if mode not in VALID_MODES:
         mode = "off"
     if mode == "primary":

@@ -765,6 +765,13 @@ class Settings(BaseSettings):
             raise ValueError(
                 "ARBITRATION_ENGINE_V2_COMPATIBILITY_MODE must be active, read_replay_only, or retired"
             )
+        # The Claim Bench reads an unknown mode as "off". Refuse it at startup
+        # instead, so a typo (or the spec's never-built "shadow") cannot switch
+        # the Bench off silently. Kept equal to services.claim_bench.VALID_MODES
+        # by test_claim_bench_rollout_guard.
+        claim_bench_rollout = str(getattr(self, "CLAIM_BENCH_ROLLOUT_MODE", "off") or "off").strip().lower()
+        if claim_bench_rollout not in {"off", "canary", "primary"}:
+            raise ValueError("CLAIM_BENCH_ROLLOUT_MODE must be off, canary, or primary")
 
         environment = str(getattr(self, "ENVIRONMENT", "development") or "development").lower()
         if environment == "production":
