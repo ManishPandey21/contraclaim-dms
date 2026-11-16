@@ -288,13 +288,22 @@ async def test_neutral_time_needs_a_stated_basis() -> None:
 # --------------------------------------------------------------------------- #
 # Days already granted
 # --------------------------------------------------------------------------- #
-def _determination(db: FakeDB, _id: str, items: list, status: str = "granted") -> None:
+def _determination(
+    db: FakeDB, _id: str, items: list, status: str = "granted", *, frozen: bool = True,
+    supersedes: list | None = None, on: datetime = datetime(2026, 6, 1),
+) -> None:
+    """A determination as the key-date register stores it: frozen once issued, items keyed by milestone."""
     db.key_date_eot_determinations.docs.append(
-        {"_id": _id, "organization_id": ORG, "project_id": PROJECT, "determination_reference": f"DET-{_id}",
-         "determination_date": datetime(2026, 6, 1), "status": status}
+        {"_id": _id, "organization_id": ORG, "project_id": PROJECT, "contract_id": "primary",
+         "determination_reference": f"DET-{_id}", "determination_date": on, "status": status,
+         "frozen_at": on if frozen else None, "supersedes_determination_ids": list(supersedes or [])}
     )
     for item in items:
-        db.key_date_eot_determination_items.docs.append({"determination_id": _id, **item})
+        granting = item.get("determination_result") in ("granted", "partially_granted")
+        db.key_date_eot_determination_items.docs.append(
+            {"determination_id": _id, "key_date_id": f"kd-{item['milestone_ref']}",
+             "eot_granted_date": datetime(2027, 1, 1) if granting else None, **item}
+        )
 
 
 async def test_days_already_granted_are_read_from_the_linked_determination() -> None:
@@ -326,13 +335,103 @@ async def test_a_determination_over_several_milestones_is_not_counted_until_one_
     _refused(exc, 422, "no item for milestone KD-9")
 
 
-@pytest.mark.parametrize("result, status", [("rejected", "rejected"), ("pending", "pending"), ("granted", "superseded")])
-async def test_a_determination_that_granted_nothing_or_was_superseded_is_not_counted(result, status) -> None:
+@pytest.mark.parametrize("result, status", [("rejected", "rejected"), ("pending", "pending"), ("granted", "under_review")])
+async def test_a_determination_that_granted_nothing_or_is_not_final_is_not_counted(result, status) -> None:
     db, bench, lab, _ = _setup()
     await _two_events(db, bench, lab)
     _determination(db, "D1", [{"milestone_ref": "KD-1", "granted_extension_days": 10, "determination_result": result}], status)
     view = await _link(db, lab, "D1", "eot_determination")
     assert view.net.previously_granted == 0 and not view.records[0].counted and view.records[0].not_counted_reason
+
+
+# --------------------------------------------------------------------------- #
+# 4B-21 (D-15, C-01): the key-date register's own rule decides what was granted
+# --------------------------------------------------------------------------- #
+def _register_governing(db: FakeDB) -> dict:
+    """What the register itself says governs each milestone, by the register's code path."""
+    from rbac_backend.services.key_date_revision_service import KeyDateRevisionService
+
+    determinations = []
+    for row in db.key_date_eot_determinations.docs:
+        determinations.append(
+            {**row, "items": [item for item in db.key_date_eot_determination_items.docs if item["determination_id"] == row["_id"]]}
+        )
+    effective = {"kd-KD-1": None, "kd-KD-2": None}
+    governing = {"kd-KD-1": None, "kd-KD-2": None}
+    KeyDateRevisionService._replay_determinations(determinations, effective, governing)
+    return {key: (row or {}).get("_id") for key, row in governing.items()}
+
+
+async def test_a_superseding_determination_is_the_one_that_counts() -> None:
+    """C-01: D1 grants 10; D2 (status "superseded" in the register, meaning it is the operative
+    one) supersedes D1 and grants 15. The register says 15; the Lab said 10."""
+    db, bench, lab, _ = _setup()
+    await _two_events(db, bench, lab)
+    _determination(db, "D1", [{"milestone_ref": "KD-1", "granted_extension_days": 10, "determination_result": "granted"}])
+    _determination(
+        db, "D2", [{"milestone_ref": "KD-1", "granted_extension_days": 15, "determination_result": "granted"}],
+        "superseded", supersedes=["D1"], on=datetime(2026, 8, 1),
+    )
+    await _link(db, lab, "D1", "eot_determination")
+    view = await _link(db, lab, "D2", "eot_determination")
+    counted = {record.label: (record.counted, record.not_counted_reason) for record in view.records}
+    assert counted["EOT determination DET-D2"] == (True, None)
+    assert counted["EOT determination DET-D1"][0] is False
+    assert "supersedes" in counted["EOT determination DET-D1"][1]
+    assert view.net.previously_granted == 15
+    # The same function the register replays with names the same governing determination.
+    assert _register_governing(db)["kd-KD-1"] == "D2"
+
+
+async def test_a_draft_determination_is_not_counted() -> None:
+    db, bench, lab, _ = _setup()
+    await _two_events(db, bench, lab)
+    _determination(db, "D1", [{"milestone_ref": "KD-1", "granted_extension_days": 10, "determination_result": "granted"}], frozen=False)
+    view = await _link(db, lab, "D1", "eot_determination")
+    assert view.net.previously_granted == 0 and "not frozen" in view.records[0].not_counted_reason
+    assert _register_governing(db)["kd-KD-1"] is None
+
+
+async def test_an_under_review_determination_granting_five_days_is_not_counted() -> None:
+    db, bench, lab, _ = _setup()
+    await _two_events(db, bench, lab)
+    _determination(db, "D1", [{"milestone_ref": "KD-1", "granted_extension_days": 5, "determination_result": "granted"}], "under_review")
+    view = await _link(db, lab, "D1", "eot_determination")
+    assert view.net.previously_granted == 0 and "not final" in view.records[0].not_counted_reason
+
+
+async def test_a_later_determination_on_the_same_milestone_governs_and_the_earlier_is_not_summed() -> None:
+    db, bench, lab, _ = _setup()
+    await _two_events(db, bench, lab)
+    _determination(db, "D1", [{"milestone_ref": "KD-1", "granted_extension_days": 10, "determination_result": "granted"}])
+    _determination(db, "D2", [{"milestone_ref": "KD-1", "granted_extension_days": 25, "determination_result": "granted"}], on=datetime(2026, 9, 1))
+    await _link(db, lab, "D1", "eot_determination")
+    view = await _link(db, lab, "D2", "eot_determination")
+    assert view.net.previously_granted == 25
+    assert _register_governing(db)["kd-KD-1"] == "D2"
+
+
+async def test_freezing_or_superseding_a_linked_determination_marks_the_link_stale() -> None:
+    db, bench, lab, _ = _setup()
+    await _two_events(db, bench, lab)
+    _determination(db, "D1", [{"milestone_ref": "KD-1", "granted_extension_days": 10, "determination_result": "granted"}], frozen=False)
+    view = await _link(db, lab, "D1", "eot_determination")
+    assert view.records[0].revision_current and view.stale_links == 0
+    db.key_date_eot_determinations.docs[0]["frozen_at"] = datetime(2026, 6, 2)
+    after_freeze = await lab.view(await _claim(db), "H1")
+    assert not after_freeze.records[0].revision_current and after_freeze.stale_links == 1
+
+    db2, bench2, lab2, _ = _setup()
+    await _two_events(db2, bench2, lab2)
+    _determination(db2, "D1", [{"milestone_ref": "KD-1", "granted_extension_days": 10, "determination_result": "granted"}])
+    linked = await _link(db2, lab2, "D1", "eot_determination")
+    assert linked.records[0].revision_current and linked.net.previously_granted == 10
+    _determination(
+        db2, "D2", [{"milestone_ref": "KD-1", "granted_extension_days": 15, "determination_result": "granted"}],
+        supersedes=["D1"], on=datetime(2026, 8, 1),
+    )
+    superseded = await lab2.view(await _claim(db2), "H1")
+    assert not superseded.records[0].revision_current and superseded.stale_links == 1
 
 
 # --------------------------------------------------------------------------- #

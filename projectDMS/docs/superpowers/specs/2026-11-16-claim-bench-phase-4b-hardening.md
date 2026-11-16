@@ -604,6 +604,13 @@ Each ticket is independently testable and lands in its own commit. "Proof" names
 - `sla_rules` notice windows are coerced to whole days from 1 to 365 (`window_days`); anything else is ignored with a warning, and the default applies.
 - C-27 fixed alongside (see the defect table).
 
+**As built, 4B-21 (2026-11-16).**
+
+- `services/key_date_determination_rule.py` holds the register's rule as pure functions (`operative_determinations`, `governing_by_milestone`, `superseded_by`). `KeyDateRevisionService._replay_determinations` now calls them, and its status constants are imported from there, so the register and the Delay Lab cannot drift. The register's own tests pass unchanged.
+- A linked determination's days count only if it is frozen, its status is final, nothing supersedes it, and it governs the head's milestone in the register. Status `superseded` is no longer a refusal: in the register it marks the superseding, operative determination. Drafts, `pending` and `under_review` are not counted. A later determination on the same milestone governs, and the two are not summed. Each refusal names its reason.
+- The determination snapshot carries `frozen_at`, `supersedes_determination_ids`, `superseded_by` and `governs`, so freezing, superseding or a change of governing determination marks the link stale.
+- Compatibility: a determination link recorded before 4B-21 has none of these fields. It is not counted and shows "Re-link this determination" until refreshed. Whether production holds such links (P-03 / P-07) is not read; the Claim Bench is off there.
+
 **C-25 (owner decision 4).** High priority. The read-only assessment is reading P-13 in 4B-01. The fix is verified on a real MongoDB for create, list, get, update, soft-delete, tenant isolation and case-driven drafting. If P-13 shows production is affected, a minimal, independently tested hotfix proposal against the production release branch is ready (`docs/C25_HOTFIX_PROPOSAL.md`); it is not deployed without separate approval. The proposal also carries C-26 (found while verifying C-25), and its tests exercise every operation listed above.
 
 Critical path: 4B-02 → 4B-47 → 4B-04 → 4B-05 → 4B-07 → 4B-26 → 4B-33 → 4B-36 → 4B-39 → 4B-43 → 4B-44. Waves 4 and 5 run beside Waves 1 and 2 once 4B-02 lands. 4B-48 is off the critical path.

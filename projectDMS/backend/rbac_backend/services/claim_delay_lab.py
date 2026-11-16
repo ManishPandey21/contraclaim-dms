@@ -42,6 +42,8 @@ from .claim_delay_engine import (
     net_eot,
     treatment_days,
 )
+from .key_date_determination_rule import FINAL_DETERMINATION_STATUSES, governing_determination_id, superseded_by
+from .key_date_revision_service import KeyDateRevisionService
 from .skills.executor import canonical_hash
 from .sla_service import _as_datetime
 
@@ -271,7 +273,13 @@ def head_treatments(delay: HeadDelay) -> Dict[str, Treatment]:
 
 
 def granted_days_of(link: ClaimHeadLink) -> tuple[int, bool, Optional[str]]:
-    """(days, counted, reason-if-not) for a linked determination."""
+    """(days, counted, reason-if-not) for a linked determination.
+
+    The register's own rule decides (D-15, ``key_date_determination_rule``): a
+    determination counts only if it is frozen, final, not superseded, and governs
+    the milestone this head concerns. Status "superseded" is not a refusal: in the
+    register it marks the superseding, operative determination.
+    """
     snapshot = link.snapshot
     if snapshot.get("needs_milestone"):
         return 0, False, "This determination covers several milestones. Say which one this head concerns."
@@ -279,8 +287,17 @@ def granted_days_of(link: ClaimHeadLink) -> tuple[int, bool, Optional[str]]:
     result = str(snapshot.get("result") or "")
     if result not in GRANTING_RESULTS:
         return 0, False, f"Its result for this milestone is {result.replace('_', ' ') or 'not recorded'}."
-    if str(snapshot.get("status") or "") == "superseded":
-        return 0, False, "This determination has been superseded."
+    if "governs" not in snapshot:
+        # A link recorded before 4B-21 carries no reading of the register's rule.
+        return 0, False, "Re-link this determination: it was linked before the register's rule was applied here."
+    if not snapshot.get("frozen_at"):
+        return 0, False, "It is not frozen yet: only a frozen determination counts."
+    if str(snapshot.get("status") or "") not in FINAL_DETERMINATION_STATUSES:
+        return 0, False, f"Its status is {str(snapshot.get('status') or 'not recorded').replace('_', ' ')}, which is not final."
+    if snapshot.get("superseded_by"):
+        return 0, False, "A later determination supersedes it."
+    if not snapshot.get("governs"):
+        return 0, False, "Another determination governs this milestone in the key-date register."
     if not isinstance(days, int) or days < 0:
         return 0, False, "It records no granted days for this milestone."
     return days, True, None
@@ -521,10 +538,20 @@ class ClaimDelayLab:
         elif len(items) == 1:
             chosen = items[0]
         label = record.get("determination_reference") or str(record.get("_id"))
+        # The register's rule (D-15), read over every determination on the same contract.
+        siblings = await KeyDateRevisionService(self.db).list_determinations(
+            record.get("organization_id"), str(record.get("project_id") or ""), str(record.get("contract_id") or "primary")
+        )
+        record_id = str(record.get("_id"))
+        key_date_id = (chosen or {}).get("key_date_id")
         return (
             {
                 "status": _enum(record.get("status")) or None,
                 "date": _as_datetime(record.get("determination_date")),
+                "frozen_at": _as_datetime(record.get("frozen_at")),
+                "supersedes_determination_ids": sorted(str(item) for item in record.get("supersedes_determination_ids") or []),
+                "superseded_by": superseded_by(siblings, record_id),
+                "governs": bool(key_date_id) and governing_determination_id(siblings, str(key_date_id)) == record_id,
                 "milestone_ref": (chosen or {}).get("milestone_ref"),
                 "granted_days": (chosen or {}).get("granted_extension_days"),
                 "result": _enum((chosen or {}).get("determination_result")) or None,
