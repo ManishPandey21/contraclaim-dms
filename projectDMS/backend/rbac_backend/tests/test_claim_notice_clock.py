@@ -296,6 +296,41 @@ async def test_a_record_that_indicates_no_claim_cannot_be_raised() -> None:
     assert await service.load_source("hindrance", "missing") is None
 
 
+async def test_a_signal_with_no_organisation_anywhere_is_refused_and_writes_nothing() -> None:
+    """4B-13: the record has none, nothing is selected and the user has none (a global role)."""
+    db = FakeDB()
+    db.delay_events.docs.append(_hindrance("7", organization_id=None))
+    service = ClaimSignalService(db)
+
+    class Global:
+        id = "sa-1"
+        organization_id = None
+
+    with pytest.raises(HTTPException) as exc:
+        await service.raise_potential("hindrance", await service.load_source("hindrance", "7"), Global())
+    assert exc.value.status_code == 422 and exc.value.detail["code"] == "signal_organisation_required"
+    assert await db.claims.count_documents({}) == 0
+    claim, created = await service.raise_potential(
+        "hindrance", await service.load_source("hindrance", "7"), Global(), selected_organization_id=ORG
+    )
+    assert created and claim["organization_id"] == ORG
+    again, created_again = await service.raise_potential(
+        "hindrance", await service.load_source("hindrance", "7"), Global(), selected_organization_id=ORG
+    )
+    assert not created_again and again["_id"] == claim["_id"]
+
+
+async def test_a_claim_triggered_board_is_never_a_signal() -> None:
+    db = FakeDB()
+    db.letter_position_boards.docs.append(
+        _board("L9", CLAIMS_SKILL_KEY, trigger={"type": "claim", "id": "c-7", "label": "Claim CLM-7"})
+    )
+    service = ClaimSignalService(db)
+    with pytest.raises(HTTPException) as exc:
+        await service.raise_potential("letter_bench", await service.load_source("letter_bench", "L9"), USER)
+    assert exc.value.status_code == 422 and "existing claim" in exc.value.detail["user_message"]
+
+
 def test_a_potential_claim_is_taken_up_or_dropped() -> None:
     assert ALLOWED_STATUS_TRANSITIONS[ClaimStatus.POTENTIAL] == {
         ClaimStatus.DRAFT, ClaimStatus.NOTIFIED, ClaimStatus.CLOSED

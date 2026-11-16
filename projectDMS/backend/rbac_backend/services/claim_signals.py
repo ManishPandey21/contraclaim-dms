@@ -13,6 +13,14 @@ Two sources:
   EOT skill.
 
 A source that already has a claim raised from it is not a signal any more.
+Nor is a Letter Bench opened from a claim (a notice drafted for CLM-7 is routed
+to the claims skill, but the claim already exists: plan 4B-13, C-12).
+
+Raising re-checks the source: a hindrance taken off the critical path, moved to
+the Contractor or archived since the list was read is refused (422). The
+organisation is resolved once (the source's, else the navbar selection, else the
+user's own) and the same value is used to look for an earlier claim and to
+create one, so a second accept of an organisation-less board returns the first.
 """
 
 from __future__ import annotations
@@ -58,6 +66,26 @@ class PotentialClaimRequest(BaseModel):
     source_id: str = Field(..., min_length=1, max_length=120)
 
 
+def _hindrance_eligible(row: Dict[str, Any]) -> bool:
+    responsibility = str(getattr(row.get("responsibility"), "value", row.get("responsibility")) or "")
+    return (
+        row.get("critical_path_impact") is True
+        and responsibility in SIGNAL_RESPONSIBILITIES
+        and row.get("archived_at") is None
+    )
+
+
+def _claim_triggered(board: Dict[str, Any]) -> bool:
+    """A board opened from a claim drafts that claim's own letter; it is not a new claim."""
+    return str((board.get("trigger") or {}).get("type") or "") == "claim"
+
+
+def _not_eligible(message: str) -> HTTPException:
+    return HTTPException(
+        status_code=422, detail={"code": "signal_not_eligible", "user_message": message, "detail": None}
+    )
+
+
 def _hindrance_signal(row: Dict[str, Any]) -> ClaimSignal:
     reference = row.get("hindrance_ref") or row.get("delay_ref") or str(row.get("_id"))
     responsibility = str(getattr(row.get("responsibility"), "value", row.get("responsibility")) or "")
@@ -78,6 +106,8 @@ def _hindrance_signal(row: Dict[str, Any]) -> ClaimSignal:
 
 
 def _board_signal(board: Dict[str, Any]) -> Optional[ClaimSignal]:
+    if _claim_triggered(board):
+        return None
     routed = {
         str(link.get("skill_key"))
         for link in board.get("chain") or []
@@ -179,7 +209,11 @@ class ClaimSignalService:
             signals.extend(_hindrance_signal(row) for row in rows if str(row.get("_id")) not in raised)
         if board_query is not None:
             boards = await self.db[BOARDS].find(
-                {**board_query, "chain.skill_key": {"$in": [CLAIMS_SKILL_KEY, EOT_SKILL_KEY]}}
+                {
+                    **board_query,
+                    "chain.skill_key": {"$in": [CLAIMS_SKILL_KEY, EOT_SKILL_KEY]},
+                    "trigger.type": {"$ne": "claim"},
+                }
             ).to_list(length=MAX_SIGNALS)
             raised = await self._raised(organization_id, "letter_bench", [str(b.get("letter_id")) for b in boards])
             for board in boards:
@@ -204,13 +238,45 @@ class ClaimSignalService:
         return await self.db[BOARDS].find_one({"letter_id": source_id})
 
     async def raise_potential(
-        self, source_type: str, source: Dict[str, Any], current_user: Any
+        self,
+        source_type: str,
+        source: Dict[str, Any],
+        current_user: Any,
+        *,
+        selected_organization_id: Optional[str] = None,
     ) -> tuple[Dict[str, Any], bool]:
-        """Create the potential claim for a signal, or return the one already raised from it."""
+        """Create the potential claim for a signal, or return the one already raised from it.
+
+        The source is re-read for eligibility. The organisation is the source's, else the
+        one selected in the navbar, else the user's own; the same value finds an earlier
+        claim and owns a new one.
+        """
+        if source_type == "hindrance" and not _hindrance_eligible(source):
+            raise _not_eligible(
+                "This hindrance no longer indicates a claim: it must be on the critical path, "
+                "with responsibility on the Employer or shared, and not archived."
+            )
         signal = _hindrance_signal(source) if source_type == "hindrance" else _board_signal(source)
         if signal is None:
-            raise HTTPException(status_code=422, detail="This record does not indicate a claim")
-        organization_id = str(signal.organization_id or "")
+            raise _not_eligible(
+                "This letter is drafted from an existing claim and does not indicate a new one."
+                if source_type == "letter_bench" and _claim_triggered(source)
+                else "This record does not indicate a claim."
+            )
+        organization_id = (
+            str(signal.organization_id or selected_organization_id or getattr(current_user, "organization_id", None) or "")
+            or None
+        )
+        if organization_id is None:
+            # A claim belongs to an organisation; the record, the selection and the user give none.
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "signal_organisation_required",
+                    "user_message": "Select the organisation this record belongs to, then raise the claim.",
+                    "detail": None,
+                },
+            )
         existing = await self.db.claims.find_one(
             {"organization_id": organization_id, "origin.type": source_type, "origin.id": signal.source_id}
         )
@@ -222,7 +288,7 @@ class ClaimSignalService:
             status=ClaimStatus.POTENTIAL,
             description=f"Raised from {signal.label}. {signal.reason}",
             event_date=signal.event_date,
-            organization_id=organization_id or None,
+            organization_id=organization_id,
             project_id=signal.project_id,
             origin=ClaimOrigin(type=source_type, id=signal.source_id, label=signal.label),  # type: ignore[arg-type]
         )

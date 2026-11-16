@@ -194,7 +194,10 @@ async def raise_potential_claim(
         organization_id=source.get("organization_id"),
         project_id=source.get("project_id"),
     )
-    claim, created = await signals.raise_potential(payload.source_type, source, current_user)
+    selected_org, _project = await selection.list_filters(None, None)
+    claim, created = await signals.raise_potential(
+        payload.source_type, source, current_user, selected_organization_id=selected_org
+    )
     return PotentialClaimResponse(claim=await _present_claim(claim, db, current_user), created=created)
 
 
