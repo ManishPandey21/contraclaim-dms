@@ -1,6 +1,6 @@
 # Phase 4b — Claim Bench and Arbitration Hardening, Correctness and Usability: implementation plan
 
-Date: 2026-11-16 · Status: **Proposed, documentation only. Not approved for implementation.** · Branch: `claude/zen-ptolemy-695liz` at `f17e4b0`
+Date: 2026-11-16 · Revised: 2026-11-16 after owner review (section 13) · Status: **Approved in principle with amendments; implementation authorised from Wave 0 (section 13).** · Branch: `claude/zen-ptolemy-695liz`, plan first written at `3d704e1` against code at `f17e4b0`
 
 Parent spec: `docs/superpowers/specs/2026-11-15-claim-arbitration-skills-audit-and-plan.md` (Moves 0–8, decisions D-01 to D-04, corrections A to C). Phase status notes: `docs/superpowers/plans/2026-11-15-claim-arbitration-phase0.md` to `2026-11-19-claim-arbitration-phase4.md`. Operator notes: `docs/CLAIM_BENCH.md`.
 
@@ -21,7 +21,7 @@ Paths below are relative to `projectDMS/backend/rbac_backend/` (backend) or `pro
 
 The Phase 0–4 implementation is structurally sound but cannot be switched on. Four blockers stop it: a publication bypass (B1), a pleading check that can never pass (B2), reviewer roles nobody can hold (B3), and approval and export buttons that offer actions the server refuses (B4). Beyond those, twenty correctness defects were confirmed against the source, several of them in contractual arithmetic (already-granted EOT, neutral delay, amounts) and in four-eyes controls (notice verification, determinations).
 
-Phase 4b fixes these in 44 tickets across nine workstreams. It also builds the missing journey: claim start → heads → notice clock → delay → quantum → determination or submission → escalation → pleading. The order is: first measure production read-only, then fix security, then fix the arithmetic, then the user experience, then end-to-end proof.
+Phase 4b fixes these in 48 tickets across nine workstreams. It also builds the missing journey: claim start → heads → notice clock → delay → quantum → determination or submission → escalation → pleading. The order is: first measure production read-only, then fix security, then fix the arithmetic, then the user experience, then end-to-end proof.
 
 **Production is not assumed empty.** Production runs `release/contraclaim-rc1` at `34d664a` (read 2026-11-15, `docs/POST_CUTOVER_OPERATIONAL_ASSESSMENT_2026-11-15.md` §6). That release has 19 migrations, the claims register (eight-status enum, free `amount_claimed`, `sla_rules` windows) and arbitration drafting on `arbitration_v2`. It does not have the skill registry, the Bench or any Phase 0–4 change. Nothing about its claim, arbitration, role or user data has been read. Ticket 4B-01 reads it before any migration, backfill or legacy-route decision is final.
 
@@ -164,9 +164,13 @@ Each decision: context, decision, consequences. "Amended" marks a change from th
 
 **D-05a — Publish is atomic with respect to approvals (new, from B1b).**
 
-- Decision:
-  - The version document carries an `approvals_digest`, recomputed on every record or revoke.
-  - Publish filters on `{status: draft, content_hash, policy_hash, approvals_digest}`; a mismatch returns 409 "approvals changed, reload".
+- Decision (amended after owner review B.1: a standalone digest comparison is not enough):
+  - **The version document is the single serialisation point.** It carries an integer `approval_revision`. Recording an approval, revoking one, publishing and deprecating each run in one MongoDB multi-document transaction (the pattern already used in `services/key_date_revision_service.py:112` and `services/letter_drafting/repository.py:598`). Each of these transactions writes the version document, incrementing `approval_revision` or changing `status`.
+  - Inside the publish transaction the approvals are read, the gate is evaluated, and the version is updated with the filter `{status: draft, content_hash, policy_hash, approval_revision: <value read>}`. A concurrent record or revoke also writes the version document, so MongoDB's write-conflict detection aborts one of the two transactions. Neither can commit on a stale view of the other. The aborted side retries once, then returns 409 "approvals changed, reload".
+  - Revoke writes the approval's `revoked_at` and the version's `approval_revision`, and, if the version is published and the revoked approval was relied on, its `status: deprecated`, all in the same transaction. A crash between writes therefore cannot leave a revoked approval on a published version.
+  - `approvals_digest`, a hash of the live approval ids, is stored on the version for display and audit only. It is not the consistency mechanism.
+  - Deployment precondition: these paths need a replica set. Production and CI both run one (`docker-compose.mongo-replicaset.yml`; CI `rs0` on port 27018). On a standalone server the service refuses to publish rather than falling back to a non-transactional path.
+  - Proof: a real-replica-set concurrency suite that interleaves record, revoke and publish (including fault injection that aborts after the first write), and after every run checks the invariant "no published version has a revoked, stale or missing required approval".
   - Independence (distinct users across live approvals; legal ≠ evaluator ≠ publisher; two different people for the two EOT technical approvals) is checked at publish as well as at record.
   - A partial unique index ensures one live approval per (skill, version, kind, reviewer_role).
   - Revoke deprecates a published version only if the revoked approval was one the publication relied on.
@@ -179,9 +183,13 @@ Each decision: context, decision, consequences. "Amended" marks a change from th
   - A user holds a reviewer role only through a `reviewer_role_assignments` record:
     - Fields: `user_id`, `role_key`, `scope_type` (`platform` | `organization` | `project`), `organization_id`, `project_id`, `granted_by`, `reason`, `granted_at`, `expires_at`, `revoked_at`, `revoked_by`, `revoke_reason`.
     - The record follows the `expert_allocations` pattern: create, revoke, audit with before and after (`services/allocation_service.py:36-99`).
-  - `core/permissions.py` gains `reviewer_roles_for(user, scope)`, the single resolver. `actor_role_names` keeps working for role keys already in `users.roles`, so existing hand-made assignments are not broken.
-  - Approving a system skill pack requires a `platform`-scope assignment. Only a Super Admin may grant platform scope, and never to themselves (`granted_by ≠ user_id`).
-  - Organisation and project scope (for arbitration case approvals) may be granted by that organisation's admin, for that scope only.
+  - `core/permissions.py` gains `reviewer_roles_for(user, scope)`, the single resolver. Its rules (amended after owner review B.2):
+    - **Platform authority comes only from an active, unexpired, unrevoked `platform`-scope assignment.** Approving a system skill pack calls the resolver with platform scope and accepts nothing else.
+    - Organisation and project assignments answer only for a resource in that organisation or project. They never confer platform authority, and an organisation assignment does not reach another organisation.
+    - **Legacy role names** in `users.roles` (hand-made role documents, if reading P-05 finds any) are honoured only for arbitration case gates, only within the user's own organisation, and are reported in the reconciliation output of 4B-06. They are never read for platform authority. `actor_role_names` keeps its current behaviour for arbitration gates only, so existing case work is not broken, and it is not called by the skill approval path.
+    - Super Admin holds no reviewer role by status. A Super Admin may grant platform scope to someone else, never to themselves (`granted_by ≠ user_id`).
+  - Organisation and project scope (for arbitration case approvals) may be granted by that organisation's admin, for that scope only. Least privilege: an assignment carries a role identity and no permissions; expiry is required for organisation and project scope (default 12 months) and optional for platform scope.
+  - Reconciliation of legacy roles (4B-06): a read-only report lists every user holding a reviewer role key through `users.roles`. An org admin, or a Super Admin for platform scope, converts each into an explicit assignment. Nothing is converted automatically.
   - `pages/UsersPage.tsx` stops replacing a user's role list on edit.
 - Consequences: one new collection, one migration, and one admin screen. Arbitration gates read the same resolver behind no flag, because this enables gates that were unreachable and relaxes none (AQ-3 covers the other arbitration roles).
 
@@ -202,7 +210,7 @@ Each decision: context, decision, consequences. "Amended" marks a change from th
 
 - Decision:
   - Modes are `off | canary | primary`. Any other value fails the startup configuration gate.
-  - The legacy claim record page and the old AI assessment are retired only when all of these hold: reading P-11 shows their use; the Bench has run primary for 30 days without rollback; and the owner signs off. Until then both remain, and the record page stays reachable from the Bench.
+  - The legacy claim record page and the old AI assessment are retired only when all of these hold: reading P-11 shows their use; the Bench has run primary for 30 days without rollback; and the owner explicitly approves retirement in writing (AQ-8). Until then both remain, and the record page stays reachable from the Bench.
 - Consequence: two claim views coexist during canary. The Bench header links to the record view.
 
 **D-10 — No blanket backfill; read first, then create boards lazily with safe coercion (amended).**
@@ -263,7 +271,12 @@ Each decision: context, decision, consequences. "Amended" marks a change from th
   - A finding is identified by its dates and its event sets; a change to either orphans it.
   - Adjacent events of one owner produce separate overlaps unless a person merges them.
   - Neutral days count only where a person records the contract's entitlement, and never vanish because an Employer event covers them.
-  - `not_true_concurrency` counts for time. It counts for cost only with a recorded cost basis, as `eot_granted_with_cost` does (AQ-4 confirms the legal reading).
+  - `not_true_concurrency` counts for time. It never creates a monetary entitlement automatically (AQ-4). Cost for any overlap, whether `not_true_concurrency` or `eot_granted_with_cost`, counts only when all of these are recorded on the finding:
+    - the contractual basis;
+    - the causation reasoning;
+    - linked cost evidence (documents linked to the claim);
+    - an authorised review: a person holding a `delay_planning_expert` assignment for the project, or the claim's determination authority, who is not the person who recorded the finding.
+  - Until then, the overlap's days are time-only in the quantum lock rules.
 
 **D-17 — Citations: one parser; verified is an allow-list; exhibits are first-class.**
 
@@ -281,35 +294,42 @@ Each decision: context, decision, consequences. "Amended" marks a change from th
   - The status moves through the guarded transition with a per-claim audit.
   - Filed or archived cases are refused. The preview is computed for the chosen target.
   - The freeze goes through `DocumentRelationshipService.freeze`.
-  - Un-escalation is allowed until the first pleading version exists in the case:
+  - Un-escalation is allowed until the first pleading version exists in the arbitration case (AQ-6). A version counts if its draft carries this case's id. Case-less scratch drafts never count, even if they cite the same claims:
     - It soft-archives the rows the escalation seeded, with a reason.
     - It restores the claim's prior status (recorded at escalation) and lifts the freeze.
     - It needs `dms.arbitration.edit` on the case and `dms.claim.manage` on the claim, and is audited.
+    - Everything escalation changed is recorded at escalation (prior status, freeze state, seeded row ids, case created or extended), so un-escalation reverses exactly that. The audit trail of both actions is kept.
   - An unlocked board may be escalated only after the user acknowledges each weak head.
 
 **D-19 — One Word writer path, safe in both modules (amended).**
 
 - Decision:
   - A shared XML sanitiser for both minimal writers ships first.
-  - Adding `python-docx` to `rbac_backend/requirements.txt` changes production pleading exports, so it is a separate ticket gated on AQ-7 and a clean `pip-audit`.
+  - Adding `python-docx` to `rbac_backend/requirements.txt` is approved conditionally (AQ-7). Conditions:
+    - the sanitiser has landed;
+    - `pip-audit` is clean;
+    - a regression comparison exists of current and new exports, by structure and text, for the existing arbitration export fixtures.
+  - To prevent unreviewed changes to production output, the writer is chosen by `DOCX_WRITER` (`minimal` | `python_docx`, default `minimal`). It moves to `python_docx` only after the owner reviews the regression comparison.
 
 **D-20 — Phase 4b precedes Phase 5.** This document is the Phase 4b plan.
 
-**D-21 — Packs stay unpublished; evaluation is server-side against golden sets.** Requirements are in section 7.
+**D-21 — Packs stay unpublished; evaluation is server-side against golden sets.** Requirements are in section 7. Datasets live in a restricted, encrypted evaluation store outside the repository; only hashes and synthetic fixtures are in GitHub. Every run has a configured model budget, and exceeding it needs explicit approval (AQ-10).
 
 **D-22 — Lock and unlock (new).**
 
 - Decision:
   - Lock needs `dms.claim.edit`.
-  - Unlock needs `dms.claim.manage` and a reason, and is audited.
+  - Unlock needs `dms.claim.manage` and a reason, and writes an append-only audit event (AQ-9). The reason is stored on the event; no route edits or deletes it.
   - Stale tests block the lock.
   - A failed stale-marking is retried, and otherwise returns 409.
 
-**D-23 — Claims carry a contract identity (new; resolves C-05, subject to AQ-1).**
+**D-23 — Claims carry a contract identity (new; resolves C-05; AQ-1 decided).**
 
 - Decision:
-  - `Claim.contract_id`: optional on legacy claims, asked at creation when the project has more than one contract.
-  - Linking a key-date record from another contract is refused.
+  - Every new claim is associated with a contract where one is identifiable. A valid contract is one in the claim's project that the user can read and whose instrument is not withdrawn.
+  - If exactly one valid contract exists, it is selected automatically and shown. If several exist, the user must choose. If none exists, the claim is created without one and shows "No contract identified".
+  - Legacy claims may keep `contract_id: null` until someone resolves it. A claim with no contract can link only records that themselves have no contract.
+  - No cross-contract linking: key-date submissions and determinations, hindrances, documents and letters that carry a different `contract_id` are refused (422) for links, quantum records, submission evidence and escalation.
 
 **D-24 — Three-question claim start (new; parent spec Move 1).**
 
@@ -318,6 +338,60 @@ Each decision: context, decision, consequences. "Amended" marks a change from th
   - That creates the claim (status `draft`) and its first head. Everything else is captured on the board.
   - The full form remains as "More details".
   - `POST /claims` no longer accepts `status` beyond `draft` or `notified`, nor `origin`; potential claims are created only by the signal path.
+
+**D-25 — Restricted evidence blocks export without leaking it (new; AQ-5 decided).**
+
+- Decision:
+  - Composing and staleness use the claim's full linked evidence set, not the viewer's, so every viewer sees the same state.
+  - A viewer without access to an item sees "Restricted item" in its place: no title, date, type, author or count by type. Only the total number of restricted items is shown.
+  - Export is refused while any required item is inaccessible to the exporter. The message says how many items are restricted and who can export (the claim owner, or a user with access to all evidence). It names no item.
+  - The refusal is a structured error (`code: evidence_restricted`) and is audited.
+
+**D-26 — Existing callers of `POST /arbitration/drafts` keep working while the scratch requirement is introduced (new; owner review B.3).**
+
+- Decision:
+  - Reading P-12 lists callers in the last 90 days that create drafts without a case (API access logs, grouped by client and user agent; counts only).
+  - `ARBITRATION_CASELESS_DRAFT_MODE` is `implicit_scratch` (default) or `strict`.
+    - In `implicit_scratch`, a case-less request without `scratch` is created as a scratch draft, which can be neither approved nor exported for filing, so no gate is bypassed. The response carries a `Deprecation` header and a `warnings[]` entry, and the call is logged with its caller.
+    - `strict` returns 422 with `code: scratch_required` and the instruction to send `scratch: true` or a `case_workspace_id`.
+  - The switch to `strict` needs the owner's approval, after P-12 and the deprecation logs show no remaining legacy callers. The UI always sends the explicit flag.
+
+**D-27 — Backend enforcement of the privilege wall and provenance, independent of the UI (new; owner review B.6).**
+
+- Decision:
+  - Every route that returns or exports claim, determination, submission, escalation or pleading content enforces, in the service layer:
+    - the privilege wall: `claim_privileged` is read only by `services/claim_privileged.py`, behind `dms.claim.strategy.read`, never for Super Admin by status, and never in exports, the source ledger, escalation or step stores;
+    - provenance: every figure, citation and evidence item in an output names a source the caller may access; anything else is refused or replaced per D-25.
+  - Hidden buttons are a convenience, never a control. Tests call the API directly with a token whose UI would hide the action.
+
+**D-28 — Specialist defence skill `india-metro-arbitration-defence` (new; owner review B.4).**
+
+- Decision:
+  - The supplied bundle `india-metro-arbitration-defence_R2.zip` is evaluated as a separate specialist skill. It is installed, if at all, as an unpublished draft under its own key, with its own approvals (Arbitration Case Preparation Expert technical review; platform `senior_legal_approver` legal sign-off) and its own golden set.
+  - It is not on the Phase 4b critical path, and nothing in Phase 4b depends on it.
+  - Its integration dependencies are recorded, not built, in Phase 4b. They include:
+    - the defence and counterclaim section set, and opponent pleading intake (both Phase 4b non-goals);
+    - the pleading-side chains;
+    - output schemas;
+    - the Traverse Board.
+  - **Input status: supplied by the owner on 2026-11-16 and inspected without execution.** Facts recorded:
+    - **Provenance.** `india-metro-arbitration-defence_R2.zip`, 60,487 bytes, SHA-256 `47c08cffba9be8d470d8b4f23943414d388e969f5b937b510eb62ef1c639af8e`.
+    - **Contents.**
+      - 25 entries, 117,288 bytes unpacked, with no absolute paths, parent references or links.
+      - The same skill appears twice, under `india-metro-arbitration-defence/` and `india-metro-arbitration-defence_R2/india-metro-arbitration-defence/`. The two copies are byte-identical.
+      - Each copy holds `SKILL.md` (SHA-256 `fcb2c0ef…e48e`), seven reference files (`01-intake` to `07-qc-checklist`) and `scripts/claim_matrix.py` (SHA-256 `33b7b62f…e44a`).
+    - **The registry would refuse it as supplied** (`services/skills/loader.py`). It contains two `SKILL.md` files, and `.py` is not an allowed suffix (`ALLOWED_SUFFIXES = {".md", ".txt"}`). The refusal is correct and must not be relaxed.
+    - **The script.**
+      - `claim_matrix.py` uses the standard library only. It builds a claim–defence–evidence matrix and a paragraph-by-paragraph traverse skeleton from a CSV, and flags unanswered SoC paragraphs.
+      - It was read, not run. Bundled code is never executed by the product.
+      - If its function is wanted, it is re-implemented as reviewed, deterministic service code ("the code does the arithmetic"), with its own tests.
+    - **Integration dependencies found in the text:**
+      - The skill asks for web search to confirm current law. The skill engine has no web access, so those points must surface as `[LAW TBC]` placeholders and be validated as such.
+      - It is respondent-oriented, for either an Employer or a contractor resisting a counterclaim, so it needs the D-01 perspective mapping.
+      - It needs a Statement of Defence and counterclaim section set, opponent SoC intake split into paragraphs, and the Traverse Board. All three are Phase 4b non-goals.
+      - Its placeholder vocabulary (`[CLAUSE TBC]`, `[AUTHORITY TBC]`) must be recognised by the citation validator as unresolved, never as verified.
+      - It cites authorities by name, and these need legal verification before any publication.
+    - **Next step (4B-48):** repackage as a single root with `.md` references only, with the script described in a reference file. Install as an unpublished draft under its own key, and record the dependency list above as tickets for the phase that builds defence pleadings.
 
 ---
 
@@ -410,7 +484,7 @@ Each ticket is independently testable and lands in its own commit. "Proof" names
 
 | ID | Ticket | Depends | Proof | Size |
 |---|---|---|---|---|
-| 4B-01 | Read-only claim, arbitration, role and skill inventory: section F of `scripts/post_cutover_readonly_checks.sh` covering readings P-02 to P-11; record the staging and production readings in the post-cutover assessment §6 | — | Script runs read-only on staging (no write ops; reviewed command list); reading table filled | M |
+| 4B-01 | Read-only claim, arbitration, role and skill inventory: section F of `scripts/post_cutover_readonly_checks.sh` covering readings **P-01 to P-12**. Each result is recorded in the post-cutover assessment §6 with its evidence class (section 8.1). A reading not taken is recorded as not taken, never as zero. | — | Script is read-only by construction (reviewed command list; tests assert no write verb); readings recorded with their class; production readings need authorised access (AQ-11) | M |
 | 4B-02 | Route tests that resolve real dependencies for `routers/claim_bench.py`, `claim_findings.py`, `claim_escalation.py` (none exist today) | — | New `tests/test_claim_routes_real_deps.py` passes with no factory overrides | M |
 | 4B-03 | Rollout guard: validate `CLAIM_BENCH_ROLLOUT_MODE` in the config gate; `ensure_enabled` on signal routes; frontend query keys include organisation and project | — | Config test (`shadow` raises); route test (signal routes 404 when off); hook test (refetch on organisation change) | S |
 
@@ -419,14 +493,14 @@ Each ticket is independently testable and lands in its own commit. "Proof" names
 | ID | Ticket | Depends | Proof | Size |
 |---|---|---|---|---|
 | 4B-04 | Policy floor and `policy_hash`; refuse weaker system manifests; refuse re-import over approved drafts; migration M-01 (fields, indexes) | 4B-02 | Re-import of a system key with `[]` → 422; new version without the floor → 422; re-import over an approved draft → 409; manifest change invalidates approvals | M |
-| 4B-05 | Atomic publish with `approvals_digest`; independence at publish; partial unique live-approval index; deprecate on revoke only if relied on; skills audit events | 4B-04 | Concurrency test: revoke racing publish never yields a published version with a revoked approval; one user cannot satisfy both EOT technical approvals; router-level revoke → deprecate test | M |
+| 4B-05 | Transactional record, revoke, publish and deprecate serialised on the version document (D-05a); independence at publish; partial unique live-approval index; deprecate on revoke only if relied on; skills audit events | 4B-04 | Real-replica-set suite: interleaved record, revoke and publish with fault injection, invariant checked after each run; one user cannot satisfy both EOT technical approvals; router-level revoke → deprecate test | L |
 
 ### Wave 2 — reviewer roles and privilege (B3, C-15, C-19)
 
 | ID | Ticket | Depends | Proof | Size |
 |---|---|---|---|---|
 | 4B-06 | Seed reviewer identities (M-02, skip-existing, conflicts reported as warnings) | 4B-01 (P-05 read) | Migration dry-run on a copy of P-05 data; seeded documents have no permissions | S |
-| 4B-07 | `reviewer_role_assignments`: model, service, routes, resolver, audit, M-03; Super Admin-only platform grants; no self-grant; org admin limited to own scope | 4B-06 | RBAC matrix test (section 6.4); a custom role with the same name never matches; expiry and revoke take effect on the next request | L |
+| 4B-07 | `reviewer_role_assignments`: model, service, routes, resolver (D-06 rules), audit, M-03; Super Admin-only platform grants; no self-grant; org admin limited to own scope; expiry | 4B-06 | RBAC matrix test (section 6.4); resolver tests: a legacy role name, an organisation assignment or a custom role with the same name never yields platform authority; expiry and revoke take effect on the next request | L |
 | 4B-08 | Users screen preserves the role list; reviewer assignment admin screen | 4B-07 | RTL: editing a user keeps extra roles; mocked E2E: Super Admin grants platform scope; org admin cannot | M |
 | 4B-09 | Reviewer queue endpoint and read-only reviewer view on `/skills` | 4B-07 | Pure reviewer opens `/skills`, sees the queue and records an approval; publisher-only actions absent | M |
 | 4B-10 | Super Admin exclusion; remove explicit-grant claim permissions from admin defaults; align `docs/CLAIM_BENCH.md` | 4B-02 | Super Admin → 403 on strategy read, determine and approve; role-contract alignment inspect shows no class-A addition of these permissions | S |
@@ -494,8 +568,27 @@ Each ticket is independently testable and lands in its own commit. "Proof" names
 | 4B-42 | Golden sets for the claims and EOT packs (section 7); pleadings set specified, built in Phase 5 preparation | 4B-41 | Suites load, hash and run; baseline report recorded; no publication | L |
 | 4B-43 | Playwright mocked suites `claim-journey.spec.ts`, `arbitration-pleading-gates.spec.ts`, `skills-review.spec.ts`, added to `MOCKED_SUITES` (`projectDMS/client/playwright.config.ts:25`) | Waves 3–7 | Suites green in CI | M |
 | 4B-44 | Staging suite against the deployed stack (real backend, MongoDB replica set, canary internal tenant); runbook `docs/CLAIM_BENCH_STAGING_CHECKS.md`; Gate 6 fresh-install run for M-01 to M-05; route inventories regenerated | all | Two consecutive green staging runs; Gate 6 record; inventories diffed and committed | M |
+| 4B-45 | Backward compatibility for `POST /arbitration/drafts` (D-26): `ARBITRATION_CASELESS_DRAFT_MODE`, deprecation header and warning, caller logging, structured 422 in strict mode | 4B-02 | Route tests in both modes; an implicit scratch draft can be neither approved nor filing-exported; the UI always sends the flag | S |
+| 4B-46 | Backend privilege-wall and provenance enforcement suite (D-27): direct API calls for every content and export route with tokens whose UI would hide the action; source-tree scan extended to exporters, ledger, escalation and step stores | 4B-10, 4B-27 | Every call refused or redacted per D-25 and D-27; scan green | M |
+| 4B-47 | Real-MongoDB integration suites for the claim, skill and escalation modules: environment variables `CLAIM_BENCH_MONGODB_URI`, `SKILL_PUBLICATION_MONGODB_URI` and `CLAIM_ESCALATION_MONGODB_URI`, wired into the CI real-Mongo step and the coverage rule (`tests/test_ci_real_mongo_coverage.py`) | 4B-02 | Suites run, not skip, in CI against `rs0` | M |
+| 4B-48 | Evaluate `india-metro-arbitration-defence_R2.zip` (D-28): provenance and integrity record; untrusted-bundle handling (size limits, guardrail scan); install as an unpublished draft under its own key with its own required approvals; integration-dependency record; golden-set specification. Bundle supplied and inspected 2026-11-16 (D-28); as supplied it is refused by the loader and must be repackaged. Not on the critical path. | 4B-04 | Draft present, unresolvable for drafting, approvals required; dependency record committed | M |
 
-Critical path: 4B-01 → 4B-02 → 4B-04 → 4B-05 → 4B-07 → 4B-26 → 4B-33 → 4B-36 → 4B-39 → 4B-43 → 4B-44. Waves 4 and 5 run beside Waves 1 and 2 once 4B-02 lands.
+Critical path: 4B-02 → 4B-47 → 4B-04 → 4B-05 → 4B-07 → 4B-26 → 4B-33 → 4B-36 → 4B-39 → 4B-43 → 4B-44. Waves 4 and 5 run beside Waves 1 and 2 once 4B-02 lands. 4B-48 is off the critical path.
+
+**Production-reading dependencies.** 4B-01 writes the read-only script, which is code and needs no access. Taking the readings needs authorised read-only access (AQ-11). Until the readings exist, the tickets below may be built and tested, but their reading-dependent step is not final and they are not released:
+
+- 4B-06 (seed conflicts, P-05);
+- 4B-18 (contract coverage, P-03);
+- 4B-19 (legacy coercion, P-03);
+- 4B-45 (switch to `strict`, P-12);
+- M-01 to M-05 release ordering (P-02);
+- D-09 retirement (P-11).
+
+**Execution order as authorised (owner review C).**
+
+1. Wave 0: 4B-02, 4B-03, 4B-01 (script only), 4B-47.
+2. Independent security groundwork: 4B-04, 4B-10, then 4B-05.
+3. Remaining waves in table order.
 
 ---
 
@@ -533,6 +626,10 @@ Critical path: 4B-01 → 4B-02 → 4B-04 → 4B-05 → 4B-07 → 4B-26 → 4B-33
 | C-21 | 4B-11, 4B-26 | Picker API returns only project members holding the permission |
 | C-22 | 4B-20, 4B-25, 4B-31, 4B-32, 4B-34, 4B-40 | `claim-journey.spec.ts` steps 1–8 |
 | C-23 | 4B-19 | `initial_head` coercion tests |
+| D-25 | 4B-27, 4B-46 | Export refused with `evidence_restricted`; no title, date or type of a restricted item in any response (asserted on the raw JSON) |
+| D-26 | 4B-45 | Both modes; implicit scratch drafts cannot be approved or exported |
+| D-27 | 4B-46 | Direct API calls with hidden-action tokens are refused or redacted |
+| D-28 | 4B-48 | Draft unresolvable; approvals required |
 
 ### 6.2 Backend integration tests
 
@@ -575,6 +672,8 @@ Using `asyncio.gather`, against a MongoDB replica set where the code relies on u
 - **XML:** control characters, `&`, `<`, `>` and RTL marks in every exported text field.
 - **Privilege wall:** a source-tree scan that `claim_privileged` is read by one module only (existing test, extended to exporters, ledger and escalation).
 - **Tenant isolation:** cross-organisation tests on every new route.
+- **UI-independent enforcement (D-27):** every refusal the UI implies is also tested by a direct API call.
+- **Resolver authority (D-06):** legacy role names, organisation assignments, expired assignments, revoked assignments and same-name custom roles each fail to confer platform authority.
 - **Audit completeness:** each privileged action writes exactly one audit row with actor, before and after.
 
 ### 6.7 Playwright end-to-end
@@ -622,8 +721,22 @@ Applies to `indian-infra-claims` and `indian-infra-eot-claims` in Phase 4b. The 
 | P-09 | Projects with `contractual_capacity` | Expect absent |
 | P-10 | Whether `ARBITRATION_REVIEWER_ROLE_MATRIX` is set in the running backend (presence, and value, which is not secret) | AQ-3 |
 | P-11 | Use of the claims register, claim detail and AI assessment in the last 90 days (audit and access logs) | D-09 retirement |
+| P-12 | Callers of `POST /arbitration/drafts` without a case in the last 90 days (access logs; counts by client) | D-26 switch to strict |
 
 The script uses only reads, never prints a credential, and its evidence is scanned by value with `scripts/evidence_secret_scan.py`.
+
+**Evidence classes (owner review B.5).** Every statement in this plan or its evidence about production carries one of these classes:
+
+| Class | Meaning |
+|---|---|
+| Production — verified | Read from the running production system by authorised read-only access, with date, operator and command |
+| Staging — verified | Read from staging the same way; says nothing about production |
+| Repository — inferred | Deduced from code or configuration in a named commit, such as "`34d664a` has 19 migrations"; not a reading |
+| Not read | No reading exists |
+
+As of this revision, the only "Production — verified" fact is the deployed checkout (branch `release/contraclaim-rc1`, commit `34d664a`), read on 2026-11-15. The running image revision was not read. Everything else about production in this plan is "Repository — inferred" or "Not read".
+
+**An unreadable database is not an empty one (owner review B.7).** If production cannot be read, the readings are recorded as "Not read" with the blocker. No migration, backfill, seed or compatibility switch may be justified by the absence of data that was never read. Any reading-dependent decision stays open.
 
 ### 8.2 Compatibility
 
@@ -669,15 +782,16 @@ Every migration is additive or index-only. None deletes or rewrites user data.
 
 All must hold, each with recorded evidence:
 
-1. Every ticket 4B-01 to 4B-44 is merged to the working branch with its proof tests, except 4B-30 if AQ-7 is declined.
+1. Every ticket 4B-01 to 4B-47 is merged to the working branch with its proof tests. 4B-48 is excluded: it is off the critical path.
 2. Every finding in section 6.1 maps to at least one passing test that exercises real dependencies.
 3. The RBAC matrix (6.4) and the concurrency (6.5) and security (6.6) suites are green.
 4. Mocked Playwright suites are green in CI. The staging suite has passed twice consecutively on the deployed stack, with a Statement of Claim drafted from an escalated claim passing every existing gate.
 5. Gate 6 fresh-install runs are recorded for the final migration count, and route inventories are regenerated and diffed.
-6. Readings P-01 to P-11 are recorded for staging and production, and decisions D-09, D-10 and AQ-3 are finalised against them.
+6. Readings P-01 to P-12 are recorded for staging and production, and decisions D-09, D-10 and AQ-3 are finalised against them.
 7. Claims and EOT golden-set baseline runs are recorded (section 7). No pack is published.
-8. AQ-1, AQ-2, AQ-4, AQ-5 and AQ-6 are answered by the owner. AQ-7 to AQ-10 are answered or explicitly deferred.
+8. AQ-1 to AQ-10 are decided (section 13), and AQ-11 has been resolved by authorised read-only access.
 9. The owner has accepted Phase 4b in writing in this document's decision record.
+10. The complete claim → escalation → pleading → approval journey has passed with real dependencies: a real backend, a MongoDB replica set and real authorisation. Mocked suites do not satisfy this criterion.
 
 ---
 
@@ -709,7 +823,7 @@ All must hold, each with recorded evidence:
 
 ---
 
-## 11. Open architectural questions for the owner
+## 11. Architectural questions (decided 2026-11-16, see section 13; AQ-11 open)
 
 | ID | Question | Recommendation |
 |---|---|---|
@@ -723,6 +837,7 @@ All must hold, each with recorded evidence:
 | AQ-8 | Legacy claim page and AI assessment retirement date | Decide after P-11 and 30 days primary (D-09) |
 | AQ-9 | Unlock at `dms.claim.manage`: too strict for small teams? | Keep manage plus reason; revisit after canary feedback |
 | AQ-10 | Where golden-set material lives, and the model budget for evaluation runs | A restricted evaluation store outside the repository; a budget set per run before 4B-42 |
+| AQ-11 | Authorised read-only access for readings P-01 to P-12 on production (and staging), and the operator who takes them | Open: this implementation environment has no production access |
 
 ---
 
@@ -761,6 +876,9 @@ Proof
 - [ ] Mocked Playwright suites in CI; staging suite green twice on the deployed stack
 - [ ] Gate 6 runs; route inventories; readings P-01 to P-11 recorded
 - [ ] Golden-set baselines recorded; no pack published
+- [ ] Real-MongoDB suites run in CI (4B-47); the complete claim → escalation → pleading → approval journey passes with real dependencies
+- [ ] Backward compatibility for `POST /arbitration/drafts` (4B-45); backend privilege-wall and provenance suite (4B-46)
+- [ ] Every production statement carries its evidence class; unread readings recorded as not read
 - [ ] Open questions answered or deferred by the owner; Phase 4b accepted in writing
 
 ## Decision record
@@ -768,4 +886,41 @@ Proof
 | Date | Decision | By |
 |---|---|---|
 | 2026-11-16 | Audit findings accepted; D-05 to D-21 approved subject to the Phase 4b requirements; plan requested | Owner |
-| — | Phase 4b plan approved for implementation | Pending |
+| 2026-11-16 | Plan approved in principle subject to amendments B.1 to B.7; AQ-1 to AQ-10 decided; implementation authorised from Wave 0 and independent security groundwork; PR #114 stays draft | Owner |
+| — | Phase 4b exit criteria met and accepted; Phase 5 may start | Pending |
+
+## 13. Owner review, 2026-11-16
+
+### Decisions on the architectural questions
+
+| ID | Decision | Lands in |
+|---|---|---|
+| AQ-1 | Associate every new claim with a contract where identifiable; auto-select only when exactly one valid contract exists; explicit selection when several exist; legacy null until resolved; no cross-contract evidence or key-date linking | D-23, 4B-18, 4B-23 |
+| AQ-2 | Dedicated `reviewer_role_assignments` with platform, organisation and project scopes, expiry, revocation, audit and least privilege. Platform legal approval needs an explicit platform assignment; organisation and project assignments never confer it; legacy roles reconciled without a bypass. | D-06, 4B-06, 4B-07 |
+| AQ-3 | Seed the unseeded arbitration reviewer identities, subject to P-05 and P-10; identities only, no permissions or assignments | D-06, 4B-06 |
+| AQ-4 | No automatic money from `not_true_concurrency`; recorded contractual basis, causation, cost evidence and authorised review required | D-16, 4B-22, 4B-24 |
+| AQ-5 | Refuse export when required evidence is inaccessible; explain without leaking content or metadata | D-25, 4B-27, 4B-46 |
+| AQ-6 | Block un-escalation after the first pleading version in the case; case-less scratch drafts do not count; full audit and reversible state before the cut-off | D-18, 4B-37 |
+| AQ-7 | `python-docx` conditionally, after sanitisation, dependency scan and regression testing; no unreviewed change to production export behaviour | D-19, 4B-29, 4B-30 |
+| AQ-8 | No retirement of the legacy claim page or AI assessment until production use is verified, primary has been stable for 30 days, and the owner approves explicitly | D-09 |
+| AQ-9 | Unlock keeps `dms.claim.manage`, a mandatory reason and an immutable audit trail | D-22, 4B-16 |
+| AQ-10 | Restricted, encrypted evaluation store outside the repository; hashes and synthetic fixtures in GitHub; configured per-run model budget, explicit approval to exceed | D-21, section 7, 4B-41, 4B-42 |
+
+### Mandatory amendments and where they are met
+
+| Ref | Amendment | Change in this plan |
+|---|---|---|
+| B.1 | Prove publication and revocation atomicity across approval records and version state; a standalone digest comparison must not leave a gap | D-05a rewritten: transactions serialised on the version document; fault-injection concurrency proof; 4B-05 |
+| B.2 | The resolver cannot treat legacy role names or organisation assignments as platform legal authority | D-06 resolver rules; 4B-07 resolver tests; section 6.6 |
+| B.3 | Backward-compatibility ticket for `/arbitration/drafts` callers | D-26; ticket 4B-45; reading P-12 |
+| B.4 | Evaluate `india-metro-arbitration-defence_R2.zip` as a separate, unpublished specialist skill; record dependencies; not on the critical path | D-28 (bundle supplied and inspected; findings recorded); ticket 4B-48 |
+| B.5 | P-01 in 4B-01; distinguish verified production evidence from staging or repository assumptions | 4B-01 covers P-01 to P-12; evidence classes in section 8.1 |
+| B.6 | Privilege wall and provenance enforced at the backend regardless of UI | D-27; ticket 4B-46; section 6.6 |
+| B.7 | An inaccessible production database is not evidence of an empty or safe-to-migrate one | Section 8.1 rule; reading-dependent tickets listed in section 5 |
+
+### Authorisation and limits
+
+- **Authorised:** implementation on `claude/zen-ptolemy-695liz` in the approved dependency order, starting with Wave 0 and the independent security groundwork.
+- **Readings:** production readings only through authorised read-only access. Where access is unavailable, the blocker is recorded, and only work that does not depend on the readings continues.
+- **Not authorised without separate authorisation:** any production migration, backfill, deployment, rollout activation, skill publication, merge or history rewrite. PR #114 stays draft.
+- **Verification required:** real-MongoDB integration, router authorisation, concurrency, security and frontend component tests, plus mocked and staging Playwright suites. The complete claim → escalation → pleading → approval journey must pass with real dependencies before Phase 5.
