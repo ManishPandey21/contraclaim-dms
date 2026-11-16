@@ -321,6 +321,9 @@ from ..publication_policy import (
 #: drafts declare no ``deleted_at`` field, so their ``$exists`` queries are right.
 CASE_NOT_DELETED: Dict[str, Any] = {"deleted_at": None}
 
+#: Attempts to assign an exhibit number when concurrent rows take the same one.
+EXHIBIT_NUMBER_ATTEMPTS = 8
+
 
 class ArbitrationCaseWorkspaceService:
     def __init__(self, db: Any) -> None:
@@ -462,8 +465,23 @@ class ArbitrationCaseWorkspaceService:
             updated_by=_actor_id(current_user),
             updated_at=now,
         ).model_dump(by_alias=True)
-        row = await self._assign_exhibit_if_needed(case_id, matrix_slug, row)
-        await self._collection(matrix_slug).insert_one(_jsonable(row))
+        chosen_number = matrix_slug == "document-index" and bool(row.get("exhibit_number"))
+        for attempt in range(EXHIBIT_NUMBER_ATTEMPTS):
+            row = await self._assign_exhibit_if_needed(case_id, matrix_slug, row)
+            try:
+                await self._collection(matrix_slug).insert_one(_jsonable(row))
+                break
+            except DuplicateKeyError:
+                # D-17 / 4B-35: exhibit numbers are unique per case (a unique index on
+                # case_id + exhibit_id). A number the user chose is refused; a number
+                # this service assigned lost a race and is re-assigned from the new maximum.
+                if matrix_slug != "document-index" or chosen_number or attempt == EXHIBIT_NUMBER_ATTEMPTS - 1:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="That exhibit number is already used in this case; choose another or leave it blank",
+                    )
+                row.pop("exhibit_number", None)
+                row.pop("exhibit_id", None)
         await self._touch_case(case_id, current_user)
         return row
 
@@ -511,16 +529,22 @@ class ArbitrationCaseWorkspaceService:
             update.update({key: numbered.get(key) for key in ("exhibit_prefix", "exhibit_number", "exhibit_id")})
         # Compare-and-set on the revision this edit was computed from, so an edit
         # and a review can never both apply to the same content.
-        updated = await collection.find_one_and_update(
-            {
-                "_id": row_id,
-                "case_id": case_id,
-                "deleted_at": {"$exists": False},
-                "edit_revision": prior.get("edit_revision"),
-            },
-            {"$set": _jsonable(update)},
-            return_document=True,
-        )
+        try:
+            updated = await collection.find_one_and_update(
+                {
+                    "_id": row_id,
+                    "case_id": case_id,
+                    "deleted_at": {"$exists": False},
+                    "edit_revision": prior.get("edit_revision"),
+                },
+                {"$set": _jsonable(update)},
+                return_document=True,
+            )
+        except DuplicateKeyError:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="That exhibit number is already used in this case; reload and retry",
+            )
         if not updated:
             if existing:
                 raise HTTPException(

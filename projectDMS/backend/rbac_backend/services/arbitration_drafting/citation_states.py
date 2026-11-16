@@ -4,12 +4,17 @@ Two deterministic checks, shared by the draft validator (which turns them into
 approval blockers) and by the screens (which show them), so a count on screen
 is always the count the gate used.
 
-**Citation states.** A draft cites sources as ``[S3: ...]``. Each cited key is
-exactly one of:
+**Citation states.** A draft cites ledger sources as ``[S3]``, ``[S3: ...]`` or
+``[SRC-4]``, and case exhibits as "Ex. C-12", "Exhibit R/3", "CW-1/4" or
+"Annexure A-7" (one parser, ``citation_refs``; D-17). Each citation is exactly
+one of:
 
-- ``verified``: in the draft's source ledger and admissible as it stands;
-- ``unverified``: in the ledger, but user-supplied or not yet verified;
-- ``unresolved``: not in the ledger at all.
+- ``verified``: in the draft's source ledger, and its status is in the
+  allow-list ``CITATION_VERIFIED_STATUSES``;
+- ``unverified``: in the ledger, but user-supplied, or any other status,
+  including a missing or unknown one;
+- ``unresolved``: not in the ledger at all (for an exhibit: no ledger row
+  carries that exhibit id).
 
 **Pleaded heads.** In a Statement of Claim every head must carry the
 contractual provision relied on, the event, the causal link, quantified
@@ -24,9 +29,19 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
-SOURCE_CITATION_RE = re.compile(r"\[(S\d+):[^\]]+\]")
-UNVERIFIED_SOURCE_STATUSES = {"draft", "needs_review", "pending", "selected", "unverified"}
+from .citation_refs import (
+    CITATION_VERIFIED_STATUSES,
+    SOURCE_REF_RE,
+    exhibit_refs,
+    is_verified_status,
+    normalise_exhibit,
+    source_refs,
+)
+
+#: Kept for importers; the parser is ``citation_refs.SOURCE_REF_RE``.
+SOURCE_CITATION_RE = SOURCE_REF_RE
 STATES = ("verified", "unverified", "unresolved")
+_EXHIBIT_ID_RE = re.compile(r"^\s*([A-Za-z]{1,3})\s*[-/]\s*(\d{1,4})(?:\s*/\s*(\d{1,4}))?\s*$")
 
 _HEAD_ELEMENTS = (
     ("clause_ids", "the contractual provision relied on"),
@@ -36,10 +51,26 @@ _HEAD_ELEMENTS = (
 
 
 def is_unverified_source(row: Dict[str, Any]) -> bool:
-    """A ledger row that is not admissible for filing as it stands."""
-    return bool(row.get("is_user_supplied")) or (
-        str(row.get("verification_status") or "").lower() in UNVERIFIED_SOURCE_STATUSES
-    )
+    """A ledger row that is not admissible for filing as it stands: user-supplied, or any
+    status outside the allow-list (a missing or unknown status included)."""
+    return bool(row.get("is_user_supplied")) or not is_verified_status(row.get("verification_status"))
+
+
+def _row_exhibit_id(row: Dict[str, Any]) -> Optional[str]:
+    raw = row.get("exhibit_id") or (row.get("metadata") or {}).get("exhibit_id")
+    match = _EXHIBIT_ID_RE.match(str(raw or ""))
+    return normalise_exhibit(*match.groups()) if match else None
+
+
+def _state_of(row: Optional[Dict[str, Any]], missing: str) -> tuple:
+    if row is None:
+        return "unresolved", missing
+    if row.get("is_user_supplied"):
+        return "unverified", "User-supplied evidence that has not been verified."
+    if not is_verified_status(row.get("verification_status")):
+        status = str(row.get("verification_status") or "").strip().lower() or "not recorded"
+        return "unverified", f"Source status is {status}."
+    return "verified", None
 
 
 def _key_order(key: str) -> tuple:
@@ -50,25 +81,39 @@ def _key_order(key: str) -> tuple:
 def classify_citations(markdown: str, source_ledger: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Every source key cited in ``markdown``, with its state against ``source_ledger``."""
     ledger = {str(row.get("source_key")): row for row in source_ledger or [] if row.get("source_key")}
-    uses: Dict[str, int] = {}
-    for match in SOURCE_CITATION_RE.finditer(markdown or ""):
-        uses[match.group(1)] = uses.get(match.group(1), 0) + 1
+    exhibits: Dict[str, Dict[str, Any]] = {}
+    for row in source_ledger or []:
+        exhibit_id = _row_exhibit_id(row)
+        if exhibit_id and exhibit_id not in exhibits:
+            exhibits[exhibit_id] = row
     items: List[Dict[str, Any]] = []
+    uses = source_refs(markdown)
     for key in sorted(uses, key=_key_order):
         row = ledger.get(key)
-        if row is None:
-            state, reason = "unresolved", "Not in this draft's source ledger."
-        elif row.get("is_user_supplied"):
-            state, reason = "unverified", "User-supplied evidence that has not been verified."
-        elif is_unverified_source(row):
-            state, reason = "unverified", f"Source status is {str(row.get('verification_status')).lower()}."
-        else:
-            state, reason = "verified", None
+        state, reason = _state_of(row, "Not in this draft's source ledger.")
         items.append(
             {
+                "kind": "source",
                 "source_key": key,
                 "state": state,
                 "uses": uses[key],
+                "label": (row or {}).get("label") or (row or {}).get("citation"),
+                "source_origin": (row or {}).get("source_origin"),
+                "reason": reason,
+            }
+        )
+    for exhibit_id, count in sorted(exhibit_refs(markdown).items()):
+        row = exhibits.get(exhibit_id)
+        state, reason = _state_of(row, f"Exhibit {exhibit_id} is not in this case's exhibit list for this draft.")
+        items.append(
+            {
+                "kind": "exhibit",
+                # The name the blockers and screens show: "Ex. C-12", never a database id.
+                "source_key": f"Ex. {exhibit_id}",
+                "exhibit_id": exhibit_id,
+                "ledger_key": (row or {}).get("source_key"),
+                "state": state,
+                "uses": count,
                 "label": (row or {}).get("label") or (row or {}).get("citation"),
                 "source_origin": (row or {}).get("source_origin"),
                 "reason": reason,
@@ -168,8 +213,8 @@ def is_pleaded_head_blocker(message: str) -> bool:
 
 
 __all__ = [
+    "CITATION_VERIFIED_STATUSES",
     "SOURCE_CITATION_RE",
-    "UNVERIFIED_SOURCE_STATUSES",
     "NO_APPROVED_HEADS",
     "citation_blockers",
     "claim_head_set_blockers",

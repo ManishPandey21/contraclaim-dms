@@ -5,6 +5,7 @@ import re
 from typing import Any, Dict, Iterable, List, Optional
 
 from ...core.config import settings
+from .citation_refs import ADJACENT_DUPLICATE_SOURCE_REF_RE, SOURCE_REF_RE, is_verified_status
 from .citation_states import is_pleaded_head_blocker
 from .context import PRODUCIBLE_QUALITY_FLAGS
 from .workflow_repository import artifact_hash
@@ -52,10 +53,9 @@ VALIDATION_BRANCHES = (
     "source_drift",
 )
 
-_CITATION_RE = re.compile(r"\[((?:S\d+)|(?:SRC-\d+))(?::[^\]]+)?\]")
-_ADJACENT_DUPLICATE_CITATION_RE = re.compile(
-    r"(\[(?:(?:S\d+)|(?:SRC-\d+))(?::[^\]]+)?\])(?:\s+\1)+"
-)
+# One parser for the validator and the workflow (D-17, 4B-35).
+_CITATION_RE = SOURCE_REF_RE
+_ADJACENT_DUPLICATE_CITATION_RE = ADJACENT_DUPLICATE_SOURCE_REF_RE
 _AMOUNT_RE = re.compile(
     r"\b(?:INR|USD|EUR|GBP|AED|SAR|QAR|\u20b9|\$|\u20ac|\u00a3)\s*[0-9][0-9,]*(?:\.\d+)?\b",
     flags=re.IGNORECASE,
@@ -270,10 +270,7 @@ class ArbitrationValidationOrchestrator:
                         and row.get("sha256")
                         and str(row.get("current_sha256")) != str(row.get("sha256"))
                     )
-                    if flags.intersection(BLOCKING_QUALITY_FLAGS) or verification in {
-                        "draft", "needs_review", "pending", "selected", "unverified",
-                        "authority_denied",
-                    } or revision_drift or content_drift:
+                    if flags.intersection(BLOCKING_QUALITY_FLAGS) or not is_verified_status(verification) or revision_drift or content_drift:
                         issues.append(
                             _issue(
                                 branch,

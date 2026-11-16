@@ -14,6 +14,7 @@ from ..contract_scope_resolver import (
 )
 from ..document_relationship_service import DocumentRelationshipService
 from ..evidence_graph_service import EvidenceGraphService
+from .citation_refs import CITATION_VERIFIED_STATUSES
 from .matrix_evidence_authority import matrix_clause_fence
 from .matrix_registry import MATRIX_COLLECTIONS
 from .permission_receipts import VERIFIED, rejoinder_permission_states
@@ -45,6 +46,34 @@ REVIEW_ONLY_SOURCE_STATUSES = {
     "pending",
     "under_review",
 }
+
+
+#: Statuses that withdraw a source's standing whatever else the row says.
+NEGATIVE_SOURCE_STATUSES = {"stale", "authority_denied", "revoked", "withdrawn"}
+_APPROVAL_FIELDS = ("verification_status", "human_approval_status", "approval_status", "readiness_status", "status")
+
+
+def ledger_verification_status(row: Dict[str, Any], *preferred: str) -> str:
+    """The status a ledger row carries into citation checks (D-17, C-11).
+
+    Previously each builder took its first field ``or "approved"``, so a row with
+    no status at all, admitted only because review sources were included, became
+    verified, and a row whose first field was not an approval (an alignment or an
+    issue's open/closed state) was reported by that field.
+
+    Now: a negative status (stale, authority denied, ...) wins; otherwise an
+    approval-family status in the citation allow-list wins; otherwise the first
+    non-empty preferred field; otherwise ``unverified``. Never ``approved`` by default.
+    """
+    values = [str(row.get(key) or "").strip().lower() for key in (*preferred, *_APPROVAL_FIELDS)]
+    present = [value for value in values if value]
+    for value in present:
+        if value in NEGATIVE_SOURCE_STATUSES:
+            return value
+    for value in present:
+        if value in CITATION_VERIFIED_STATUSES:
+            return value
+    return present[0] if present else "unverified"
 
 
 async def _collect(cursor: Any) -> List[Dict[str, Any]]:
@@ -908,7 +937,7 @@ class ArbitrationContextBuilder:
                 "page_numbers": [],
                 "clause_number": None,
                 "letter_no": None,
-                "verification_status": row.get("approval_status") or "approved",
+                "verification_status": ledger_verification_status(row, "approval_status"),
                 "is_user_supplied": True,
                 "source_origin": "case_jurisdiction_matrix",
                 "matrix_row_id": row.get("_id"),
@@ -966,7 +995,7 @@ class ArbitrationContextBuilder:
                 "page_numbers": [],
                 "clause_number": None,
                 "letter_no": None,
-                "verification_status": row.get("alignment_status") or row.get("approval_status") or "approved",
+                "verification_status": ledger_verification_status(row, "approval_status"),
                 "is_user_supplied": False,
                 "source_origin": "case_expert_alignment",
                 "matrix_row_id": row.get("_id"),
@@ -1074,7 +1103,7 @@ class ArbitrationContextBuilder:
                 "page_numbers": authoritative.get("page_numbers") or row.get("page_numbers") or [],
                 "clause_number": None,
                 "letter_no": row.get("letter_no"),
-                "verification_status": row.get("verification_status") or row.get("human_approval_status") or "approved",
+                "verification_status": ledger_verification_status(row, "verification_status", "human_approval_status"),
                 "is_user_supplied": False,
                 "source_origin": "case_document_index",
                 "matrix_row_id": row.get("_id"),
@@ -1271,7 +1300,7 @@ class ArbitrationContextBuilder:
                 "page_numbers": row.get("page_numbers") or [],
                 "clause_number": row.get("clause_number"),
                 "letter_no": None,
-                "verification_status": row.get("approval_status") or "approved",
+                "verification_status": ledger_verification_status(row, "approval_status"),
                 "is_user_supplied": False,
                 "source_origin": "case_clause_matrix",
                 "matrix_row_id": row.get("_id"),
@@ -1330,7 +1359,7 @@ class ArbitrationContextBuilder:
                 "page_numbers": [],
                 "clause_number": ", ".join(_string_list(row.get("clause_ids"))) or None,
                 "letter_no": None,
-                "verification_status": row.get("status") or row.get("approval_status") or "approved",
+                "verification_status": ledger_verification_status(row, "approval_status", "status"),
                 "is_user_supplied": True,
                 "source_origin": "case_issue_matrix",
                 "matrix_row_id": row.get("_id"),
@@ -1395,7 +1424,7 @@ class ArbitrationContextBuilder:
                     "page_numbers": [],
                     "clause_number": ", ".join(_string_list(row.get("clause_ids"))) or None,
                     "letter_no": None,
-                    "verification_status": row.get("readiness_status") or row.get("approval_status") or "approved",
+                    "verification_status": ledger_verification_status(row, "readiness_status", "approval_status"),
                     "is_user_supplied": False,
                     "source_origin": f"case_{slug}",
                     "matrix_row_id": row.get("_id"),
@@ -1463,7 +1492,7 @@ class ArbitrationContextBuilder:
                 "page_numbers": [],
                 "clause_number": None,
                 "letter_no": None,
-                "verification_status": row.get("approval_status") or "approved",
+                "verification_status": ledger_verification_status(row, "approval_status"),
                 "is_user_supplied": False,
                 "source_origin": "case_quantum_annexure",
                 "matrix_row_id": row.get("_id"),
@@ -1526,7 +1555,7 @@ class ArbitrationContextBuilder:
                 "page_numbers": [],
                 "clause_number": row.get("clause") or row.get("clause_number"),
                 "letter_no": row.get("notice_ref"),
-                "verification_status": row.get("approval_status") or "approved",
+                "verification_status": ledger_verification_status(row, "approval_status"),
                 "is_user_supplied": False,
                 "source_origin": "case_notice_compliance",
                 "matrix_row_id": row.get("_id"),

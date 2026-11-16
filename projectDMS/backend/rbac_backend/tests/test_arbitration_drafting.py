@@ -375,7 +375,7 @@ class _FakeDb:
                     "version": 1,
                     "full_markdown": "# EOT Statement of Claim\n\nRelies on C-1 and [S1: Delay notice].\n",
                     "structured_output": {"source_hashes": ["abc"]},
-                    "source_ledger": [{"source_key": "S1", "source_id": "doc-1", "citation": "Delay notice"}],
+                    "source_ledger": [{"source_key": "S1", "source_id": "doc-1", "citation": "Delay notice", "verification_status": "approved"}],
                 }
             ]
         )
@@ -4653,7 +4653,10 @@ def test_phase4_validation_fans_out_deterministically_and_only_deduplicates_exis
                 "body": "The amount is INR 100. [S1: Notice] [S1: Notice]",
             }
         ],
-        "source_ledger": [{"source_key": "S1", "source_id": "doc-1", "source_revision_id": "rev-1"}],
+        # D-17: a source is verified only by an allow-listed status; a row with none is unverified.
+        "source_ledger": [
+            {"source_key": "S1", "source_id": "doc-1", "source_revision_id": "rev-1", "verification_status": "approved"}
+        ],
         "structured_output": {"approval_blockers": []},
         "validation_status": "passed",
     }

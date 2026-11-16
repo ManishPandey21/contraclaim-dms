@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List
 
+from .citation_refs import has_citation, source_refs
 from .citation_states import (
     claim_head_set_blockers,
     classify_citations,
@@ -12,7 +13,6 @@ from .citation_states import (
 )
 
 
-_SOURCE_CITATION_RE = re.compile(r"\[(S\d+):[^\]]+\]")
 _ISO_DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 _SLASH_DATE_RE = re.compile(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b")
 _AMOUNT_RE = re.compile(
@@ -25,7 +25,12 @@ _FACTUAL_VERB_RE = re.compile(
     r"\b(?:was|were|caused|failed|delayed|issued|submitted|notified|incurred|paid|completed|breached|withheld|terminated)\b",
     re.IGNORECASE,
 )
-_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+# A full stop after an exhibit abbreviation ("Ex. C-12", "Annex. A/7") does not end the
+# sentence, so the exhibit stays in the sentence it supports (4B-35).
+_SENTENCE_RE = re.compile(
+    r"(?<!\bEx\.)(?<!\bExh\.)(?<!\bAnn\.)(?<!\bAnnex\.)(?<!\bNo\.)(?<=[.!?])\s+|\n+",
+    re.IGNORECASE,
+)
 _NON_ENTITY_PHRASES = {
     "statement of claim",
     "statement of defence",
@@ -63,7 +68,7 @@ class ArbitrationDraftValidator:
             warnings.append(message)
             approval_blockers.append(message)
 
-        cited_keys = {match.group(1) for match in _SOURCE_CITATION_RE.finditer(markdown)}
+        cited_keys = set(source_refs(markdown))
         unknown_keys = sorted(cited_keys - source_keys)
         if unknown_keys:
             message = f"Draft cites sources not present in the source ledger: {', '.join(unknown_keys)}."
@@ -111,7 +116,7 @@ class ArbitrationDraftValidator:
             if (
                 len(normalized) >= 40
                 and _FACTUAL_VERB_RE.search(normalized)
-                and not _SOURCE_CITATION_RE.search(normalized)
+                and not has_citation(normalized)
                 and "[Evidence required]" not in normalized
             ):
                 unsupported_assertions.append(normalized[:180])
@@ -146,6 +151,15 @@ class ArbitrationDraftValidator:
         # named rather than left inside the general ledger blocker above.
         citations = classify_citations(markdown, source_ledger)
         unverified_cited = [item["source_key"] for item in citations["items"] if item["state"] == "unverified"]
+        # D-17: an exhibit reference ("Ex. C-12") is a citation like any other, and one
+        # the case's exhibit list cannot resolve blocks approval by name.
+        unresolved_exhibits = [
+            item["source_key"] for item in citations["items"] if item.get("kind") == "exhibit" and item["state"] == "unresolved"
+        ]
+        if unresolved_exhibits:
+            message = f"Draft cites exhibits that are not in the case's exhibit list: {', '.join(unresolved_exhibits)}."
+            warnings.append(message)
+            approval_blockers.append(message)
         if unverified_cited:
             message = f"Draft cites sources that are not yet verified: {', '.join(unverified_cited)}."
             warnings.append(message)
