@@ -18,6 +18,7 @@ CI's real-Mongo step.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import os
 import uuid
 from contextlib import asynccontextmanager
@@ -206,6 +207,85 @@ def test_a_publish_that_commits_while_revoke_is_deciding_is_deprecated_by_that_r
             else:
                 assert stored["status"] == "draft"
             await _assert_invariant(db)
+
+    _run(scenario())
+
+
+_ROLE: "contextvars.ContextVar[str]" = contextvars.ContextVar("race_role", default="")
+
+
+def test_publish_and_revoke_interleaved_step_by_step_never_leave_a_published_version_on_a_revoked_review(
+    monkeypatch,
+) -> None:
+    """Owner request (4B-05 follow-up): a deterministic interleaving for publish versus revoke.
+
+    The publish-during-revoke test above cannot fail without transactions, because a revoke
+    marks the approval before it reads the version, so a publish that starts later already
+    sees the revocation. This test forces the one order that can break the invariant, with
+    events rather than sleeps, each side identified by its own task context:
+
+      1. publish reads the approvals: both live;
+      2. revoke marks the legal approval revoked and reads the version: still a draft;
+      3. publish writes the version as published and commits;
+      4. revoke writes the version, filtered on the draft it read.
+
+    Without transactions, step 4 matches nothing and the revoke answers 409 after its
+    approval write has already landed: a published version stands on a revoked review.
+    With transactions, step 4 conflicts with step 3, the revoke is retried from the start,
+    sees the published version, and deprecates it in the same transaction.
+    """
+
+    publish_has_read = asyncio.Event()
+    revoke_has_read = asyncio.Event()
+    publish_done = asyncio.Event()
+    seen = {"publish_hold": 0, "revoke_hold": 0}
+    original_list_in = SkillApprovalService._list_in
+    original_version_in = SkillApprovalService._version_in
+
+    async def list_in(self, *args: Any, **kwargs: Any):
+        result = await original_list_in(self, *args, **kwargs)
+        if _ROLE.get() == "publish" and seen["publish_hold"] == 0:
+            seen["publish_hold"] += 1
+            publish_has_read.set()
+            await asyncio.wait_for(revoke_has_read.wait(), 10)  # step 1 -> 2
+        return result
+
+    async def version_in(self, *args: Any, **kwargs: Any):
+        result = await original_version_in(self, *args, **kwargs)
+        if _ROLE.get() == "revoke" and seen["revoke_hold"] == 0:
+            seen["revoke_hold"] += 1
+            revoke_has_read.set()
+            await asyncio.wait_for(publish_done.wait(), 10)  # step 2 -> 3 -> 4
+        return result
+
+    monkeypatch.setattr(SkillApprovalService, "_list_in", list_in)
+    monkeypatch.setattr(SkillApprovalService, "_version_in", version_in)
+
+    async def as_role(role: str, coro: Any) -> Any:
+        _ROLE.set(role)
+        return await _outcome(coro)
+
+    async def scenario() -> None:
+        async with _db() as db:
+            _record, legal = await _fully_approved(db, "1.9.0")
+            publish = asyncio.create_task(
+                as_role("publish", SkillRegistry(db).publish(CLAIMS_SKILL_KEY, "1.9.0", REPORT, PUBLISHER))
+            )
+            await asyncio.wait_for(publish_has_read.wait(), 10)
+            revoke = asyncio.create_task(as_role("revoke", SkillApprovalService(db).revoke(legal.id, "overruled", COUNSEL)))
+            published = await asyncio.wait_for(publish, 10)
+            publish_done.set()
+            revoked = await asyncio.wait_for(revoke, 10)
+
+            # The interleaving really happened: both sides were held once.
+            assert seen == {"publish_hold": 1, "revoke_hold": 1}, seen
+            # The invariant first: a failure here is the defect itself, not a symptom.
+            await _assert_invariant(db)
+            stored = await db[SKILL_VERSIONS].find_one({"version": "1.9.0"})
+            assert stored["status"] == "deprecated", stored["status"]
+            assert (await db[SKILL_APPROVALS].find_one({"_id": legal.id}))["revoked_at"] is not None
+            assert not isinstance(published, HTTPException), published
+            assert not isinstance(revoked, HTTPException), revoked
 
     _run(scenario())
 
