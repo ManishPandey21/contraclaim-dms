@@ -86,18 +86,62 @@ class HearingDeliverableOutput(BaseModel):
     speaking_note: Optional[str] = None
 
 
+FindingResult = Literal["full", "partial", "none", "insufficient_information"]
+
+
+class ClaimDeterminationOutput(BaseModel):
+    """`indian-infra-claims`: a finding on one head, for a determination or a simulation of one.
+
+    Carries no days and no amount: figures are entered by a person from the
+    delay assessment and the quantum build-up. The default is the "cannot yet
+    be determined" value.
+    """
+
+    result: FindingResult = "insufficient_information"
+    findings: str = "Not assessed."
+    residual_risks: List[str] = Field(default_factory=list)
+    information_required: List[str] = Field(default_factory=list)
+    clause_refs: List[str] = Field(default_factory=list)
+
+
+class SubmissionSectionOutput(BaseModel):
+    """`indian-infra-claims`: one section of a claim submission, as paragraphs."""
+
+    paragraphs: List[str] = Field(default_factory=list)
+
+
+class StrategyNoteOutput(BaseModel):
+    """`indian-infra-claims`: the claimant's internal view of the claim. Never issued."""
+
+    strengths: List[str] = Field(default_factory=list)
+    weaknesses: List[str] = Field(default_factory=list)
+    residual_risks: List[str] = Field(default_factory=list)
+
+
 CLAIM_HEAD_TEST_SCHEMA_KEY = "claim_head_test.v1"
+CLAIM_DETERMINATION_SCHEMA_KEY = "claim_determination.v1"
+SUBMISSION_SECTION_SCHEMA_KEY = "submission_section.v1"
+STRATEGY_NOTE_SCHEMA_KEY = "strategy_note.v1"
 DELAY_EVENT_SCHEMA_KEY = "delay_event_classification.v1"
 PLEADING_HEAD_SCHEMA_KEY = "pleading_head.v1"
 HEARING_DELIVERABLE_SCHEMA_KEY = "hearing_deliverable.v1"
 
 register_schema(CLAIM_HEAD_TEST_SCHEMA_KEY, ClaimHeadTestOutput)
+register_schema(CLAIM_DETERMINATION_SCHEMA_KEY, ClaimDeterminationOutput)
+register_schema(SUBMISSION_SECTION_SCHEMA_KEY, SubmissionSectionOutput)
+register_schema(STRATEGY_NOTE_SCHEMA_KEY, StrategyNoteOutput)
 register_schema(DELAY_EVENT_SCHEMA_KEY, DelayEventClassificationOutput)
 register_schema(PLEADING_HEAD_SCHEMA_KEY, PleadingHeadOutput)
 register_schema(HEARING_DELIVERABLE_SCHEMA_KEY, HearingDeliverableOutput)
 
 __all__ = [
+    "CLAIM_DETERMINATION_SCHEMA_KEY",
     "CLAIM_HEAD_TEST_SCHEMA_KEY",
+    "STRATEGY_NOTE_SCHEMA_KEY",
+    "SUBMISSION_SECTION_SCHEMA_KEY",
+    "ClaimDeterminationOutput",
+    "StrategyNoteOutput",
+    "SubmissionSectionOutput",
     "DELAY_EVENT_SCHEMA_KEY",
     "HEARING_DELIVERABLE_SCHEMA_KEY",
     "PLEADING_HEAD_SCHEMA_KEY",

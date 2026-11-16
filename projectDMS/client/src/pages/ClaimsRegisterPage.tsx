@@ -96,6 +96,7 @@ import {
 } from "@/lib/claims-helpers";
 import ClaimStatusPill from "@/components/claims/ClaimStatusPill";
 import ClaimSignalsStrip from "@/components/claim-bench/ClaimSignalsStrip";
+import { useClaimBenchOn } from "@/hooks/useClaimBenchOn";
 import { formatCrore, formatDateIN, formatINR, fromDateInput, toDateInput } from "@/lib/format-in";
 
 const CLAIM_TYPES: { value: ClaimType; label: string }[] = [
@@ -169,6 +170,8 @@ const ClaimsRegisterPage: React.FC = () => {
   const [saving, setSaving] = useState(false);
   const [approvalClaim, setApprovalClaim] = useState<ClaimDTO | null>(null);
   const [assessClaim, setAssessClaim] = useState<ClaimDTO | null>(null);
+  // The free-text assessment is retired where the Claim Bench is on.
+  const benchOn = useClaimBenchOn();
   const [taskClaim, setTaskClaim] = useState<ClaimDTO | null>(null);
   const [slaMap, setSlaMap] = useState<Record<string, ClaimSla>>({});
   const [exportingId, setExportingId] = useState<string | null>(null);
@@ -489,9 +492,11 @@ const ClaimsRegisterPage: React.FC = () => {
                             <DropdownMenuItem onClick={() => setTaskClaim(c)}>
                               <ClipboardList className="mr-2 h-4 w-4" /> New task
                             </DropdownMenuItem>
-                            <DropdownMenuItem onClick={() => setAssessClaim(c)}>
-                              <Sparkles className="mr-2 h-4 w-4" /> AI assessment
-                            </DropdownMenuItem>
+                            {!benchOn && (
+                              <DropdownMenuItem onClick={() => setAssessClaim(c)}>
+                                <Sparkles className="mr-2 h-4 w-4" /> AI assessment
+                              </DropdownMenuItem>
+                            )}
                             <DropdownMenuItem onClick={() => setApprovalClaim(c)}>
                               <ShieldCheck className="mr-2 h-4 w-4" /> Approval
                             </DropdownMenuItem>

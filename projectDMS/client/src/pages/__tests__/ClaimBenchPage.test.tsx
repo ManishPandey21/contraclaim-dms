@@ -25,6 +25,11 @@ const api = vi.hoisted(() => ({
   verifyNoticeRequirement: vi.fn(),
 }));
 vi.mock("@/services/claim-bench-api", () => api);
+const permission = vi.hoisted(() => ({ granted: false }));
+vi.mock("@/hooks/useHasPermission", () => ({ default: () => permission.granted }));
+vi.mock("@/components/claim-bench/DeterminationsPanel", () => ({ default: () => <p>determinations panel</p> }));
+vi.mock("@/components/claim-bench/SubmissionPanel", () => ({ default: () => <p>submission panel</p> }));
+vi.mock("@/components/claim-bench/InternalAnalysisPanel", () => ({ default: () => <p>internal panel</p> }));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
 const head = (over: Partial<ClaimHead> = {}): ClaimHead => ({
@@ -89,7 +94,37 @@ function renderPage() {
 describe("Claim Bench page", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    permission.granted = false;
     api.fetchClaimBench.mockResolvedValue(response());
+  });
+
+  it("opens a Contractor's workspace on the board, with the submission and no internal tab without access", async () => {
+    renderPage();
+    const tabs = await screen.findByRole("tablist", { name: "Claim workspace" });
+    expect(within(tabs).getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
+      "Board",
+      "Determinations received",
+      "Submission",
+    ]);
+    expect(within(tabs).getByRole("tab", { name: "Board" })).toHaveAttribute("aria-selected", "true");
+    await userEvent.click(within(tabs).getByRole("tab", { name: "Submission" }));
+    expect(screen.getByText("submission panel")).toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "Heads of claim" })).not.toBeInTheDocument();
+  });
+
+  it("opens an Engineer's workspace on the determination, with no submission tab", async () => {
+    permission.granted = true;
+    api.fetchClaimBench.mockResolvedValue(response({ perspective: "engineer" }));
+    renderPage();
+    const tabs = await screen.findByRole("tablist", { name: "Claim workspace" });
+    expect(within(tabs).getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
+      "Board",
+      "Determination",
+      "Internal analysis",
+    ]);
+    expect(screen.getByText("determinations panel")).toBeInTheDocument();
+    await userEvent.click(within(tabs).getByRole("tab", { name: "Internal analysis" }));
+    expect(screen.getByText("internal panel")).toBeInTheDocument();
   });
 
   it("shows an error state when the claim cannot be read", async () => {

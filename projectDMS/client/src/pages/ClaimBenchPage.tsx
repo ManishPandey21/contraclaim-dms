@@ -4,6 +4,9 @@ import { ArrowLeft, FileText, Lock, LockOpen, Mail, Plus, Scale } from "lucide-r
 
 import ClaimStatusPill from "@/components/claims/ClaimStatusPill";
 import DelayTab from "@/components/claim-bench/DelayTab";
+import DeterminationsPanel from "@/components/claim-bench/DeterminationsPanel";
+import InternalAnalysisPanel from "@/components/claim-bench/InternalAnalysisPanel";
+import SubmissionPanel from "@/components/claim-bench/SubmissionPanel";
 import HeadPanel from "@/components/claim-bench/HeadPanel";
 import QuantumTab from "@/components/claim-bench/QuantumTab";
 import NoticeClockCard from "@/components/claim-bench/NoticeClockCard";
@@ -11,6 +14,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useClaimBench } from "@/hooks/useClaimBench";
+import useHasPermission from "@/hooks/useHasPermission";
 import { errorMessage } from "@/hooks/useLetterBench";
 import {
   ELEMENT_LABEL,
@@ -53,6 +57,8 @@ const Lights: React.FC<{ head: ClaimHead }> = ({ head }) => (
   </ul>
 );
 
+type WorkspaceView = "board" | "determinations" | "submission" | "internal";
+
 /**
  * The Claim Bench: a claim worked as a board of heads. Records decide the
  * facts, the claims skill (once published) proposes a view, and the person
@@ -64,6 +70,9 @@ const ClaimBenchPage: React.FC = () => {
   const { query, open, addHead, patchHead, removeHead, decide, test, lock, unlock, perspective } = useClaimBench(id);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [tab, setTab] = useState<"elements" | "delay" | "quantum">("elements");
+  const [chosenView, setChosenView] = useState<WorkspaceView | null>(null);
+  // Hides the tab only. The server refuses privileged material to anyone without the permission.
+  const mayReadInternal = useHasPermission("dms.claim.strategy.read");
   const data = query.data;
 
   if (query.isLoading) {
@@ -98,6 +107,16 @@ const ClaimBenchPage: React.FC = () => {
   const cannotTestReason = !data.perspective
     ? "State which party this project acts for first"
     : undefined;
+  // An Engineer's or Employer's workspace opens on evaluation; a Contractor's on the board.
+  const evaluating = data.perspective === "engineer" || data.perspective === "employer";
+  const views: [WorkspaceView, string][] = [
+    ["board", "Board"],
+    ["determinations", evaluating ? "Determination" : "Determinations received"],
+    ...(evaluating ? [] : ([["submission", "Submission"]] as [WorkspaceView, string][])),
+    ...(mayReadInternal ? ([["internal", "Internal analysis"]] as [WorkspaceView, string][]) : []),
+  ];
+  const wanted = chosenView ?? (evaluating ? "determinations" : "board");
+  const view = views.some(([key]) => key === wanted) ? wanted : "board";
 
   return (
     <div className="container mx-auto space-y-4 p-6">
@@ -191,6 +210,27 @@ const ClaimBenchPage: React.FC = () => {
           </Button>
         </section>
       ) : (
+        <>
+        <div role="tablist" aria-label="Claim workspace" className="flex flex-wrap gap-1 rounded-lg border bg-card p-1">
+          {views.map(([key, label]) => (
+            <button
+              key={key}
+              type="button"
+              role="tab"
+              aria-selected={view === key}
+              onClick={() => setChosenView(key)}
+              className={`rounded-md px-4 py-1.5 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                view === key ? "bg-primary text-primary-foreground" : "hover:bg-muted"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        {view === "determinations" && <DeterminationsPanel claimId={id} readOnly={data.read_only} />}
+        {view === "submission" && <SubmissionPanel claimId={id} readOnly={data.read_only} />}
+        {view === "internal" && <InternalAnalysisPanel claimId={id} readOnly={data.read_only} />}
+        {view === "board" && (
         <div className="grid gap-4 lg:grid-cols-[260px_minmax(0,1fr)_280px]">
           <nav aria-label="Heads of claim" className="space-y-2">
             {bench.heads.map((item) => {
@@ -377,6 +417,8 @@ const ClaimBenchPage: React.FC = () => {
             )}
           </aside>
         </div>
+        )}
+        </>
       )}
     </div>
   );

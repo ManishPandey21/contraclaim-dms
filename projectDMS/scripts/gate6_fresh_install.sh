@@ -38,7 +38,7 @@
 #   GATE6_BACKEND_IMAGE        use this image instead of building one. Its
 #                              org.opencontainers.image.revision label must
 #                              equal the checked-out commit.
-#   GATE6_EXPECTED_MIGRATIONS  catalogue size this run must find (default 25)
+#   GATE6_EXPECTED_MIGRATIONS  catalogue size this run must find (default 26)
 #   GATE6_MONGO_IMAGE          default mongo:8.0, the image CI uses
 #   GATE6_OUT_DIR              where step logs go (default: a new temp dir)
 #   GATE6_KEEP=1               leave the containers and network up afterwards
@@ -48,7 +48,7 @@
 set -Eeuo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-EXPECTED=${GATE6_EXPECTED_MIGRATIONS:-25}
+EXPECTED=${GATE6_EXPECTED_MIGRATIONS:-26}
 MONGO_IMAGE=${GATE6_MONGO_IMAGE:-mongo:8.0}
 # Lower case throughout: the name is also the server's hostname, and URL parsers
 # fold hostnames to lower case.
@@ -316,7 +316,7 @@ function check(name, pass, detail) {
 }
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
-const expectedCollections = ["skills", "skill_versions", "skill_bindings", "skill_approvals", "letter_position_boards", "letter_skill_steps", "skill_steps", "claim_notice_requirements", "claim_head_links"];
+const expectedCollections = ["skills", "skill_versions", "skill_bindings", "skill_approvals", "letter_position_boards", "letter_skill_steps", "skill_steps", "claim_notice_requirements", "claim_head_links", "claim_determinations", "claim_privileged", "claim_submissions"];
 const present = new Set(db.getCollectionNames());
 for (const name of expectedCollections) check("collection " + name + " exists", present.has(name));
 
@@ -349,6 +349,12 @@ const expectedIndexes = [
     { status: "active" }],
   ["claim_head_links", "claim_head_link_claim_time", { claim_id: 1, status: 1, created_at: 1 }, false, null],
   ["claim_head_links", "claim_head_link_target", { organization_id: 1, target_type: 1, target_id: 1, status: 1 }, false, null],
+  // 20261118_0001: determinations, the privileged claim store, submissions.
+  ["claim_determinations", "claim_determination_revision_unique", { claim_id: 1, origin: 1, revision: 1 }, true, null],
+  ["claim_determinations", "claim_determination_scope_status", { organization_id: 1, project_id: 1, status: 1 }, false, null],
+  ["claim_privileged", "claim_privileged_claim_kind_time", { claim_id: 1, kind: 1, created_at: -1 }, false, null],
+  ["claim_privileged", "claim_privileged_one_strategy_note", { claim_id: 1 }, true, { kind: "strategy_note" }],
+  ["claim_submissions", "claim_submission_claim_unique", { claim_id: 1 }, true, null],
 ];
 for (const [collection, name, key, unique, partial] of expectedIndexes) {
   const found = db.getCollection(collection).getIndexes().find((i) => i.name === name);
@@ -500,6 +506,26 @@ check("removed links to it are kept as history",
 check("the same hindrance can be linked to another head",
   attempt(links, { _id: "k5", ...link, head_id: "H2", status: "active" }) === "inserted");
 
+// 20261118_0001. A determination revision is unique per claim and origin; a claim
+// has one strategy note and any number of simulations; one submission per claim.
+const dets = "claim_determinations", priv = "claim_privileged", subs = "claim_submissions";
+const det = { organization_id: org, claim_id: "gate6-claim", origin: "authored", revision: 1 };
+check("first determination revision is accepted", attempt(dets, { _id: "d1", ...det }) === "inserted");
+r = attempt(dets, { _id: "d2", ...det });
+check("the same revision of an authored determination is refused", r === "E11000 claim_determination_revision_unique", r);
+check("a received determination may carry the same revision number",
+  attempt(dets, { _id: "d3", ...det, origin: "received" }) === "inserted");
+check("a strategy note is accepted", attempt(priv, { _id: "p1", organization_id: org, claim_id: "gate6-claim", kind: "strategy_note" }) === "inserted");
+r = attempt(priv, { _id: "p2", organization_id: org, claim_id: "gate6-claim", kind: "strategy_note" });
+check("a second strategy note for the claim is refused", r === "E11000 claim_privileged_one_strategy_note", r);
+check("simulations of the same claim are many",
+  attempt(priv, { _id: "p3", organization_id: org, claim_id: "gate6-claim", kind: "simulation" }) === "inserted" &&
+  attempt(priv, { _id: "p4", organization_id: org, claim_id: "gate6-claim", kind: "simulation" }) === "inserted");
+check("first submission for a claim is accepted", attempt(subs, { _id: "u1", organization_id: org, claim_id: "gate6-claim" }) === "inserted");
+r = attempt(subs, { _id: "u2", organization_id: org, claim_id: "gate6-claim" });
+check("a second submission for the claim is refused", r === "E11000 claim_submission_claim_unique", r);
+
+for (const name of [dets, priv, subs]) db.getCollection(name).deleteMany({ organization_id: org });
 db.getCollection(boards).deleteMany({ organization_id: org });
 db.skill_versions.deleteMany({ owner_scope: "gate6-probe" });
 db.getCollection(links).deleteMany({ organization_id: org });
@@ -508,7 +534,8 @@ db.claims.deleteMany({ organization_id: org });
 db.skill_steps.deleteMany({ subject_id: "gate6:H1" });
 const left = db.getCollection(boards).countDocuments({}) + db.skill_versions.countDocuments({ owner_scope: "gate6-probe" }) +
   db.getCollection(notice).countDocuments({}) + db.claims.countDocuments({}) + db.skill_steps.countDocuments({}) +
-  db.getCollection(links).countDocuments({});
+  db.getCollection(links).countDocuments({}) + db.getCollection(dets).countDocuments({}) +
+  db.getCollection(priv).countDocuments({}) + db.getCollection(subs).countDocuments({});
 check("probe rows removed", left === 0, left + " left");
 if (failed) { print("PROBE FAILED=" + failed); quit(1); }
 print("PROBE=PASS");

@@ -27,6 +27,8 @@ CLIENT_DMS_PERMISSIONS: List[str] = [
     "dms.claim.delete",
     "dms.claim.manage",
     "dms.claim.assess",
+    "dms.claim.determine",
+    "dms.claim.strategy.read",
     "dms.contract.appraisal.view",
     "dms.contract.appraisal.generate",
     "dms.contract.appraisal.edit",
@@ -199,6 +201,11 @@ class Permissions:
     CLAIM_DELETE = "dms.claim.delete"
     CLAIM_MANAGE = "dms.claim.manage"
     CLAIM_ASSESS = "dms.claim.assess"
+    # Authority to make and approve an official determination of a claim, and
+    # access to a party's privileged analysis of it (simulations, strategy
+    # note). Both are granted by name, never through the bulk role merge.
+    CLAIM_DETERMINE = "dms.claim.determine"
+    CLAIM_STRATEGY_READ = "dms.claim.strategy.read"
     CONTRACT_APPRAISAL_VIEW = "dms.contract.appraisal.view"
     CONTRACT_APPRAISAL_GENERATE = "dms.contract.appraisal.generate"
     CONTRACT_APPRAISAL_EDIT = "dms.contract.appraisal.edit"
@@ -351,6 +358,11 @@ class Permissions:
 EXPLICIT_GRANT_ONLY_PERMISSIONS: frozenset = frozenset(
     {
         "dms.document.review_extraction",
+        # Claim-to-arbitration Phase 3. Determination authority and access to
+        # privileged claim analysis are deliberate grants: holding the claim
+        # permissions does not confer either.
+        "dms.claim.determine",
+        "dms.claim.strategy.read",
     }
 )
 

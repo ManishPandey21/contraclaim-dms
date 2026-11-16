@@ -29,6 +29,7 @@ import {
 import { getTasks, TaskDTO } from "@/services/tasks-api";
 import ClaimApprovalDialog from "@/components/claims/ClaimApprovalDialog";
 import ClaimAssessmentDialog from "@/components/claims/ClaimAssessmentDialog";
+import { useClaimBenchOn } from "@/hooks/useClaimBenchOn";
 import ClaimTaskDialog from "@/components/claims/ClaimTaskDialog";
 import ClaimDocumentLinks from "@/components/claims/ClaimDocumentLinks";
 import useHasPermission from "@/hooks/useHasPermission";
@@ -68,6 +69,7 @@ const ClaimDetailPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [approvalOpen, setApprovalOpen] = useState(false);
   const [assessOpen, setAssessOpen] = useState(false);
+  const benchOn = useClaimBenchOn();
   const [taskOpen, setTaskOpen] = useState(false);
   const canManageDocumentLinks = useHasPermission("dms.claim.edit");
 
@@ -141,10 +143,14 @@ const ClaimDetailPage: React.FC = () => {
             <ClipboardList className="mr-2 h-4 w-4" />
             New task
           </Button>
-          <Button variant="outline" size="sm" onClick={() => setAssessOpen(true)}>
-            <Sparkles className="mr-2 h-4 w-4 text-indigo-500" />
-            AI assessment
-          </Button>
+          {/* Where the Claim Bench is on, a claim is assessed head by head there, and
+              the free-text assessment is no longer offered. Its history stays on the API. */}
+          {!benchOn && (
+            <Button variant="outline" size="sm" onClick={() => setAssessOpen(true)}>
+              <Sparkles className="mr-2 h-4 w-4 text-indigo-500" />
+              AI assessment
+            </Button>
+          )}
           <Button variant="outline" size="sm" onClick={() => setApprovalOpen(true)}>
             <ShieldCheck className="mr-2 h-4 w-4" />
             Approval

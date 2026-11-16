@@ -50,6 +50,8 @@ PERMISSION_FEATURE_REQUIREMENTS: Dict[str, Tuple[str, ...]] = {
     "dms.claim.delete": ("feature.dms.claims",),
     "dms.claim.manage": ("feature.dms.claims",),
     "dms.claim.assess": ("feature.dms.claims",),
+    "dms.claim.determine": ("feature.dms.claims",),
+    "dms.claim.strategy.read": ("feature.dms.claims",),
     "dms.contract.appraisal.view": ("feature.dms.contract_appraisal",),
     "dms.contract.appraisal.generate": ("feature.dms.contract_appraisal",),
     "dms.contract.appraisal.edit": ("feature.dms.contract_appraisal",),

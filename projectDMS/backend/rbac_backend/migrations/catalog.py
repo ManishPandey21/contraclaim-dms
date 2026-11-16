@@ -127,6 +127,10 @@ from .v20261117_0001_claim_head_link_indexes import DESCRIPTION as CLAIM_HEAD_LI
 from .v20261117_0001_claim_head_link_indexes import NAME as CLAIM_HEAD_LINK_INDEXES_NAME
 from .v20261117_0001_claim_head_link_indexes import VERSION as CLAIM_HEAD_LINK_INDEXES_VERSION
 from .v20261117_0001_claim_head_link_indexes import upgrade as upgrade_claim_head_link_indexes
+from .v20261118_0001_claim_findings_indexes import DESCRIPTION as CLAIM_FINDINGS_INDEXES_DESCRIPTION
+from .v20261118_0001_claim_findings_indexes import NAME as CLAIM_FINDINGS_INDEXES_NAME
+from .v20261118_0001_claim_findings_indexes import VERSION as CLAIM_FINDINGS_INDEXES_VERSION
+from .v20261118_0001_claim_findings_indexes import upgrade as upgrade_claim_findings_indexes
 
 
 MIGRATIONS = [
@@ -279,5 +283,11 @@ MIGRATIONS = [
         name=CLAIM_HEAD_LINK_INDEXES_NAME,
         description=CLAIM_HEAD_LINK_INDEXES_DESCRIPTION,
         upgrade=upgrade_claim_head_link_indexes,
+    ),
+    Migration(
+        version=CLAIM_FINDINGS_INDEXES_VERSION,
+        name=CLAIM_FINDINGS_INDEXES_NAME,
+        description=CLAIM_FINDINGS_INDEXES_DESCRIPTION,
+        upgrade=upgrade_claim_findings_indexes,
     ),
 ]

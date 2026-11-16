@@ -395,6 +395,15 @@ _merge_role_permissions(
     ["dms.document.review_extraction"],
 )
 
+# Claim-to-arbitration Phase 3: determination authority and access to privileged
+# claim analysis go to these two roles in the release definitions and to no
+# other. Production role documents do not change until an administrator grants
+# the permissions there.
+_merge_role_permissions(
+    {"orgadmin", "projectadmin"},
+    ["dms.claim.determine", "dms.claim.strategy.read"],
+)
+
 _merge_role_permissions(
     {"contraclaim_drafting_manager"},
     [

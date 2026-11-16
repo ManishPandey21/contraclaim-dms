@@ -358,6 +358,8 @@ const PermissionsPage = () => {
         { id: "dms.claim.delete", name: "Delete Claims" },
         { id: "dms.claim.manage", name: "Manage Claims" },
         { id: "dms.claim.assess", name: "Assess Claims (AI)" },
+        { id: "dms.claim.determine", name: "Determine Claims" },
+        { id: "dms.claim.strategy.read", name: "View Privileged Claim Analysis" },
         { id: "dms.contract.appraisal.view", name: "View Contract Appraisal" },
         { id: "dms.contract.appraisal.generate", name: "Generate Contract Appraisal" },
         { id: "dms.contract.appraisal.edit", name: "Edit Contract Appraisal" },

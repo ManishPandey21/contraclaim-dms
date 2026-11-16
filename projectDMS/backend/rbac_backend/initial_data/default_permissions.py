@@ -73,6 +73,8 @@ DEFAULT_PERMISSIONS = [
     {"_id": "dms.claim.delete", "name": "Delete Claims"},
     {"_id": "dms.claim.manage", "name": "Manage Claims"},
     {"_id": "dms.claim.assess", "name": "Assess Claims"},
+    {"_id": "dms.claim.determine", "name": "Determine Claims"},
+    {"_id": "dms.claim.strategy.read", "name": "View Privileged Claim Analysis"},
     {"_id": "dms.contract.appraisal.view", "name": "View Contract Appraisal"},
     {"_id": "dms.contract.appraisal.generate", "name": "Generate Contract Appraisal"},
     {"_id": "dms.contract.appraisal.edit", "name": "Edit Contract Appraisal"},

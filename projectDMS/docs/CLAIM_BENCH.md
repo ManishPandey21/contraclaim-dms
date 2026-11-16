@@ -89,10 +89,40 @@ Compensable periods come from the delay decisions: Employer critical delay with 
 
 Migration `20261117_0001` indexes `claim_head_links`. Linking needs `dms.claim.edit` and read access to the record (`dms.hindrance.view` or `dms.keydate.view`).
 
+## Two Chairs and the Submission Pack (Phase 3)
+
+Behind the same flag as the Bench. When the Bench is on, the claim page gains a row of views: Board, Determination(s), Submission, Internal analysis.
+
+**Determinations.** An official finding on the claim, head by head: made out in full, in part, not at all, or cannot yet be determined, with reasons and, where it cannot be determined, the information required.
+
+- **Made here** only in a project that acts as Engineer or Employer, by a person holding `dms.claim.determine`. A second person with that permission approves it; nobody who made a finding can approve or return it. Approved, it does not change. "Start a new revision" creates a new record that supersedes it.
+- **Received** from the other side: any workspace records one, tied to the document it arrived in (which must already be linked to the claim). Once recorded it does not change.
+- Days and amounts are typed by the person. The figures on the record (days claimed, the delay assessment's figure or range, amount claimed, amount with and without proof) are shown beside each head and never copied in.
+- "Propose findings" puts a proposal beside each head. With no published claims skill it is the record's: it lists what the board leaves open and never proposes an entitlement. A published skill's proposal cannot be "made out in full" over an element the board does not hold as supported, and never carries a figure.
+- A determination reads the board. It writes nothing to the claim, its heads, its links or another determination.
+
+**Internal analysis** (privileged). Needs `dms.claim.strategy.read` to see at all, and claim edit rights as well to change.
+
+- **Simulation**: how another party is likely to respond. Every response and screen carries "Internal analysis — not a determination". With no published skill it predicts nothing and lists what the board shows to be open to challenge.
+- **Strategy note**: strengths, weaknesses, residual risks, free notes. One per claim. "Draft from the board" replaces the three lists and keeps the notes.
+- Both live in the `claim_privileged` collection and nowhere else. One module (`services/claim_privileged.py`) names that collection; a test fails if another starts to. They are not on the claim record, not in the shared skill-step store, not in the evidence bundle, not in the submission or its exports, and nothing in the arbitration module reads them.
+
+**Submission.** A Contractor's workspace only, and only from a **locked** board.
+
+- Six sections: executive summary, contractual basis, chronology and evidence, delay analysis, quantum, relief and reservation of rights. Plus an evidence schedule: the claim's linked documents in date order, numbered E-1 onwards.
+- Each section is composed from the record by code. With a published skill, the skill may re-express a section; its text is used only if every number in it is on the record, every clause it names is one the heads cite, and the reservation of rights survives. Otherwise the record composition is used and the reason shown.
+- What never goes in: a notice period not verified against the contract (the submission then gives only the date notice was served), a cost line whose proof is not linked, clause wording that is not in the clause index, and anything privileged.
+- "For you, not in the document" notes say what was left out and why. They are not exported.
+- A section goes stale when the record it was composed from changes. Re-composing redoes only stale sections. Export is refused while any section is stale or the board is unlocked.
+- Export is Word or PDF. Until the claim is approved through its existing approval workflow, the export is headed "DRAFT. Not approved for issue." Each export is written to the audit trail.
+
+**The old AI assessment** button is hidden on the register and the record page where the Bench is on. The endpoint and its history are unchanged; where the Bench is off nothing changes.
+
+**Permissions.** `dms.claim.determine` and `dms.claim.strategy.read` are new, and are granted by name only: in the release role definitions to `orgadmin` and `projectadmin`, and not through the bulk role merge. Migration `20261118_0001` adds indexes only; **no existing role document gains either permission**, so in a deployed database nobody can author a determination or open Internal analysis until an administrator grants them.
+
 ## Not in this phase
 
 - The project form has no field for the party; it is set from the Bench.
-- Determinations and the submission pack (Phase 3).
-- Skill proposals for delay events, overlap treatment and quantum lines. The delay proposals shown come from the hindrance register; the EOT and claims skills are unpublished, and their review steps are built with Phase 3.
+- Skill proposals for delay events, overlap treatment and quantum lines. The delay proposals shown come from the hindrance register.
 - The contract's own concurrency clause is not looked up and quoted on an overlap; the person states the basis.
 - Notice periods are proposed from single clauses. Precedence between a general condition and a document that modifies it is shown (modifying documents are listed first and marked) and decided by the person, not computed.
