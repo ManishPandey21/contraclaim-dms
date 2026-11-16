@@ -179,9 +179,29 @@ class ArbitrationDraftingService:
         self.validator = ArbitrationDraftValidator()
         self.exporter = ArbitrationDraftExporter()
 
+    async def case_for_draft(self, case_id: str, organization_id: Any, project_id: Any) -> Dict[str, Any]:
+        """The case a draft is attached to: it must exist (404) and belong to the draft's
+        organisation and project (409). Plan 4B-38, C-20: a draft attached to a missing or
+        foreign case lost its scratch mark and escaped every case gate."""
+        case = await self.case_workspace.get_case(str(case_id))
+        if str(case.get("organization_id") or "") != str(organization_id or "") or str(
+            case.get("project_id") or ""
+        ) != str(project_id or ""):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "draft_case_scope_mismatch",
+                    "user_message": "That arbitration case belongs to another project. Choose a case of this draft's project.",
+                    "detail": None,
+                },
+            )
+        return case
+
     async def create_draft(self, payload: ArbitrationDraftCreate, current_user: Any) -> Dict[str, Any]:
         draft_payload = payload.model_dump(exclude={"selected_references", "claim_heads", "scratch"})
         draft_payload["organization_id"] = payload.organization_id or getattr(current_user, "organization_id", None)
+        if payload.case_id:
+            await self.case_for_draft(payload.case_id, draft_payload["organization_id"], payload.project_id)
         draft = ArbitrationDraft(
             **draft_payload,
             is_scratch=not payload.case_id,
@@ -233,6 +253,10 @@ class ArbitrationDraftingService:
         draft = await self._load_unlocked(draft_id)
         update = payload.model_dump(exclude_unset=True)
         if "case_id" in update:
+            if update["case_id"]:
+                await self.case_for_draft(
+                    update["case_id"], draft.get("organization_id"), update.get("project_id", draft.get("project_id"))
+                )
             # Attached to a case, a scratch draft stops being one; detached, it becomes one.
             update["is_scratch"] = not update["case_id"]
         update["updated_at"] = datetime.utcnow()

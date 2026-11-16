@@ -669,6 +669,9 @@ async def create_arbitration_draft(
         organization_id=org,
         project_id=payload.project_id,
     )
+    if payload.case_id:
+        # Attaching is editing the case's set of drafts (4B-38).
+        await _load_case_and_authorize(payload.case_id, Permissions.ARBITRATION_EDIT, db, current_user, policy)
     if not payload.case_id and not payload.scratch:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -700,6 +703,9 @@ async def update_arbitration_draft(
     policy: PolicyService = Depends(get_policy),
 ):
     await _load_and_authorize(draft_id, Permissions.ARBITRATION_EDIT, db, current_user, policy)
+    if payload.case_id:
+        # Attaching a draft to a case: the case must be one the caller may edit (4B-38, C-20).
+        await _load_case_and_authorize(payload.case_id, Permissions.ARBITRATION_EDIT, db, current_user, policy)
     return ArbitrationDraftDetail(**await ArbitrationDraftingService(db).update_draft(draft_id, payload, current_user))
 
 

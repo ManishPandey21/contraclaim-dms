@@ -73,6 +73,7 @@ export const ERROR_CODE_MESSAGES = {
   escalation_key_released: "The earlier attempt did not finish. Try again.",
   escalation_key_reused: "This escalation was started for different claims. Reload the page and try again.",
   escalation_in_progress: "This escalation is still running. Try again in a moment.",
+  draft_case_scope_mismatch: "That arbitration case belongs to another project. Choose a case of this draft's project.",
 } as const;
 
 export type StatusKind = "claim" | "arbitration_case" | "arbitration_draft";
