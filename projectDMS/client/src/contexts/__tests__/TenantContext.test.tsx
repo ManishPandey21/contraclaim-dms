@@ -1,6 +1,7 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { TenantProvider, useTenant } from "../TenantContext";
+import { SELECTION_STORAGE_KEY, TenantProvider, useTenant } from "../TenantContext";
+import { serializeSelection } from "@/services/active-scope";
 
 const { getCurrentUserProfile, listOrganizations, listProjects } = vi.hoisted(
   () => ({
@@ -66,8 +67,9 @@ describe("TenantProvider", () => {
     );
 
     expect(await screen.findByText("Acme Infrastructure")).toBeInTheDocument();
-    expect(screen.getByText("North Corridor")).toBeInTheDocument();
-    expect(screen.getByTestId("can-switch")).toHaveTextContent("true");
+    // Organisation-tier default is All Projects (owner policy 2026-10-06).
+    await waitFor(() => expect(screen.getByTestId("can-switch")).toHaveTextContent("true"));
+    expect(screen.queryByText("North Corridor")).not.toBeInTheDocument();
 
     act(() => screen.getByRole("button", { name: "Switch project" }).click());
 
@@ -99,8 +101,10 @@ describe("TenantProvider", () => {
   });
 
   it("restores a valid persisted project selection", async () => {
-    window.localStorage.setItem("org_id", "org-1");
-    window.localStorage.setItem("proj_id", "project-2");
+    window.localStorage.setItem(
+      SELECTION_STORAGE_KEY,
+      serializeSelection({ organizationId: "org-1", projectId: "project-2" }),
+    );
     getCurrentUserProfile.mockResolvedValue({
       roles: ["orguser"],
       organization_id: "org-1",
