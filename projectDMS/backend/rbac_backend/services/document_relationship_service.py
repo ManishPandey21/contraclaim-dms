@@ -811,18 +811,14 @@ class DocumentRelationshipService:
         other time is left as it is. Claims only. One transaction; audited.
         """
         context = await self._target(actor, target_type, target_id, manage=True, freeze=True)
-        if context.target_type != "claim":
+        adapter = self.registry.get(context.target_type)
+        lift = getattr(adapter, "lift_freeze", None)
+        if lift is None:
             raise DocumentRelationshipError(f"{context.target_type} evidence freeze cannot be lifted", 409)
         actor_id = getattr(actor, "id", None)
 
         async def persist(session: Any) -> None:
-            result = await self.db.claims.update_one(
-                {"_id": context.entity.get("_id"), "evidence_frozen_at": frozen_at},
-                {"$set": {"evidence_frozen_at": None, "evidence_frozen_by": None, "evidence_freeze_reason": None}},
-                session=session,
-            )
-            if not getattr(result, "matched_count", 0):
-                raise DocumentRelationshipError("Claim evidence was frozen by something else; it is left frozen", 409)
+            await lift(self.db, context, frozen_at=frozen_at, session=session)
             links = await self.db.entity_document_links.find(
                 {
                     "organization_id": context.organization_id,
