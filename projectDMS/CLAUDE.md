@@ -83,10 +83,12 @@ Local dev: `make front` (client) / `make back` (uvicorn `rbac_backend.main:app` 
   Pre-commit `forbid-legacy-authz` blocks `Depends(has_permission(...))`.
 - **Permission names use the `dms.*` convention** (`dms.contract.clause.read`, …), not
   `contract:read`.
-- **Role normalization lives once** in `core/permissions.py` (`CANONICAL_ROLE_ALIASES`,
-  `normalize_role_name`). Never add a module-local `ROLE_ALIASES` or private normalizer —
-  `test_role_alias_single_source.py` fails on it. Adding an alias is a *behaviour change*
-  (a previously unresolvable role becomes effective).
+- **Role normalization is NOT single-source on release yet.** `core/role_reference.py`
+  `ROLE_ALIASES` (re-exported by `core/security.py`) coexists with local tables in
+  `services/authorization_service.py`, `services/permission_service.py` and
+  `services/rbac_service.py`. `CANONICAL_ROLE_ALIASES` and `test_role_alias_single_source.py`
+  exist only on `codex/csv-import-scope` (PR #19 lineage). Never add a *new* local table.
+  Adding an alias is a *behaviour change* (a previously unresolvable role becomes effective).
 - **Routers must re-raise domain errors as a group:** `except (BaseDomainError, HTTPException)`.
   Re-raising one domain error and letting siblings fall to `except Exception` turns 403s
   into 500s; `test_domain_error_reraise_guard.py` walks every router's AST for this shape.
@@ -94,8 +96,9 @@ Local dev: `make front` (client) / `make back` (uvicorn `rbac_backend.main:app` 
   `user:{id}` bucket that cross-contaminates ~19 routers.
 - No `print()` in `ingestion|retrieval|agents|observability`; ruff + ruff-format + mypy run
   in pre-commit; archived/duplicate file paths are blocked by `forbid-dead-code-paths`.
-- New LLM call sites that produce *drafting content* pass `strict=True` to
-  `LLMGenerator.generate` and supply their own deterministic fallback + degraded marking.
+- New LLM call sites that produce *drafting content* must supply their own deterministic
+  fallback + degraded marking. The `strict=True` mode on `LLMGenerator.generate` exists only
+  on the PR #19 lineage; on release `retrieval/generator.py` has no `strict` parameter.
   Changing arbitration prompts requires bumping the prompt-version constants (tests pin them).
 
 ## Security / RBAC rules that cost hours to rediscover
@@ -110,9 +113,10 @@ Local dev: `make front` (client) / `make back` (uvicorn `rbac_backend.main:app` 
   to their assignments**, not 403 and not an org-wide list. Never bound results in the gate.
 - **A `401` from a scoped endpoint may be a masked 403.** The client turns 401 into a
   forced logout, 403 into a toast — so a scope refusal must keep its own status.
-- **Trust `gate_evidence` in `route_control_manifest.json`, not `enforcement`.** The latter
-  is substring matching over a source blob and can claim a gate that doesn't exist.
-  `unsafe` in that inventory means "mutating HTTP method", not "insecure".
+- **There is no `route_control_manifest.json` on release** (only on the PR #19 lineage).
+  The route gates are `scripts/rbac_phase0_route_inventory.py` + `test_route_inventory.py`
+  and `scripts/gate3_route_inventory.py` + `test_gate3_route_inventory.py`. `unsafe` in an
+  inventory means "mutating HTTP method", not "insecure".
 - Tenant-bound accounts hit `403 "No active subscription is configured…"` in
   `policy_service` *before* any scope logic; superadmin bypasses it. Any RBAC test run needs
   a `subscriptions` row per test org (`status`/`billing_status` `active`, `plan_code`
@@ -213,8 +217,10 @@ Production is `contraclaim.com` (SSH alias `contraclaim`), checkout
 
 ## Decisions not to reverse accidentally
 
-- Qdrant is the **only** vector store. The write-only `FalkorDBVectorService` was deliberately
-  deleted; FalkorDB keeps `GRAPH.*` use only (letter/clause references).
+- Qdrant is the **only** vector store; FalkorDB keeps `GRAPH.*` use only (letter/clause
+  references). The write-only `FalkorDBVectorService` is still on release
+  (`services/falkordb_vector_service.py`, imported in app code only by `services/data_sync.py`); its
+  deletion exists only on the PR #19 lineage. Never add a new caller.
 - Contract retrieval is **clause-first**: structured `contract_clauses` records + the
   `contract_clauses` Qdrant namespace. Legacy `document_vectors`/token chunks are fallback only.
 - Contract Master projection becomes CURRENT **only** through the contract-worker's
