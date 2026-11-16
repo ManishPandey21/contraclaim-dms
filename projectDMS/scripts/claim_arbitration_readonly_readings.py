@@ -1,4 +1,4 @@
-"""Phase 4b readings P-02 to P-12: claims, arbitration, roles and skills, read-only.
+"""Phase 4b readings P-02 to P-13: claims, arbitration, roles and skills, read-only.
 
 Plan: docs/superpowers/specs/2026-11-16-claim-bench-phase-4b-hardening.md, §8.1.
 
@@ -353,6 +353,42 @@ def read_caseless_drafts(db: ReadOnlyDatabase, now: datetime) -> Dict[str, Any]:
     )
 
 
+def read_case_visibility(db: ReadOnlyDatabase) -> Dict[str, Any]:
+    """C-25: which arbitration cases the pre-fix case queries could not see.
+
+    Production at 34d664a looks cases up with {"deleted_at": {"$exists": False}},
+    while ArbitrationCase stores deleted_at as null. A case with a stored null is
+    invisible to get_case and list_cases there, though it is not deleted.
+    """
+    if "arbitration_cases" not in db.list_collection_names():
+        return _reading("P-13", arbitration_cases_collection_present=False)
+    cases = db["arbitration_cases"]
+    missing = {"deleted_at": {"$exists": False}}
+    null = {"deleted_at": {"$type": "null"}}
+    set_value = {"deleted_at": {"$exists": True, "$ne": None}}
+    affected_ids = cases.distinct("_id", null)
+    names = set(db.list_collection_names())
+    dependents: Dict[str, int] = {}
+    if affected_ids:
+        for name in ("arbitration_drafts",) + MATRIX_COLLECTIONS:
+            if name in names:
+                dependents[name] = db[name].count_documents({"case_id": {"$in": affected_ids}})
+    return _reading(
+        "P-13",
+        arbitration_cases_collection_present=True,
+        cases_total=cases.count_documents({}),
+        deleted_at_missing=cases.count_documents(missing),
+        deleted_at_null=len(affected_ids),
+        deleted_at_set=cases.count_documents(set_value),
+        visible_to_pre_fix_query=cases.count_documents(missing),
+        potentially_affected_by_pre_fix_query=len(affected_ids),
+        affected_by_status=_group_count(cases, "status", null),
+        affected_organisations=len(cases.distinct("organization_id", null)),
+        records_referencing_affected_cases=dependents,
+        note="affected = stored deleted_at null: not deleted, but not found by get_case or list_cases at 34d664a",
+    )
+
+
 def database_check(db: ReadOnlyDatabase, database_name: Optional[str]) -> Dict[str, Any]:
     """Whether this is the application database: it must hold users and roles."""
     names = set(db.list_collection_names())
@@ -395,6 +431,7 @@ def collect(
         ("P-10", lambda: read_reviewer_matrix_setting(environ)),
         ("P-11", lambda: read_usage(guarded, moment)),
         ("P-12", lambda: read_caseless_drafts(guarded, moment)),
+        ("P-13", lambda: read_case_visibility(guarded)),
     ]
     out: List[Dict[str, Any]] = [check]
     if not check.get("initialised"):

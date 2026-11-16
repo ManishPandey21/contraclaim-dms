@@ -234,6 +234,7 @@ jobs:
             backend/rbac_backend/tests/integration/test_claim_routes_real_deps_mongo.py
             backend/rbac_backend/tests/integration/test_claim_arbitration_readings_mongo.py
             backend/rbac_backend/tests/integration/test_claim_privileged_rbac_mongo.py
+            backend/rbac_backend/tests/integration/test_arbitration_case_lookup_mongo.py
             backend/rbac_backend/tests/integration/test_skill_publication_transactions_mongo.py
             backend/rbac_backend/tests/integration/test_pleaded_heads_end_to_end_mongo.py
           )

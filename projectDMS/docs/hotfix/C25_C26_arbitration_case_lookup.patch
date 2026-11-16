@@ -1,0 +1,352 @@
+From 1d5e2573a086dbd2f5b95b897a17d72cb2dfe578 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 16 Nov 2026 11:10:56 +0000
+Subject: [PATCH] C-25/C-26 hotfix proposal
+
+---
+ .github/workflows/ci.yml                      |   1 +
+ .../routers/arbitration_drafting.py           |   4 +-
+ .../arbitration_drafting/case_workspace.py    |   8 +-
+ ...st_arbitration_case_lookup_hotfix_mongo.py | 256 ++++++++++++++++++
+ 4 files changed, 263 insertions(+), 6 deletions(-)
+ create mode 100644 projectDMS/backend/rbac_backend/tests/integration/test_arbitration_case_lookup_hotfix_mongo.py
+
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index f44ffa7..ee45c95 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -176,6 +176,7 @@ jobs:
+           suites=(
+             backend/rbac_backend/tests/integration/test_document_relationships_cl1_mongo.py
+             backend/rbac_backend/tests/integration/test_variation_relationships_cl2_mongo.py
++            backend/rbac_backend/tests/integration/test_arbitration_case_lookup_hotfix_mongo.py
+             backend/rbac_backend/tests/integration/test_cl3a_variation_hindrance_mongo.py
+             backend/rbac_backend/tests/integration/test_cl3b_programme_chronology_mongo.py
+             backend/rbac_backend/tests/integration/test_chronology_verification_authority_mongo.py
+diff --git a/projectDMS/backend/rbac_backend/routers/arbitration_drafting.py b/projectDMS/backend/rbac_backend/routers/arbitration_drafting.py
+index ca70d24..b34fcd1 100644
+--- a/projectDMS/backend/rbac_backend/routers/arbitration_drafting.py
++++ b/projectDMS/backend/rbac_backend/routers/arbitration_drafting.py
+@@ -103,7 +103,7 @@ async def list_arbitration_cases(
+         current_user,
+         Permissions.ARBITRATION_VIEW,
+         resource_type="arbitration_case",
+-        organization_id=organization_id,
++        organization_id=organization_id or getattr(current_user, "organization_id", None),  # C-26
+         project_id=project_id,
+         audit=False,
+     )
+@@ -631,7 +631,7 @@ async def list_arbitration_drafts(
+         current_user,
+         Permissions.ARBITRATION_VIEW,
+         resource_type="arbitration_draft",
+-        organization_id=organization_id,
++        organization_id=organization_id or getattr(current_user, "organization_id", None),  # C-26
+         project_id=project_id,
+         audit=False,
+     )
+diff --git a/projectDMS/backend/rbac_backend/services/arbitration_drafting/case_workspace.py b/projectDMS/backend/rbac_backend/services/arbitration_drafting/case_workspace.py
+index eeaa2e2..cc6e2ab 100644
+--- a/projectDMS/backend/rbac_backend/services/arbitration_drafting/case_workspace.py
++++ b/projectDMS/backend/rbac_backend/services/arbitration_drafting/case_workspace.py
+@@ -261,7 +261,7 @@ class ArbitrationCaseWorkspaceService:
+         limit: int = 100,
+     ) -> List[Dict[str, Any]]:
+         query = dict(scope or {})
+-        query["deleted_at"] = {"$exists": False}
++        query["deleted_at"] = None  # C-25: missing or null; ArbitrationCase stores null
+         for key in ["project_id", "contract_id", "status"]:
+             if filters.get(key):
+                 query[key] = filters[key]
+@@ -282,7 +282,7 @@ class ArbitrationCaseWorkspaceService:
+         instead of leaking existence. Internal service calls omit it because the
+         route has already verified access.
+         """
+-        query: Dict[str, Any] = {"_id": case_id, "deleted_at": {"$exists": False}}
++        query: Dict[str, Any] = {"_id": case_id, "deleted_at": None}  # C-25
+         if scope:
+             query.update(scope)
+         case = await self.db.arbitration_cases.find_one(query)
+@@ -296,7 +296,7 @@ class ArbitrationCaseWorkspaceService:
+         update["updated_by"] = _actor_id(current_user)
+         update["updated_at"] = datetime.utcnow()
+         updated = await self.db.arbitration_cases.find_one_and_update(
+-            {"_id": case_id, "deleted_at": {"$exists": False}},
++            {"_id": case_id, "deleted_at": None},  # C-25
+             {"$set": _jsonable(update)},
+             return_document=True,
+         )
+@@ -849,7 +849,7 @@ class ArbitrationCaseWorkspaceService:
+         ).model_dump(by_alias=True)
+         await self.db.arbitration_workflow_approvals.insert_one(_jsonable(receipt))
+         updated = await self.db.arbitration_cases.find_one_and_update(
+-            {"_id": case_id, "deleted_at": {"$exists": False}},
++            {"_id": case_id, "deleted_at": None},  # C-25
+             {
+                 "$set": {
+                     "status": ArbitrationCaseStatus.READY_FOR_DRAFTING.value,
+diff --git a/projectDMS/backend/rbac_backend/tests/integration/test_arbitration_case_lookup_hotfix_mongo.py b/projectDMS/backend/rbac_backend/tests/integration/test_arbitration_case_lookup_hotfix_mongo.py
+new file mode 100644
+index 0000000..7e14251
+--- /dev/null
++++ b/projectDMS/backend/rbac_backend/tests/integration/test_arbitration_case_lookup_hotfix_mongo.py
+@@ -0,0 +1,256 @@
++"""C-25 / C-26 hotfix for the production release: arbitration cases are found again.
++
++Hotfix proposal docs/C25_HOTFIX_PROPOSAL.md (on the Phase 4b branch). Over real
++HTTP, MongoDB and RBAC, with the production ``app`` and no dependency override:
++
++- C-25: ``ArbitrationCase.deleted_at`` is stored as null, and the case queries
++  asked for ``{"$exists": False}``, so a created case answered 404 and was
++  missing from every list.
++- C-26: the case and drafts lists gave the subscription check no organisation
++  when the page sent none, so every tenant user was refused (403).
++
++Opt-in: ``RELATIONSHIP_CL2_MONGODB_URI`` (a disposable replica set), already set
++in CI's real-Mongo step.
++"""
++
++from __future__ import annotations
++
++import asyncio
++import uuid
++from contextlib import asynccontextmanager
++from datetime import datetime
++from typing import Any, AsyncIterator, Dict
++
++import httpx
++import pytest
++from motor.motor_asyncio import AsyncIOMotorClient
++
++from rbac_backend.tests.integration.test_variation_relationships_cl2_mongo import (
++    ORG_A,
++    PROJ_A1,
++    PROJ_A2,
++    _seed,
++    _token,
++    _uri,
++)
++
++pytestmark = pytest.mark.integration
++
++
++class Env:
++    def __init__(self, db: Any, client: httpx.AsyncClient) -> None:
++        self.db = db
++        self.client = client
++
++    def headers(self, persona: str, project: str = PROJ_A1) -> Dict[str, str]:
++        return {"Authorization": f"Bearer {_token(persona)}", "X-Proj-Id": project}
++
++    async def call(self, method: str, persona: str, path: str, project: str = PROJ_A1, **kwargs: Any) -> httpx.Response:
++        return await self.client.request(method, path, headers=self.headers(persona, project), **kwargs)
++
++
++@asynccontextmanager
++async def _env(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Env]:
++    from rbac_backend.core import database as database_module
++    from rbac_backend.main import app
++
++    assert app.dependency_overrides == {}, f"unexpected overrides: {list(app.dependency_overrides)}"
++    mongo = AsyncIOMotorClient(_uri(), serverSelectionTimeoutMS=5_000)
++    hello = await mongo.admin.command("hello")
++    if not hello.get("setName") or not hello.get("isWritablePrimary"):
++        mongo.close()
++        pytest.fail("the real-Mongo URI is not a writable replica set")
++    db = mongo[f"c25_hotfix_{uuid.uuid4().hex[:12]}"]
++    saved = (database_module.client, database_module.database)
++    database_module.client, database_module.database = mongo, db
++    try:
++        await _seed(db)
++        transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
++        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
++            yield Env(db, client)
++    finally:
++        database_module.client, database_module.database = saved
++        await mongo.drop_database(db.name)
++        mongo.close()
++
++
++def _never_leaks(response: httpx.Response) -> None:
++    assert response.status_code in {401, 403, 404}, (response.status_code, response.text[:300])
++
++CASES = "/api/arbitration/cases"
++DRAFTS = "/api/arbitration/drafts"
++
++
++def _run(coro: Any) -> Any:
++    return asyncio.run(coro)
++
++
++async def _create(env: Any, persona: str = "org_admin", project: str = PROJ_A1, title: str = "ABC Infra v. Authority") -> Dict[str, Any]:
++    response = await env.call(
++        "POST", persona, CASES, project=project,
++        json={"organization_id": ORG_A, "project_id": project, "title": title},
++    )
++    assert response.status_code == 201, response.text[:300]
++    return response.json()
++
++
++def _ids(response: Any) -> list:
++    assert response.status_code == 200, response.text[:300]
++    return [item.get("_id") or item.get("id") for item in response.json()]
++
++
++def test_a_created_case_is_found_listed_and_updated_by_its_creator(monkeypatch) -> None:
++    async def scenario() -> None:
++        async with _env(monkeypatch) as env:
++            case = await _create(env)
++            case_id = case.get("_id") or case.get("id")
++            stored = await env.db.arbitration_cases.find_one({"_id": case_id})
++            # The stored shape that the pre-fix query could not match.
++            assert "deleted_at" in stored and stored["deleted_at"] is None
++
++            got = await env.call("GET", "org_admin", f"{CASES}/{case_id}")
++            assert got.status_code == 200, got.text[:300]
++            assert case_id in _ids(await env.call("GET", "org_admin", f"{CASES}?project_id={PROJ_A1}"))
++            assert case_id in _ids(await env.call("GET", "org_admin", CASES))
++
++            patched = await env.call("PATCH", "org_admin", f"{CASES}/{case_id}", json={"title": "Renamed"})
++            assert patched.status_code == 200, patched.text[:300]
++            assert patched.json()["title"] == "Renamed"
++            assert (await env.db.arbitration_cases.find_one({"_id": case_id}))["title"] == "Renamed"
++
++    _run(scenario())
++
++
++def test_a_soft_deleted_case_stays_hidden_and_cannot_be_updated(monkeypatch) -> None:
++    async def scenario() -> None:
++        from rbac_backend.services.arbitration_drafting.case_workspace import ArbitrationCaseWorkspaceService
++
++        async with _env(monkeypatch) as env:
++            case_id = (await _create(env))["_id"]
++            await ArbitrationCaseWorkspaceService(env.db).soft_delete_case(case_id, {"_id": "user-org_admin"})
++            assert (await env.db.arbitration_cases.find_one({"_id": case_id}))["deleted_at"] is not None
++
++            assert (await env.call("GET", "org_admin", f"{CASES}/{case_id}")).status_code == 404
++            assert case_id not in _ids(await env.call("GET", "org_admin", CASES))
++            patched = await env.call("PATCH", "org_admin", f"{CASES}/{case_id}", json={"title": "Back"})
++            assert patched.status_code == 404
++            assert (await env.db.arbitration_cases.find_one({"_id": case_id}))["title"] != "Back"
++
++    _run(scenario())
++
++
++def test_cases_stored_in_every_deleted_at_shape_are_read_correctly(monkeypatch) -> None:
++    """Rows written before the model set deleted_at (field absent) stay visible;
++    stored null is visible; a set value is deleted."""
++
++    async def scenario() -> None:
++        async with _env(monkeypatch) as env:
++            base = {"organization_id": ORG_A, "project_id": PROJ_A1, "status": "intake",
++                    "party_perspective": "claimant", "created_at": datetime(2026, 10, 1), "updated_at": datetime(2026, 10, 1)}
++            await env.db.arbitration_cases.insert_many(
++                [
++                    {"_id": "case-legacy", "title": "Legacy", **base},
++                    {"_id": "case-null", "title": "Null", "deleted_at": None, **base},
++                    {"_id": "case-gone", "title": "Gone", "deleted_at": datetime(2026, 10, 2), **base},
++                ]
++            )
++            listed = set(_ids(await env.call("GET", "org_admin", CASES)))
++            assert {"case-legacy", "case-null"} <= listed and "case-gone" not in listed
++            assert (await env.call("GET", "org_admin", f"{CASES}/case-legacy")).status_code == 200
++            assert (await env.call("GET", "org_admin", f"{CASES}/case-null")).status_code == 200
++            assert (await env.call("GET", "org_admin", f"{CASES}/case-gone")).status_code == 404
++
++    _run(scenario())
++
++
++def test_another_tenant_or_project_never_sees_the_case(monkeypatch) -> None:
++    async def scenario() -> None:
++        async with _env(monkeypatch) as env:
++            case_id = (await _create(env))["_id"]
++
++            # Another organisation: refused, absent from its lists, cannot rename it.
++            _never_leaks(await env.call("GET", "foreign_org_admin", f"{CASES}/{case_id}"))
++            foreign_list = await env.call("GET", "foreign_org_admin", CASES)
++            if foreign_list.status_code == 200:
++                assert case_id not in _ids(foreign_list)
++            else:
++                _never_leaks(foreign_list)
++            _never_leaks(await env.call("PATCH", "foreign_org_admin", f"{CASES}/{case_id}", json={"title": "X"}))
++
++            # Another project in the same organisation.
++            _never_leaks(await env.call("GET", "other_project_admin", f"{CASES}/{case_id}", project=PROJ_A2))
++            other_list = await env.call("GET", "other_project_admin", CASES, project=PROJ_A2)
++            if other_list.status_code == 200:
++                assert case_id not in _ids(other_list)
++            else:
++                _never_leaks(other_list)
++
++            assert (await env.db.arbitration_cases.find_one({"_id": case_id}))["title"] == "ABC Infra v. Authority"
++
++    _run(scenario())
++
++
++def test_a_draft_is_created_and_prepared_from_a_case_and_not_from_a_deleted_one(monkeypatch) -> None:
++    async def scenario() -> None:
++        from rbac_backend.services.arbitration_drafting.case_workspace import ArbitrationCaseWorkspaceService
++
++        async with _env(monkeypatch) as env:
++            case_id = (await _create(env))["_id"]
++            created = await env.call(
++                "POST", "org_admin", DRAFTS,
++                json={"case_id": case_id, "organization_id": ORG_A, "project_id": PROJ_A1,
++                      "draft_type": "statement_of_claim", "party_role": "claimant", "title": "SoC"},
++            )
++            assert created.status_code == 201, created.text[:300]
++            draft_id = created.json().get("_id") or created.json().get("id")
++
++            prepared = await env.call("POST", "org_admin", f"{DRAFTS}/{draft_id}/prepare-from-case")
++            assert prepared.status_code == 200, prepared.text[:300]
++            assert prepared.json()["case_id"] == case_id
++
++            # Another tenant can neither read nor prepare it.
++            _never_leaks(await env.call("POST", "foreign_org_admin", f"{DRAFTS}/{draft_id}/prepare-from-case"))
++
++            await ArbitrationCaseWorkspaceService(env.db).soft_delete_case(case_id, {"_id": "user-org_admin"})
++            after = await env.call("POST", "org_admin", f"{DRAFTS}/{draft_id}/prepare-from-case")
++            assert after.status_code == 404, after.text[:300]
++
++    _run(scenario())
++
++
++def test_the_pages_unfiltered_lists_answer_tenant_users(monkeypatch) -> None:
++    """C-26: the case and drafts pages list with no query parameters. The subscription check
++    was given no organisation and refused every tenant user (403 "No active subscription");
++    only Super Admin, who skips that check, saw a list. Same code on 34d664a."""
++
++    async def scenario() -> None:
++        async with _env(monkeypatch) as env:
++            case_id = (await _create(env))["_id"]
++            created = await env.call(
++                "POST", "org_admin", DRAFTS,
++                json={"case_id": case_id, "organization_id": ORG_A, "project_id": PROJ_A1,
++                      "draft_type": "statement_of_claim", "party_role": "claimant", "title": "SoC"},
++            )
++            assert created.status_code == 201, created.text[:300]
++            draft_id = created.json().get("_id") or created.json().get("id")
++
++            for persona in ("org_admin", "project_admin"):
++                assert case_id in _ids(await env.call("GET", persona, CASES)), persona
++                assert case_id in _ids(await env.call("GET", persona, f"{CASES}?project_id={PROJ_A1}")), persona
++                assert draft_id in _ids(await env.call("GET", persona, DRAFTS)), persona
++
++            # The fallback is the user's own organisation: it widens nothing.
++            assert (await env.call("GET", "project_user", CASES)).status_code == 403
++            for path in (CASES, DRAFTS):
++                foreign = await env.call("GET", "foreign_org_admin", path)
++                if foreign.status_code == 200:
++                    assert case_id not in _ids(foreign) and draft_id not in _ids(foreign)
++                else:
++                    _never_leaks(foreign)
++            other = await env.call("GET", "other_project_admin", CASES, project=PROJ_A2)
++            if other.status_code == 200:
++                assert case_id not in _ids(other)
++            else:
++                _never_leaks(other)
++
++    _run(scenario())
+-- 
+2.43.0
+

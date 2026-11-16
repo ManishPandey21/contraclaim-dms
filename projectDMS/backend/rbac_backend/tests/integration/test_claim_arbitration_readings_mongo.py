@@ -92,7 +92,19 @@ def _seed(db: Any) -> None:
         ]
     )
     db.projects.insert_many([{"_id": "p1", "name": "NH-48"}, {"_id": "p2", "name": "Metro", "contractual_capacity": "engineer"}])
-    db.arbitration_cases.insert_one({"_id": "case-1", "status": "intake", "title": "Private case"})
+    db.arbitration_cases.insert_many(
+        [
+            # C-25 shapes: deleted_at absent (visible to the pre-fix query), stored null (not
+            # deleted, but invisible to it), and set (soft-deleted).
+            {"_id": "case-1", "status": "intake", "title": "Private case", "organization_id": "org-a"},
+            {"_id": "case-null-1", "status": "intake", "deleted_at": None, "organization_id": "org-a"},
+            {"_id": "case-null-2", "status": "drafting", "deleted_at": None, "organization_id": "org-b"},
+            {"_id": "case-gone", "status": "intake", "deleted_at": old, "organization_id": "org-a"},
+        ]
+    )
+    db.arbitration_clause_matrix.insert_many(
+        [{"_id": "cl1", "case_id": "case-null-1"}, {"_id": "cl2", "case_id": "case-null-2"}, {"_id": "cl3", "case_id": "case-1"}]
+    )
     db.arbitration_drafts.insert_many(
         [
             {"_id": "draft-private-1", "case_id": None, "status": "draft", "created_by": "u1", "created_at": recent},
@@ -142,7 +154,7 @@ def test_the_readings_are_right_change_nothing_and_name_no_one() -> None:
         assert after == before, "the readings changed the database"
 
         by_code = {row["reading"]: row for row in rows}
-        assert [row["reading"] for row in rows] == ["DB"] + [f"P-{n:02d}" for n in range(2, 13)]
+        assert [row["reading"] for row in rows] == ["DB"] + [f"P-{n:02d}" for n in range(2, 14)]
         assert by_code["DB"]["initialised"] is True and by_code["DB"]["database"] == name
         assert all(row["status"] == "read" for row in rows), [r for r in rows if r["status"] != "read"]
 
@@ -180,6 +192,16 @@ def test_the_readings_are_right_change_nothing_and_name_no_one() -> None:
         assert by_code["P-11"]["claim_audit_events_by_action"] == {"claim.updated": 1}
         assert by_code["P-12"]["caseless_drafts_created_in_window"] == 2
         assert by_code["P-12"]["distinct_creators"] == 1
+        p13 = by_code["P-13"]
+        assert p13["cases_total"] == 4
+        assert (p13["deleted_at_missing"], p13["deleted_at_null"], p13["deleted_at_set"]) == (1, 2, 1)
+        assert p13["visible_to_pre_fix_query"] == 1
+        assert p13["potentially_affected_by_pre_fix_query"] == 2
+        assert p13["affected_by_status"] == {"drafting": 1, "intake": 1}
+        assert p13["affected_organisations"] == 2
+        assert p13["records_referencing_affected_cases"]["arbitration_clause_matrix"] == 2
+        assert p13["records_referencing_affected_cases"]["arbitration_drafts"] == 0
+        assert "case-null-1" not in json.dumps(p13) and "org-b" not in json.dumps(p13)
 
         text = json.dumps(rows, default=str)
         for secret in PRIVATE:

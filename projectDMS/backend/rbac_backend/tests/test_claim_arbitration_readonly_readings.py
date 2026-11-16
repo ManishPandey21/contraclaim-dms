@@ -124,7 +124,7 @@ def test_an_empty_or_wrong_database_is_never_read_as_an_empty_production() -> No
     assert by_code["DB"] == {
         "reading": "DB", "status": "read", "database": "contraclaim", "collections": 0, "initialised": False,
     }
-    for code in [f"P-{n:02d}" for n in range(2, 13) if n != 10]:
+    for code in [f"P-{n:02d}" for n in range(2, 14) if n != 10]:
         assert by_code[code]["status"] == "not_read", code
         assert "not evidence of an empty production" in by_code[code]["reason"]
         assert "total" not in by_code[code] and "users_total" not in by_code[code]

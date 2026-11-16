@@ -104,7 +104,9 @@ async def list_arbitration_cases(
         current_user,
         Permissions.ARBITRATION_VIEW,
         resource_type="arbitration_case",
-        organization_id=organization_id,
+        # C-26: the subscription check needs an organisation. The pages send none, so fall
+        # back to the active selection, as the other register routes do.
+        organization_id=organization_id or getattr(current_user, "organization_id", None),
         project_id=project_id,
         audit=False,
     )
@@ -633,7 +635,9 @@ async def list_arbitration_drafts(
         current_user,
         Permissions.ARBITRATION_VIEW,
         resource_type="arbitration_draft",
-        organization_id=organization_id,
+        # C-26: the subscription check needs an organisation. The pages send none, so fall
+        # back to the active selection, as the other register routes do.
+        organization_id=organization_id or getattr(current_user, "organization_id", None),
         project_id=project_id,
         audit=False,
     )
