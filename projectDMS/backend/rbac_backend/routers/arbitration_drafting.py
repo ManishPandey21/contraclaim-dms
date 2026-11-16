@@ -665,6 +665,14 @@ async def create_arbitration_draft(
         organization_id=org,
         project_id=payload.project_id,
     )
+    if not payload.case_id and not payload.scratch:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Select the arbitration case this draft belongs to. A draft with no case is a scratch draft: "
+                "it can be neither approved nor exported for filing, and must be asked for explicitly."
+            ),
+        )
     return ArbitrationDraftDetail(**await ArbitrationDraftingService(db).create_draft(payload, current_user))
 
 
@@ -730,6 +738,19 @@ async def refresh_arbitration_source_ledger(
         current_user,
         include_unverified_graph_links=body.include_unverified_graph_links,
     )
+
+
+@router.get("/drafts/{draft_id}/citations")
+async def get_arbitration_draft_citations(
+    draft_id: str,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    """Each citation in the latest version as verified, unverified or unresolved,
+    with what blocks approval. The same computation the approval gate uses."""
+    await _load_and_authorize(draft_id, Permissions.ARBITRATION_VIEW, db, current_user, policy)
+    return await ArbitrationDraftingService(db).citation_view(draft_id)
 
 
 @router.get("/drafts/{draft_id}/source-ledger")

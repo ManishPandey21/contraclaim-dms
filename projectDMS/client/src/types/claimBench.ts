@@ -144,6 +144,7 @@ export interface ClaimBenchResponse {
   skill: { skill_key: string; available: boolean; version?: string | null; reason?: string | null };
   read_only: boolean;
   read_only_reason?: string | null;
+  arbitration_case_id?: string | null;
   rollout_mode: string;
 }
 

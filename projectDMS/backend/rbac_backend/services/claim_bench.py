@@ -201,6 +201,8 @@ class ClaimBenchResponse(BaseModel):
     skill: BenchSkillState = Field(default_factory=BenchSkillState)
     read_only: bool = False
     read_only_reason: Optional[str] = None
+    # The arbitration case the claim was escalated into, if any.
+    arbitration_case_id: Optional[str] = None
     rollout_mode: str = "off"
 
 
@@ -694,6 +696,7 @@ class ClaimBenchService:
             skill=await self._skill_state(claim),
             read_only=reason is not None,
             read_only_reason=reason,
+            arbitration_case_id=claim.get("arbitration_case_id"),
             rollout_mode=self.availability(str(claim.get("organization_id") or "") or None).rollout_mode,
         )
 

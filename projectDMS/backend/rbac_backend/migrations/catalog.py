@@ -131,6 +131,10 @@ from .v20261118_0001_claim_findings_indexes import DESCRIPTION as CLAIM_FINDINGS
 from .v20261118_0001_claim_findings_indexes import NAME as CLAIM_FINDINGS_INDEXES_NAME
 from .v20261118_0001_claim_findings_indexes import VERSION as CLAIM_FINDINGS_INDEXES_VERSION
 from .v20261118_0001_claim_findings_indexes import upgrade as upgrade_claim_findings_indexes
+from .v20261119_0001_claim_escalation_and_scratch_drafts import DESCRIPTION as CLAIM_ESCALATION_DESCRIPTION
+from .v20261119_0001_claim_escalation_and_scratch_drafts import NAME as CLAIM_ESCALATION_NAME
+from .v20261119_0001_claim_escalation_and_scratch_drafts import VERSION as CLAIM_ESCALATION_VERSION
+from .v20261119_0001_claim_escalation_and_scratch_drafts import upgrade as upgrade_claim_escalation
 
 
 MIGRATIONS = [
@@ -289,5 +293,11 @@ MIGRATIONS = [
         name=CLAIM_FINDINGS_INDEXES_NAME,
         description=CLAIM_FINDINGS_INDEXES_DESCRIPTION,
         upgrade=upgrade_claim_findings_indexes,
+    ),
+    Migration(
+        version=CLAIM_ESCALATION_VERSION,
+        name=CLAIM_ESCALATION_NAME,
+        description=CLAIM_ESCALATION_DESCRIPTION,
+        upgrade=upgrade_claim_escalation,
     ),
 ]

@@ -38,7 +38,7 @@
 #   GATE6_BACKEND_IMAGE        use this image instead of building one. Its
 #                              org.opencontainers.image.revision label must
 #                              equal the checked-out commit.
-#   GATE6_EXPECTED_MIGRATIONS  catalogue size this run must find (default 26)
+#   GATE6_EXPECTED_MIGRATIONS  catalogue size this run must find (default 27)
 #   GATE6_MONGO_IMAGE          default mongo:8.0, the image CI uses
 #   GATE6_OUT_DIR              where step logs go (default: a new temp dir)
 #   GATE6_KEEP=1               leave the containers and network up afterwards
@@ -48,7 +48,7 @@
 set -Eeuo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-EXPECTED=${GATE6_EXPECTED_MIGRATIONS:-26}
+EXPECTED=${GATE6_EXPECTED_MIGRATIONS:-27}
 MONGO_IMAGE=${GATE6_MONGO_IMAGE:-mongo:8.0}
 # Lower case throughout: the name is also the server's hostname, and URL parsers
 # fold hostnames to lower case.
@@ -355,6 +355,10 @@ const expectedIndexes = [
   ["claim_privileged", "claim_privileged_claim_kind_time", { claim_id: 1, kind: 1, created_at: -1 }, false, null],
   ["claim_privileged", "claim_privileged_one_strategy_note", { claim_id: 1 }, true, { kind: "strategy_note" }],
   ["claim_submissions", "claim_submission_claim_unique", { claim_id: 1 }, true, null],
+  // 20261119_0001: the link between claims and arbitration cases.
+  ["claims", "claim_arbitration_case", { organization_id: 1, arbitration_case_id: 1 }, false,
+    { arbitration_case_id: { $type: "string" } }],
+  ["arbitration_cases", "arbitration_case_claim_ids", { organization_id: 1, claim_ids: 1 }, false, null],
 ];
 for (const [collection, name, key, unique, partial] of expectedIndexes) {
   const found = db.getCollection(collection).getIndexes().find((i) => i.name === name);
@@ -368,7 +372,7 @@ for (const [collection, name, key, unique, partial] of expectedIndexes) {
   );
 }
 const partials = expectedIndexes.filter((e) => e[4] !== null).length;
-check("partial unique indexes expected", partials === 6, partials + " declared");
+check("partial indexes expected", partials === 7, partials + " declared");
 
 const expectedSkills = ["indian-infra-contract-letters", "indian-infra-letter-analysis", "indian-infra-variations"];
 // Stored by 20261115_0001 as DRAFTS: unreviewed method text that must not be
@@ -626,7 +630,7 @@ RUN="docker run --rm --network <private> -e DATABASE_URL=mongodb://<disposable>:
   echo "  5. ${MIGRATE} --list"
   echo "       exit ${LIST_AFTER_RC}   ${LIST_AFTER_COUNTS}"
   echo
-  echo "Skill and claim migrations 20261114_0001 to 20261117_0001, read with mongosh: ${BENCH_PASSES} passed, 0 failed"
+  echo "Skill and claim migrations 20261114_0001 to 20261119_0001, read with mongosh: ${BENCH_PASSES} passed, 0 failed"
   grep -E '^(PASS|FAIL)' "$OUT_DIR/07-bench.stdout" | sed 's/^/  /'
   echo "Seeded skills (key, version, content hash) - equal to the files bundled in the image: YES"
   echo "$SEEDED" | sed 's/^SEED  /  /'

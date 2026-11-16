@@ -240,6 +240,8 @@ class Claim(ClaimBase):
     evidence_frozen_by: Optional[str] = None
     evidence_freeze_reason: Optional[str] = None
     bench: Optional[ClaimBench] = None
+    # The arbitration case this claim was escalated into, if any. Set by escalation only.
+    arbitration_case_id: Optional[str] = None
 
     model_config = ConfigDict(populate_by_name=True)
 

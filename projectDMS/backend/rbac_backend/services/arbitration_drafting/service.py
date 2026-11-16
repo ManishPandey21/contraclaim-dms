@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import hashlib
 import inspect
 import json
@@ -39,6 +40,7 @@ from .generator import ArbitrationDraftGenerator, PROMPT_VERSION, SECTION_KEYS_B
 from .llm_generator import LLMDraftGenerator
 from .case_workspace import ArbitrationCaseWorkspaceService
 from .repository import ArbitrationDraftingRepository, _jsonable
+from .citation_states import classify_citations
 from .validator import ArbitrationDraftValidator
 from .approval_policy import REVOKED_REJOINDER_PERMISSION, enforce_author_approver_separation, resolve_gate_role
 from .workflow_governance import (
@@ -73,6 +75,8 @@ _DRAFT_HASH_FIELDS = [
 ]
 
 
+logger = logging.getLogger(__name__)
+
 def stable_generation_input_hash(
     context: Dict[str, Any],
     *,
@@ -99,6 +103,11 @@ def stable_generation_input_hash(
         "prompt_version": PROMPT_VERSION,
         "source_policy": SOURCE_POLICY,
     }
+    skill = context.get("pleading_skill") or None
+    if skill:
+        # Present only when a published pleadings skill is in use, so every hash
+        # made without one is unchanged.
+        payload["pleading_skill"] = {"content_hash": skill.get("content_hash"), "role": skill.get("role")}
     raw = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -171,10 +180,11 @@ class ArbitrationDraftingService:
         self.exporter = ArbitrationDraftExporter()
 
     async def create_draft(self, payload: ArbitrationDraftCreate, current_user: Any) -> Dict[str, Any]:
-        draft_payload = payload.model_dump(exclude={"selected_references", "claim_heads"})
+        draft_payload = payload.model_dump(exclude={"selected_references", "claim_heads", "scratch"})
         draft_payload["organization_id"] = payload.organization_id or getattr(current_user, "organization_id", None)
         draft = ArbitrationDraft(
             **draft_payload,
+            is_scratch=not payload.case_id,
             created_by=_actor_id(current_user),
             updated_at=datetime.utcnow(),
         ).model_dump(by_alias=True)
@@ -222,6 +232,9 @@ class ArbitrationDraftingService:
     async def update_draft(self, draft_id: str, payload: ArbitrationDraftUpdate, current_user: Any) -> Dict[str, Any]:
         draft = await self._load_unlocked(draft_id)
         update = payload.model_dump(exclude_unset=True)
+        if "case_id" in update:
+            # Attached to a case, a scratch draft stops being one; detached, it becomes one.
+            update["is_scratch"] = not update["case_id"]
         update["updated_at"] = datetime.utcnow()
         update["updated_by"] = _actor_id(current_user)
         updated = await self.repo.update_draft(draft_id, update)
@@ -465,6 +478,9 @@ class ArbitrationDraftingService:
         )
         if pleading_plan:
             context["pleading_plan"] = dict(pleading_plan)
+        pleading_skill = await self._pleading_skill(draft)
+        if pleading_skill:
+            context["pleading_skill"] = pleading_skill
         latest = await self.repo.latest_version(draft_id)
         if run_type == GenerationRunType.SECTION_REGENERATION:
             if not payload.section_key:
@@ -610,6 +626,8 @@ class ArbitrationDraftingService:
                 "retrieval_queries": retrieval_queries,
                 "validation_warnings": warnings,
                 "approval_blockers": safety_report["approval_blockers"],
+                "citations": safety_report["citations"]["counts"],
+                "pleaded_head_gaps": safety_report["pleaded_head_gaps"],
                 "legal_review_required": bool(warnings or generated["missing_evidence"]),
                 "context_warnings": context.get("context_warnings") or [],
             }
@@ -703,6 +721,8 @@ class ArbitrationDraftingService:
                 "input_hash": input_hash,
                 "validation_warnings": warnings,
                 "approval_blockers": safety_report["approval_blockers"],
+                "citations": safety_report["citations"]["counts"],
+                "pleaded_head_gaps": safety_report["pleaded_head_gaps"],
                 "legal_review_required": bool(warnings or context["missing_evidence"]),
                 "manual_version": True,
             },
@@ -730,6 +750,90 @@ class ArbitrationDraftingService:
         if not row:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft version not found")
         return row
+
+    async def _pleading_skill(self, draft: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """The published pleadings skill for this draft's project, compiled for the party it acts for.
+
+        None unless a version has been published, which needs the technical
+        review and the independent legal approval, and unless the project states
+        a party the skill supports. Nothing unpublished is ever compiled.
+        """
+        # Imported here, and in this order: the skill engine and the letter
+        # drafting package import each other, and only this order resolves.
+        from ..letter_drafting import prompts as _letter_prompts  # noqa: F401
+        from ..skills.compiler import compile_skill
+        from ..skills.registry import SkillRegistry
+        from ..skills.system_skills import PLEADINGS_SKILL_KEY
+
+        organization_id = str(draft.get("organization_id") or "") or None
+        project_id = draft.get("project_id")
+        try:
+            version, _binding, _reason = await SkillRegistry(self.db).resolve(
+                PLEADINGS_SKILL_KEY, organization_id, project_id
+            )
+            if version is None:
+                return None
+            project = await self.db.projects.find_one({"_id": project_id})
+            role = str((project or {}).get("contractual_capacity") or "")
+            if role not in set(version.manifest.roles_supported or []):
+                return None
+            compiled = compile_skill(version, role)
+        except Exception as exc:  # a skill problem must never stop a draft being generated
+            logger.warning("pleadings skill not used for draft %s: %s", draft.get("_id"), exc)
+            return None
+        return {
+            "skill_key": version.skill_key,
+            "version": version.version,
+            "content_hash": version.content_hash,
+            "role": role,
+            "block": compiled.block,
+        }
+
+    async def citation_view(self, draft_id: str) -> Dict[str, Any]:
+        """Citation states of the latest version, and what stands between it and approval.
+
+        Read from the stored version: its text, its own ledger and the blockers
+        recorded when it was made. Nothing is recomputed against newer evidence,
+        because approval acts on that version as it stands.
+        """
+        draft = await self._load(draft_id)
+        latest = await self.repo.latest_version(draft_id)
+        scratch = not draft.get("case_id")
+        if not latest:
+            return {
+                "draft_id": draft_id, "version": None, "scratch": scratch,
+                "counts": {"verified": 0, "unverified": 0, "unresolved": 0, "cited": 0, "ledger": 0},
+                "items": [], "approval_blockers": [], "pleaded_head_gaps": [], "missing_evidence": [],
+                "can_be_approved": False,
+                "cannot_be_approved_reason": "No version has been generated or saved.",
+            }
+        structured = latest.get("structured_output") or {}
+        classification = classify_citations(str(latest.get("full_markdown") or ""), latest.get("source_ledger") or [])
+        blockers = list(structured.get("approval_blockers") or [])
+        missing = list(latest.get("missing_evidence") or [])
+        if scratch:
+            reason: Optional[str] = (
+                "This is a scratch draft with no case workspace. It cannot be approved or exported for filing; "
+                "attach it to a case to bring it under the case gates."
+            )
+        elif blockers or missing or latest.get("validation_status") != "passed":
+            reason = "The blockers listed must be resolved in a new version before approval."
+        else:
+            reason = None
+        return {
+            "draft_id": draft_id,
+            "version": latest.get("version"),
+            "scratch": scratch,
+            "counts": classification["counts"],
+            "items": classification["items"],
+            "approval_blockers": blockers,
+            "pleaded_head_gaps": structured.get("pleaded_head_gaps") or [],
+            "missing_evidence": missing,
+            # The workflow gates (readiness, plan, legal review) are checked at
+            # approval itself; this says only whether the evidence allows it.
+            "can_be_approved": reason is None,
+            "cannot_be_approved_reason": reason,
+        }
 
     async def approve(
         self,

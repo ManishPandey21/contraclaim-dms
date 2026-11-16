@@ -120,6 +120,27 @@ Behind the same flag as the Bench. When the Bench is on, the claim page gains a 
 
 **Permissions.** `dms.claim.determine` and `dms.claim.strategy.read` are new, and are granted by name only: in the release role definitions to `orgadmin` and `projectadmin`, and not through the bulk role merge. Migration `20261118_0001` adds indexes only; **no existing role document gains either permission**, so in a deployed database nobody can author a determination or open Internal analysis until an administrator grants them.
 
+## Escalation to arbitration and draft evidence controls (Phase 4)
+
+**Escalate to arbitration** (Bench header; behind the Bench flag). Needs `dms.claim.manage` on the claim and `dms.arbitration.create` (new case) or `dms.arbitration.edit` (existing case).
+
+- A confirmation sheet first shows what would be carried, what is weak on the record, and what is left behind and why. Nothing changes until "Escalate".
+- Carried: heads → claim matrix; notice dates → notice compliance; cost lines with proof → quantum annexures; key dates and delay events → chronology; linked documents → document index; overlaps with no decided treatment → issue matrix as open issues with no figure.
+- Never carried: a notice period not verified against the contract (only the dates go), cost lines without proof, simulations and the strategy note.
+- Every row is created through the case workspace's own row path, so it starts as **needs review** and withdraws any readiness approval already given on the case, exactly as a row added by hand does. Escalation approves nothing.
+- Rows carry their origin (claim, head). Escalating the same claim again adds nothing twice.
+- The claim records its case, its evidence is frozen (the board becomes read-only), and its status becomes `disputed` where the claim lifecycle allows that move.
+- A case built this way names its claims. Its claim agent reads those claims only; a case with none named keeps reading the project's register as before.
+
+**Evidence controls on a pleading draft** (arbitration module; these apply whatever the Bench flag says).
+
+- Each citation in a draft version is **verified** (in the ledger and admissible), **unverified** (in the ledger but user-supplied or not yet verified) or **unresolved** (not in the ledger). The draft page shows the three counts and each citation's state in place of the bare "Sources" figure. One function computes them for the screen and for the approval gate.
+- A cited source that is unverified is now named in the approval blockers. (Unresolved citations and unverified ledger rows already blocked approval.)
+- In a Statement of Claim, each pleaded head must carry the provision relied on, the event, the causal link, quantified relief and a notice record, and records supporting any figure pleaded. Each missing item is a named approval blocker.
+- A draft with no case is a **scratch draft** and must be asked for by name: the API refuses to create a case-less draft without `scratch: true`, and the form no longer defaults to "none". A scratch draft could already be neither approved nor exported for filing; that is unchanged. Attaching it to a case clears the flag and puts it under every case gate. Migration `20261119_0001` marks existing case-less drafts as scratch; none is deleted or changes status.
+
+**Pleadings skill.** When a version of `indian-infra-arbitration-pleadings` is **published** (technical review plus independent legal approval) and the project acts as Contractor or Employer, its text is placed in front of the drafting prompt and its key, version and hash are recorded on the draft version. The task prompt, its hard rules, the reconciliation of citations and the validator are unchanged. While the skill is unpublished, which is the case today, the prompt is byte-for-byte what it was. No engine flag, rollout mode or approval gate is touched.
+
 ## Not in this phase
 
 - The project form has no field for the party; it is set from the Bench.

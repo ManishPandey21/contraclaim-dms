@@ -5,6 +5,7 @@ import { ArrowLeft, FileText, Lock, LockOpen, Mail, Plus, Scale } from "lucide-r
 import ClaimStatusPill from "@/components/claims/ClaimStatusPill";
 import DelayTab from "@/components/claim-bench/DelayTab";
 import DeterminationsPanel from "@/components/claim-bench/DeterminationsPanel";
+import EscalateDialog from "@/components/claim-bench/EscalateDialog";
 import InternalAnalysisPanel from "@/components/claim-bench/InternalAnalysisPanel";
 import SubmissionPanel from "@/components/claim-bench/SubmissionPanel";
 import HeadPanel from "@/components/claim-bench/HeadPanel";
@@ -71,6 +72,7 @@ const ClaimBenchPage: React.FC = () => {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [tab, setTab] = useState<"elements" | "delay" | "quantum">("elements");
   const [chosenView, setChosenView] = useState<WorkspaceView | null>(null);
+  const [escalating, setEscalating] = useState(false);
   // Hides the tab only. The server refuses privileged material to anyone without the permission.
   const mayReadInternal = useHasPermission("dms.claim.strategy.read");
   const data = query.data;
@@ -150,8 +152,29 @@ const ClaimBenchPage: React.FC = () => {
               Draft a notice letter
             </Link>
           </Button>
+          {data.arbitration_case_id ? (
+            <Button asChild variant="outline" size="sm">
+              <Link to={`/arbitration/cases/${data.arbitration_case_id}`}>
+                <Scale className="mr-2 h-4 w-4" aria-hidden="true" />
+                Open the arbitration case
+              </Link>
+            </Button>
+          ) : (
+            <Button variant="outline" size="sm" onClick={() => setEscalating(true)}>
+              <Scale className="mr-2 h-4 w-4" aria-hidden="true" />
+              Escalate to arbitration
+            </Button>
+          )}
         </div>
       </header>
+      <EscalateDialog
+        claimId={id}
+        claimTitle={data.title}
+        projectId={data.project_id}
+        open={escalating}
+        onOpenChange={setEscalating}
+        onEscalated={() => void query.refetch()}
+      />
 
       {data.read_only && (
         <p role="status" className="rounded-md border border-slate-300 bg-slate-50 p-3 text-sm">

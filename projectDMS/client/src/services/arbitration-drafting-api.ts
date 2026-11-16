@@ -38,6 +38,8 @@ export interface ArbitrationClaimHeadInput {
 
 export interface ArbitrationDraftCreatePayload {
   case_id?: string | null;
+  /** Required to be true when there is no case: a scratch draft is asked for by name. */
+  scratch?: boolean;
   organization_id?: string | null;
   project_id: string;
   contract_id?: string | null;
@@ -377,5 +379,33 @@ export async function cancelArbitrationWorkflow(caseId: string, runId: string, s
     `/arbitration/cases/${caseId}/workflows/${runId}/cancel`,
     { state_version: stateVersion, reason },
   );
+  return data;
+}
+
+// Evidence controls: each citation in the latest version as verified,
+// unverified or unresolved, by the same computation the approval gate uses.
+export type CitationState = "verified" | "unverified" | "unresolved";
+
+export interface DraftCitations {
+  draft_id: string;
+  version: number | null;
+  scratch: boolean;
+  counts: { verified: number; unverified: number; unresolved: number; cited: number; ledger: number };
+  items: {
+    source_key: string;
+    state: CitationState;
+    uses: number;
+    label?: string | null;
+    reason?: string | null;
+  }[];
+  approval_blockers: string[];
+  pleaded_head_gaps: { claim: string; missing: string[] }[];
+  missing_evidence: string[];
+  can_be_approved: boolean;
+  cannot_be_approved_reason?: string | null;
+}
+
+export async function getArbitrationDraftCitations(draftId: string) {
+  const { data } = await api.get<DraftCitations>(`/arbitration/drafts/${draftId}/citations`);
   return data;
 }

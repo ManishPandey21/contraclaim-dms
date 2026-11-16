@@ -740,7 +740,7 @@ def test_the_findings_migration_is_in_the_catalogue_and_changes_no_role() -> Non
     from rbac_backend.migrations import v20261118_0001_claim_findings_indexes as migration
     from rbac_backend.migrations.catalog import MIGRATIONS
 
-    assert MIGRATIONS[-1].version == migration.VERSION == "20261118_0001"
+    assert migration.VERSION == "20261118_0001" and migration.VERSION in {item.version for item in MIGRATIONS}
     assert {index["collection"] for index in migration.INDEXES} == {"claim_determinations", "claim_privileged", "claim_submissions"}
     assert not any("roles" in index["collection"] for index in migration.INDEXES)
 

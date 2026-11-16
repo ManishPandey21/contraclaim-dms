@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List
 
+from .citation_states import classify_citations, is_unverified_source, pleaded_head_blockers, pleaded_head_gaps
+
 
 _SOURCE_CITATION_RE = re.compile(r"\[(S\d+):[^\]]+\]")
 _ISO_DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
@@ -127,18 +129,31 @@ class ArbitrationDraftValidator:
             warnings.append(message)
             approval_blockers.append(message)
 
-        unverified_selected = [
-            row
-            for row in source_ledger
-            if row.get("is_user_supplied")
-            or str(row.get("verification_status") or "").lower() in {"draft", "needs_review", "pending", "selected", "unverified"}
-        ]
+        unverified_selected = [row for row in source_ledger if is_unverified_source(row)]
         if unverified_selected:
             message = "Draft source ledger contains user-supplied or unverified selected evidence that is not admissible for filing."
             warnings.append(message)
             approval_blockers.append(message)
 
+        # Correction C. The states shown beside a draft are computed here, once,
+        # by the same function the screens read, and an unverified citation is
+        # named rather than left inside the general ledger blocker above.
+        citations = classify_citations(markdown, source_ledger)
+        unverified_cited = [item["source_key"] for item in citations["items"] if item["state"] == "unverified"]
+        if unverified_cited:
+            message = f"Draft cites sources that are not yet verified: {', '.join(unverified_cited)}."
+            warnings.append(message)
+            approval_blockers.append(message)
+
         matrix_context = context.get("matrix_context") or {}
+        head_gaps: List[Dict[str, Any]] = []
+        if context.get("draft", {}).get("draft_type") == "statement_of_claim":
+            # Each pleaded head must carry provision, event, causal link, quantified
+            # relief and notice, and the records behind any figure it pleads.
+            head_gaps = pleaded_head_gaps(matrix_context)
+            for message in pleaded_head_blockers(matrix_context):
+                warnings.append(message)
+                approval_blockers.append(message)
         self._duplication_warnings(matrix_context, warnings)
         self._global_claim_warnings(matrix_context, warnings)
 
@@ -183,6 +198,8 @@ class ArbitrationDraftValidator:
             "approval_blockers": approval_blockers,
             "legal_review_required": bool(warnings),
             "source_count": len(source_ledger),
+            "citations": citations,
+            "pleaded_head_gaps": head_gaps,
         }
 
     def _duplication_warnings(self, matrix_context: Dict[str, Any], warnings: List[str]) -> None:

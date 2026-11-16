@@ -21,6 +21,18 @@ vi.mock("@/services/arbitration-drafting-api", () => ({
   listArbitrationDrafts: vi.fn().mockResolvedValue([]),
   createArbitrationDraft: vi.fn(),
   getArbitrationDraft: (...args: unknown[]) => getDraftMock(...args),
+  getArbitrationDraftCitations: vi.fn().mockResolvedValue({
+    draft_id: "d1",
+    version: 1,
+    scratch: true,
+    counts: { verified: 0, unverified: 0, unresolved: 0, cited: 0, ledger: 0 },
+    items: [],
+    approval_blockers: [],
+    pleaded_head_gaps: [],
+    missing_evidence: [],
+    can_be_approved: false,
+    cannot_be_approved_reason: "This is a scratch draft with no case workspace.",
+  }),
   generateArbitrationDraft: (...args: unknown[]) => generateMock(...args),
   prepareArbitrationDraftFromCase: vi.fn(),
   regenerateArbitrationSection: vi.fn(),
@@ -119,13 +131,14 @@ describe("ArbitrationDraftingPage (draft view)", () => {
     await waitFor(() => expect(approveMock).toHaveBeenCalledWith("draft-1"));
   });
 
-  it("shows the ungated banner for drafts without a case link and excludes register sources", async () => {
+  it("shows the scratch-draft banner for drafts without a case link and excludes register sources", async () => {
     updateDraftMock.mockResolvedValue({ ...DRAFT, excluded_register_ids: ["claim-1"] });
     renderDraftView();
     await waitFor(() => expect(getDraftMock).toHaveBeenCalled());
 
-    // DRAFT has no case_id -> the ungated warning is prominent.
-    expect(screen.getByText(/Ungated draft/)).toBeInTheDocument();
+    // DRAFT has no case_id -> it is named as a scratch draft, with what that means.
+    expect(screen.getByText(/Scratch draft\./)).toBeInTheDocument();
+    expect(screen.getAllByText(/cannot be\s+approved or exported for filing/).length).toBeGreaterThan(0);
 
     // The claim-register ledger row offers per-row exclusion.
     await userEvent.click(screen.getByRole("button", { name: "Exclude register source CL-001" }));

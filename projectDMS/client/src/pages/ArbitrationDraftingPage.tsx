@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
+import DraftCitationPanel from "@/components/arbitration/DraftCitationPanel";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -140,7 +141,8 @@ interface FormState {
 const initialForm = (kind: string): FormState => ({
   organization_id: "",
   project_id: "",
-  case_id: "none",
+  // No default: a draft belongs to a case unless a scratch draft is chosen by name.
+  case_id: "",
   include_registers: "yes",
   title: DRAFT_TYPES[kind]?.label || "Arbitration Draft",
   dispute_type: "eot_delay",
@@ -263,12 +265,17 @@ const ArbitrationDraftingPage: React.FC = () => {
       toast.error("Project and title are required");
       return;
     }
+    if (!form.case_id) {
+      toast.error("Select the case this draft belongs to, or choose a scratch draft");
+      return;
+    }
     setSaving(true);
     try {
       const payload: ArbitrationDraftCreatePayload = {
         organization_id: form.organization_id || undefined,
         project_id: form.project_id,
         case_id: form.case_id && form.case_id !== "none" ? form.case_id : undefined,
+        scratch: form.case_id === "none",
         include_register_sources: form.include_registers !== "no",
         draft_type: draftType.value,
         party_role: form.party_role,
@@ -586,12 +593,12 @@ const ArbitrationDraftingPage: React.FC = () => {
           <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
             <div>
-              <span className="font-medium">Ungated draft.</span> This draft is not linked to a case workspace, so the
-              matrix readiness gate (jurisdiction, limitation, quantum, expert alignment) was not applied.{" "}
+              <span className="font-medium">Scratch draft.</span> This draft has no case workspace. It cannot be
+              approved or exported for filing, and any download is watermarked.{" "}
               <Link to="/arbitration/cases" className="underline">
-                Link it to a case workspace
+                Attach it to a case workspace
               </Link>{" "}
-              for a gated filing.
+              to bring it under the case gates.
             </div>
           </div>
         )}
@@ -845,7 +852,10 @@ const ArbitrationDraftingPage: React.FC = () => {
                   <CardDescription>Source ledger and missing proof markers</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-3 text-sm">
-                  <div>Sources: {sourceLedger.length || draft?.selected_references?.length || 0}</div>
+                  {draft && <DraftCitationPanel draftId={draft._id} version={draft.current_version} />}
+                  <div className="text-xs text-muted-foreground">
+                    Sources in the ledger: {sourceLedger.length || draft?.selected_references?.length || 0}
+                  </div>
                   {selectedReferences.length > 0 && (
                     <div className="space-y-2">
                       <div className="text-xs font-medium text-muted-foreground">Selected references</div>
@@ -1002,13 +1012,13 @@ const ArbitrationDraftingPage: React.FC = () => {
                   </Select>
                 </div>
                 <div className="space-y-2">
-                  <Label>Case workspace (recommended)</Label>
+                  <Label>Case workspace</Label>
                   <Select value={form.case_id} onValueChange={(value) => update("case_id", value)}>
                     <SelectTrigger>
-                      <SelectValue placeholder="Link a case workspace" />
+                      <SelectValue placeholder="Select a case" />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="none">None — ungated draft</SelectItem>
+                      <SelectItem value="none">No case: scratch draft (cannot be approved or filed)</SelectItem>
                       {cases
                         .filter((item) => !form.project_id || item.project_id === form.project_id)
                         .map((item) => (

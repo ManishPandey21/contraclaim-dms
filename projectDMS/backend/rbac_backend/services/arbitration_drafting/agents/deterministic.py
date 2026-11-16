@@ -1076,6 +1076,11 @@ class DeterministicArbitrationAgent:
         if collection is None:
             return []
         query = _scope_query(self.case, include_contract=False)
+        escalated = [str(item) for item in (self.case.get("claim_ids") or []) if item]
+        if collection_name == "claims" and escalated:
+            # A case built by escalation names its claims. Only those are its
+            # claim records; the rest of the project's register is not read.
+            query = {**query, "_id": {"$in": escalated}}
         try:
             cursor = collection.find(query)
             if hasattr(cursor, "sort"):
