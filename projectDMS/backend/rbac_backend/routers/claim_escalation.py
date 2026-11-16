@@ -22,7 +22,14 @@ from ..core.security import CurrentUser, get_current_user
 from ..core.tenant_context import ActiveScope, active_scope
 from ..services.arbitration_drafting.case_workspace import ArbitrationCaseWorkspaceService
 from ..services.claim_bench import ClaimBenchService
-from ..services.claim_escalation import ClaimEscalation, EscalationPreview, EscalationRequest, EscalationResult
+from ..services.claim_escalation import (
+    ClaimEscalation,
+    EscalationPreview,
+    EscalationRequest,
+    EscalationResult,
+    UndoRequest,
+    UndoResult,
+)
 from ..services.document_relationship_service import DocumentRelationshipService
 from ..services.policy_service import PolicyService
 from ..utils.error_handler import handle_exceptions
@@ -109,6 +116,32 @@ async def run_claim_escalation(
     claims, documents, case, notices = await _gather(payload, db, bench, current_user, policy, selection)
     await escalation_limiter.check_user_limit(_user_id(current_user) or "")
     return await ClaimEscalation(db, bench).escalate(claims, documents, payload, current_user, case, notices)
+
+
+@router.post("/claims/escalation/undo", response_model=UndoResult)
+@handle_exceptions
+async def undo_claim_escalation(
+    payload: UndoRequest,
+    db=Depends(get_db),
+    bench: ClaimBenchService = Depends(get_bench),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
+):
+    """Undo one claim's escalation until the case's first pleading version (D-18, AQ-6).
+
+    Needs claim-manage on the claim and arbitration-edit on the case, and a reason.
+    Restores the claim's prior status, lifts the freeze the escalation made, archives
+    the rows it seeded and, for a case it created that nothing else uses, discards it.
+    """
+    claim = await _claim(payload.claim_id, Permissions.CLAIM_MANAGE, db, current_user, policy, selection, bench)
+    # As escalation loads its target (_gather): the navbar selection bounds the case,
+    # and the policy decides arbitration-edit on it.
+    case = await ArbitrationCaseWorkspaceService(db).get_case(payload.case_id)
+    await selection.require_record(case)
+    await policy.authorize_document(current_user, Permissions.ARBITRATION_EDIT, case, resource_type="arbitration_case")
+    await escalation_limiter.check_user_limit(_user_id(current_user) or "")
+    return await ClaimEscalation(db, bench).undo(claim, case, payload, current_user)
 
 
 __all__ = ["router"]

@@ -114,6 +114,21 @@ def _conflict(code: str, message: str) -> HTTPException:
     return HTTPException(status_code=409, detail={"code": code, "user_message": message, "detail": None})
 
 
+class UndoRequest(BaseModel):
+    claim_id: str = Field(..., min_length=1, max_length=120)
+    case_id: str = Field(..., min_length=1, max_length=120)
+    reason: str = Field(..., min_length=10, max_length=1000)
+
+
+class UndoResult(BaseModel):
+    claim_id: str
+    case_id: str
+    status: str
+    rows_archived: int = 0
+    freeze_lifted: bool = False
+    case_discarded: bool = False
+
+
 class ClaimCarry(BaseModel):
     claim_id: str
     claim_ref: Optional[str] = None
@@ -516,9 +531,20 @@ class ClaimEscalation:
             if outcome == "reserved":
                 reserved.append(claim)
 
-        # 4. Freeze the evidence (checked in step 1).
+        # 4. Freeze the evidence (checked in step 1). What each link pointed at before is
+        # recorded first, so an undo (4B-37) can give it back exactly.
+        for claim in reserved:
+            if not claim.get("evidence_frozen_at"):
+                await self._record_links_before(claim, case_id)
         for claim in claims:
             await self._freeze(claim, current_user)
+        for claim in reserved:
+            if not claim.get("evidence_frozen_at"):
+                frozen = await self.db.claims.find_one({"_id": claim["_id"]}) or {}
+                await self.db.claims.update_one(
+                    {"_id": claim["_id"], "escalation.case_id": case_id},
+                    {"$set": {"escalation.frozen_at": frozen.get("evidence_frozen_at")}},
+                )
 
         # 5. Seed the rows; a row already carried is refused by the unique index (M-05).
         created_rows: Dict[str, int] = {}
@@ -662,6 +688,7 @@ class ClaimEscalation:
                     "escalation": {
                         "case_id": case_id,
                         "prior_status": prior,
+                        "status_after": status_after(prior),
                         "was_frozen": bool(claim.get("evidence_frozen_at")),
                         "created_case": created_case,
                         "idempotency_key": key,
@@ -689,6 +716,170 @@ class ClaimEscalation:
             if not fresh.get("evidence_frozen_at"):
                 raise
 
+    async def _record_links_before(self, claim: Dict[str, Any], case_id: str) -> None:
+        links = await self.db.entity_document_links.find(
+            {"target_type": "claim", "target_id": str(claim["_id"]), "removed_at": None}
+        ).to_list(length=None)
+        await self.db.claims.update_one(
+            {"_id": claim["_id"], "escalation.case_id": case_id},
+            {
+                "$set": {
+                    "escalation.links_before": [
+                        {"link_id": str(link.get("_id")), "document_version_id": link.get("document_version_id")}
+                        for link in links
+                    ]
+                }
+            },
+        )
+
+    # ------------------------------------------------------------ undo (4B-37)
+    async def pleading_versions(self, case_id: str) -> int:
+        """Pleading versions in the case: versions of any draft carrying this case's id
+        (deleted drafts included: their versions existed). Scratch drafts never count."""
+        draft_ids = await self.db.arbitration_drafts.distinct("_id", {"case_id": case_id})
+        if not draft_ids:
+            return 0
+        return await self.db.arbitration_draft_versions.count_documents({"draft_id": {"$in": draft_ids}})
+
+    async def undo(
+        self, claim: Dict[str, Any], case: Dict[str, Any], request: "UndoRequest", current_user: Any
+    ) -> "UndoResult":
+        """Reverse one claim's escalation, exactly, until the case's first pleading version (D-18, AQ-6)."""
+        reason = " ".join(request.reason.split())
+        if len(reason.strip(" .,;:-")) < 10:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "escalation_undo_reason",
+                    "user_message": "Say why the escalation is being undone (at least 10 characters).",
+                    "detail": None,
+                },
+            )
+        case_id = str(case["_id"])
+        record = claim.get("escalation") or {}
+        if claim.get("arbitration_case_id") != case_id or record.get("case_id") != case_id:
+            raise _conflict("escalation_not_found", "This claim was not escalated into this case, so there is nothing to undo.")
+        if await self.pleading_versions(case_id):
+            raise _conflict(
+                "escalation_undo_after_pleading",
+                "A pleading version exists in this case, so the escalation can no longer be undone.",
+            )
+        user_id = str(getattr(current_user, "id", "") or "") or None
+        now = now_utc()
+        # 1. The claim goes back to the status it had, if it has not moved since.
+        result = await self.db.claims.update_one(
+            {
+                "_id": claim["_id"],
+                "arbitration_case_id": case_id,
+                "escalation.case_id": case_id,
+                "status": record.get("status_after", claim.get("status")),
+            },
+            {
+                "$set": {
+                    "arbitration_case_id": None,
+                    "status": record.get("prior_status") or claim.get("status"),
+                    "updated_at": datetime.utcnow(),
+                    "updated_by": user_id,
+                },
+                "$unset": {"escalation": ""},
+                "$push": {
+                    "escalation_history": {**record, "undone_at": now, "undone_by": user_id, "undo_reason": reason}
+                },
+            },
+        )
+        if not getattr(result, "matched_count", 0):
+            raise _conflict(
+                "escalation_claim_moved",
+                "The claim has changed since it was escalated (its status moved on), so the escalation is not undone.",
+            )
+        # 2. The freeze this escalation made is lifted; an earlier freeze is kept.
+        freeze_lifted = False
+        if not record.get("was_frozen") and record.get("frozen_at"):
+            await self.relationships.lift_freeze(
+                current_user,
+                "claim",
+                str(claim["_id"]),
+                frozen_at=record["frozen_at"],
+                versions_before={
+                    str(item.get("link_id")): item.get("document_version_id")
+                    for item in record.get("links_before") or []
+                },
+                reason=f"Escalation undone: {reason}",
+            )
+            freeze_lifted = True
+        # 3. The rows it seeded are archived with the reason; their origin is released so
+        # a later escalation can carry the claim again (M-05 indexes live rows only by origin).
+        archived = 0
+        for item in record.get("seeded_rows") or []:
+            collection = self.db[MATRIX_COLLECTIONS[item["matrix"]]]
+            row = await collection.find_one({"_id": item["row_id"], "case_id": case_id, "deleted_at": {"$exists": False}})
+            if not row:
+                continue
+            await collection.update_one(
+                {"_id": row["_id"], "deleted_at": {"$exists": False}},
+                {
+                    "$set": {
+                        "deleted_at": now,
+                        "deleted_by": user_id,
+                        "delete_reason": f"Escalation undone: {reason}",
+                        "archived_origin_key": row.get("origin_key"),
+                    },
+                    "$unset": {"origin_key": ""},
+                },
+            )
+            archived += 1
+        # 4. The case loses the claim; a case this escalation created and nothing else uses goes too.
+        await self.db.arbitration_cases.update_one(
+            {"_id": case["_id"]},
+            {"$pull": {"claim_ids": str(claim["_id"])}, "$set": {"updated_at": datetime.utcnow(), "updated_by": user_id}},
+        )
+        if archived:
+            await self.cases.invalidate_readiness_approvals(case_id, "escalation_undone", current_user)
+        discarded = False
+        if record.get("created_case"):
+            fresh = await self.db.arbitration_cases.find_one({"_id": case["_id"]}) or {}
+            live_rows = 0
+            for name in set(MATRIX_COLLECTIONS.values()):
+                live_rows += await self.db[name].count_documents({"case_id": case_id, "deleted_at": {"$exists": False}})
+            drafts = await self.db.arbitration_drafts.count_documents({"case_id": case_id})
+            if not fresh.get("claim_ids") and not live_rows and not drafts:
+                await self.db.arbitration_cases.update_one(
+                    {"_id": case["_id"], "deleted_at": None},
+                    {"$set": {"deleted_at": now, "deleted_reason": f"Escalation undone: {reason}"}},
+                )
+                discarded = True
+        audit = AuditEventService(self.db)
+        await audit.emit(
+            action="claim.escalation_undone",
+            actor_id=user_id,
+            resource_type="claim",
+            resource_id=str(claim["_id"]),
+            organization_id=claim.get("organization_id"),
+            project_id=claim.get("project_id"),
+            reason=reason,
+            before={"status": claim.get("status"), "arbitration_case_id": case_id},
+            after={"status": record.get("prior_status"), "arbitration_case_id": None},
+            metadata={"rows_archived": archived, "freeze_lifted": freeze_lifted, "case_discarded": discarded},
+        )
+        await audit.emit(
+            action="arbitration_case.claim_escalation_undone",
+            actor_id=user_id,
+            resource_type="arbitration_case",
+            resource_id=case_id,
+            organization_id=case.get("organization_id"),
+            project_id=case.get("project_id"),
+            reason=reason,
+            after={"claim_id": str(claim["_id"]), "rows_archived": archived, "case_discarded": discarded},
+        )
+        return UndoResult(
+            claim_id=str(claim["_id"]),
+            case_id=case_id,
+            status=str(record.get("prior_status") or claim.get("status") or ""),
+            rows_archived=archived,
+            freeze_lifted=freeze_lifted,
+            case_discarded=discarded,
+        )
+
     async def _release(self, reserved: List[Dict[str, Any]], case_id: str) -> None:
         for claim in reserved:
             await self.db.claims.update_one(
@@ -713,6 +904,8 @@ __all__ = [
     "EscalationRequest",
     "EscalationResult",
     "NewCase",
+    "UndoRequest",
+    "UndoResult",
     "build_carry",
     "status_after",
 ]

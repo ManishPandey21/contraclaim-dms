@@ -792,6 +792,80 @@ class DocumentRelationshipService:
             for stored, document, version_id in committed
         ]
 
+    async def lift_freeze(
+        self,
+        actor: Any,
+        target_type: str,
+        target_id: str,
+        *,
+        frozen_at: Any,
+        versions_before: dict[str, Optional[str]],
+        reason: str,
+    ) -> None:
+        """Reverse one freeze exactly (4B-37, D-18): the claim's own escalation freeze.
+
+        Only the freeze stamped ``frozen_at`` is lifted: the claim must still carry
+        that stamp, and only links frozen at that instant are released. Each link
+        gets back the version it had before (``versions_before``, recorded by the
+        caller before freezing; a link not listed had none). A freeze made at any
+        other time is left as it is. Claims only. One transaction; audited.
+        """
+        context = await self._target(actor, target_type, target_id, manage=True, freeze=True)
+        if context.target_type != "claim":
+            raise DocumentRelationshipError(f"{context.target_type} evidence freeze cannot be lifted", 409)
+        actor_id = getattr(actor, "id", None)
+
+        async def persist(session: Any) -> None:
+            result = await self.db.claims.update_one(
+                {"_id": context.entity.get("_id"), "evidence_frozen_at": frozen_at},
+                {"$set": {"evidence_frozen_at": None, "evidence_frozen_by": None, "evidence_freeze_reason": None}},
+                session=session,
+            )
+            if not getattr(result, "matched_count", 0):
+                raise DocumentRelationshipError("Claim evidence was frozen by something else; it is left frozen", 409)
+            links = await self.db.entity_document_links.find(
+                {
+                    "organization_id": context.organization_id,
+                    "project_id": context.project_id,
+                    "target_type": context.target_type,
+                    "target_id": context.target_id,
+                    "frozen_at": frozen_at,
+                },
+                session=session,
+            ).to_list(length=None)
+            for link in links:
+                released = await self.db.entity_document_links.update_one(
+                    {"_id": link.get("_id"), "_revision": int(link.get("_revision") or 1)},
+                    {
+                        "$set": {
+                            "frozen_at": None,
+                            "frozen_by": None,
+                            "document_version_id": versions_before.get(str(link.get("_id"))),
+                        },
+                        "$inc": {"_revision": 1},
+                    },
+                    session=session,
+                )
+                if not getattr(released, "matched_count", 0):
+                    raise DocumentRelationshipError("Document relationship changed while the freeze was lifted", 409)
+            await self.audit.emit(
+                action="document_relationships.unfrozen",
+                actor_id=actor_id,
+                resource_type=context.target_type,
+                resource_id=context.target_id,
+                organization_id=context.organization_id,
+                project_id=context.project_id,
+                before={"evidence_frozen_at": frozen_at},
+                after={"evidence_frozen_at": None, "links_released": len(links)},
+                reason=reason,
+                session=session,
+            )
+
+        try:
+            await self._run_transaction(persist)
+        except RuntimeError as exc:
+            raise DocumentRelationshipError(str(exc), 409) from exc
+
     async def get(self, actor: Any, link_id: str) -> DocumentRelationshipView:
         """The current state of one link row, including a removal tombstone.
 

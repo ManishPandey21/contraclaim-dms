@@ -73,6 +73,10 @@ export const ERROR_CODE_MESSAGES = {
   escalation_key_released: "The earlier attempt did not finish. Try again.",
   escalation_key_reused: "This escalation was started for different claims. Reload the page and try again.",
   escalation_in_progress: "This escalation is still running. Try again in a moment.",
+  escalation_undo_reason: "Say why the escalation is being undone.",
+  escalation_not_found: "This claim was not escalated into this case, so there is nothing to undo.",
+  escalation_undo_after_pleading: "A pleading version exists in this case, so the escalation can no longer be undone.",
+  escalation_claim_moved: "The claim has changed since it was escalated, so the escalation is not undone.",
   draft_case_scope_mismatch: "That arbitration case belongs to another project. Choose a case of this draft's project.",
 } as const;
 
