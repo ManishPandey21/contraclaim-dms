@@ -255,6 +255,7 @@ jobs:
             backend/rbac_backend/tests/integration/test_determination_four_eyes_mongo.py
             backend/rbac_backend/tests/integration/test_net_eot_table_mongo.py
             backend/rbac_backend/tests/integration/test_submission_evidence_restricted_mongo.py
+            backend/rbac_backend/tests/integration/test_key_date_recalc_preview_mongo.py
             backend/rbac_backend/tests/integration/test_reviewer_assignments_mongo.py
             backend/rbac_backend/tests/integration/test_project_perspective_mongo.py
             backend/rbac_backend/tests/integration/test_claim_contract_identity_mongo.py
