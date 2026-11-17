@@ -137,10 +137,31 @@ export async function verifyNoticeRequirement(requirementId: string): Promise<No
   return data;
 }
 
-export async function setProjectPerspective(projectId: string, perspective: Perspective): Promise<void> {
+export async function setProjectPerspective(
+  projectId: string,
+  perspective: Perspective,
+  reason?: string
+): Promise<void> {
   await api.patch(`/projects/${encodeURIComponent(projectId)}/contractual-capacity`, {
     contractual_capacity: perspective,
+    ...(reason ? { reason } : {}),
   });
+}
+
+/** Which party a project acts for, where that comes from, and whether the signed-in person may set it. */
+export interface PerspectiveState {
+  value: Perspective | null;
+  source: "project" | "organisation_default" | "none";
+  in_use: boolean;
+  can_set: boolean;
+  cannot_set_reason?: string | null;
+}
+
+export async function fetchProjectPerspective(projectId: string): Promise<PerspectiveState> {
+  const { data } = await api.get<PerspectiveState>(
+    `/projects/${encodeURIComponent(projectId)}/contractual-capacity`
+  );
+  return data;
 }
 
 // --------------------------------------------------------------------------- //

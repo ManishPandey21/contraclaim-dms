@@ -85,6 +85,20 @@ Rules:
 register_default_template(STRATEGY_NOTE_PROMPT, STRATEGY_NOTE_TEMPLATE)
 
 
+
+async def any_simulation_for_projects(db: Any, project_ids: List[str]) -> bool:
+    """Whether a simulation exists for any of these projects (plan 4B-15).
+
+    Answers yes or no and returns nothing else, so the perspective lock can ask
+    without any other module reading privileged material.
+    """
+    if not project_ids:
+        return False
+    row = await db[PRIVILEGED].find_one(
+        {"project_id": {"$in": [str(item) for item in project_ids]}, "kind": "simulation"}, {"_id": 1}
+    )
+    return row is not None
+
 class SimulationRequest(BaseModel):
     simulated_party: str
 

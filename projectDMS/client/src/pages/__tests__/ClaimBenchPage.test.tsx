@@ -20,13 +20,17 @@ const api = vi.hoisted(() => ({
   lockClaimBench: vi.fn(),
   unlockClaimBench: vi.fn(),
   setProjectPerspective: vi.fn(),
+  fetchProjectPerspective: vi.fn(),
   fetchNoticeCandidates: vi.fn(),
   setNoticeRequirement: vi.fn(),
   verifyNoticeRequirement: vi.fn(),
 }));
 vi.mock("@/services/claim-bench-api", () => api);
-const permission = vi.hoisted(() => ({ granted: false }));
-vi.mock("@/hooks/useHasPermission", () => ({ default: () => permission.granted }));
+// `granted` stands for every permission; `names` grants particular ones.
+const permission = vi.hoisted(() => ({ granted: false, names: [] as string[] }));
+vi.mock("@/hooks/useHasPermission", () => ({
+  default: (name: string) => permission.granted || permission.names.includes(name),
+}));
 vi.mock("@/components/claim-bench/DeterminationsPanel", () => ({ default: () => <p>determinations panel</p> }));
 vi.mock("@/components/claim-bench/SubmissionPanel", () => ({ default: () => <p>submission panel</p> }));
 vi.mock("@/components/claim-bench/InternalAnalysisPanel", () => ({ default: () => <p>internal panel</p> }));
@@ -95,7 +99,9 @@ describe("Claim Bench page", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     permission.granted = false;
+    permission.names = [];
     api.fetchClaimBench.mockResolvedValue(response());
+    api.fetchProjectPerspective.mockResolvedValue({ value: null, source: "none", in_use: false, can_set: true });
   });
 
   it("opens a Contractor's workspace on the board, with the submission and no internal tab without access", async () => {
@@ -137,6 +143,7 @@ describe("Claim Bench page", () => {
   it("offers to open the board for a claim that has none", async () => {
     api.fetchClaimBench.mockResolvedValue(response({ exists: false, bench: { board_version: 0, stage: "heads", heads: [] } }));
     api.openClaimBench.mockResolvedValue(response());
+    permission.names = ["dms.claim.edit"];
     renderPage();
     await userEvent.click(await screen.findByRole("button", { name: "Open the board" }));
     expect(api.openClaimBench).toHaveBeenCalledWith("claim-1");
@@ -165,8 +172,38 @@ describe("Claim Bench page", () => {
     renderPage();
     expect(await screen.findByRole("heading", { name: "Which party does this project act for?" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Test this head" })).toBeDisabled();
-    await userEvent.click(screen.getByRole("button", { name: "Engineer" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Engineer" }));
     expect(api.setProjectPerspective).toHaveBeenCalledWith("proj-A", "engineer");
+    expect(api.fetchProjectPerspective).toHaveBeenCalledWith("proj-A");
+  });
+
+  it("does not ask someone who cannot record the party; it tells them who can (4B-15, C-14)", async () => {
+    api.fetchClaimBench.mockResolvedValue(response({ perspective: null }));
+    api.fetchProjectPerspective.mockResolvedValue({
+      value: null,
+      source: "none",
+      in_use: false,
+      can_set: false,
+      cannot_set_reason: "You do not have permission to change this project's settings.",
+    });
+    renderPage();
+    const banner = (await screen.findByRole("heading", { name: "Which party does this project act for?" })).closest("section")!;
+    expect(await within(banner).findByText(/Ask a project or organisation administrator to record it/)).toBeInTheDocument();
+    expect(within(banner).queryAllByRole("button")).toHaveLength(0);
+    expect(api.setProjectPerspective).not.toHaveBeenCalled();
+  });
+
+  it("does not look up who can record the party when it is already recorded", async () => {
+    renderPage();
+    await screen.findByRole("tablist", { name: "Claim workspace" });
+    expect(api.fetchProjectPerspective).not.toHaveBeenCalled();
+  });
+
+  it("shows a viewer that the board is unopened without offering to open it (4B-15, C-14)", async () => {
+    api.fetchClaimBench.mockResolvedValue(response({ exists: false, bench: { board_version: 0, stage: "heads", heads: [] } }));
+    renderPage();
+    expect(await screen.findByText(/Someone who can edit this claim opens it/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open the board" })).not.toBeInTheDocument();
   });
 
   it("keeps a proposal apart from the decision, and sends the person's call with the board version", async () => {

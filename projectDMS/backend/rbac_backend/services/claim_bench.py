@@ -606,9 +606,11 @@ class ClaimBenchService:
         project_id = claim.get("project_id")
         if not project_id:
             return None
-        project = await self._find_project(str(project_id))
-        value = (project or {}).get("contractual_capacity")
-        return value if value in {"contractor", "engineer", "employer"} else None
+        from .project_perspective import resolve_perspective
+
+        # The project's own position, or its organisation's default (plan 4B-15).
+        value, _source = await resolve_perspective(self.db, await self._find_project(str(project_id)))
+        return value
 
     async def _find_project(self, project_id: str) -> Optional[Dict[str, Any]]:
         from bson import ObjectId

@@ -461,12 +461,21 @@ def test_only_the_privileged_module_names_the_privileged_collection() -> None:
     root = Path(__file__).resolve().parents[1]
     owners = {"services/claim_privileged.py", "migrations/v20261118_0001_claim_findings_indexes.py"}
     importers = {"routers/claim_findings.py"}
+    yes_no_only = "services/project_perspective.py"
     for path in root.rglob("*.py"):
         relative = path.relative_to(root).as_posix()
         if relative.startswith("tests/") or "__pycache__" in relative:
             continue
         source = path.read_text(encoding="utf-8")
         if "claim_privileged" in source and relative not in owners:
+            if relative == yes_no_only:
+                # 4B-15: the perspective lock asks one yes/no question ("does a
+                # simulation exist for these projects?") and may name nothing else.
+                mentions = [line.strip() for line in source.splitlines() if "claim_privileged" in line]
+                assert mentions == ["from .claim_privileged import any_simulation_for_projects"], (
+                    f"{relative} may import only the yes/no check from the privileged module, found: {mentions}"
+                )
+                continue
             assert relative in importers, f"{relative} reaches into privileged claim material"
         for model in ("ClaimSimulation", "StrategyNote"):
             if re.search(rf"\b{model}\b", source):
@@ -750,3 +759,16 @@ def test_the_findings_migration_is_in_the_catalogue_and_changes_no_role() -> Non
 
 def _unused(_: Optional[str] = None) -> None:  # pragma: no cover - keeps optional imports honest
     return None
+
+
+def test_the_yes_no_simulation_check_returns_a_boolean_and_nothing_else() -> None:
+    """4B-15: what the perspective lock is allowed to learn from privileged material."""
+    import inspect
+
+    from rbac_backend.services import claim_privileged
+
+    source = inspect.getsource(claim_privileged.any_simulation_for_projects)
+    assert "-> bool" in source
+    assert source.count("return ") == 2 and "return False" in source and "return row is not None" in source
+    # It reads the key only: no text of any simulation leaves the module.
+    assert '{"_id": 1}' in source

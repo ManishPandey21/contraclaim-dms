@@ -91,6 +91,11 @@ export const ERROR_CODE_MESSAGES = {
   reviewer_assignment_exists: "That person already holds this reviewer role at this scope.",
   reviewer_assignment_not_found: "That assignment could not be found.",
   reviewer_scope_mismatch: "That project does not belong to that organisation.",
+  perspective_locked:
+    "A determination, simulation or submission has already been made from this position. Only an administrator of the organisation can change it, with a reason.",
+  perspective_reason_required: "Say why the party this project acts for is being changed (at least 10 characters).",
+  perspective_changed_concurrently: "Someone changed this at the same time. Reload and try again.",
+  perspective_default_needs_organisation_admin: "Only an administrator of the organisation can set its default.",
 } as const;
 
 export type StatusKind = "claim" | "arbitration_case" | "arbitration_draft";

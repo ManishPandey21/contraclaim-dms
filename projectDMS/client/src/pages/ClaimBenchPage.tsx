@@ -2,6 +2,8 @@ import React, { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { ArrowLeft, FileText, Lock, LockOpen, Mail, Plus, Scale } from "lucide-react";
 
+import { useQuery } from "@tanstack/react-query";
+
 import ClaimStatusPill from "@/components/claims/ClaimStatusPill";
 import DelayTab from "@/components/claim-bench/DelayTab";
 import DeterminationsPanel from "@/components/claim-bench/DeterminationsPanel";
@@ -18,6 +20,7 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { useClaimBench } from "@/hooks/useClaimBench";
+import { fetchProjectPerspective } from "@/services/claim-bench-api";
 import useHasPermission from "@/hooks/useHasPermission";
 import { errorMessage } from "@/hooks/useLetterBench";
 import {
@@ -81,6 +84,17 @@ const ClaimBenchPage: React.FC = () => {
   const mayReadInternal = useHasPermission("dms.claim.strategy.read");
   // Reopening a locked board needs claim-manage rights and a reason (D-22); the server enforces both.
   const mayReopen = useHasPermission("dms.claim.manage");
+  // Hides actions a viewer cannot take. The server refuses them regardless (C-14).
+  const mayEdit = useHasPermission("dms.claim.edit");
+  const projectId = query.data?.project_id ?? "";
+  const needsPerspective = Boolean(query.data && !query.data.perspective && projectId);
+  // Only someone who can answer is asked which party the project acts for (D-11).
+  const perspectiveState = useQuery({
+    queryKey: ["project-perspective", projectId],
+    queryFn: () => fetchProjectPerspective(projectId),
+    enabled: needsPerspective,
+    retry: false,
+  });
   const [reopenReason, setReopenReason] = useState<string | null>(null);
   const data = query.data;
 
@@ -217,6 +231,14 @@ const ClaimBenchPage: React.FC = () => {
             A head is tested from one party's position, and that is never assumed. This is recorded once for the
             project and applies to all of its claims.
           </p>
+          {!perspectiveState.data?.can_set && (
+            <p className="text-sm font-medium">
+              {perspectiveState.isLoading
+                ? "Checking who can record this…"
+                : "This has not been recorded yet. Ask a project or organisation administrator to record it; heads cannot be tested until then."}
+            </p>
+          )}
+          {perspectiveState.data?.can_set && (
           <div className="flex flex-wrap gap-2">
             {(Object.keys(PERSPECTIVE_LABEL) as Perspective[]).map((value) => (
               <Button
@@ -231,6 +253,7 @@ const ClaimBenchPage: React.FC = () => {
               </Button>
             ))}
           </div>
+          )}
         </section>
       )}
 
@@ -251,9 +274,15 @@ const ClaimBenchPage: React.FC = () => {
             Opening the board carries the claim's title, clauses, days and amount into a first head. Each head is then
             tested on event, notice, contractual basis, causation and quantum, and you make the call on each.
           </p>
-          <Button disabled={open.isPending || data.read_only} onClick={() => open.mutate()}>
-            Open the board
-          </Button>
+          {mayEdit ? (
+            <Button disabled={open.isPending || data.read_only} onClick={() => open.mutate()}>
+              Open the board
+            </Button>
+          ) : (
+            <p className="text-sm font-medium">
+              The board has not been opened. Someone who can edit this claim opens it.
+            </p>
+          )}
         </section>
       ) : (
         <>
