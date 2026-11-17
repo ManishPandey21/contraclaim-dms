@@ -85,3 +85,16 @@ def test_every_structured_error_code_from_the_phase_4b_routes_has_a_message() ->
     # PolicyService refusals the client renders from "Not authorized: <reason>".
     codes |= {"explicit_grant_required", "missing_permission", "no_active_subscription"}
     assert codes - _keys("ERROR_CODE_MESSAGES") == set()
+
+
+def test_no_message_code_is_defined_twice() -> None:
+    # A repeated key in the object literal silently replaces the earlier message (it
+    # happened: OD-1 reused 4B-18's claim_contract_required). CI does not type-check the
+    # client, so this catches it.
+    import collections
+
+    text = PLAIN.read_text(encoding="utf-8")
+    for block in re.findall(r"^export const \w+ = \{\n(.*?)^\} as const;", text, re.M | re.S):
+        keys = re.findall(r"^  ([a-z][a-z0-9_]*):", block, re.M)
+        repeated = sorted(key for key, count in collections.Counter(keys).items() if count > 1)
+        assert repeated == [], repeated

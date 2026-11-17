@@ -201,6 +201,10 @@ export interface SubmissionView {
   approved_for_issue: boolean;
   can_export: boolean;
   cannot_export_reason?: string | null;
+  /** D-25: how many evidence items this viewer may not read. Never which ones. */
+  restricted_items?: number;
+  /** 4B-27: evidence documents changed since the submission was composed. */
+  evidence_changed?: number;
   /** Evidence not confirmed against the Contract Master, or naming no contract. Warnings only. */
   evidence_notes?: string[];
   /** OD-1: records awaiting a person's confirmation of their contract, and those confirmed. */

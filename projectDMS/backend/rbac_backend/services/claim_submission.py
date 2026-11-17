@@ -30,7 +30,9 @@ sections are re-composed; the others are left alone.
 
 from __future__ import annotations
 
+import hashlib
 import io
+import json
 import logging
 import re
 from datetime import datetime
@@ -56,6 +58,7 @@ from ..models.claim_skill_outputs import SUBMISSION_SECTION_SCHEMA_KEY, Submissi
 from ..utils.datetime import now_utc
 from .claim_delay_lab import ClaimDelayLab, DelayView, build_view
 from .claim_quantum import ClaimQuantum, QuantumView
+from .publication_policy import is_consumable, resolve_canonical_document
 from .quantum_formulas import rupees, to_paise
 from .docx_xml import w_paragraph, w_table
 from .letter_drafting.prompts import UNTRUSTED_CONTENT_GUARD, register_default_template
@@ -114,6 +117,129 @@ class SectionView(BaseModel):
     stale: bool = False
 
 
+#: D-25: what a viewer without access to an evidence item sees in its place.
+RESTRICTED_LABEL = "Restricted item"
+RESTRICTED_PARAGRAPH = "This paragraph relies on a restricted item."
+EVIDENCE_RESTRICTED = "evidence_restricted"
+
+
+def evidence_revision(document: Dict[str, Any]) -> str:
+    """A document's revision fingerprint for the evidence snapshot (4B-27): its file
+    content and the fields the evidence schedule prints. A tag or a view count does not
+    change it; a new file, version, subject, date or reference does."""
+    basis = {
+        "id": str(document.get("_id")),
+        "sha256": document.get("sha256"),
+        "version": str(document.get("version_id") or document.get("resolved_version_id") or document.get("version") or ""),
+        "file": str(document.get("file_object_id") or ""),
+        "subject": document.get("subject") or document.get("original_filename") or document.get("filename"),
+        "date": str(_as_datetime(document.get("date")) or ""),
+        "reference": document.get("letter_no") or document.get("letterNo"),
+    }
+    return hashlib.sha256(json.dumps(basis, sort_keys=True, default=str).encode()).hexdigest()
+
+
+async def claim_evidence_ids(db: Any, claim: Dict[str, Any]) -> Set[str]:
+    """The claim's full linked evidence set, the same for every viewer (D-25, 4B-27).
+
+    Active claim links plus the claim's legacy document ids, each resolved to its
+    canonical document, consumable and in the claim's organisation and project. No
+    viewer permission is applied here: what a viewer may see is decided afterwards,
+    by redaction, never by changing what the submission is composed from."""
+    organization_id = str(claim.get("organization_id") or "")
+    project_id = str(claim.get("project_id") or "")
+    candidates: List[str] = []
+    async for row in db.entity_document_links.find(
+        {"organization_id": organization_id, "project_id": project_id, "target_type": "claim",
+         "target_id": str(claim["_id"]), "removed_at": None},
+        {"document_id": 1},
+    ):
+        candidates.append(str(row.get("document_id") or ""))
+    candidates.extend(str(item or "") for item in claim.get("linked_document_ids") or [])
+    found: Set[str] = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        document = await resolve_canonical_document(db, candidate)
+        if not document or not is_consumable(document):
+            continue
+        doc_org = str(document.get("organization_id") or document.get("organizationId") or "")
+        doc_project = str(document.get("project_id") or document.get("projectId") or "")
+        if doc_org != organization_id or doc_project != project_id:
+            continue
+        found.add(str(document.get("_id")))
+    return found
+
+
+def _restricted_paragraph(paragraph: SubmissionParagraph, accessible: Set[str]) -> SubmissionParagraph:
+    hidden = [s for s in paragraph.sources if s.kind == "document" and s.ref not in accessible]
+    if not hidden:
+        return paragraph
+    return SubmissionParagraph(
+        text=RESTRICTED_PARAGRAPH,
+        sources=[
+            ParagraphSource(kind="document", ref="", label=RESTRICTED_LABEL)
+            if source.kind == "document" and source.ref not in accessible else source
+            for source in paragraph.sources
+        ],
+    )
+
+
+def redact_for(view: "SubmissionView", evidence_ids: Set[str], accessible: Set[str]) -> "SubmissionView":
+    """D-25: the viewer's copy. Every item the viewer may not read becomes "Restricted
+    item" - no title, date, type, reference or id - and only the total is given."""
+    restricted = evidence_ids - accessible
+    if not restricted:
+        return view
+    sections = [
+        SectionView(
+            section=item.section.model_copy(
+                update={"paragraphs": [_restricted_paragraph(p, accessible) for p in item.section.paragraphs]}
+            ),
+            stale=item.stale,
+        )
+        for item in view.sections
+    ]
+    evidence = [
+        entry if entry.document_id in accessible
+        else EvidenceItem(number=entry.number, document_id="", title=RESTRICTED_LABEL)
+        for entry in view.evidence
+    ]
+
+    def _item(entry: Dict[str, Any]) -> Dict[str, Any]:
+        if entry.get("kind") == "document" and str(entry.get("record_id")) in restricted:
+            return {**entry, "record_id": "", "label": RESTRICTED_LABEL, "confirmation_id": None,
+                    "reason": None, "confirmed_by": None, "confirmed_at": None}
+        return entry
+
+    unconfirmed = [_item(entry) for entry in view.unconfirmed_evidence]
+    confirmed = [_item(entry) for entry in view.confirmed_evidence]
+    notes = [note for note in view.evidence_notes if not any(_label_in(note, view, rid) for rid in restricted)]
+    if len(notes) != len(view.evidence_notes):
+        notes.append("Some evidence awaiting confirmation is restricted for you; a person with access must confirm it.")
+    return view.model_copy(update={
+        "sections": sections, "evidence": evidence, "unconfirmed_evidence": unconfirmed,
+        "confirmed_evidence": confirmed, "evidence_notes": notes, "restricted_items": len(restricted),
+        "can_export": False,
+        "cannot_export_reason": view.cannot_export_reason or restricted_message(len(restricted)),
+    })
+
+
+def _label_in(note: str, view: "SubmissionView", record_id: str) -> bool:
+    labels = [str(entry.get("label")) for entry in view.unconfirmed_evidence + view.confirmed_evidence
+              if str(entry.get("record_id")) == record_id and entry.get("label")]
+    labels += [entry.title for entry in view.evidence if entry.document_id == record_id and entry.title]
+    return any(label and label in note for label in labels)
+
+
+def restricted_message(count: int) -> str:
+    return (
+        f"{count} item{'s' if count != 1 else ''} of this claim's evidence {'are' if count != 1 else 'is'} restricted "
+        "for you, so you cannot export the submission. The claim's owner, or a person with access to all of its "
+        "evidence, can export it."
+    )
+
+
 class SubmissionView(BaseModel):
     claim_id: str
     exists: bool = False
@@ -128,6 +254,10 @@ class SubmissionView(BaseModel):
     approved_for_issue: bool = False
     can_export: bool = False
     cannot_export_reason: Optional[str] = None
+    #: D-25: how many evidence items this viewer may not read. Never which ones.
+    restricted_items: int = 0
+    #: 4B-27: evidence documents changed since the submission was composed (a count).
+    evidence_changed: int = 0
     #: Evidence whose contract is not confirmed against the Contract Master, or that
     #: names no contract (owner review of 4B-23). Warnings: nothing here blocks.
     evidence_notes: List[str] = Field(default_factory=list)
@@ -733,7 +863,20 @@ class ClaimSubmissions:
         approval = await self.db.approvals.find_one({"resource_type": "claim", "resource_id": str(claim["_id"])})
         return bool(approval and approval.get("state") == "approved")
 
-    async def view(self, claim: Dict[str, Any], document_ids: Set[str]) -> SubmissionView:
+    async def snapshot(self, document_ids: Set[str]) -> Dict[str, str]:
+        """Each evidence document's revision fingerprint, now (4B-27)."""
+        return {str(document["_id"]): evidence_revision(document) for document in await self._documents(document_ids)}
+
+    async def view(
+        self, claim: Dict[str, Any], document_ids: Set[str], accessible: Optional[Set[str]] = None
+    ) -> SubmissionView:
+        """The submission as composed from the claim's full evidence set (``document_ids``),
+        then redacted for a viewer who may read only ``accessible`` (D-25). Without
+        ``accessible`` the caller is trusted with everything (service use and tests)."""
+        full = await self._view(claim, document_ids)
+        return full if accessible is None else redact_for(full, set(document_ids), set(accessible))
+
+    async def _view(self, claim: Dict[str, Any], document_ids: Set[str]) -> SubmissionView:
         bench = self.bench._bench_of(claim)
         stored = await self._stored(claim)
         reason = await self._cannot_compose(claim, bench)
@@ -743,6 +886,15 @@ class ClaimSubmissions:
             for section in stored.sections:
                 fresh = current.get(section.key)
                 sections.append(SectionView(section=section, stale=fresh is None or fresh.input_hash != section.input_hash))
+        changed = 0
+        if stored is not None and stored.evidence_snapshot:
+            now = await self.snapshot(document_ids)
+            changed = sum(1 for key in set(now) | set(stored.evidence_snapshot) if now.get(key) != stored.evidence_snapshot.get(key))
+            if changed:
+                sections = [
+                    SectionView(section=item.section, stale=True) if item.section.key == "chronology_and_evidence" else item
+                    for item in sections
+                ]
         stale = sum(1 for item in sections if item.stale)
         review = await contract_scope.identity_review(
             self.db, claim, await ClaimDelayLab(self.db, self.bench).links_for_claim(str(claim["_id"])), document_ids
@@ -774,13 +926,15 @@ class ClaimSubmissions:
             approved_for_issue=await self._approved(claim),
             can_export=export_reason is None,
             cannot_export_reason=export_reason,
+            evidence_changed=changed,
             evidence_notes=contract_scope.identity_notes(claim, review),
             unconfirmed_evidence=[vars(item) for item in review.unconfirmed] if contract_scope.contract_of(claim) else [],
             confirmed_evidence=[vars(item) for item in review.confirmed],
         )
 
     async def compose(
-        self, claim: Dict[str, Any], request: ComposeRequest, document_ids: Set[str], user_id: Optional[str]
+        self, claim: Dict[str, Any], request: ComposeRequest, document_ids: Set[str], user_id: Optional[str],
+        accessible: Optional[Set[str]] = None,
     ) -> SubmissionView:
         bench = self.bench._bench_of(claim)
         reason = await self._cannot_compose(claim, bench)
@@ -814,6 +968,7 @@ class ClaimSubmissions:
             claim_id=str(claim["_id"]),
             sections=sections,
             evidence=record.evidence,
+            evidence_snapshot=await self.snapshot(document_ids),
             board_version=bench.board_version,
             composed_by=user_id,
         )
@@ -827,7 +982,7 @@ class ClaimSubmissions:
             )
             if not getattr(result, "matched_count", 0):
                 raise HTTPException(status_code=409, detail="The submission was re-composed by someone else. Reload it.")
-        return await self.view(claim, document_ids)
+        return await self.view(claim, document_ids, accessible)
 
     async def _with_skill(
         self, claim: Dict[str, Any], key: str, base: SubmissionSection, cited: Set[str], user_id: Optional[str], force: bool
@@ -874,10 +1029,21 @@ class ClaimSubmissions:
         section.produced_by = "skill"
         return section
 
-    async def export(self, claim: Dict[str, Any], fmt: str, document_ids: Set[str]) -> tuple[bytes, str, str]:
+    async def export(
+        self, claim: Dict[str, Any], fmt: str, document_ids: Set[str], accessible: Optional[Set[str]] = None
+    ) -> tuple[bytes, str, str]:
         if fmt not in {"docx", "pdf"}:
             raise HTTPException(status_code=422, detail="format must be docx or pdf")
-        view = await self.view(claim, document_ids)
+        restricted = set(document_ids) - set(accessible) if accessible is not None else set()
+        if restricted:
+            # D-25 / AQ-5: refused while any evidence is inaccessible to the exporter; names no item.
+            message = restricted_message(len(restricted))
+            raise HTTPException(
+                status_code=403,
+                detail={"code": EVIDENCE_RESTRICTED, "user_message": message, "detail": message,
+                        "restricted_items": len(restricted)},
+            )
+        view = await self._view(claim, document_ids)
         if not view.can_export:
             raise HTTPException(status_code=409, detail=view.cannot_export_reason)
         stored = await self._stored(claim)

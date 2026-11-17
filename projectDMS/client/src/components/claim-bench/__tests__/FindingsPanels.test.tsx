@@ -432,6 +432,19 @@ describe("Internal analysis", () => {
 });
 
 describe("Submission", () => {
+  it("says how many items are restricted, never which, and that changed evidence needs re-composing (4B-27)", async () => {
+    api.fetchSubmission.mockResolvedValue(
+      submission({
+        restricted_items: 2,
+        evidence_changed: 1,
+        evidence: [{ number: "E-1", document_id: "", title: "Restricted item" }],
+      })
+    );
+    mount(<SubmissionPanel claimId="c1" readOnly={false} />);
+    expect(await screen.findByText(/2 items of this claim's evidence are restricted for you/)).toBeInTheDocument();
+    expect(screen.getByText(/1 evidence document has changed since the submission was composed/)).toBeInTheDocument();
+  });
+
   it("lists evidence whose contract is not confirmed beside the submission (4B-23 review)", async () => {
     const note = "Document L-12: does not say which contract it belongs to. Check it belongs to this claim's contract before relying on it.";
     api.fetchSubmission.mockResolvedValue(submission({ evidence_notes: [note] }));

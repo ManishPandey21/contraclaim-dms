@@ -238,6 +238,9 @@ class ClaimSubmission(BaseModel):
     claim_id: str
     sections: List[SubmissionSection] = Field(default_factory=list)
     evidence: List[EvidenceItem] = Field(default_factory=list)
+    #: 4B-27: each evidence document's revision when composed (document id -> revision
+    #: fingerprint). A document replaced or re-dated afterwards makes the evidence stale.
+    evidence_snapshot: Dict[str, str] = Field(default_factory=dict)
     board_version: Optional[int] = None
     version: int = 0
     composed_by: Optional[str] = None

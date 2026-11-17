@@ -326,7 +326,10 @@ async def confirm(
 
     contract = contract_of(claim)
     if contract is None:
-        raise _refuse(422, "claim_contract_required", "Set the claim's contract first; evidence is confirmed for that contract.")
+        raise _refuse(
+            422, "evidence_confirmation_contract_required",
+            "Set the claim's contract first; evidence is confirmed for that contract.",
+        )
     text = (reason or "").strip()
     if len(text) < 10:
         raise _refuse(422, "evidence_confirmation_reason_required", "Say how you know this record belongs to the claim's contract.")

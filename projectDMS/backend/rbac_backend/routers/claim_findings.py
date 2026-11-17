@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
@@ -49,7 +49,13 @@ from ..services.claim_privileged import (
 )
 from ..services import claim_contract_scope as contract_scope
 from ..services.claim_delay_lab import ClaimDelayLab
-from ..services.claim_submission import ClaimSubmissions, ComposeRequest, SubmissionView
+from ..services.claim_submission import (
+    EVIDENCE_RESTRICTED,
+    ClaimSubmissions,
+    ComposeRequest,
+    SubmissionView,
+    claim_evidence_ids,
+)
 from ..services.policy_service import PolicyService
 from ..utils.error_handler import handle_exceptions
 from ..utils.rate_limiter import RateLimiter
@@ -425,7 +431,9 @@ async def get_claim_submission(
     selection: ActiveScope = Depends(active_scope),
 ):
     claim = await _claim(claim_id, Permissions.CLAIM_VIEW, db, current_user, policy, selection, bench)
-    return await ClaimSubmissions(db, bench).view(claim, await _claim_documents(claim, db, current_user))
+    return await ClaimSubmissions(db, bench).view(
+        claim, await claim_evidence_ids(db, claim), await _claim_documents(claim, db, current_user)
+    )
 
 
 @router.post("/claims/{claim_id}/submission/compose", response_model=SubmissionView)
@@ -443,7 +451,8 @@ async def compose_claim_submission(
     claim = await _claim(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection, bench)
     await findings_skill_limiter.check_user_limit(_user_id(current_user) or "")
     return await ClaimSubmissions(db, bench).compose(
-        claim, payload, await _claim_documents(claim, db, current_user), _user_id(current_user)
+        claim, payload, await claim_evidence_ids(db, claim), _user_id(current_user),
+        accessible=await _claim_documents(claim, db, current_user),
     )
 
 
@@ -461,9 +470,26 @@ async def export_claim_submission(
     """Download the submission as DOCX or PDF. Marked as a draft until the claim
     is approved. Never contains the strategy note or a simulation."""
     claim = await _claim(claim_id, Permissions.CLAIM_VIEW, db, current_user, policy, selection, bench)
-    content, media_type, filename = await ClaimSubmissions(db, bench).export(
-        claim, format, await _claim_documents(claim, db, current_user)
-    )
+    try:
+        content, media_type, filename = await ClaimSubmissions(db, bench).export(
+            claim, format, await claim_evidence_ids(db, claim), await _claim_documents(claim, db, current_user)
+        )
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        if detail.get("code") == EVIDENCE_RESTRICTED:
+            # D-25: the refusal is audited; the event records the count, never an item.
+            await AuditEventService(db).emit(
+                action="claim.submission_export_refused",
+                actor_id=_user_id(current_user),
+                resource_type="claim",
+                resource_id=str(claim_id),
+                organization_id=claim.get("organization_id"),
+                project_id=claim.get("project_id"),
+                result="denied",
+                reason=EVIDENCE_RESTRICTED,
+                after={"format": format, "restricted_items": detail.get("restricted_items")},
+            )
+        raise
     await AuditEventService(db).emit(
         action="claim.submission_exported",
         actor_id=_user_id(current_user),
@@ -495,17 +521,29 @@ class EvidenceWithdrawalRequest(BaseModel):
 
 async def _evidence_review(claim: dict, db, current_user: CurrentUser, bench: ClaimBenchService):
     links = await ClaimDelayLab(db, bench).links_for_claim(str(claim["_id"]))
-    return await contract_scope.identity_review(db, claim, links, await _claim_documents(claim, db, current_user))
+    # The claim's full evidence set (4B-27): confirmations are about the claim, not the viewer.
+    return await contract_scope.identity_review(db, claim, links, await claim_evidence_ids(db, claim))
 
 
-def _review_body(claim: dict, review) -> dict:
+def _review_body(claim: dict, review, accessible: set) -> dict:
+    """D-25: a document the viewer may not read appears as "Restricted item", without its id."""
+
+    def shown(item) -> dict:
+        entry = vars(item)
+        if item.kind == "document" and item.record_id not in accessible:
+            return {**entry, "record_id": "", "label": "Restricted item", "confirmation_id": None,
+                    "reason": None, "confirmed_by": None, "confirmed_at": None}
+        return entry
+
+    hidden = sum(1 for item in review.unconfirmed + review.confirmed if item.kind == "document" and item.record_id not in accessible)
     return {
         "claim_id": str(claim["_id"]),
         "contract_id": contract_scope.contract_of(claim),
-        "conflicts": review.conflicts,
-        "unconfirmed": [vars(item) for item in review.unconfirmed] if contract_scope.contract_of(claim) else [],
-        "confirmed": [vars(item) for item in review.confirmed],
+        "conflicts": len(review.conflicts) if hidden else review.conflicts,
+        "unconfirmed": [shown(item) for item in review.unconfirmed] if contract_scope.contract_of(claim) else [],
+        "confirmed": [shown(item) for item in review.confirmed],
         "blocking": contract_scope.unconfirmed_reason(claim, review),
+        "restricted_items": hidden,
     }
 
 
@@ -521,7 +559,9 @@ async def get_claim_evidence_contract(
 ):
     """The claim's evidence whose contract a person must confirm before export or escalation (OD-1)."""
     claim = await _claim(claim_id, Permissions.CLAIM_VIEW, db, current_user, policy, selection, bench)
-    return _review_body(claim, await _evidence_review(claim, db, current_user, bench))
+    return _review_body(
+        claim, await _evidence_review(claim, db, current_user, bench), await _claim_documents(claim, db, current_user)
+    )
 
 
 @router.post("/claims/{claim_id}/evidence-contract/confirmations")
@@ -538,6 +578,10 @@ async def confirm_claim_evidence_contract(
     """Confirm that one record belongs to the claim's contract. Audited; the record is not changed."""
     claim = await _claim(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection, bench)
     review = await _evidence_review(claim, db, current_user, bench)
+    accessible = await _claim_documents(claim, db, current_user)
+    if payload.record_kind == "document" and payload.record_id not in accessible:
+        # Only a person who can read a document can vouch for it (D-25: and nothing is said about it).
+        raise HTTPException(status_code=403, detail="You cannot confirm a record you are not allowed to read.")
     row = await contract_scope.confirm(
         db, claim, review, kind=payload.record_kind, record_id=payload.record_id, reason=payload.reason,
         user_id=_user_id(current_user),
@@ -552,7 +596,7 @@ async def confirm_claim_evidence_contract(
         reason=row["reason"],
         after={key: row[key] for key in ("_id", "contract_id", "record_kind", "record_id", "state_at_confirmation")},
     )
-    return _review_body(claim, await _evidence_review(claim, db, current_user, bench))
+    return _review_body(claim, await _evidence_review(claim, db, current_user, bench), accessible)
 
 
 @router.post("/claims/{claim_id}/evidence-contract/confirmations/{confirmation_id}/withdraw")
@@ -580,7 +624,9 @@ async def withdraw_claim_evidence_contract(
         reason=row.get("withdrawal_reason"),
         after={"_id": row["_id"], "record_kind": row["record_kind"], "record_id": row["record_id"]},
     )
-    return _review_body(claim, await _evidence_review(claim, db, current_user, bench))
+    return _review_body(
+        claim, await _evidence_review(claim, db, current_user, bench), await _claim_documents(claim, db, current_user)
+    )
 
 
 __all__ = ["router"]

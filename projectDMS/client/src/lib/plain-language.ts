@@ -52,7 +52,8 @@ export const ERROR_CODE_MESSAGES = {
   picker_permission_not_supported: "This list cannot be filtered that way.",
   project_not_found: "That project could not be found.",
   explicit_grant_required: "This needs a permission granted to you by name. Ask your administrator.",
-  evidence_restricted: "Some evidence is restricted for you, so this cannot be exported.",
+  evidence_restricted:
+    "Some of this claim's evidence is restricted for you, so you cannot export the submission. The claim's owner, or a person with access to all of its evidence, can export it.",
   no_active_subscription: "Your organisation's subscription does not cover this.",
   missing_permission: "You do not have permission to do this.",
   claim_origin_server_owned: "A claim's origin is recorded by the system; it cannot be set here.",
@@ -120,7 +121,7 @@ export const ERROR_CODE_MESSAGES = {
     "The approver this was sent to can still decide it. It can go to another approver only if they lose determination authority on this project.",
   claim_evidence_contract_unconfirmed:
     "Some evidence does not show which contract it belongs to. A person who may edit the claim must confirm each record belongs to the claim's contract first.",
-  claim_contract_required: "Set the claim's contract first; evidence is confirmed for that contract.",
+  evidence_confirmation_contract_required: "Set the claim's contract first; evidence is confirmed for that contract.",
   evidence_confirmation_reason_required: "Say how you know this record belongs to the claim's contract.",
   evidence_already_confirmed: "This record is already confirmed for the claim's contract.",
   evidence_confirmation_not_applicable:
