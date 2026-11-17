@@ -200,6 +200,7 @@ PAGE_STATES: Dict[str, PageStates] = {
     "LetterBenchPage": _fetching(),
     "BenchOpenRoute": _fetching(empty=False),
     "SkillAdminPage": _fetching(),
+    "ReviewerAssignmentsPage": _fetching(),
     "LetterReviewPage": _fetching(empty=False),
     "LetterApprovalPage": _fetching(empty=False),
     "LetterCompletedPage": _fetching(empty=False),

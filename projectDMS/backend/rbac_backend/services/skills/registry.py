@@ -220,6 +220,10 @@ class SkillRegistry:
             available=True,
         )
 
+    async def draft_versions(self) -> List[SkillVersion]:
+        """Every draft, for the reviewers' queue."""
+        return [item for item in await self._all_versions() if item.status == "draft"]
+
     async def admin_list(self, organization_id: Optional[str] = None) -> SkillAdminListResponse:
         versions = await self._all_versions()
         skills: Dict[str, Skill] = {}

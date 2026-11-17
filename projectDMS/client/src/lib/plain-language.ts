@@ -80,6 +80,17 @@ export const ERROR_CODE_MESSAGES = {
   escalation_claim_moved: "The claim has changed since it was escalated, so the escalation is not undone.",
   draft_action_refused: "This pleading cannot be approved or exported yet. The reasons are listed on the draft.",
   draft_case_scope_mismatch: "That arbitration case belongs to another project. Choose a case of this draft's project.",
+  reviewer_platform_grant_forbidden: "Only a Super Admin can grant or withdraw a platform reviewer role.",
+  reviewer_grant_needs_organisation_admin: "Only an administrator of that organisation can grant or withdraw this reviewer role.",
+  reviewer_self_grant: "You cannot grant a reviewer role to yourself. Another administrator must do it.",
+  reviewer_user_not_found: "That person could not be found.",
+  reviewer_user_not_a_person: "A reviewer role is held by a person, not by a service account.",
+  reviewer_user_not_a_member: "That person is not a member of that organisation or project.",
+  reviewer_expiry_in_the_past: "The end date must be in the future.",
+  reviewer_expiry_too_long: "An organisation or project reviewer role runs for at most twelve months. Grant it again after that.",
+  reviewer_assignment_exists: "That person already holds this reviewer role at this scope.",
+  reviewer_assignment_not_found: "That assignment could not be found.",
+  reviewer_scope_mismatch: "That project does not belong to that organisation.",
 } as const;
 
 export type StatusKind = "claim" | "arbitration_case" | "arbitration_draft";

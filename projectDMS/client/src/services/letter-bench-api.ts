@@ -13,6 +13,7 @@ import type {
   SkillApprovalKind,
   SkillApprovalList,
   SkillEvalReport,
+  SkillReviewQueue,
   SkillStep,
   SkillVersionSummary,
   TextSpan,
@@ -189,6 +190,18 @@ export async function publishSkillVersion(
     `/skills/${encodeURIComponent(skillKey)}/versions/${encodeURIComponent(version)}/publish`,
     { eval_report: evalReport }
   );
+  return data;
+}
+
+/** Drafts that ask a review from a role the signed-in user holds at platform scope. */
+export async function fetchSkillReviewQueue(): Promise<SkillReviewQueue> {
+  const { data } = await api.get<SkillReviewQueue>("/skills/review-queue");
+  return data;
+}
+
+/** One version with its text. A draft is readable only by a reviewer it names. */
+export async function fetchSkillVersionText(skillKey: string, version: string): Promise<{ skill_md: string }> {
+  const { data } = await api.get<{ skill_md: string }>(versionPath(skillKey, version));
   return data;
 }
 

@@ -253,6 +253,9 @@ export const OPEN_AUTHENTICATED_ROUTES = [
   "/security-terms",
   "/profile",
   "/notifications",
+  // The reviewer's queue. A reviewer holds an identity, not a permission, so no
+  // permission can gate it; the server returns an empty queue to anyone else.
+  "/skill-reviews",
 ] as const;
 
 export const ROUTE_PERMISSIONS: Record<string, string[]> = {
@@ -333,6 +336,8 @@ export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   "/reports": ["reports:view"],
   "/health": ["system:admin"],
   "/users": ["users:read"],
+  // Granting a reviewer role needs user management in that organisation (server-checked).
+  "/reviewer-roles": ["users:update"],
   "/permissions": ["roles:read", "permissions:read"],
   "/plan-settings": ["billing.plan.view", "subscription.entitlement.manage"],
   "/subscription-management": ["billing.plan.view", "subscription.entitlement.manage", "subscription.upgrade"],

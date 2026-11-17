@@ -49,6 +49,7 @@ const LetterStrategicPlanPage = lazyWithRetry(
 const LetterDraftPage = lazyWithRetry(() => import("./pages/LetterDraftPage"));
 const LetterBenchPage = lazyWithRetry(() => import("./pages/LetterBenchPage"));
 const SkillAdminPage = lazyWithRetry(() => import("./pages/SkillAdminPage"));
+const ReviewerAssignmentsPage = lazyWithRetry(() => import("./pages/ReviewerAssignmentsPage"));
 const LetterReviewPage = lazyWithRetry(() => import("./pages/LetterReviewPage"));
 const LetterApprovalPage = lazyWithRetry(() => import("./pages/LetterApprovalPage"));
 const LetterCompletedPage = lazyWithRetry(() => import("./pages/LetterCompletedPage"));
@@ -205,6 +206,9 @@ const AppRoutes = () => (
             has one. */}
         <Route path="letters/bench/new" element={<BenchOpenRoute />} />
         <Route path="skills" element={<SkillAdminPage />} />
+        <Route path="reviewer-roles" element={<ReviewerAssignmentsPage />} />
+        {/* The same page as /skills, reachable by a reviewer who holds no skill permission. */}
+        <Route path="skill-reviews" element={<SkillAdminPage />} />
         {/* Former address of the skills page; kept so existing links still open it. */}
         <Route path="letters/skills" element={<SkillAdminPage />} />
         <Route path="letters/:id/bench" element={<LetterBenchPage />} />

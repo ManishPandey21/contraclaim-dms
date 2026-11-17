@@ -30,6 +30,9 @@ from ..models.skill import (
     SkillImportOptions,
     SkillManifest,
     SkillPublishRequest,
+    SkillReviewQueueItem,
+    SkillReviewQueueResponse,
+    SkillReviewQueueReview,
     SkillVersion,
 )
 from ..services.ai_guardrails import AIOutputGuardrailService
@@ -57,10 +60,14 @@ async def get_approval_service() -> SkillApprovalService:
     return SkillApprovalService(await get_database())
 
 
-async def _is_named_reviewer(record: SkillVersion, current_user: CurrentUser) -> bool:
-    """True when the user holds, at platform scope, a reviewer role this version asks an approval from."""
+async def _is_named_reviewer(record: SkillVersion, current_user: CurrentUser, db) -> bool:
+    """True when the user holds, at platform scope, a reviewer role this version asks an approval from.
+
+    ``db`` is the database the route's own service was given, so the answer is
+    read from the same place as the approvals it guards.
+    """
     wanted = {item.reviewer_role for item in required_reviews(record)}
-    return bool(wanted & await platform_reviewer_roles(await get_database(), current_user))
+    return bool(wanted & await platform_reviewer_roles(db, current_user))
 
 
 def _user_id(current_user: CurrentUser) -> str:
@@ -101,6 +108,80 @@ async def list_skills_for_admin(
     return await registry.admin_list(organization_id)
 
 
+async def _authorize_reader_or_reviewer(
+    record: Optional[SkillVersion], current_user: CurrentUser, policy: PolicyService, db, **scope: Optional[str]
+) -> None:
+    """Admit a drafter in scope, or a reviewer this version asks an approval from.
+
+    A reviewer holds an identity, not a permission bundle (plan D-06), so a pure
+    reviewer has no ``drafting.skill.read``. What admits them is a live platform
+    assignment for a role the version names, and only to that version.
+    """
+    if record is not None and await _is_named_reviewer(record, current_user, db):
+        return
+    await policy.authorize(
+        current_user,
+        "drafting.skill.read",
+        resource_type="skill",
+        resource_id=record.skill_key if record is not None else None,
+        **scope,
+    )
+
+
+@router.get("/review-queue", response_model=SkillReviewQueueResponse)
+@handle_exceptions
+async def skill_review_queue(
+    registry: SkillRegistry = Depends(get_skill_registry),
+    approvals: SkillApprovalService = Depends(get_approval_service),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Draft versions that ask a review from a role the caller holds at platform scope.
+
+    Open to any signed-in user; someone who holds no platform reviewer role gets
+    an empty queue, which says nothing about what drafts exist.
+    """
+    my_roles = await platform_reviewer_roles(approvals.db, current_user)
+    if not my_roles:
+        return SkillReviewQueueResponse()
+    me = _user_id(current_user)
+    items: List[SkillReviewQueueItem] = []
+    for record in await registry.draft_versions():
+        required = required_reviews(record)
+        if not {item.reviewer_role for item in required} & my_roles:
+            continue
+        live = await approvals.live_approvals(record.skill_key, record.version)
+        current = [item for item in live if item.content_hash == record.content_hash]
+        reviews = []
+        for requirement in required:
+            matching = [
+                item for item in current
+                if item.kind == requirement.kind and item.reviewer_role == requirement.reviewer_role
+            ]
+            reviews.append(
+                SkillReviewQueueReview(
+                    kind=requirement.kind,
+                    reviewer_role=requirement.reviewer_role,
+                    mine=requirement.reviewer_role in my_roles,
+                    given=bool(matching),
+                    given_by_me=any(item.reviewer_user_id == me for item in matching),
+                )
+            )
+        items.append(
+            SkillReviewQueueItem(
+                skill_key=record.skill_key,
+                version=record.version,
+                name=record.name,
+                kind=record.kind,
+                content_hash=record.content_hash,
+                created_at=record.created_at,
+                reviews=reviews,
+                waiting_on_me=any(item.mine and not item.given for item in reviews),
+            )
+        )
+    items.sort(key=lambda item: (not item.waiting_on_me, item.skill_key, item.version))
+    return SkillReviewQueueResponse(my_roles=sorted(my_roles), items=items)
+
+
 @router.get("/{skill_key}/versions/{version}", response_model=SkillVersion)
 @handle_exceptions
 async def get_skill_version(
@@ -119,18 +200,13 @@ async def get_skill_version(
     `GET /letters/{id}/bench/skills`.
     """
     organization_id = organization_id or getattr(current_user, "organization_id", None)
-    await policy.authorize(
-        current_user,
-        "drafting.skill.read",
-        resource_type="skill",
-        resource_id=skill_key,
-        organization_id=organization_id,
-        project_id=project_id,
-    )
     record = await registry.get_version(skill_key, version)
+    await _authorize_reader_or_reviewer(
+        record, current_user, policy, registry.db, organization_id=organization_id, project_id=project_id
+    )
     if record is None:
         raise HTTPException(status_code=404, detail="Skill version not found")
-    if record.status == "draft" and not await _is_named_reviewer(record, current_user):
+    if record.status == "draft" and not await _is_named_reviewer(record, current_user, registry.db):
         # Drafts are unpublished, unreviewed text: not visible through the drafter
         # route. The reviewers a draft names must be able to read what they sign.
         raise HTTPException(status_code=404, detail="Skill version not found")
@@ -204,10 +280,8 @@ async def list_skill_approvals(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Reviews a version calls for, and every approval recorded against it."""
-    await policy.authorize(
-        current_user, "drafting.skill.read", resource_type="skill", resource_id=skill_key
-    )
     record = await registry.get_version(skill_key, version)
+    await _authorize_reader_or_reviewer(record, current_user, policy, approvals.db)
     if record is None:
         raise HTTPException(status_code=404, detail="Skill version not found")
     return SkillApprovalListResponse(
@@ -238,11 +312,9 @@ async def record_skill_approval(
     The permission lets a user reach the route; the approval itself belongs to
     the named reviewer role, which no platform role substitutes for.
     """
-    await policy.authorize(
-        current_user, "drafting.skill.read", resource_type="skill", resource_id=skill_key
-    )
-    await skill_admin_limiter.check_user_limit(_user_id(current_user))
     record = await registry.get_version(skill_key, version)
+    await _authorize_reader_or_reviewer(record, current_user, policy, approvals.db)
+    await skill_admin_limiter.check_user_limit(_user_id(current_user))
     if record is None:
         raise HTTPException(status_code=404, detail="Skill version not found")
     return await approvals.record(record, payload, current_user)
@@ -263,7 +335,10 @@ async def revoke_skill_approval(
     The deprecation is made in the same transaction as the revocation
     (SkillApprovalService.revoke), so neither can happen without the other.
     """
-    await policy.authorize(current_user, "drafting.skill.read", resource_type="skill")
+    # A reviewer may withdraw their own approval, or a peer's in the same role
+    # (decided by the service), without holding any drafting permission.
+    if not await platform_reviewer_roles(approvals.db, current_user):
+        await policy.authorize(current_user, "drafting.skill.read", resource_type="skill")
     await skill_admin_limiter.check_user_limit(_user_id(current_user))
     revoked = await approvals.revoke(approval_id, payload.reason, current_user)
     await registry.refresh_published_pointer(revoked.skill_key, revoked.version)

@@ -16,6 +16,7 @@ import {
 import { enhancedApi } from "@/services/enhanced-api";
 import {
   fetchSkillApprovals,
+  fetchSkillVersionText,
   publishSkillVersion,
   recordSkillApproval,
   revokeSkillApproval,
@@ -24,9 +25,16 @@ import { getCurrentUserProfile } from "@/services/session-api";
 import type { SkillEvalReport, SkillVersionSummary } from "@/types/letterBench";
 
 interface Props {
-  version: SkillVersionSummary;
+  version: Pick<SkillVersionSummary, "skill_key" | "version" | "name" | "content_hash" | "required_approvals">;
   onClose: () => void;
   onPublished: () => void;
+  /**
+   * The reviewer's view: read the text, record or withdraw your own review.
+   * Nothing a publisher does is offered. `myRoles` are the reviewer roles the
+   * signed-in person holds at platform scope; only those reviews can be given.
+   */
+  reviewOnly?: boolean;
+  myRoles?: string[];
 }
 
 const FIELDS = [
@@ -47,7 +55,7 @@ const personName = (u: { first_name?: string; last_name?: string; username?: str
  * server enforces all of it; this panel shows where things stand and why
  * Publish is or is not available.
  */
-const SkillPublishPanel: React.FC<Props> = ({ version, onClose, onPublished }) => {
+const SkillPublishPanel: React.FC<Props> = ({ version, onClose, onPublished, reviewOnly = false, myRoles }) => {
   const client = useQueryClient();
   const approvalsKey = ["skills", "approvals", version.skill_key, version.version] as const;
   const needsApprovals = (version.required_approvals?.length ?? 0) > 0;
@@ -65,6 +73,13 @@ const SkillPublishPanel: React.FC<Props> = ({ version, onClose, onPublished }) =
     staleTime: 60_000,
     retry: false,
   });
+  const text = useQuery({
+    queryKey: ["skills", "text", version.skill_key, version.version, version.content_hash],
+    queryFn: () => fetchSkillVersionText(version.skill_key, version.version),
+    enabled: reviewOnly,
+    retry: false,
+  });
+  const mayGive = (role: string) => !reviewOnly || (myRoles ?? []).includes(role);
   const names = useMemo(() => {
     const map = new Map<string, string>();
     for (const user of people.data ?? []) map.set(String(user.id || user._id || ""), personName(user));
@@ -92,7 +107,7 @@ const SkillPublishPanel: React.FC<Props> = ({ version, onClose, onPublished }) =
     report,
     approvals.data?.policy_hash ?? null
   );
-  const blockers = needsApprovals ? publishBlockers(statuses, report, myId) : [];
+  const blockers = needsApprovals && !reviewOnly ? publishBlockers(statuses, report, myId) : [];
   if (report && !passing) blockers.unshift("The evaluation is below its threshold, or no cases were run.");
 
   const refreshApprovals = () => client.invalidateQueries({ queryKey: approvalsKey });
@@ -126,14 +141,37 @@ const SkillPublishPanel: React.FC<Props> = ({ version, onClose, onPublished }) =
     <section aria-labelledby="publish-heading" className="space-y-4 rounded-lg border p-4">
       <div>
         <h2 id="publish-heading" className="text-sm font-semibold">
-          {needsApprovals ? "Review and publish" : "Publish"} {version.name} {version.version}
+          {reviewOnly ? "Review" : needsApprovals ? "Review and publish" : "Publish"} {version.name} {version.version}
         </h2>
         <p className="text-sm text-muted-foreground">
-          {needsApprovals
+          {reviewOnly
+            ? "Read the text below, then record your review against the evaluation result you were given. Your review covers this exact text and that result only. Publishing is done by someone else."
+            : needsApprovals
             ? "This skill shapes contractual and legal output. It is published only when each review below has been given against this exact text and evaluation result, by people other than the one who publishes it."
             : "Record the result of the golden-set evaluation. A version below its threshold cannot be published."}
         </p>
       </div>
+
+      {reviewOnly && (
+        <div className="space-y-1">
+          <h3 className="text-xs font-semibold uppercase text-muted-foreground">Text under review</h3>
+          {text.isLoading && <p className="text-sm text-muted-foreground">Loading the text…</p>}
+          {text.isError && (
+            <p role="alert" className="text-sm text-destructive">
+              {errorMessage(text.error, "The text could not be loaded.")}
+            </p>
+          )}
+          {text.data && (
+            <pre
+              tabIndex={0}
+              aria-label={`Text of ${version.name} ${version.version}`}
+              className="max-h-96 overflow-auto whitespace-pre-wrap rounded-md border bg-muted/30 p-3 text-xs"
+            >
+              {text.data.skill_md}
+            </pre>
+          )}
+        </div>
+      )}
 
       <div className="grid gap-3 sm:grid-cols-2">
         {FIELDS.map(([key, label, type]) => (
@@ -227,7 +265,10 @@ const SkillPublishPanel: React.FC<Props> = ({ version, onClose, onPublished }) =
                     </div>
                   </div>
                   <div className="flex gap-2">
-                    {status.state !== "ok" && (
+                    {status.state !== "ok" && !mayGive(requirement.reviewer_role) && (
+                      <span className="text-xs text-muted-foreground">For another reviewer</span>
+                    )}
+                    {status.state !== "ok" && mayGive(requirement.reviewer_role) && (
                       <Button
                         size="sm"
                         variant="outline"
@@ -242,7 +283,9 @@ const SkillPublishPanel: React.FC<Props> = ({ version, onClose, onPublished }) =
                         Record my approval
                       </Button>
                     )}
-                    {status.state === "ok" && approval && (
+                    {status.state === "ok" &&
+                      approval &&
+                      (!reviewOnly || approval.reviewer_user_id === myId || mayGive(requirement.reviewer_role)) && (
                       <Button
                         size="sm"
                         variant="ghost"
@@ -276,9 +319,11 @@ const SkillPublishPanel: React.FC<Props> = ({ version, onClose, onPublished }) =
       )}
 
       <div className="flex gap-2">
-        <Button disabled={!report || blockers.length > 0 || publish.isPending} onClick={() => publish.mutate()}>
-          Publish
-        </Button>
+        {!reviewOnly && (
+          <Button disabled={!report || blockers.length > 0 || publish.isPending} onClick={() => publish.mutate()}>
+            Publish
+          </Button>
+        )}
         <Button variant="ghost" onClick={onClose}>
           Close
         </Button>

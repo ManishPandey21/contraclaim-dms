@@ -36,10 +36,10 @@ Gate 3's execution plan; it is not a licence to ship a page with no error state.
 ## Counts
 
 - Source: `client/src/routes.tsx`
-- Routes: **101**
-- Authenticated routes: **94**
-- Routes owing an empty state: **65**
-- Routes owing a loading state: **94**
+- Routes: **103**
+- Authenticated routes: **96**
+- Routes owing an empty state: **67**
+- Routes owing a loading state: **96**
 
 ## The inventory
 
@@ -135,9 +135,11 @@ Gate 3's execution plan; it is not a licence to ship a page with no error state.
 | `/reports` | GET | yes | `ReportsAnalyticsPage` | yes | yes | MISSING - no fault-injection coverage yet |
 | `/representatives` | GET | yes | `RepresentativesPage` | yes | yes | MISSING - no fault-injection coverage yet |
 | `/retrieval-console` | GET | yes | `RetrievalConsolePage` | yes | yes | MISSING - no fault-injection coverage yet |
+| `/reviewer-roles` | GET | yes | `ReviewerAssignmentsPage` | yes | yes | MISSING - no fault-injection coverage yet |
 | `/security-terms` | GET | yes | `SecurityTermsPage` | no | yes | MISSING - no fault-injection coverage yet |
 | `/settings` | GET | yes | `SettingsPage` | no | yes | MISSING - no fault-injection coverage yet |
 | `/share/:id` | GET | yes | `ShareDocumentPage` | no | yes | MISSING - no fault-injection coverage yet |
+| `/skill-reviews` | GET | yes | `SkillAdminPage` | yes | yes | MISSING - no fault-injection coverage yet |
 | `/skills` | GET | yes | `SkillAdminPage` | yes | yes | MISSING - no fault-injection coverage yet |
 | `/sla` | GET | yes | `SLATrackerPage` | yes | yes | MISSING - no fault-injection coverage yet |
 | `/subscription-management` | GET | yes | `SubscriptionManagementPage` | yes | yes | MISSING - no fault-injection coverage yet |

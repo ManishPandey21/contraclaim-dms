@@ -310,6 +310,28 @@ export interface SkillVersionSummary {
   required_approvals?: SkillApprovalRequirement[];
 }
 
+export interface SkillReviewQueueItem {
+  skill_key: string;
+  version: string;
+  name: string;
+  kind: SkillKind;
+  content_hash: string;
+  created_at?: string | null;
+  reviews: Array<{
+    kind: SkillApprovalKind;
+    reviewer_role: string;
+    mine: boolean;
+    given: boolean;
+    given_by_me: boolean;
+  }>;
+  waiting_on_me: boolean;
+}
+
+export interface SkillReviewQueue {
+  my_roles: string[];
+  items: SkillReviewQueueItem[];
+}
+
 export interface SkillBinding {
   organization_id: string;
   project_id?: string | null;

@@ -14,6 +14,7 @@ import re
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, ValidationError
 
+from ..core.permissions import REVIEWER_ROLE_KEYS
 from ..core.security import (
     create_access_token, get_password_hash, verify_password, get_current_user, CurrentUser, require_permission
 )
@@ -258,6 +259,7 @@ class UserController:
             validated_data = await self._validate_user_input(user_data)
             # Every later check, and the stored record, sees canonical role ids only.
             validated_data.roles = await self._resolve_assigned_roles(validated_data.roles)
+            self._refuse_new_reviewer_roles(validated_data.roles, [])
 
             # Check for existing user
             existing_user = await self.user_service.check_user_exists(
@@ -454,6 +456,7 @@ class UserController:
             if validated_update.roles is not None:
                 # Resolve before judging: an alias must be judged as the role it becomes.
                 validated_update.roles = await self._resolve_assigned_roles(validated_update.roles)
+                self._refuse_new_reviewer_roles(validated_update.roles, getattr(existing_user, "roles", []) or [])
                 await self._enforce_role_assignment_scope(
                     current_user,
                     validated_update.roles,
@@ -895,6 +898,25 @@ class UserController:
             user_data.organization_id,
             user_data.projects or [],
         )
+
+    @staticmethod
+    def _refuse_new_reviewer_roles(requested_roles: List[str], held_roles: List[str]) -> None:
+        """A reviewer role is granted by a reviewer assignment, never by a role list (plan D-06).
+
+        A role list has no scope, no expiry, no reason and no grantor. A reviewer
+        role already on a user's list is left alone, so editing that user does
+        not strip it; adding one is refused for every caller.
+        """
+        held = {str(role).strip().lower() for role in held_roles or []}
+        added = sorted(
+            {str(role).strip().lower() for role in requested_roles or []} & REVIEWER_ROLE_KEYS - held
+        )
+        if added:
+            raise UserError(
+                "A reviewer role is granted on the Reviewer roles screen, with a scope, a reason and an end date. "
+                f"It cannot be added to a user's role list: {', '.join(added)}",
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
 
     async def _resolve_assigned_roles(self, requested_roles: List[str]) -> List[str]:
         """Resolve every requested role to exactly one active role document.

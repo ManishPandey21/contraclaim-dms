@@ -65,6 +65,8 @@ def test_every_structured_error_code_from_the_phase_4b_routes_has_a_message() ->
         BACKEND / "services" / "claim_notice_requirements.py",
         BACKEND / "services" / "claim_bench.py",
         BACKEND / "services" / "claim_escalation.py",
+        # Reviewer role assignments (4B-07).
+        BACKEND / "services" / "reviewer_assignments.py",
     ]
     codes: Set[str] = set()
     for path in routes:

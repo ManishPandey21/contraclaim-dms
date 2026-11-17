@@ -342,6 +342,36 @@ class SkillVersionSummary(BaseModel):
     required_approvals: List[SkillApprovalRequirement] = Field(default_factory=list)
 
 
+class SkillReviewQueueReview(BaseModel):
+    kind: SkillApprovalKind
+    reviewer_role: str
+    #: The caller holds this reviewer role at platform scope.
+    mine: bool = False
+    #: A live approval is on record for this review (for any evaluation result).
+    given: bool = False
+    given_by_me: bool = False
+
+
+class SkillReviewQueueItem(BaseModel):
+    """One draft a platform reviewer is asked to review."""
+
+    skill_key: str
+    version: str
+    name: str
+    kind: SkillKind
+    content_hash: str
+    created_at: Optional[datetime] = None
+    reviews: List[SkillReviewQueueReview] = Field(default_factory=list)
+    #: At least one review that is the caller's to give is still outstanding.
+    waiting_on_me: bool = False
+
+
+class SkillReviewQueueResponse(BaseModel):
+    #: The reviewer roles the caller holds at platform scope.
+    my_roles: List[str] = Field(default_factory=list)
+    items: List[SkillReviewQueueItem] = Field(default_factory=list)
+
+
 class SkillAdminListResponse(BaseModel):
     skills: List[Skill] = Field(default_factory=list)
     versions: List[SkillVersionSummary] = Field(default_factory=list)
@@ -353,6 +383,9 @@ __all__ = [
     "EffectiveSkill",
     "Skill",
     "SkillAdminListResponse",
+    "SkillReviewQueueItem",
+    "SkillReviewQueueResponse",
+    "SkillReviewQueueReview",
     "SkillApproval",
     "SkillApprovalKind",
     "SkillApprovalListResponse",

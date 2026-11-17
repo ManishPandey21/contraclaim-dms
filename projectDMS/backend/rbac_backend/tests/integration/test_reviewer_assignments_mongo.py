@@ -543,3 +543,186 @@ def test_an_unauthenticated_caller_is_refused(monkeypatch) -> None:
                 assert response.status_code == 401, (method, path, response.status_code)
 
     _run(scenario())
+
+
+# ----------------------------------------- 4B-09: the reviewer's own journey
+
+
+def _review_request() -> dict:
+    return {"kind": "legal", "reviewer_role": LEGAL, "eval_report": REPORT.model_dump(mode="json")}
+
+
+def test_a_pure_reviewer_sees_the_queue_reads_the_draft_and_records_an_approval_over_http(monkeypatch) -> None:
+    """4B-09 proof. The reviewer holds a platform assignment and no skill permission."""
+
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            await _ready(env)
+            await _draft(env.db, "4.9.0")
+            version = "/api/skills/indian-infra-claims/versions/4.9.0"
+
+            # Before any assignment: an empty queue, and the draft does not exist for them.
+            empty = await env.call("GET", "project_user", "/api/skills/review-queue")
+            assert empty.status_code == 200 and empty.json() == {"my_roles": [], "items": []}
+            hidden = await env.call("GET", "project_user", version)
+            assert hidden.status_code in (403, 404), hidden.status_code
+            refused = await env.call("POST", "project_user", f"{version}/approvals", json=_review_request())
+            assert refused.status_code == 403, refused.text[:200]
+
+            granted = await env.call("POST", "superadmin", BASE, json=_platform("user-project_user"))
+            assert granted.status_code == 201
+
+            queue = await env.call("GET", "project_user", "/api/skills/review-queue")
+            assert queue.status_code == 200, queue.text[:200]
+            body = queue.json()
+            assert body["my_roles"] == [LEGAL]
+            item = next(entry for entry in body["items"] if entry["version"] == "4.9.0")
+            assert item["waiting_on_me"] is True
+            mine = [review for review in item["reviews"] if review["mine"]]
+            assert [(review["reviewer_role"], review["given"]) for review in mine] == [(LEGAL, False)]
+
+            text = await env.call("GET", "project_user", version)
+            assert text.status_code == 200 and "skill_md" in text.json()
+            listed = await env.call("GET", "project_user", f"{version}/approvals")
+            assert listed.status_code == 200
+
+            recorded = await env.call("POST", "project_user", f"{version}/approvals", json=_review_request())
+            assert recorded.status_code == 201, recorded.text[:300]
+            assert recorded.json()["reviewer_user_id"] == "user-project_user"
+
+            after = await env.call("GET", "project_user", "/api/skills/review-queue")
+            item = next(entry for entry in after.json()["items"] if entry["version"] == "4.9.0")
+            assert item["waiting_on_me"] is False
+            assert [review["given_by_me"] for review in item["reviews"] if review["mine"]] == [True]
+
+            # The role the reviewer does not hold stays someone else's to give.
+            other = {**_review_request(), "kind": "technical", "reviewer_role": "chief_contract_expert"}
+            assert (await env.call("POST", "project_user", f"{version}/approvals", json=other)).status_code == 403
+
+    _run(scenario())
+
+
+def test_a_reviewer_is_offered_nothing_a_publisher_does(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            await _ready(env)
+            await _draft(env.db, "4.9.1")
+            await env.call("POST", "superadmin", BASE, json=_platform("user-project_user"))
+            version = "/api/skills/indian-infra-claims/versions/4.9.1"
+            report = {"eval_report": REPORT.model_dump(mode="json")}
+            attempts = [
+                ("GET", "/api/skills/admin", None),
+                ("POST", f"{version}/publish", report),
+                ("POST", f"{version}/deprecate", None),
+                ("PUT", "/api/skills/bindings", {"organization_id": ORG_A, "skill_key": "indian-infra-claims", "version": "4.9.1"}),
+            ]
+            for method, path, payload in attempts:
+                response = await env.call(method, "project_user", path, json=payload)
+                assert response.status_code == 403, (method, path, response.status_code, response.text[:160])
+            imported = await env.client.post(
+                "/api/skills/import",
+                headers=env.headers("project_user"),
+                data={"version": "9.9.9", "kind": "evaluation", "manifest": "{}"},
+                files={"file": ("pack.zip", b"PK\x05\x06" + b"\x00" * 18, "application/zip")},
+            )
+            assert imported.status_code == 403, imported.text[:160]
+            assert (await env.db.skill_versions.find_one({"version": "4.9.1"}))["status"] == "draft"
+
+    _run(scenario())
+
+
+def test_an_organisation_reviewer_gets_no_queue_and_no_draft(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            await _ready(env)
+            await _draft(env.db, "4.9.2")
+            assert (await env.call("POST", "org_admin", BASE, json=_organisation("user-project_user"))).status_code == 201
+            queue = await env.call("GET", "project_user", "/api/skills/review-queue")
+            assert queue.json() == {"my_roles": [], "items": []}
+            version = "/api/skills/indian-infra-claims/versions/4.9.2"
+            assert (await env.call("GET", "project_user", version)).status_code in (403, 404)
+            refused = await env.call("POST", "project_user", f"{version}/approvals", json=_review_request())
+            assert refused.status_code == 403
+
+    _run(scenario())
+
+
+def test_a_reviewer_withdraws_their_own_approval_and_a_stranger_cannot(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            await _ready(env)
+            await _draft(env.db, "4.9.3")
+            await env.call("POST", "superadmin", BASE, json=_platform("user-project_user"))
+            version = "/api/skills/indian-infra-claims/versions/4.9.3"
+            approval = (await env.call("POST", "project_user", f"{version}/approvals", json=_review_request())).json()
+            approval_id = approval.get("_id") or approval.get("id")
+            path = f"/api/skills/approvals/{approval_id}/revoke"
+
+            stranger = await env.call("POST", "org_user", path, json={"reason": "Not my approval to end"})
+            assert stranger.status_code == 403, stranger.text[:200]
+            own = await env.call("POST", "project_user", path, json={"reason": "I found an error in the pack"})
+            assert own.status_code == 200 and own.json()["revoked_at"], own.text[:200]
+
+    _run(scenario())
+
+
+# ------------------------- 4B-08: a reviewer role is not added by a role list
+
+
+async def _member(env: Any, roles: list) -> str:
+    """A project member stored the way the Users screen stores one (an ObjectId key)."""
+    from bson import ObjectId
+
+    user_id = ObjectId()
+    await env.db.users.insert_one(
+        {
+            "_id": user_id, "email": f"{user_id}@example.com", "username": f"member-{user_id}", "disabled": False,
+            "account_type": "client_user", "first_name": "Asha", "last_name": "Rao", "roles": roles,
+            "organization_id": ORG_A, "organizations": [], "projects": [PROJ_A1],
+        }
+    )
+    return str(user_id)
+
+
+async def _roles(env: Any, user_id: str) -> list:
+    from bson import ObjectId
+
+    return (await env.db.users.find_one({"_id": ObjectId(user_id)}))["roles"]
+
+
+def test_a_reviewer_role_cannot_be_added_through_a_users_role_list_by_anyone(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            await _ready(env)
+            user_id = await _member(env, ["projectuser"])
+            for persona in ("superadmin", "org_admin"):
+                added = await env.call("PUT", persona, f"/api/users/{user_id}", json={"roles": ["projectuser", LEGAL]})
+                assert added.status_code == 422, (persona, added.status_code, added.text[:200])
+                assert "Reviewer roles screen" in added.text
+            assert await _roles(env, user_id) == ["projectuser"]
+            # An ordinary edit of the same user still works.
+            plain = await env.call("PUT", "superadmin", f"/api/users/{user_id}", json={"first_name": "Asha K"})
+            assert plain.status_code == 200, plain.text[:300]
+
+    _run(scenario())
+
+
+def test_editing_a_user_who_already_has_a_reviewer_role_on_their_list_keeps_it(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            await _ready(env)
+            user_id = await _member(env, ["projectuser", QUANTUM])
+            kept = await env.call(
+                "PUT", "superadmin", f"/api/users/{user_id}",
+                json={"first_name": "Asha K", "roles": ["projectuser", QUANTUM]},
+            )
+            assert kept.status_code == 200, kept.text[:300]
+            assert await _roles(env, user_id) == ["projectuser", QUANTUM]
+            # A second reviewer role is still not added this way.
+            more = await env.call(
+                "PUT", "superadmin", f"/api/users/{user_id}", json={"roles": ["projectuser", QUANTUM, LEGAL]}
+            )
+            assert more.status_code == 422, more.text[:200]
+            assert await _roles(env, user_id) == ["projectuser", QUANTUM]
+
+    _run(scenario())

@@ -13,10 +13,16 @@ import { Textarea } from "@/components/ui/textarea";
 import { errorMessage } from "@/hooks/useLetterBench";
 import SkillPublishPanel from "@/components/skills/SkillPublishPanel";
 import { reviewerRoleLabel } from "@/lib/skill-approvals";
-import { deprecateSkillVersion, fetchSkillAdminList, importSkillBundle } from "@/services/letter-bench-api";
-import type { SkillVersionSummary } from "@/types/letterBench";
+import {
+  deprecateSkillVersion,
+  fetchSkillAdminList,
+  fetchSkillReviewQueue,
+  importSkillBundle,
+} from "@/services/letter-bench-api";
+import type { SkillReviewQueueItem, SkillVersionSummary } from "@/types/letterBench";
 
 const ADMIN_KEY = ["letter-bench", "skills-admin"] as const;
+const QUEUE_KEY = ["skills", "review-queue"] as const;
 
 const DEFAULT_MANIFEST = JSON.stringify(
   {
@@ -37,7 +43,16 @@ const STATUS_TEXT = { draft: "Draft", published: "Published", deprecated: "Depre
 
 const SkillAdminPage: React.FC = () => {
   const client = useQueryClient();
-  const { data, isLoading, error } = useQuery({ queryKey: ADMIN_KEY, queryFn: () => fetchSkillAdminList() });
+  const { data, isLoading, error } = useQuery({
+    queryKey: ADMIN_KEY,
+    queryFn: () => fetchSkillAdminList(),
+    retry: false,
+  });
+  // A reviewer holds no publishing permission, so the list above is refused for
+  // them. Their queue is what they came for, and it needs no permission.
+  const queue = useQuery({ queryKey: QUEUE_KEY, queryFn: () => fetchSkillReviewQueue(), retry: false });
+  const [reviewing, setReviewing] = useState<SkillReviewQueueItem | null>(null);
+  const isReviewer = (queue.data?.my_roles.length ?? 0) > 0;
   const [file, setFile] = useState<File | null>(null);
   const [version, setVersion] = useState("");
   const [kind, setKind] = useState("evaluation");
@@ -85,8 +100,70 @@ const SkillAdminPage: React.FC = () => {
         </div>
       </div>
 
+      {isReviewer && (
+        <section aria-labelledby="review-queue-heading" className="rounded-lg border">
+          <h2 id="review-queue-heading" className="border-b px-4 py-3 text-sm font-semibold">
+            Waiting for your review
+          </h2>
+          <p className="px-4 pt-3 text-sm text-muted-foreground">
+            You hold: {queue.data!.my_roles.map(reviewerRoleLabel).join(", ")}.
+          </p>
+          {queue.data!.items.length === 0 ? (
+            <p className="p-4 text-sm">No draft is asking for your review.</p>
+          ) : (
+            <ul className="divide-y">
+              {queue.data!.items.map((item) => (
+                <li
+                  key={`${item.skill_key}-${item.version}`}
+                  className="flex flex-wrap items-center justify-between gap-3 p-4 text-sm"
+                >
+                  <div>
+                    <p className="font-medium">
+                      {item.name} <span className="tabular-nums">{item.version}</span>
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {item.reviews
+                        .map(
+                          (review) =>
+                            `${reviewerRoleLabel(review.reviewer_role)}: ${
+                              review.given_by_me ? "given by you" : review.given ? "given" : "not yet given"
+                            }`
+                        )
+                        .join(" · ")}
+                    </p>
+                  </div>
+                  <Button size="sm" variant={item.waiting_on_me ? "default" : "outline"} onClick={() => setReviewing(item)}>
+                    {item.waiting_on_me ? "Review…" : "Open"}
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      )}
+
+      {reviewing && (
+        <SkillPublishPanel
+          key={`review-${reviewing.skill_key}-${reviewing.version}-${reviewing.content_hash}`}
+          reviewOnly
+          myRoles={queue.data?.my_roles ?? []}
+          version={{
+            skill_key: reviewing.skill_key,
+            version: reviewing.version,
+            name: reviewing.name,
+            content_hash: reviewing.content_hash,
+            required_approvals: reviewing.reviews.map(({ kind, reviewer_role }) => ({ kind, reviewer_role })),
+          }}
+          onClose={() => {
+            setReviewing(null);
+            void client.invalidateQueries({ queryKey: QUEUE_KEY });
+          }}
+          onPublished={() => undefined}
+        />
+      )}
+
       {isLoading && <Skeleton className="h-48 w-full" />}
-      {error && (
+      {error && !isReviewer && (
         <p role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
           {errorMessage(error, "Skills could not be loaded. You may not have permission to manage them.")}
         </p>
@@ -174,6 +251,7 @@ const SkillAdminPage: React.FC = () => {
         />
       )}
 
+      {data && (
       <section aria-labelledby="import-heading" className="space-y-3 rounded-lg border p-4">
         <h2 id="import-heading" className="text-sm font-semibold">
           Import a skill bundle
@@ -242,6 +320,7 @@ const SkillAdminPage: React.FC = () => {
           Import as draft
         </Button>
       </section>
+      )}
     </div>
   );
 };
