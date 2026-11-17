@@ -114,6 +114,6 @@ Rows 4B-06 and 4B-07 were rewritten after the verification, by the session that 
 | c6971ae | 4B-08, 4B-09 | Rows rewritten. Closes the 4B-07 gap "refusal proven at the service only": the approval route is now exercised over HTTP. Full backend suite 8,299 passed, 0 failed, 761 skipped; frontend 938 passed, 3 skipped. |
 | 94a3d67 | 4B-15 | Row rewritten. |
 
-Fixed since the verification: the order-dependent test in `I/test_caseless_draft_compat_mongo.py` (4B-45) now passes alone, as a file and after another suite; the case-less draft line in `docs/CLAIM_BENCH.md` describes both modes. CI's type gate failed on `8726558` to `edb3dfd` for one finding in `services/reviewer_assignments.py`, fixed in `2ea3c8a`.
+Fixed since the verification: the order-dependent test in `I/test_caseless_draft_compat_mongo.py` (4B-45) now passes alone, as a file and after another suite; the case-less draft line in `docs/CLAIM_BENCH.md` describes both modes. CI's type gate failed on `8726558` to `edb3dfd` for one finding in `services/reviewer_assignments.py`, fixed in `92c37ab`.
 
 Open items carried from the verification, not yet fixed: no skills audit events (4B-05); M-01 absent (4B-04).
