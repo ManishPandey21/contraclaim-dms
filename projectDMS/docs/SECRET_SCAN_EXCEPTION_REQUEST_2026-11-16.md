@@ -1,6 +1,6 @@
 # Secret-scan exception request: two historical false positives on PR #114
 
-Date: 2026-11-16 · Branch: `claude/zen-ptolemy-695liz` · Status: **awaiting owner review. Not applied.** CI's "Secret scan" job stays red until an owner approves and applies the change below.
+Date: 2026-11-16 · Branch: `claude/zen-ptolemy-695liz` · Status: **submitted for authorised security review on 2026-11-17. Not applied.** The owner has assessed both findings as non-credentials. CI's "Secret scan" job stays red until the security reviewer approves and the change below is applied. No rule, allow-list or path exemption is changed by this request.
 
 ## What the scan reports
 
@@ -65,4 +65,5 @@ Every synthetic credential in the controls was generated at random inside the di
 
 | Date | Owner | Decision | Commit |
 |---|---|---|---|
-| — | — | Pending | — |
+| 2026-11-17 | Owner | Both findings assessed as non-credentials; fingerprint-only exception submitted for authorised security review | — |
+| — | Security reviewer | Pending | — |

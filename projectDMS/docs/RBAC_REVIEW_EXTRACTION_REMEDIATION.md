@@ -1,9 +1,9 @@
 # Extraction review permission: audit and remediation proposal (4B-49, AQ-12)
 
-Status: **proposal, for the owner's review.** No access has been withdrawn. Nothing
-here is deployed. Owner decision 3 (2026-11-16) sets explicit-grant-only as the
-target and requires the affected users and services to be identified, and a
-migration path approved, before any access changes.
+Status: **target decided by the owner on 2026-11-17 (section 6); not implemented.**
+No access has been withdrawn. Nothing here is deployed. Existing production access
+stays as it is until reading P-15, the impact analysis, the migration arrangements
+and a separate release approval are all complete.
 
 ## 1. What the permission does
 
@@ -145,9 +145,33 @@ Each step needs the owner's approval. None is started.
 Rollback for step 4 is a one-line revert. No data changes in any step, except the role
 grants in step 3, which administrators make through the product.
 
-## 6. Open decisions for the owner
+## 6. Owner decision, 2026-11-17 (AQ-12)
 
-- Whether Contract Manager - Organization should review extraction (step 3).
-- Whether Super Admin should keep approving pages (step 4). The plan's rule for
-  privileged material says no.
-- Who takes P-15, and when (AQ-11).
+| Role | Decision |
+|---|---|
+| Contract Manager - Organization | Must not receive `dms.document.review_extraction` automatically through `dms.admin`. |
+| Super Admin | Must not acquire extraction approval authority merely through platform privileges. |
+| Organization Admin, Project Admin | May keep the permission they hold by name, subject to normal scope and audit controls. |
+| Contract Managers who genuinely review extraction | May receive an explicit, scoped grant by name. |
+
+Consequences for the path in section 5:
+
+- Step 3 is settled for Contract Manager - Organization: the permission is **not**
+  added to that seed role. A Contract Manager who reviews extraction gets a named
+  grant on a role they hold in the organisation or project where they review, made
+  by that scope's administrator and audited like any role change.
+- Step 4 is settled in principle: the permission joins
+  `SUPERADMIN_EXCLUDED_PERMISSIONS`, so `dms.admin`, `*` and the Super Admin
+  shortcut no longer pass it. Super Admin keeps viewing documents.
+- **Nothing in step 4 is implemented or released yet.** The gate is, in order:
+  P-15 read on production; the impact analysis of step 2; the named grants of step
+  3 in place; and a separate release approval from the owner. Until then the code
+  is unchanged and the pinned matrix test keeps describing today's behaviour.
+
+## 7. Still open
+
+- Who takes P-15, and when (AQ-11). Procedure:
+  `docs/PHASE_4B_READINGS_OPERATOR_PROCEDURE.md`.
+- The release approval for step 4, after the gate above.
+- Custom roles carrying `dms.admin` or `*`: unknown until P-15. Each is handled as in
+  step 2, case by case.

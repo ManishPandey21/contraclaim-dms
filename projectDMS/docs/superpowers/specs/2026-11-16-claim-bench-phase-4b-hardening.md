@@ -861,9 +861,9 @@ All must hold, each with recorded evidence:
 3. The RBAC matrix (6.4) and the concurrency (6.5) and security (6.6) suites are green.
 4. Mocked Playwright suites are green in CI. The staging suite has passed twice consecutively on the deployed stack, with a Statement of Claim drafted from an escalated claim passing every existing gate.
 5. Gate 6 fresh-install runs are recorded for the final migration count, and route inventories are regenerated and diffed.
-6. Readings P-01 to P-12 are recorded for staging and production, and decisions D-09, D-10 and AQ-3 are finalised against them.
+6. Readings P-01 to P-15 are recorded for staging and production, each as read or as not read with its reason, and decisions D-09, D-10 and AQ-3 are finalised against them. (Reconciled 2026-11-17: P-13, P-14 and P-15 were added after this criterion was first written.)
 7. Claims and EOT golden-set baseline runs are recorded (section 7). No pack is published.
-8. AQ-1 to AQ-10 are decided (section 13), and AQ-11 has been resolved by authorised read-only access.
+8. AQ-1 to AQ-10 are decided (section 13), and AQ-11 has been resolved by authorised read-only access. AQ-12 is decided (2026-11-17); its remediation (4B-49 steps 2 to 5) is a separate release with its own approval and is not an exit condition, but no step of it may have been taken without P-15.
 9. The owner has accepted Phase 4b in writing in this document's decision record.
 10. The complete claim → escalation → pleading → approval journey has passed with real dependencies: a real backend, a MongoDB replica set and real authorisation. Mocked suites do not satisfy this criterion.
 
@@ -911,8 +911,8 @@ All must hold, each with recorded evidence:
 | AQ-8 | Legacy claim page and AI assessment retirement date | Decide after P-11 and 30 days primary (D-09) |
 | AQ-9 | Unlock at `dms.claim.manage`: too strict for small teams? | Keep manage plus reason; revisit after canary feedback |
 | AQ-10 | Where golden-set material lives, and the model budget for evaluation runs | A restricted evaluation store outside the repository; a budget set per run before 4B-42 |
-| AQ-11 | Authorised read-only access for readings P-01 to P-14 on production (and staging), and the operator who takes them | **Owner decision 2 (2026-11-16):** the readings remain mandatory. Development and local testing continue; migration compatibility, role seeding, legacy claims and deployment decisions are not finalised until the evidence exists. Still open: no production access from this environment |
-| AQ-12 | Found in 4B-10: `dms.document.review_extraction` is also meant to be granted only by name, but any `dms.admin` holder passes it, because PolicyService widens `dms.*` checks to `dms.admin`. That includes `contractmgr_org`, which the seed comment says must not have it. Unlike the two claim permissions, this one is live in production, so closing the gap would withdraw access people may use today. | Open. Recommendation: add it to `SUPERADMIN_EXCLUDED_PERMISSIONS` after a production reading of which users hold it only through `dms.admin`. 4B-10 deliberately left it unchanged. **Owner decision 3 (2026-11-16):** a separate high-priority audit and remediation ticket, 4B-49; explicit-grant-only is the target; existing production workflows are preserved until the affected users and services are identified and a migration path is approved. **4B-49 (2026-11-16):** matrix, reading P-15 and a five-step migration path delivered; awaiting P-15 and the owner's decisions on Contract Manager - Organization and Super Admin |
+| AQ-11 | Authorised read-only access for readings P-01 to P-14 on production (and staging), and the operator who takes them | **Owner decision 2 (2026-11-16):** the readings remain mandatory. Development and local testing continue; migration compatibility, role seeding, legacy claims and deployment decisions are not finalised until the evidence exists. Still open: no production access from this environment. **Owner decision (2026-11-17):** P-01 to P-15 remain mandatory where applicable; unavailable data is never read as an empty database. Operator procedure, evidence template and the list of unread readings with their dependent tickets: `docs/PHASE_4B_READINGS_OPERATOR_PROCEDURE.md` |
+| AQ-12 | Found in 4B-10: `dms.document.review_extraction` is also meant to be granted only by name, but any `dms.admin` holder passes it, because PolicyService widens `dms.*` checks to `dms.admin`. That includes `contractmgr_org`, which the seed comment says must not have it. Unlike the two claim permissions, this one is live in production, so closing the gap would withdraw access people may use today. | Open. Recommendation: add it to `SUPERADMIN_EXCLUDED_PERMISSIONS` after a production reading of which users hold it only through `dms.admin`. 4B-10 deliberately left it unchanged. **Owner decision 3 (2026-11-16):** a separate high-priority audit and remediation ticket, 4B-49; explicit-grant-only is the target; existing production workflows are preserved until the affected users and services are identified and a migration path is approved. **4B-49 (2026-11-16):** matrix, reading P-15 and a five-step migration path delivered; awaiting P-15. **Owner decision (2026-11-17):** Contract Manager - Organization must not receive the permission through `dms.admin`; Super Admin must not hold extraction approval through platform privileges; Organization Admin and Project Admin keep their named grants; Contract Managers who review extraction may receive explicit scoped grants. No existing production access is revoked until P-15, the impact analysis, the migration arrangements and a separate release approval are complete (`docs/RBAC_REVIEW_EXTRACTION_REMEDIATION.md` §6). The code change is not made yet |
 
 ---
 
@@ -949,7 +949,7 @@ Proof
 
 - [ ] Real-dependency route tests; RBAC matrix; concurrency; security corpora
 - [ ] Mocked Playwright suites in CI; staging suite green twice on the deployed stack
-- [ ] Gate 6 runs; route inventories; readings P-01 to P-11 recorded
+- [ ] Gate 6 runs; route inventories; readings P-01 to P-15 recorded
 - [ ] Golden-set baselines recorded; no pack published
 - [ ] Real-MongoDB suites run in CI (4B-47); the complete claim → escalation → pleading → approval journey passes with real dependencies
 - [ ] Backward compatibility for `POST /arbitration/drafts` (4B-45); backend privilege-wall and provenance suite (4B-46)
@@ -962,6 +962,7 @@ Proof
 |---|---|---|
 | 2026-11-16 | Audit findings accepted; D-05 to D-21 approved subject to the Phase 4b requirements; plan requested | Owner |
 | 2026-11-16 | Plan approved in principle subject to amendments B.1 to B.7; AQ-1 to AQ-10 decided; implementation authorised from Wave 0 and independent security groundwork; PR #114 stays draft | Owner |
+| 2026-11-17 | Phase 4b **not** accepted as complete; Phase 5 remains blocked. Implementation continues under this plan in dependency order (reviewer authorisation first), with no production deployment, merge, skill publication or rollout activation. AQ-11: readings P-01 to P-15 stay mandatory. AQ-12: decided as recorded in section 11. The two secret-scan findings are assessed as non-credentials; the fingerprint-only exception goes to authorised security review. Ticket register: `docs/PHASE_4B_TICKET_REGISTER.md` | Owner |
 | — | Phase 4b exit criteria met and accepted; Phase 5 may start | Pending |
 
 ## 13. Owner review, 2026-11-16
