@@ -37,7 +37,7 @@ from pydantic import BaseModel, Field
 from . import claim_contract_scope as contract_scope
 from ..models.claim import ClaimBench, ClaimHead
 from ..models.claim_delay import FormulaInput, QuantumLine, QuantumRecord
-from .quantum_formulas import FORMULA_INPUTS, compute_paise, delay_days, inconsistencies, missing_inputs, rupees, to_paise
+from .quantum_formulas import FORMULA_CAUTIONS, FORMULA_INPUTS, compute_paise, delay_days, inconsistencies, missing_inputs, rupees, to_paise
 from .claim_delay_engine import compensable_days, days_outside
 from .claim_delay_lab import ClaimDelayLab, _day, _head, engine_events, head_treatments
 
@@ -70,7 +70,8 @@ class QuantumLineRequest(QuantumLineInput):
 CALCULATION_NOTE = (
     "Calculated from the figures entered. A calculation is not a finding that this amount is "
     "recoverable: entitlement under the contract, evidence that the overhead was in fact unabsorbed, "
-    "and whether the formula's conditions are met are decided separately."
+    "and whether the formula's conditions are met are decided separately. The tribunal chooses the "
+    "method and may insist on proof of actual loss."
 )
 
 
@@ -168,7 +169,8 @@ def build_quantum_view(
         views.append(
             QuantumLineView(
                 line=line, locked=bool(reasons), lock_reasons=reasons,
-                calculated=calculated, calculation_note=CALCULATION_NOTE if calculated else None,
+                calculated=calculated,
+                calculation_note=f"{CALCULATION_NOTE} {FORMULA_CAUTIONS[line.formula]}" if calculated else None,
             )
         )
     claimed = sum(int(view.line.amount_paise or 0) for view in views)

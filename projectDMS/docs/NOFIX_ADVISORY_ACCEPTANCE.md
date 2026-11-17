@@ -355,3 +355,72 @@ real-Mongo suites against a MongoDB 8.0.5 replica set.
 **The correct statement of the scan result is "pip-audit and the backend image
 scan passed with a time-bound owner-approved exception (R4)", never
 "0 vulnerabilities".**
+
+
+## R5 (PROPOSED, not applied): GHSA-fc5q-39xc-vjpf, picomatch ReDoS through single-branch repeated extglobs
+
+**Status: proposal for authorised security review. Nothing in the gate is changed.**
+`.github/scripts/npm_audit_gate.py` still fails on this advisory, so the dependency
+scan stays red (CI run 407 on `b80d3d3`, step "Scan frontend dependencies") until a
+reviewer decides. Recorded 2026-11-17.
+
+### What the advisory says
+
+GitHub advisory GHSA-fc5q-39xc-vjpf, severity high: picomatch is vulnerable to a
+regular-expression denial of service when a glob *pattern* uses single-branch
+repeated extglobs. Affected range as `npm audit` reports it: `<=4.0.7`.
+
+### Is there a supported fix?
+
+No, as of 2026-11-17. `npm view picomatch versions` lists 4.0.7 (published
+2026-08-24) as the newest release, and it is inside the affected range; the 2.x and
+3.x lines (2.3.2, 3.0.2) are affected too. `npm audit` reports `fixAvailable: false`
+for picomatch itself. Upgrading parents does not help: every parent resolves to an
+affected picomatch. So no override or upgrade can clear it today.
+
+### Dependency chain (from `npm ls picomatch` and the audit report)
+
+All 20 HIGH entries in `npm audit` trace to this one advisory (checked by walking each
+entry's `via` chain to its root advisories): `picomatch` itself and 19 parents -
+`vite`, `vitest`, `tinyglobby`, `fdir`, `tailwindcss`, `tailwindcss-animate`,
+`@tailwindcss/typography`, `chokidar`, `anymatch`, `readdirp`, `micromatch`,
+`fast-glob`, `rollup-plugin-visualizer`, `lovable-tagger`,
+`@typescript-eslint/typescript-estree`, `@types/jest`, `expect`, `jest-util`,
+`jest-message-util`. picomatch 4.0.4 sits under vite, vitest, tinyglobby, fdir and
+rollup-plugin-visualizer; 2.3.2 under tailwindcss (chokidar, micromatch, readdirp,
+anymatch) and jest-util. All are build, lint or test tooling.
+
+### Reachability
+
+- **Application source: none.** No file under `projectDMS/client/src` imports
+  picomatch, micromatch, minimatch or any glob library.
+- **Patterns are not user input.** The advisory needs an attacker-chosen *pattern*.
+  The patterns here come from build configuration (`vite.config.ts`,
+  `tailwind.config.ts` content globs, `eslint.config.js`, vitest include lists),
+  written by the repository's maintainers.
+- **Deployed client image: absent by construction.** The runtime stage copies only
+  `dist/` and `scripts/serve-dist.mjs` (`client/Dockerfile`, `COPY --from=builder`),
+  serves static files with `node:` built-ins, and carries no application
+  `node_modules` (the same properties R3 records, checked by CI's "Client runtime
+  image carries no package manager" step and the image scan, both green in run 405).
+  Not re-verified on an image built from `b80d3d3` in this session (no Docker here).
+
+### Classification proposed
+
+Build-time tooling only; not exploitable from a request to the application; no
+patched release exists. Same class as R3.
+
+### What the reviewer would be approving (if they approve)
+
+An exception shaped exactly like R3's, in `npm_audit_gate.py`: pinned to this GHSA,
+package and range; failing on any CRITICAL, on any other HIGH, when the advisory's
+identity or range changes, when a patched picomatch is published, and after an
+expiry date the reviewer sets (suggested: 30 days, with a re-check of the registry
+weekly). Its tests in `test_npm_audit_gate.py` would cover each of those failures.
+**None of this is written until the review approves it.**
+
+### Remediation when a fix is published
+
+`npm update` (or an `overrides` entry for `picomatch`) to the first patched 2.x and
+4.x releases, `npm ci` with the lockfile check, then the full client suite, build
+and image scan. The exception, if granted, is removed in the same commit.

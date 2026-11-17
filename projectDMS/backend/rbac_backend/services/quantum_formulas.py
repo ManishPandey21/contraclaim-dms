@@ -103,6 +103,23 @@ FORMULA_INPUTS: Dict[str, Tuple[FormulaInputSpec, ...]] = {
 }
 
 
+#: What each formula assumes, in the Supreme Court's words or close to them
+#: (McDermott International v. Burn Standard, 12 May 2006; docs/QUANTUM_FORMULA_SOURCES.md).
+#: Shown beside a formula line: the choice of formula and proof of actual loss are for
+#: the tribunal, not the calculation.
+FORMULA_CAUTIONS: Dict[str, str] = {
+    "hudson": (
+        "Hudson takes the overhead percentage from the tender, which may bear little or no relation "
+        "to the contractor's actual head-office costs."
+    ),
+    "emden": "Emden uses the contractor's actual overhead and profit percentage, so the accounts it comes from are the evidence.",
+    "eichleay": (
+        "Eichleay allocates actual head-office overhead by billings; it is used where loss of opportunity "
+        "cannot be proved and the claim rests on actual cost."
+    ),
+}
+
+
 def missing_inputs(formula: str, inputs: Mapping[str, Any]) -> List[str]:
     """Labels of the inputs a formula needs that are absent or not a positive figure."""
     missing: List[str] = []

@@ -229,3 +229,21 @@ def test_the_export_states_amounts_from_paise_exactly() -> None:
     # A rupee figure is read through its decimal text: 1.005 is Rs 1.01, as typed, not 1.00 as binary would give.
     assert f"{1.005:.2f}" == "1.00" and format_amount(1.005) == "INR 1.01"
     assert format_amount(125000.5) == format_paise(12_500_050)
+
+
+def test_each_formula_line_carries_the_courts_caution_for_that_formula() -> None:
+    # docs/QUANTUM_FORMULA_SOURCES.md: McDermott International v. Burn Standard (2006).
+    from rbac_backend.services.quantum_formulas import FORMULA_CAUTIONS
+
+    assert set(FORMULA_CAUTIONS) == set(FORMULA_INPUTS_KEYS)
+    assert "little or no relation" in FORMULA_CAUTIONS["hudson"]
+    assert "loss of opportunity cannot be proved" in FORMULA_CAUTIONS["eichleay"]
+    line = QuantumLine(
+        line_id="Q1", category="overhead_formula", description="HO", amount_paise=1, formula="emden",
+        formula_inputs={}, records=[QuantumRecord(document_id="d", role="actual_loss")],
+    )
+    note = build_quantum_view(ClaimHead(head_id="H1", title="T", quantum_lines=[line]), set(), linked={"d"}).lines[0].calculation_note
+    assert note.endswith(FORMULA_CAUTIONS["emden"]) and "may insist on proof of actual loss" in note
+
+
+FORMULA_INPUTS_KEYS = ("hudson", "emden", "eichleay")
