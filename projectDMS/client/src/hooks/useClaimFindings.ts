@@ -7,6 +7,7 @@ import {
   composeSubmission,
   createDetermination,
   downloadSubmission,
+  editSubmissionSection,
   fetchDeterminations,
   fetchSimulations,
   fetchStrategyNote,
@@ -121,7 +122,8 @@ export function useSubmission(claimId: string) {
   const key = findingsKeys.submission(claimId);
   const query = useQuery({ queryKey: key, queryFn: () => fetchSubmission(claimId) });
   const compose = useMutation({
-    mutationFn: (sections: string[]) => composeSubmission(claimId, sections),
+    mutationFn: (input: { sections: string[]; confirmOverwrite?: string[] }) =>
+      composeSubmission(claimId, input.sections, input.confirmOverwrite ?? []),
     onSuccess: (data) => client.setQueryData(key, data),
     onError: async (error: unknown) => {
       toast.error(errorMessage(error, "The submission could not be composed"));
@@ -136,5 +138,17 @@ export function useSubmission(claimId: string) {
       await client.invalidateQueries({ queryKey: key });
     },
   });
-  return { query, compose, download };
+  const editSection = useMutation({
+    mutationFn: (input: { key: string; version: number; paragraphs: string[] }) =>
+      editSubmissionSection(claimId, input.key, input.version, input.paragraphs),
+    onSuccess: (data) => {
+      client.setQueryData(key, data);
+      toast.success("Section saved");
+    },
+    onError: async (error: unknown) => {
+      toast.error(errorMessage(error, "The section could not be saved"));
+      await client.invalidateQueries({ queryKey: key });
+    },
+  });
+  return { query, compose, download, editSection };
 }

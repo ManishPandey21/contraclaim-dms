@@ -108,8 +108,22 @@ register_default_template(SUBMISSION_SECTION_PROMPT, SUBMISSION_SECTION_TEMPLATE
 # --------------------------------------------------------------------------- #
 class ComposeRequest(BaseModel):
     # Sections to re-compose even if their record has not changed. Stale and
-    # missing sections are always composed.
+    # missing sections are always composed - except an edited one (4B-32).
     sections: List[str] = Field(default_factory=list)
+    #: 4B-32: edited sections the person confirms may be replaced by a fresh composition.
+    confirm_overwrite: List[str] = Field(default_factory=list)
+
+
+class SectionEditRequest(BaseModel):
+    """4B-32: new text for each paragraph of one section, in order. Sources are not
+    edited: each paragraph keeps the provenance of the paragraph it replaces."""
+
+    version: int = Field(..., ge=0)
+    paragraphs: List[str] = Field(..., min_length=1, max_length=200)
+
+
+SECTION_EDITED = "submission_section_edited"
+EDIT_NOT_ON_RECORD = "submission_edit_not_on_record"
 
 
 class SectionView(BaseModel):
@@ -256,6 +270,8 @@ class SubmissionView(BaseModel):
     cannot_export_reason: Optional[str] = None
     #: D-25: how many evidence items this viewer may not read. Never which ones.
     restricted_items: int = 0
+    #: 4B-32: the stored submission's version, sent back with a section edit.
+    version: int = 0
     #: 4B-27: evidence documents changed since the submission was composed (a count).
     evidence_changed: int = 0
     #: Evidence whose contract is not confirmed against the Contract Master, or that
@@ -927,6 +943,7 @@ class ClaimSubmissions:
             can_export=export_reason is None,
             cannot_export_reason=export_reason,
             evidence_changed=changed,
+            version=stored.version if stored else 0,
             evidence_notes=contract_scope.identity_notes(claim, review),
             unconfirmed_evidence=[vars(item) for item in review.unconfirmed] if contract_scope.contract_of(claim) else [],
             confirmed_evidence=[vars(item) for item in review.confirmed],
@@ -954,12 +971,29 @@ class ClaimSubmissions:
         stored = await self._stored(claim)
         kept = {section.key: section for section in (stored.sections if stored else [])}
         cited = {ref for head in bench.heads for ref in head.clause_refs}
+        # 4B-32: an edited section is never replaced without the person's confirmation. Asked for
+        # explicitly and not confirmed: refused, naming the sections. Merely stale: kept, still stale.
+        unconfirmed = [
+            key for key in request.sections
+            if kept.get(key) is not None and kept[key].edited_by and key not in request.confirm_overwrite
+        ]
+        if unconfirmed:
+            message = (
+                "These sections were edited by hand and re-composing them would replace the edits: "
+                + ", ".join(unconfirmed) + ". Confirm that they may be replaced."
+            )
+            raise HTTPException(
+                status_code=409, detail={"code": SECTION_EDITED, "user_message": message, "detail": message, "sections": unconfirmed}
+            )
         sections: List[SubmissionSection] = []
         for key in SECTION_ORDER:
             base = fresh[key]
             previous = kept.get(key)
             if previous is not None and previous.input_hash == base.input_hash and key not in request.sections:
                 sections.append(previous)
+                continue
+            if previous is not None and previous.edited_by and key not in request.confirm_overwrite:
+                sections.append(previous)  # edited: kept as edited, and shown stale until confirmed
                 continue
             sections.append(await self._with_skill(claim, key, base, cited, user_id, force=key in request.sections))
         submission = ClaimSubmission(
@@ -982,6 +1016,62 @@ class ClaimSubmissions:
             )
             if not getattr(result, "matched_count", 0):
                 raise HTTPException(status_code=409, detail="The submission was re-composed by someone else. Reload it.")
+        return await self.view(claim, document_ids, accessible)
+
+    async def edit_section(
+        self, claim: Dict[str, Any], key: str, request: SectionEditRequest, document_ids: Set[str],
+        user_id: Optional[str], accessible: Optional[Set[str]] = None,
+    ) -> SubmissionView:
+        """4B-32: a person rewrites a section's paragraphs. The text must stay within the record
+        (the same rule as a skill's text: no figure or clause the record does not state, and the
+        reservation of rights kept); every paragraph keeps its sources; the section is marked
+        edited, with who and when; recomposition never replaces it without confirmation."""
+        if key not in SECTION_ORDER:
+            raise HTTPException(status_code=404, detail="Unknown section")
+        if accessible is not None and set(document_ids) - set(accessible):
+            message = restricted_message(len(set(document_ids) - set(accessible)))
+            raise HTTPException(status_code=403, detail={"code": EVIDENCE_RESTRICTED, "user_message": message, "detail": message})
+        stored = await self._stored(claim)
+        if stored is None:
+            raise HTTPException(status_code=409, detail="Compose the submission first.")
+        if stored.version != request.version:
+            raise HTTPException(status_code=409, detail="The submission changed since you loaded it. Reload it.")
+        section = next((item for item in stored.sections if item.key == key), None)
+        if section is None:
+            raise HTTPException(status_code=404, detail="Section not found")
+        if len(request.paragraphs) != len(section.paragraphs):
+            raise HTTPException(
+                status_code=422,
+                detail="Edit the text of each paragraph; a paragraph is not added or removed, so its sources stay with it.",
+            )
+        texts = [text.strip() for text in request.paragraphs]
+        if any(not text for text in texts):
+            raise HTTPException(status_code=422, detail="A paragraph cannot be empty.")
+        bench = self.bench._bench_of(claim)
+        record_texts = [paragraph.text for paragraph in section.paragraphs]
+        if bench is not None:
+            fresh = compose_record_sections(await self.gather(claim, bench, document_ids))
+            record_texts += [paragraph.text for paragraph in fresh[key].paragraphs]
+        cited = {ref for head in (bench.heads if bench else []) for ref in head.clause_refs}
+        reasons = validate_section_text(key, texts, record_texts, cited)
+        if reasons:
+            message = "The edited text says something the record does not: " + "; ".join(reasons)
+            raise HTTPException(
+                status_code=422, detail={"code": EDIT_NOT_ON_RECORD, "user_message": message, "detail": message, "reasons": reasons}
+            )
+        changed = False
+        for paragraph, text in zip(section.paragraphs, texts):
+            if paragraph.text != text:
+                paragraph.text, paragraph.edited, changed = text, True, True
+        if not changed:
+            return await self.view(claim, document_ids, accessible)
+        section.edited_by, section.edited_at, section.edit_basis_hash = user_id, now_utc(), section.input_hash
+        result = await self._collection.update_one(
+            {"_id": stored.id, "version": stored.version},
+            {"$set": {"sections": [item.model_dump() for item in stored.sections], "version": stored.version + 1}},
+        )
+        if not getattr(result, "matched_count", 0):
+            raise HTTPException(status_code=409, detail="The submission changed since you loaded it. Reload it.")
         return await self.view(claim, document_ids, accessible)
 
     async def _with_skill(

@@ -53,6 +53,7 @@ from ..services.claim_submission import (
     EVIDENCE_RESTRICTED,
     ClaimSubmissions,
     ComposeRequest,
+    SectionEditRequest,
     SubmissionView,
     claim_evidence_ids,
 )
@@ -454,6 +455,36 @@ async def compose_claim_submission(
         claim, payload, await claim_evidence_ids(db, claim), _user_id(current_user),
         accessible=await _claim_documents(claim, db, current_user),
     )
+
+
+@router.put("/claims/{claim_id}/submission/sections/{section_key}", response_model=SubmissionView)
+@handle_exceptions
+async def edit_claim_submission_section(
+    claim_id: str,
+    section_key: str,
+    payload: SectionEditRequest,
+    db=Depends(get_db),
+    bench: ClaimBenchService = Depends(get_bench),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
+):
+    """4B-32: rewrite a section's paragraphs. Marked edited; sources kept; text checked against the record."""
+    claim = await _claim(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection, bench)
+    view = await ClaimSubmissions(db, bench).edit_section(
+        claim, section_key, payload, await claim_evidence_ids(db, claim), _user_id(current_user),
+        accessible=await _claim_documents(claim, db, current_user),
+    )
+    await AuditEventService(db).emit(
+        action="claim.submission_section_edited",
+        actor_id=_user_id(current_user),
+        resource_type="claim",
+        resource_id=str(claim_id),
+        organization_id=claim.get("organization_id"),
+        project_id=claim.get("project_id"),
+        after={"section": section_key, "paragraphs": len(payload.paragraphs)},
+    )
+    return view
 
 
 @router.get("/claims/{claim_id}/submission/export")

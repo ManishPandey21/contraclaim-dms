@@ -1,8 +1,9 @@
-import React from "react";
+import React, { useState } from "react";
 import { Download, RefreshCw } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 import EvidenceContractConfirmations from "@/components/claim-bench/EvidenceContractConfirmations";
 import { useSubmission } from "@/hooks/useClaimFindings";
 import { formatDateIN } from "@/lib/format-in";
@@ -30,7 +31,12 @@ const Section: React.FC<{
   stale: boolean;
   disabled: boolean;
   onRegenerate: () => void;
-}> = ({ number, section, stale, disabled, onRegenerate }) => (
+  canEdit: boolean;
+  saving: boolean;
+  onSave: (paragraphs: string[]) => void;
+}> = ({ number, section, stale, disabled, onRegenerate, canEdit, saving, onSave }) => {
+  const [draft, setDraft] = useState<string[] | null>(null);
+  return (
   <section aria-labelledby={`section-${section.key}`} className="space-y-2">
     <header className="flex flex-wrap items-center justify-between gap-2 border-b pb-1">
       <h3 id={`section-${section.key}`} className="text-base font-semibold">
@@ -38,6 +44,16 @@ const Section: React.FC<{
       </h3>
       <div className="flex items-center gap-2">
         {stale && <Badge variant="warning">Record has changed</Badge>}
+        {section.edited_by && (
+          <span title={section.edited_at ? `Edited ${formatDateIN(section.edited_at)}` : undefined}>
+            <Badge variant="neutral">Edited by hand</Badge>
+          </span>
+        )}
+        {canEdit && draft === null && section.paragraphs.length > 0 && (
+          <Button variant="ghost" size="sm" disabled={disabled} onClick={() => setDraft(section.paragraphs.map((p) => p.text))}>
+            Edit
+          </Button>
+        )}
         <Badge variant="neutral">{section.produced_by === "skill" ? "Claims skill" : "Composed from the record"}</Badge>
         <Button variant="ghost" size="sm" disabled={disabled} onClick={onRegenerate} aria-label={`Re-compose ${section.title}`}>
           <RefreshCw className="mr-1 h-3.5 w-3.5" aria-hidden="true" />
@@ -48,10 +64,42 @@ const Section: React.FC<{
     {section.paragraphs.length === 0 && (
       <p className="text-sm text-muted-foreground">The record holds nothing for this section.</p>
     )}
-    {section.paragraphs.map((paragraph, index) => (
+    {draft !== null && (
+      <div className="space-y-2 rounded-md border p-2">
+        <p className="text-xs text-muted-foreground">
+          Each paragraph keeps its sources. The text may not state a figure or clause the record does not.
+        </p>
+        {draft.map((text, index) => (
+          <Textarea
+            key={index}
+            aria-label={`Paragraph ${index + 1} of ${section.title}`}
+            rows={3}
+            value={text}
+            onChange={(event) => setDraft(draft.map((item, at) => (at === index ? event.target.value : item)))}
+          />
+        ))}
+        <div className="flex gap-2">
+          <Button
+            size="sm"
+            disabled={saving || draft.some((text) => !text.trim())}
+            onClick={() => {
+              onSave(draft);
+              setDraft(null);
+            }}
+          >
+            Save section
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => setDraft(null)}>
+            Cancel
+          </Button>
+        </div>
+      </div>
+    )}
+    {draft === null && section.paragraphs.map((paragraph, index) => (
       <details key={index} className="group rounded-md px-2 py-1 hover:bg-muted/40">
         <summary className="cursor-pointer list-none text-sm leading-relaxed">
           {paragraph.text}
+          {paragraph.edited && <span className="ml-2 text-xs italic text-muted-foreground">(edited)</span>}
           <span className="ml-2 text-xs text-muted-foreground group-open:hidden">
             {paragraph.sources.length} source{paragraph.sources.length === 1 ? "" : "s"}
           </span>
@@ -79,7 +127,8 @@ const Section: React.FC<{
       <p className="text-xs text-muted-foreground">{section.degraded_reason}</p>
     )}
   </section>
-);
+  );
+};
 
 /**
  * The claim submission as it would be issued, composed from the locked board.
@@ -87,7 +136,7 @@ const Section: React.FC<{
  * screen are kept visibly apart from the document's own text.
  */
 const SubmissionPanel: React.FC<Props> = ({ claimId, readOnly }) => {
-  const { query, compose, download } = useSubmission(claimId);
+  const { query, compose, download, editSection } = useSubmission(claimId);
   const view = query.data;
   if (query.isLoading) return <p className="p-4 text-sm text-muted-foreground">Loading the submission…</p>;
   if (!view) return <p role="alert" className="p-4 text-sm text-destructive">The submission could not be loaded.</p>;
@@ -106,7 +155,7 @@ const SubmissionPanel: React.FC<Props> = ({ claimId, readOnly }) => {
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button size="sm" disabled={cannotCompose} onClick={() => compose.mutate([])}>
+          <Button size="sm" disabled={cannotCompose} onClick={() => compose.mutate({ sections: [] })}>
             {view.exists ? (view.stale_sections ? "Re-compose what changed" : "Check against the record") : "Compose the submission"}
           </Button>
           {(["docx", "pdf"] as const).map((format) => (
@@ -175,7 +224,22 @@ const SubmissionPanel: React.FC<Props> = ({ claimId, readOnly }) => {
               section={item.section}
               stale={item.stale}
               disabled={cannotCompose}
-              onRegenerate={() => compose.mutate([item.section.key])}
+              onRegenerate={() => {
+                const key = item.section.key;
+                // 4B-32: an edited section is replaced only once the person confirms it.
+                if (item.section.edited_by) {
+                  if (window.confirm(`Re-composing "${item.section.title}" replaces the edits made by hand. Replace them?`)) {
+                    compose.mutate({ sections: [key], confirmOverwrite: [key] });
+                  }
+                  return;
+                }
+                compose.mutate({ sections: [key] });
+              }}
+              canEdit={!readOnly && (view.restricted_items ?? 0) === 0}
+              saving={editSection.isPending}
+              onSave={(paragraphs) =>
+                editSection.mutate({ key: item.section.key, version: view.version ?? 0, paragraphs })
+              }
             />
           ))}
           <section aria-labelledby="evidence-schedule" className="space-y-2">

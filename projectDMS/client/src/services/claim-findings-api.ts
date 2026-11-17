@@ -132,8 +132,29 @@ export async function fetchSubmission(claimId: string): Promise<SubmissionView> 
   return data;
 }
 
-export async function composeSubmission(claimId: string, sections: string[] = []): Promise<SubmissionView> {
-  const { data } = await api.post<SubmissionView>(`${base(claimId)}/submission/compose`, { sections });
+export async function composeSubmission(
+  claimId: string,
+  sections: string[] = [],
+  confirmOverwrite: string[] = []
+): Promise<SubmissionView> {
+  const { data } = await api.post<SubmissionView>(`${base(claimId)}/submission/compose`, {
+    sections,
+    confirm_overwrite: confirmOverwrite,
+  });
+  return data;
+}
+
+/** 4B-32: new text for each paragraph of one section; sources are kept by the server. */
+export async function editSubmissionSection(
+  claimId: string,
+  sectionKey: string,
+  version: number,
+  paragraphs: string[]
+): Promise<SubmissionView> {
+  const { data } = await api.put<SubmissionView>(
+    `${base(claimId)}/submission/sections/${encodeURIComponent(sectionKey)}`,
+    { version, paragraphs }
+  );
   return data;
 }
 

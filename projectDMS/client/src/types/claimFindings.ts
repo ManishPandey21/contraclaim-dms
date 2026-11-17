@@ -173,12 +173,15 @@ export interface ParagraphSource {
 export interface SubmissionSection {
   key: string;
   title: string;
-  paragraphs: { text: string; sources: ParagraphSource[] }[];
+  paragraphs: { text: string; sources: ParagraphSource[]; edited?: boolean }[];
   internal_notes: string[];
   produced_by: "skill" | "record_composition";
   degraded: boolean;
   degraded_reason?: string | null;
   composed_at: string;
+  /** 4B-32: who last edited the section by hand, and when. */
+  edited_by?: string | null;
+  edited_at?: string | null;
 }
 
 export interface EvidenceItem {
@@ -203,6 +206,8 @@ export interface SubmissionView {
   cannot_export_reason?: string | null;
   /** D-25: how many evidence items this viewer may not read. Never which ones. */
   restricted_items?: number;
+  /** 4B-32: the stored submission's version, sent back with a section edit. */
+  version?: number;
   /** 4B-27: evidence documents changed since the submission was composed. */
   evidence_changed?: number;
   /** Evidence not confirmed against the Contract Master, or naming no contract. Warnings only. */

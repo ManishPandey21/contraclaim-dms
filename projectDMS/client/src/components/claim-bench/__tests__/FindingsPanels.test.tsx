@@ -31,6 +31,7 @@ const api = vi.hoisted(() => ({
   generateStrategyNote: vi.fn(),
   fetchSubmission: vi.fn(),
   composeSubmission: vi.fn(),
+  editSubmissionSection: vi.fn(),
   downloadSubmission: vi.fn(),
 }));
 vi.mock("@/services/claim-findings-api", () => api);
@@ -432,6 +433,50 @@ describe("Internal analysis", () => {
 });
 
 describe("Submission", () => {
+  it("edits a section by paragraph, marks it edited, and asks before re-composing over an edit (4B-32)", async () => {
+    const base = submission({ version: 3 });
+    api.fetchSubmission.mockResolvedValue(base);
+    api.editSubmissionSection.mockResolvedValue(base);
+    api.composeSubmission.mockResolvedValue(base);
+    const first = mount(<SubmissionPanel claimId="c1" readOnly={false} />);
+    await userEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    const paragraph = screen.getByLabelText("Paragraph 1 of Executive summary");
+    await userEvent.clear(paragraph);
+    await userEvent.type(paragraph, "In short, the Contractor claims payment of INR 5,00,000.00.");
+    await userEvent.click(screen.getByRole("button", { name: "Save section" }));
+    await waitFor(() =>
+      expect(api.editSubmissionSection).toHaveBeenCalledWith("c1", "executive_summary", 3, [
+        "In short, the Contractor claims payment of INR 5,00,000.00.",
+      ])
+    );
+    first.unmount();
+
+    const edited = submission({ version: 4 });
+    edited.sections[0].section = { ...edited.sections[0].section, edited_by: "u1", edited_at: "2026-11-17T00:00:00",
+      paragraphs: [{ ...edited.sections[0].section.paragraphs[0], edited: true }] };
+    api.fetchSubmission.mockResolvedValue(edited);
+    api.composeSubmission.mockClear();
+    const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
+    mount(<SubmissionPanel claimId="c1" readOnly={false} />);
+    expect(await screen.findByText("Edited by hand")).toBeInTheDocument();
+    expect(screen.getByText("(edited)")).toBeInTheDocument();
+    const recompose = screen.getByRole("button", { name: "Re-compose Executive summary" });
+    await userEvent.click(recompose);
+    expect(api.composeSubmission).not.toHaveBeenCalled(); // declined: nothing replaced
+    await userEvent.click(recompose);
+    await waitFor(() =>
+      expect(api.composeSubmission).toHaveBeenCalledWith("c1", ["executive_summary"], ["executive_summary"])
+    );
+    confirm.mockRestore();
+  });
+
+  it("offers no editing to a viewer for whom evidence is restricted (4B-32, D-25)", async () => {
+    api.fetchSubmission.mockResolvedValue(submission({ restricted_items: 1 }));
+    mount(<SubmissionPanel claimId="c1" readOnly={false} />);
+    await screen.findByRole("heading", { name: /Executive summary/ });
+    expect(screen.queryByRole("button", { name: "Edit" })).not.toBeInTheDocument();
+  });
+
   it("says how many items are restricted, never which, and that changed evidence needs re-composing (4B-27)", async () => {
     api.fetchSubmission.mockResolvedValue(
       submission({
@@ -469,7 +514,7 @@ describe("Submission", () => {
     expect(screen.getByRole("button", { name: "Word" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "PDF" })).toBeDisabled();
     await userEvent.click(screen.getByRole("button", { name: "Re-compose Executive summary" }));
-    await waitFor(() => expect(api.composeSubmission).toHaveBeenCalledWith("c1", ["executive_summary"]));
+    await waitFor(() => expect(api.composeSubmission).toHaveBeenCalledWith("c1", ["executive_summary"], []));
     await waitFor(() => expect(screen.getByRole("button", { name: "Word" })).toBeEnabled());
   });
 

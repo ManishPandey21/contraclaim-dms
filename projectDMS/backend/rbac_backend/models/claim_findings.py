@@ -206,6 +206,8 @@ class ParagraphSource(BaseModel):
 class SubmissionParagraph(BaseModel):
     text: str
     sources: List[ParagraphSource] = Field(default_factory=list)
+    #: 4B-32: the text was changed by a person; its sources are those of the composed paragraph.
+    edited: bool = False
 
 
 class EvidenceItem(BaseModel):
@@ -229,6 +231,10 @@ class SubmissionSection(BaseModel):
     degraded_reason: Optional[str] = None
     step_id: Optional[str] = None
     composed_at: datetime = Field(default_factory=now_utc)
+    #: 4B-32: who last edited the section by hand, when, and the record (input hash) they edited against.
+    edited_by: Optional[str] = None
+    edited_at: Optional[datetime] = None
+    edit_basis_hash: Optional[str] = None
 
 
 class ClaimSubmission(BaseModel):
