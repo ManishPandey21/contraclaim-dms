@@ -189,6 +189,8 @@ class ClaimQuantum:
         # anything (D-14, 4B-17, C-07). Only line operations call this.
         if head.quantum_lines:
             head.amount_claimed = round(sum(line.amount for line in head.quantum_lines), 2)
+            # The build-up is the amount now; a legacy figure awaiting re-entry is superseded.
+            head.figures_to_reenter = [item for item in head.figures_to_reenter if item.field != "amount_claimed"]
         else:
             head.amount_claimed = None
 

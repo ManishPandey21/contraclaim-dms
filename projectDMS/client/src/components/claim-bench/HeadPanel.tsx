@@ -28,6 +28,7 @@ import {
   type ElementState,
   type HeadClassification,
   type HeadKind,
+  type FigureField,
   type HeadPatch,
 } from "@/types/claimBench";
 
@@ -118,6 +119,30 @@ const HeadPanel: React.FC<Props> = ({
 
   const disabled = readOnly || busy;
 
+  // A figure the claim record held in a form that could not be carried over.
+  // The person enters it above, or says this head does not need it.
+  const reenter = (field: FigureField, word: string) => {
+    const item = (head.figures_to_reenter ?? []).find((entry) => entry.field === field);
+    if (!item) return null;
+    return (
+      <div role="note" className="mt-1 rounded border border-amber-700 bg-amber-50 p-2 text-xs text-amber-900">
+        <p>
+          The claim record holds the {word} as “{item.recorded}”, which could not be read reliably. Enter the {word}
+          above.
+        </p>
+        <Button
+          size="sm"
+          variant="outline"
+          className="mt-1"
+          disabled={disabled}
+          onClick={() => onPatch({ figures_not_needed: [field] })}
+        >
+          This head has no {word}
+        </Button>
+      </div>
+    );
+  };
+
   return (
     <div className="space-y-4">
       <section aria-labelledby="head-facts-heading" className="space-y-3 rounded-lg border bg-card p-4">
@@ -172,6 +197,7 @@ const HeadPanel: React.FC<Props> = ({
             <Label htmlFor="head-days">Days claimed</Label>
             <Input id="head-days" inputMode="numeric" value={form.days} disabled={disabled} aria-invalid={days === undefined} onChange={(e) => setForm({ ...form, days: e.target.value })} />
             {days === undefined && <p className="pt-1 text-xs text-red-700">Whole days only.</p>}
+            {reenter("eot_days_claimed", "days")}
           </div>
           <div>
             <Label htmlFor="head-amount">Amount claimed</Label>
@@ -181,6 +207,7 @@ const HeadPanel: React.FC<Props> = ({
             ) : (
               amount != null && <p className="pt-1 text-xs text-muted-foreground">{formatCrore(amount, currency)}</p>
             )}
+            {reenter("amount_claimed", "amount")}
           </div>
         </div>
         {dirty && (

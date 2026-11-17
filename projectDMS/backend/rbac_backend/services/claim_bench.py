@@ -23,6 +23,7 @@ has already been authorised to act on.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
@@ -34,6 +35,8 @@ from ..models.claim import (
     ELEMENT_KEYS,
     ClaimBench,
     ClaimHead,
+    FigureField,
+    FigureToReenter,
     HeadElement,
     NoticeAssessment,
 )
@@ -42,6 +45,7 @@ from ..models.claim_skill_outputs import CLAIM_HEAD_TEST_SCHEMA_KEY, ClaimHeadTe
 from ..models.skill import SkillRunStep
 from ..utils.datetime import now_utc
 from .audit_event_service import AuditEventService
+from .claim_legacy import coerce_legacy_amount, coerce_legacy_days, unrecognised_status
 from .claim_notice_requirements import NoticeRequirementService
 from .claims_notice import assess_notice
 from .letter_drafting.clause_checker import normalize_cited_clause
@@ -126,6 +130,8 @@ class HeadPatchRequest(BaseModel):
     clear_amount: bool = False
     eot_days_claimed: Optional[int] = Field(default=None, ge=0)
     clear_eot_days: bool = False
+    # 4B-19: figures carried from the claim record that this head does not need.
+    figures_not_needed: List[FigureField] = Field(default_factory=list, max_length=2)
     classification: Optional[str] = None
     clear_classification: bool = False
 
@@ -248,25 +254,53 @@ def clean_clause_refs(values: Optional[List[str]]) -> List[str]:
     return seen[:30]
 
 
+def _legacy_clauses(value: Any) -> List[str]:
+    if isinstance(value, str):
+        return [part for part in re.split(r"[,;\n]", value) if part.strip()]
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value if isinstance(item, (str, int, float)) and not isinstance(item, bool)]
+    return []
+
+
 def initial_head(claim: Dict[str, Any]) -> ClaimHead:
-    """The one head a claim starts with, carried over from its register fields."""
-    amount = claim.get("amount_claimed")
-    days = claim.get("eot_days_claimed")
-    if days is not None and amount is None:
+    """The one head a claim starts with, carried over from its register fields.
+
+    The record may predate the board and hold figures in any form (D-10): they
+    are coerced only when that is unambiguous, otherwise left empty and listed
+    for re-entry."""
+    raw_amount = claim.get("amount_claimed")
+    raw_days = claim.get("eot_days_claimed")
+    amount, amount_recorded = coerce_legacy_amount(raw_amount)
+    days, days_recorded = coerce_legacy_days(raw_days)
+    # The kind follows what the record holds, including a figure awaiting re-entry.
+    has_amount = amount is not None or amount_recorded is not None
+    has_days = days is not None or days_recorded is not None
+    if has_days and not has_amount:
         kind = "time"
-    elif amount is not None and days is None and str(claim.get("type") or "") != "eot":
+    elif has_amount and not has_days and str(claim.get("type") or "") != "eot":
         kind = "cost"
     else:
         kind = "time_and_cost"
+    to_reenter = []
+    if amount_recorded is not None:
+        to_reenter.append(FigureToReenter(field="amount_claimed", recorded=amount_recorded))
+    if days_recorded is not None:
+        to_reenter.append(FigureToReenter(field="eot_days_claimed", recorded=days_recorded))
+    description = claim.get("description")
     return ClaimHead(
         head_id="H1",
-        title=str(claim.get("title") or "Head of claim")[:300],
+        title=(str(claim.get("title") or "").strip() or "Head of claim")[:300],
         kind=kind,  # type: ignore[arg-type]
-        event_summary=(str(claim.get("description")) if claim.get("description") else None),
-        clause_refs=clean_clause_refs(claim.get("contract_clauses")),
-        amount_claimed=amount if isinstance(amount, (int, float)) and amount >= 0 else None,
-        eot_days_claimed=days if isinstance(days, int) and days >= 0 else None,
+        event_summary=(str(description).strip()[:4000] or None) if description else None,
+        clause_refs=clean_clause_refs(_legacy_clauses(claim.get("contract_clauses"))),
+        amount_claimed=amount,
+        eot_days_claimed=days,
+        figures_to_reenter=to_reenter,
     )
+
+
+def _figure_settled(head: ClaimHead, field: str) -> None:
+    head.figures_to_reenter = [item for item in head.figures_to_reenter if item.field != field]
 
 
 def next_head_id(bench: ClaimBench) -> str:
@@ -283,9 +317,17 @@ def compute_gate(bench: ClaimBench) -> BenchGate:
     )
     unclassified = sum(1 for head in bench.heads if head.classification is None)
     stale = sum(1 for head in bench.heads if head.test_stale)
+    to_reenter = sum(len(head.figures_to_reenter) for head in bench.heads)
     blockers: List[str] = []
     if not bench.heads:
         blockers.append("Add at least one head of claim")
+    if to_reenter:
+        # D-10 (4B-19): a figure from the claim record that was not carried over is
+        # re-entered or set aside by a person before the position is locked.
+        blockers.append(
+            f"{to_reenter} figure{'' if to_reenter == 1 else 's'} from the claim record "
+            f"need{'s' if to_reenter == 1 else ''} re-entry"
+        )
     if undecided:
         blockers.append(f"{undecided} element{'' if undecided == 1 else 's'} still need your call")
     if unclassified:
@@ -563,6 +605,13 @@ class ClaimBenchService:
     def _read_only_reason(claim: Dict[str, Any]) -> Optional[str]:
         if claim.get("evidence_frozen_at"):
             return "This claim's evidence is frozen, so its heads can no longer be changed."
+        status_text = unrecognised_status(claim)
+        if status_text:
+            # D-10 (4B-19): nothing is built on a status the application cannot place.
+            return (
+                f"This claim's recorded status (\"{status_text[:40]}\") is not one the Bench recognises, so it "
+                "opens read-only until the status on the claim record is corrected."
+            )
         return None
 
     def _ensure_writable(self, claim: Dict[str, Any], bench: ClaimBench, client_version: int) -> None:
@@ -849,6 +898,14 @@ class ClaimBenchService:
                 head.amount_claimed = None
             elif request.amount_claimed is not None and request.amount_claimed != head.amount_claimed:
                 head.amount_claimed, facts_changed = request.amount_claimed, True
+            # A figure awaiting re-entry is settled by entering it or by saying it is
+            # not needed. Saving the head with the field still empty does neither.
+            if request.amount_claimed is not None:
+                _figure_settled(head, "amount_claimed")
+            if request.eot_days_claimed is not None:
+                _figure_settled(head, "eot_days_claimed")
+            for field in request.figures_not_needed:
+                _figure_settled(head, field)
             if request.clear_eot_days:
                 facts_changed = facts_changed or head.eot_days_claimed is not None
                 head.eot_days_claimed = None
@@ -1075,6 +1132,9 @@ __all__ = [
     "apply_fact_guards",
     "claim_bench_rollout",
     "compute_gate",
+    "coerce_legacy_amount",
+    "coerce_legacy_days",
     "initial_head",
+    "unrecognised_status",
     "record_checks",
 ]

@@ -39,6 +39,7 @@ from ..services.claim_contracts import (
     resolve_for_new_claim,
     valid_contracts,
 )
+from ..services.claim_legacy import coerce_legacy_amount, coerce_legacy_days, unrecognised_status
 from ..services.claim_service import ClaimService
 from ..services.claim_notice_requirements import NoticeRequirementService
 from ..services.claims_notice import assess_notice
@@ -111,8 +112,29 @@ async def _read_model(
     claim: dict, linked_document_ids: list, windows: _NoticeWindows, contract_name: Optional[str] = None
 ) -> ClaimRead:
     presented = {**claim, "linked_document_ids": linked_document_ids}
-    for derived in ("notice_assessment", "allowed_status_transitions", "head_count", "bench_stage", "contract_label"):
+    for derived in (
+        "notice_assessment", "allowed_status_transitions", "head_count", "bench_stage", "contract_label", "record_notes"
+    ):
         presented.pop(derived, None)
+    # D-10 (4B-19): a legacy record's figures and status are shown without guessing,
+    # so one such row cannot make the register unreadable for the whole project.
+    notes: List[str] = []
+    amount, amount_recorded = coerce_legacy_amount(claim.get("amount_claimed"))
+    days, days_recorded = coerce_legacy_days(claim.get("eot_days_claimed"))
+    presented["amount_claimed"], presented["eot_days_claimed"] = amount, days
+    if amount_recorded is not None:
+        notes.append(f'The amount is recorded as "{amount_recorded}", which cannot be read as a figure. It needs re-entry.')
+    if days_recorded is not None:
+        notes.append(f'The days are recorded as "{days_recorded}", which is not a whole number of days. They need re-entry.')
+    status_text = unrecognised_status(claim)
+    if status_text:
+        presented["status"] = status_text[:40]
+        notes.append(
+            f'The status "{status_text[:40]}" is not one the application recognises. '
+            "The claim is read-only until it is corrected."
+        )
+    elif not presented.get("status"):
+        presented["status"] = ClaimStatus.DRAFT
     # The board is read through the Bench; the register only needs its outline.
     bench = presented.pop("bench", None) or {}
     return ClaimRead(
@@ -124,6 +146,7 @@ async def _read_model(
         ),
         allowed_status_transitions=allowed_next_statuses(claim.get("status")),
         contract_label=contract_name,
+        record_notes=notes,
         head_count=len(bench.get("heads") or []),
         bench_stage=bench.get("stage") if bench.get("heads") else None,
     )

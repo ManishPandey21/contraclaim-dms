@@ -10,7 +10,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -123,6 +123,18 @@ def _empty_elements() -> Dict[str, HeadElement]:
     return {key: HeadElement() for key in ELEMENT_KEYS}
 
 
+FigureField = Literal["amount_claimed", "eot_days_claimed"]
+
+
+class FigureToReenter(BaseModel):
+    """A figure on the claim record that could not be carried onto the board
+    safely (plan D-10, 4B-19). The head's figure is left empty and the recorded
+    text is kept here, so a person re-enters it and nothing is guessed or lost."""
+
+    field: FigureField
+    recorded: str = Field(..., max_length=80)
+
+
 class ClaimHead(BaseModel):
     head_id: str
     title: str = Field(..., min_length=1, max_length=300)
@@ -131,6 +143,8 @@ class ClaimHead(BaseModel):
     clause_refs: List[str] = Field(default_factory=list)
     amount_claimed: Optional[float] = Field(default=None, ge=0)
     eot_days_claimed: Optional[int] = Field(default=None, ge=0)
+    # Legacy figures that need a person to re-enter them. Locking waits on these.
+    figures_to_reenter: List[FigureToReenter] = Field(default_factory=list)
     elements: Dict[str, HeadElement] = Field(default_factory=_empty_elements)
     proposed_classification: Optional[HeadClassification] = None
     classification: Optional[HeadClassification] = None
@@ -294,6 +308,11 @@ class NoticeAssessment(BaseModel):
 class ClaimRead(Claim):
     """A claim as returned by the API, with fields derived at read time."""
 
+    # A legacy record may hold a status outside the list (D-10, 4B-19). It is shown
+    # as recorded, with no moves offered, rather than failing the whole register.
+    status: Union[ClaimStatus, str] = ClaimStatus.DRAFT  # type: ignore[assignment]
+    # What on this record needs a person's attention, in plain words.
+    record_notes: List[str] = Field(default_factory=list)
     notice_assessment: Optional[NoticeAssessment] = None
     allowed_status_transitions: List[ClaimStatus] = Field(default_factory=list)
     # The contract's name, for display. Null when the claim has no contract.

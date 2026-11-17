@@ -85,6 +85,8 @@ export interface ClaimDTO {
   /** The contract the claim is made under; null on a claim with none identified (4B-18). */
   contract_id?: string | null;
   contract_label?: string | null;
+  /** What on this record needs attention, e.g. a legacy figure that needs re-entry. */
+  record_notes?: string[];
 }
 
 export interface ClaimPayload {
