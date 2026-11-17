@@ -282,6 +282,19 @@ class ClaimSignalService:
         )
         if existing:
             return existing, False
+        # The contract (D-23): the source record's own, if it is one of the project's
+        # contracts the person can read; else the only one; else none. There is no
+        # form to ask on, so several contracts and none named leaves it unidentified.
+        from .claim_contracts import resolve_for_new_claim, valid_contracts
+        from .policy_service import PolicyService
+
+        options = await valid_contracts(
+            self.db, PolicyService(db=self.db), current_user,
+            organization_id=organization_id, project_id=signal.project_id,
+        )
+        source_contract = str(source.get("contract_id") or "").strip()
+        named = source_contract if source_contract in {item.contract_id for item in options} else None
+        contract_id = resolve_for_new_claim(named, options, must_choose=False)
         payload = ClaimCreate(
             title=signal.title,
             type=signal.claim_type,
@@ -290,6 +303,7 @@ class ClaimSignalService:
             event_date=signal.event_date,
             organization_id=organization_id,
             project_id=signal.project_id,
+            contract_id=contract_id,
             origin=ClaimOrigin(type=source_type, id=signal.source_id, label=signal.label),  # type: ignore[arg-type]
         )
         try:

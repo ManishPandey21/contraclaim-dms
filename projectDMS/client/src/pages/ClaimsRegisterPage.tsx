@@ -69,6 +69,7 @@ import { toast } from "sonner";
 import {
   ClaimDTO,
   ClaimPayload,
+  type ClaimContractOptions,
   ClaimStatus,
   ClaimType,
   createClaim,
@@ -94,6 +95,7 @@ import {
   parseClauseList,
   type ClaimSla,
 } from "@/lib/claims-helpers";
+import ClaimContractField from "@/components/claims/ClaimContractField";
 import ClaimStatusPill from "@/components/claims/ClaimStatusPill";
 import ClaimSignalsStrip from "@/components/claim-bench/ClaimSignalsStrip";
 import EscalateDialog from "@/components/claim-bench/EscalateDialog";
@@ -142,6 +144,7 @@ interface ClaimForm {
   eot_days_claimed?: number;
   contract_clauses: string;
   project_id: string;
+  contract_id: string;
   status: ClaimStatus;
 }
 
@@ -159,6 +162,7 @@ const EMPTY_FORM: ClaimForm = {
   eot_days_claimed: undefined,
   contract_clauses: "",
   project_id: "",
+  contract_id: "",
   status: "draft",
 };
 
@@ -174,6 +178,7 @@ const ClaimsRegisterPage: React.FC = () => {
   const fromBoard = Boolean(editingId && editingClaim?.bench_stage);
   const [deleteTarget, setDeleteTarget] = useState<ClaimDTO | null>(null);
   const [form, setForm] = useState<ClaimForm>({ ...EMPTY_FORM });
+  const [contractOptions, setContractOptions] = useState<ClaimContractOptions | null>(null);
   const [saving, setSaving] = useState(false);
   const [approvalClaim, setApprovalClaim] = useState<ClaimDTO | null>(null);
   const [assessClaim, setAssessClaim] = useState<ClaimDTO | null>(null);
@@ -252,6 +257,7 @@ const ClaimsRegisterPage: React.FC = () => {
       eot_days_claimed: c.eot_days_claimed ?? undefined,
       contract_clauses: c.contract_clauses.join(", "),
       project_id: c.project_id || "",
+      contract_id: c.contract_id || "",
       status: c.status,
     });
     setDialogOpen(true);
@@ -260,6 +266,11 @@ const ClaimsRegisterPage: React.FC = () => {
   const submit = async () => {
     if (!form.title.trim()) {
       toast.error("Title is required");
+      return;
+    }
+    // Several contracts on the project: one must be chosen for a new claim (D-23).
+    if (!editingId && contractOptions?.must_choose && !form.contract_id) {
+      toast.error("Choose the contract this claim is made under");
       return;
     }
     try {
@@ -283,6 +294,8 @@ const ClaimsRegisterPage: React.FC = () => {
         eot_days_claimed: fromBoard ? undefined : form.eot_days_claimed,
         contract_clauses: parseClauseList(form.contract_clauses),
         project_id: form.project_id || undefined,
+        // A contract already on the claim is fixed and is not sent again.
+        contract_id: editingClaim?.contract_id ? undefined : form.contract_id || undefined,
         status: form.status,
       };
       if (editingId) await updateClaim(editingId, payload);
@@ -481,7 +494,12 @@ const ClaimsRegisterPage: React.FC = () => {
                       </TableCell>
                     )}
                     <TableCell className="font-mono text-xs">{c.claim_ref || "—"}</TableCell>
-                    <TableCell className="font-medium">{c.title}</TableCell>
+                    <TableCell className="font-medium">
+                      {c.title}
+                      {c.contract_label && (
+                        <div className="text-xs font-normal text-muted-foreground">{c.contract_label}</div>
+                      )}
+                    </TableCell>
                     <TableCell>{typeLabel(c.type)}</TableCell>
                     <TableCell>
                       {c.allowed_status_transitions.length === 0 ? (
@@ -712,6 +730,17 @@ const ClaimsRegisterPage: React.FC = () => {
                 <Input id="claim-response-due" type="date" value={form.response_due_date} onChange={(e) => setForm({ ...form, response_due_date: e.target.value })} />
               </div>
             </div>
+            <ClaimContractField
+              projectId={form.project_id}
+              value={form.contract_id}
+              onChange={(contractId) => setForm((current) => ({ ...current, contract_id: contractId }))}
+              onOptions={setContractOptions}
+              fixed={
+                editingClaim?.contract_id
+                  ? { contractId: editingClaim.contract_id, label: editingClaim.contract_label || editingClaim.contract_id }
+                  : null
+              }
+            />
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <Label>Project</Label>

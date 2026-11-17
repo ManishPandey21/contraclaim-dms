@@ -96,6 +96,10 @@ export const ERROR_CODE_MESSAGES = {
   perspective_reason_required: "Say why the party this project acts for is being changed (at least 10 characters).",
   perspective_changed_concurrently: "Someone changed this at the same time. Reload and try again.",
   perspective_default_needs_organisation_admin: "Only an administrator of the organisation can set its default.",
+  claim_contract_required: "This project has more than one contract. Choose the contract this claim is made under.",
+  claim_contract_not_valid: "That contract is not one of this project's contracts, or you cannot read it.",
+  claim_contract_fixed:
+    "A claim's contract cannot be changed once it is set: the records linked to it belong to that contract.",
 } as const;
 
 export type StatusKind = "claim" | "arbitration_case" | "arbitration_draft";

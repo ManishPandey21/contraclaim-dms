@@ -7,6 +7,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 /** 4B-40: several claims of one project are escalated together from the register. */
 const api = vi.hoisted(() => ({
   getClaims: vi.fn(),
+  // The form reads the project's contracts (4B-18); none here, so nothing is asked.
+  fetchClaimContractOptions: vi.fn().mockResolvedValue({ options: [], selected: null, must_choose: false }),
   updateClaim: vi.fn(),
   createClaim: vi.fn(),
   deleteClaim: vi.fn(),

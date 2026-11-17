@@ -11,6 +11,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  */
 const api = vi.hoisted(() => ({
   getClaims: vi.fn(),
+  // The form reads the project's contracts (4B-18); none here, so nothing is asked.
+  fetchClaimContractOptions: vi.fn().mockResolvedValue({ options: [], selected: null, must_choose: false }),
   updateClaim: vi.fn(),
   createClaim: vi.fn(),
   deleteClaim: vi.fn(),

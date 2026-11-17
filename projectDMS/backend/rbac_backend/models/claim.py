@@ -196,6 +196,9 @@ class ClaimBase(BaseModel):
     type_metadata: Dict[str, Any] = Field(default_factory=dict)
     organization_id: Optional[str] = None
     project_id: Optional[str] = None
+    # The contract this claim is made under: the project's Contract Master entry
+    # (plan 4B-18, D-23). Null on a legacy claim, or where none was identifiable.
+    contract_id: Optional[str] = Field(default=None, max_length=120)
     origin: Optional[ClaimOrigin] = None
 
 
@@ -224,6 +227,8 @@ class ClaimUpdate(BaseModel):
     linked_document_ids: Optional[List[str]] = None
     linked_letter_ids: Optional[List[str]] = None
     type_metadata: Optional[Dict[str, Any]] = None
+    # Sets the contract of a claim that has none; an existing one is not changed (D-23).
+    contract_id: Optional[str] = Field(default=None, max_length=120)
 
 
 class ClaimStatusUpdate(BaseModel):
@@ -291,6 +296,8 @@ class ClaimRead(Claim):
 
     notice_assessment: Optional[NoticeAssessment] = None
     allowed_status_transitions: List[ClaimStatus] = Field(default_factory=list)
+    # The contract's name, for display. Null when the claim has no contract.
+    contract_label: Optional[str] = None
     # Summary of the board for the register; the board itself is read through the Bench.
     head_count: int = 0
     bench_stage: Optional[BenchStage] = None

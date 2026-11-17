@@ -82,10 +82,15 @@ export interface ClaimDTO {
   evidence_frozen_at?: string | null;
   evidence_frozen_by?: string | null;
   evidence_freeze_reason?: string | null;
+  /** The contract the claim is made under; null on a claim with none identified (4B-18). */
+  contract_id?: string | null;
+  contract_label?: string | null;
 }
 
 export interface ClaimPayload {
   title: string;
+  /** The contract the claim is made under. On an update it can only fill an empty one (4B-18). */
+  contract_id?: string;
   type?: ClaimType;
   claim_ref?: string;
   /** null clears the field on an update (4B-12); undefined leaves it unchanged. */
@@ -126,6 +131,22 @@ export async function getClaims(params?: {
 export async function getClaim(id: string): Promise<ClaimDTO> {
   const { data } = await api.get(`/claims/${id}`);
   return normalize(data);
+}
+
+export interface ClaimContractOptions {
+  options: Array<{ contract_id: string; label: string }>;
+  /** The contract used when none is chosen: the project's only one. */
+  selected: string | null;
+  /** Several contracts exist, so one must be chosen. */
+  must_choose: boolean;
+}
+
+/** The contracts a claim on this project can be made under, for the signed-in person. */
+export async function fetchClaimContractOptions(projectId: string): Promise<ClaimContractOptions> {
+  const { data } = await api.get<ClaimContractOptions>("/claims/contract-options", {
+    params: { project_id: projectId },
+  });
+  return data;
 }
 
 export async function createClaim(payload: ClaimPayload): Promise<ClaimDTO> {

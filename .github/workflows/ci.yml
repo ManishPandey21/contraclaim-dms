@@ -252,6 +252,7 @@ jobs:
             backend/rbac_backend/tests/integration/test_effective_permission_names_mongo.py
             backend/rbac_backend/tests/integration/test_reviewer_assignments_mongo.py
             backend/rbac_backend/tests/integration/test_project_perspective_mongo.py
+            backend/rbac_backend/tests/integration/test_claim_contract_identity_mongo.py
             backend/rbac_backend/tests/integration/test_skill_publication_transactions_mongo.py
             backend/rbac_backend/tests/integration/test_pleaded_heads_end_to_end_mongo.py
           )

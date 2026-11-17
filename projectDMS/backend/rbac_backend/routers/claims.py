@@ -31,6 +31,14 @@ from ..models.claim import (
 from ..services.approval_service import ApprovalError, ApprovalService
 from ..services.audit_event_service import AuditEventService
 from ..services.claim_assessment_service import ClaimAssessmentService
+from ..services.claim_contracts import (
+    ClaimContractOptions,
+    contract_label,
+    describe as describe_contract_options,
+    resolve_for_existing_claim,
+    resolve_for_new_claim,
+    valid_contracts,
+)
 from ..services.claim_service import ClaimService
 from ..services.claim_notice_requirements import NoticeRequirementService
 from ..services.claims_notice import assess_notice
@@ -74,9 +82,36 @@ class _NoticeWindows:
         return self._cache[organization_id]
 
 
-async def _read_model(claim: dict, linked_document_ids: list, windows: _NoticeWindows) -> ClaimRead:
+class _ContractLabels:
+    """Per-request cache of each project's contract names (plan 4B-18)."""
+
+    def __init__(self, db) -> None:
+        self._db = db
+        self._contract_labels: dict[tuple, dict] = {}
+
+    async def contract_label_for(self, claim: dict):
+        """The name of the claim's contract, read once per project in a request."""
+        contract_id = str(claim.get("contract_id") or "")
+        if not contract_id:
+            return None
+        scope = (str(claim.get("organization_id") or ""), str(claim.get("project_id") or ""))
+        if scope not in self._contract_labels:
+            query = {"project_id": scope[1]}
+            if scope[0]:
+                query["organization_id"] = scope[0]
+            rows = await self._db.contract_master.find(
+                query, {"contract_id": 1, "contract_name": 1, "contract_code": 1}
+            ).to_list(length=200)
+            self._contract_labels[scope] = {str(row.get("contract_id") or ""): contract_label(row) for row in rows}
+        # A contract whose entry has since gone is still named by its key, never hidden.
+        return self._contract_labels[scope].get(contract_id) or contract_id
+
+
+async def _read_model(
+    claim: dict, linked_document_ids: list, windows: _NoticeWindows, contract_name: Optional[str] = None
+) -> ClaimRead:
     presented = {**claim, "linked_document_ids": linked_document_ids}
-    for derived in ("notice_assessment", "allowed_status_transitions", "head_count", "bench_stage"):
+    for derived in ("notice_assessment", "allowed_status_transitions", "head_count", "bench_stage", "contract_label"):
         presented.pop(derived, None)
     # The board is read through the Bench; the register only needs its outline.
     bench = presented.pop("bench", None) or {}
@@ -88,6 +123,7 @@ async def _read_model(claim: dict, linked_document_ids: list, windows: _NoticeWi
             requirement=await windows.requirement_for(claim),
         ),
         allowed_status_transitions=allowed_next_statuses(claim.get("status")),
+        contract_label=contract_name,
         head_count=len(bench.get("heads") or []),
         bench_stage=bench.get("stage") if bench.get("heads") else None,
     )
@@ -100,7 +136,9 @@ async def _present_claim(claim: dict, db, current_user: CurrentUser) -> ClaimRea
         str(claim.get("_id") or ""),
         legacy_document_ids=claim.get("linked_document_ids") or [],
     )
-    return await _read_model(claim, linked, _NoticeWindows(db))
+    return await _read_model(
+        claim, linked, _NoticeWindows(db), await _ContractLabels(db).contract_label_for(claim)
+    )
 
 
 async def _present_claims(claims: list[dict], db, current_user: CurrentUser) -> list[ClaimRead]:
@@ -108,8 +146,14 @@ async def _present_claims(claims: list[dict], db, current_user: CurrentUser) -> 
         db
     ).authorized_document_ids_for_claims(current_user, claims)
     windows = _NoticeWindows(db)
+    labels = _ContractLabels(db)
     return [
-        await _read_model(claim, ids_by_claim.get(str(claim.get("_id") or ""), []), windows)
+        await _read_model(
+            claim,
+            ids_by_claim.get(str(claim.get("_id") or ""), []),
+            windows,
+            await labels.contract_label_for(claim),
+        )
         for claim in claims
     ]
 
@@ -259,6 +303,36 @@ async def list_claims(
     return await _present_claims(claims, db, current_user)
 
 
+@router.get("/claims/contract-options", response_model=ClaimContractOptions)
+@handle_exceptions
+async def claim_contract_options(
+    project_id: str = Query(..., min_length=1),
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
+):
+    """The contracts a new claim on this project can be made under (plan 4B-18, D-23).
+
+    One contract: it is the selection. Several: one must be chosen. None the
+    caller can read: the claim is created with no contract and says so.
+    """
+    await selection.require_project(project_id, None)
+    project = await db.projects.find_one({"_id": project_id}, {"organization_id": 1})
+    organization_id = str((project or {}).get("organization_id") or "") or getattr(current_user, "organization_id", None)
+    await policy.authorize(
+        current_user,
+        Permissions.CLAIM_VIEW,
+        resource_type="claim",
+        organization_id=organization_id,
+        project_id=project_id,
+        audit=False,
+    )
+    return describe_contract_options(
+        await valid_contracts(db, policy, current_user, organization_id=organization_id, project_id=project_id)
+    )
+
+
 @router.post("/claims", response_model=ClaimRead, status_code=status.HTTP_201_CREATED)
 @handle_exceptions
 async def create_claim(
@@ -292,6 +366,11 @@ async def create_claim(
         resource_type="claim",
         organization_id=org,
         project_id=payload.project_id,
+    )
+    # The contract: the only one, the one chosen, or none identifiable (D-23, AQ-1).
+    payload.contract_id = resolve_for_new_claim(
+        payload.contract_id,
+        await valid_contracts(db, policy, current_user, organization_id=org, project_id=payload.project_id),
     )
     legacy_ids = list(payload.linked_document_ids)
     claim_service = ClaimService(db)
@@ -361,6 +440,20 @@ async def update_claim(
             "This claim's amount and days come from its heads on the Claim Bench "
             f"({', '.join(derived)}). Change them there.",
         )
+    if changes.get("contract_id") is not None:
+        # A claim with no contract may be given one; a contract already set stays (D-23).
+        changes["contract_id"] = resolve_for_existing_claim(
+            claim,
+            changes["contract_id"],
+            await valid_contracts(
+                db, policy, current_user,
+                organization_id=claim.get("organization_id"), project_id=claim.get("project_id"),
+            ),
+        )
+        if changes["contract_id"] == claim.get("contract_id"):
+            changes.pop("contract_id")
+    else:
+        changes.pop("contract_id", None)
     clear = sorted(key for key, value in changes.items() if value is None and key in CLEARABLE_FIELDS)
     expected = None
     if changes.get("status") is not None:

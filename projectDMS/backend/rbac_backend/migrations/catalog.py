@@ -147,6 +147,10 @@ from .v20261121_0002_reviewer_role_assignment_indexes import DESCRIPTION as REVI
 from .v20261121_0002_reviewer_role_assignment_indexes import NAME as REVIEWER_ASSIGNMENTS_NAME
 from .v20261121_0002_reviewer_role_assignment_indexes import VERSION as REVIEWER_ASSIGNMENTS_VERSION
 from .v20261121_0002_reviewer_role_assignment_indexes import upgrade as upgrade_reviewer_assignments
+from .v20261122_0001_claim_contract_index import DESCRIPTION as CLAIM_CONTRACT_DESCRIPTION
+from .v20261122_0001_claim_contract_index import NAME as CLAIM_CONTRACT_NAME
+from .v20261122_0001_claim_contract_index import VERSION as CLAIM_CONTRACT_VERSION
+from .v20261122_0001_claim_contract_index import upgrade as upgrade_claim_contract
 
 
 MIGRATIONS = [
@@ -329,5 +333,11 @@ MIGRATIONS = [
         name=REVIEWER_ASSIGNMENTS_NAME,
         description=REVIEWER_ASSIGNMENTS_DESCRIPTION,
         upgrade=upgrade_reviewer_assignments,
+    ),
+    Migration(
+        version=CLAIM_CONTRACT_VERSION,
+        name=CLAIM_CONTRACT_NAME,
+        description=CLAIM_CONTRACT_DESCRIPTION,
+        upgrade=upgrade_claim_contract,
     ),
 ]
