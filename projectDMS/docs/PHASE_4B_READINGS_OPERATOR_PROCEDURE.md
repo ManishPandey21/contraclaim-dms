@@ -1,4 +1,4 @@
-# Phase 4b readings P-01 to P-15: operator procedure and evidence template
+# Phase 4b readings P-01 to P-16: operator procedure and evidence template
 
 Date: 2026-11-17 · Owner decision AQ-11 (2026-11-17): the readings remain mandatory.
 An unavailable reading is recorded as **not read**, with its reason. It is never
@@ -114,6 +114,7 @@ P-12 case-less draft callers, 90 days        |  |  |
 P-13 arbitration cases hidden by null deleted_at |  |  |
 P-14 notice requirements by status and origin |  |  |
 P-15 extraction-review holders by path       |  |  |
+P-16 second-contract key dates from main LOA  |  |  |
 
 Anything unexpected (free text, no names, no ids):
 ```
@@ -142,6 +143,7 @@ exists and is tested against a disposable database only, which is not a reading.
 | P-13 | Not read | Not read | C-25: whether the arbitration case-lookup hotfix proposal is taken forward |
 | P-14 | Not read | Not read | 4B-14: whether legacy notice periods need re-verification |
 | P-15 | Not read | Not read | 4B-49 steps 2 to 5: no existing extraction-review access is withdrawn before it (AQ-12) |
+| P-16 | Not read | Not read | KD-1: whether any stored key date of a contract other than the main one was calculated from the main contract's LOA, and so whether a correction (recalculation, with approval) is needed at all |
 
 **What continues without the readings:** code, tests and migrations that add
 indexes or seed skip-existing identities, built and proven against representative

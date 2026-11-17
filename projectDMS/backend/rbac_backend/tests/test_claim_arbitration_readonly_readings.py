@@ -159,3 +159,18 @@ def test_the_script_header_names_section_f_and_the_logs_verb() -> None:
     header = CHECKS.read_text().split("set -u", 1)[0]
     assert "F. Phase 4b readings" in header
     assert "`logs`" in header
+
+
+def test_p16_restates_the_key_date_formula_exactly() -> None:
+    # The reader runs on images without the service, so it restates calculate_key_date;
+    # the two must agree on both week bases.
+    from datetime import datetime
+
+    from rbac_backend.services.key_date_service import calculate_key_date
+
+    reader = _reader()
+    start = datetime(2026, 1, 5)
+    for basis in ("loa_plus_weeks", "loa_plus_weeks_minus_1"):
+        for week in (1, 4, 52, 104):
+            assert reader._kd_calc(start, week, basis) == calculate_key_date(start, week, basis), (basis, week)
+    assert reader._kd_calc(start, "not a week", "loa_plus_weeks") is None

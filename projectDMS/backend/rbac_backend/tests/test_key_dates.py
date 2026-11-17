@@ -555,3 +555,89 @@ def test_csv_export_has_header_and_rows():
     lines = csv_text.strip().splitlines()
     assert lines[0].startswith("Ref,Title,Week")
     assert "MS-1" in lines[1] and "Foundation" in lines[1] and "overdue" in lines[1]
+
+
+# --------------------------------------------------------------------------- #
+# KD-1 (owner decision 2026-11-17, High): a second contract's key dates were
+# calculated from the main contract's LOA date and week basis.
+# --------------------------------------------------------------------------- #
+DEPOT_LOA = START + timedelta(days=100)
+
+
+async def _two_contracts(db) -> None:
+    await db.contract_master.insert_one({
+        "_id": "cm-primary", "project_id": "proj-A", "contract_id": "primary", "organization_id": "org-A",
+        "contract_start_date": START, "week_basis": "loa_plus_weeks",
+    })
+    await db.contract_master.insert_one({
+        "_id": "cm-depot", "project_id": "proj-A", "contract_id": "pkg-depot", "organization_id": "org-A",
+        "contract_start_date": DEPOT_LOA, "week_basis": "loa_plus_weeks_minus_1",
+    })
+
+
+@pytest.mark.asyncio
+async def test_kd1_a_second_contracts_milestone_uses_its_own_loa_and_basis():
+    db = _DB()
+    svc = KeyDateService(db)
+    await _two_contracts(db)
+    main = await svc.create_milestone(
+        KeyDateMilestoneCreate(title="Main", project_id="proj-A", contractual_week_number=4), _user()
+    )
+    depot = await svc.create_milestone(
+        KeyDateMilestoneCreate(title="Depot", project_id="proj-A", contract_id="pkg-depot", contractual_week_number=4),
+        _user(),
+    )
+    assert main["calculated_key_date"] == START + timedelta(days=28)  # main: LOA + 4 weeks
+    # Depot: its own LOA, its own basis, (4 - 1) weeks. Before KD-1: START + 28 days.
+    assert depot["calculated_key_date"] == DEPOT_LOA + timedelta(days=21)
+
+    # Changing the week recalculates from the depot contract too.
+    updated = await svc.update(depot, {"contractual_week_number": 6}, _user())
+    assert updated["calculated_key_date"] == DEPOT_LOA + timedelta(days=35)
+
+
+@pytest.mark.asyncio
+async def test_kd1_a_second_contract_without_its_own_loa_never_borrows_the_main_one():
+    db = _DB()
+    svc = KeyDateService(db)
+    await _two_contracts(db)
+    with pytest.raises(KeyDateError, match="contract pkg-civil has no contract start date"):
+        await svc.create_milestone(
+            KeyDateMilestoneCreate(title="Civil", project_id="proj-A", contract_id="pkg-civil", contractual_week_number=4),
+            _user(),
+        )
+    # An explicit start date given for the calculation is used; still not the main contract's.
+    given = START + timedelta(days=7)
+    civil = await svc.create_milestone(
+        KeyDateMilestoneCreate(title="Civil", project_id="proj-A", contract_id="pkg-civil", contractual_week_number=4,
+                               project_start_date=given),
+        _user(),
+    )
+    assert civil["calculated_key_date"] == given + timedelta(days=28)
+
+
+@pytest.mark.asyncio
+async def test_kd1_recalculation_uses_each_contracts_basis_and_skips_one_without_a_loa():
+    db = _DB()
+    svc = KeyDateService(db)
+    await _two_contracts(db)
+    main = await svc.create_milestone(
+        KeyDateMilestoneCreate(title="Main", project_id="proj-A", contractual_week_number=4), _user()
+    )
+    depot = await svc.create_milestone(
+        KeyDateMilestoneCreate(title="Depot", project_id="proj-A", contract_id="pkg-depot", contractual_week_number=4),
+        _user(),
+    )
+    given = START + timedelta(days=7)
+    civil = await svc.create_milestone(
+        KeyDateMilestoneCreate(title="Civil", project_id="proj-A", contract_id="pkg-civil", contractual_week_number=4,
+                               project_start_date=given),
+        _user(),
+    )
+    result = await svc.recalculate_project({}, "proj-A", _user())
+    assert result["updated"] == 2 and result["skipped_by_contract"] == {"pkg-civil": 1}
+    assert (await svc.get(main["_id"]))["original_planned_key_date"] == START + timedelta(days=28)
+    assert (await svc.get(depot["_id"]))["original_planned_key_date"] == DEPOT_LOA + timedelta(days=21)
+    # The contract with no LOA of its own keeps its stored dates; recalculation never rewrites it.
+    after_civil = await svc.get(civil["_id"])
+    assert after_civil["original_planned_key_date"] == civil["original_planned_key_date"] == given + timedelta(days=28)

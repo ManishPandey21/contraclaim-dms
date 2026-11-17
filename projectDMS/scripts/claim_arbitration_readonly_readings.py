@@ -1,4 +1,4 @@
-"""Phase 4b readings P-02 to P-15: claims, arbitration, roles and skills, read-only.
+"""Phase 4b readings P-02 to P-16: claims, arbitration, roles and skills, read-only.
 
 Plan: docs/superpowers/specs/2026-11-16-claim-bench-phase-4b-hardening.md, §8.1.
 
@@ -424,6 +424,109 @@ def read_notice_requirements(db: ReadOnlyDatabase) -> Dict[str, Any]:
     )
 
 
+#: KD-1: the two week bases services/key_date_service.calculate_key_date knows.
+_KD_LOA_PLUS = "loa_plus_weeks"
+_KD_LOA_PLUS_MINUS_1 = "loa_plus_weeks_minus_1"
+
+
+def _kd_date(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None)
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=None)
+        except ValueError:
+            return None
+    return None
+
+
+def _kd_calc(start: datetime, week: Any, basis: str) -> Optional[datetime]:
+    """calculate_key_date, restated here so the script runs on an image without it."""
+    try:
+        weeks = int(week)
+    except (TypeError, ValueError):
+        return None
+    if basis == _KD_LOA_PLUS_MINUS_1:
+        weeks -= 1
+    return start + timedelta(days=weeks * 7)
+
+
+def read_key_date_contract_basis(db: ReadOnlyDatabase) -> Dict[str, Any]:
+    """KD-1 (High): key dates of a contract other than the main one, calculated from the
+    main contract's LOA date and week basis before the fix.
+
+    Counts only. For each milestone of a contract other than ``"primary"``, its stored
+    ``calculated_key_date`` is compared with the date from its own contract's Contract
+    Master entry and with the date from the main contract's. A milestone that matches
+    the main contract's and not its own was calculated wrongly; one with no approved
+    revision (``current_revision`` 0) has its baseline from that calculation too, and
+    is the one a recalculation would change. Nothing is changed by reading this.
+    """
+    names = db.list_collection_names()
+    if "key_date_milestones" not in names:
+        return _reading("P-16", key_date_milestones_collection_present=False)
+    masters: Dict[tuple, Dict[str, Any]] = {}
+    contracts_per_project: Dict[str, set] = {}
+    if "contract_master" in names:
+        for row in db["contract_master"].find({}, {"project_id": 1, "contract_id": 1, "contract_start_date": 1, "week_basis": 1}):
+            project, contract = str(row.get("project_id") or ""), str(row.get("contract_id") or "")
+            masters[(project, contract)] = row
+            contracts_per_project.setdefault(project, set()).add(contract)
+    milestones = db["key_date_milestones"]
+    counts = {
+        "secondary_milestones": 0,
+        "own_contract_has_no_loa": 0,
+        "matches_own_contract": 0,
+        "matches_main_contract_not_own": 0,
+        "matches_neither": 0,
+        "no_stored_calculation": 0,
+    }
+    wrong_unrevised = 0
+    wrong_projects: set = set()
+    projection = {"project_id": 1, "contract_id": 1, "contractual_week_number": 1,
+                  "calculated_key_date": 1, "current_revision": 1}
+    for row in milestones.find({"contract_id": {"$nin": [None, "", "primary"]}}, projection):
+        counts["secondary_milestones"] += 1
+        project, contract = str(row.get("project_id") or ""), str(row.get("contract_id"))
+        stored = _kd_date(row.get("calculated_key_date"))
+        own = masters.get((project, contract)) or {}
+        main = masters.get((project, "primary")) or {}
+        own_start = _kd_date(own.get("contract_start_date"))
+        if stored is None:
+            counts["no_stored_calculation"] += 1
+            continue
+        if own_start is None:
+            counts["own_contract_has_no_loa"] += 1
+            continue
+        week = row.get("contractual_week_number")
+        own_date = _kd_calc(own_start, week, str(own.get("week_basis") or _KD_LOA_PLUS))
+        main_start = _kd_date(main.get("contract_start_date"))
+        main_date = _kd_calc(main_start, week, str(main.get("week_basis") or _KD_LOA_PLUS)) if main_start else None
+        if own_date is not None and stored.date() == own_date.date():
+            counts["matches_own_contract"] += 1
+        elif main_date is not None and stored.date() == main_date.date():
+            counts["matches_main_contract_not_own"] += 1
+            wrong_projects.add(project)
+            if int(row.get("current_revision") or 0) == 0:
+                wrong_unrevised += 1
+        else:
+            counts["matches_neither"] += 1
+    return _reading(
+        "P-16",
+        key_date_milestones_collection_present=True,
+        milestones_total=milestones.count_documents({}),
+        milestones_by_contract_kind={
+            "primary_or_unset": milestones.count_documents({"contract_id": {"$in": [None, "", "primary"]}}),
+            "other": counts["secondary_milestones"],
+        },
+        projects_with_several_contracts=sum(1 for keys in contracts_per_project.values() if len(keys) > 1),
+        secondary_milestones=counts,
+        calculated_from_main_contract_with_no_approved_revision=wrong_unrevised,
+        projects_affected=len(wrong_projects),
+        note="KD-1: a match with the main contract's date and not the milestone's own means it was calculated from the main contract",
+    )
+
+
 #: 4B-49 (AQ-12): the permission audited by P-15, and the grants that stand in for it.
 REVIEW_EXTRACTION = "dms.document.review_extraction"
 DMS_ADMIN = "dms.admin"
@@ -644,6 +747,7 @@ def collect(
         ("P-13", lambda: read_case_visibility(guarded)),
         ("P-14", lambda: read_notice_requirements(guarded)),
         ("P-15", lambda: read_review_extraction_holders(guarded)),
+        ("P-16", lambda: read_key_date_contract_basis(guarded)),
     ]
     out: List[Dict[str, Any]] = [check]
     if not check.get("initialised"):

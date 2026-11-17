@@ -140,6 +140,29 @@ def _seed(db: Any) -> None:
     )
 
 
+def _seed_key_dates(db: Any) -> None:
+    """KD-1 (P-16): project p1 has a main contract and a depot contract with its own LOA and basis."""
+    loa, depot_loa = datetime(2026, 1, 5), datetime(2026, 4, 15)
+    db.contract_master.insert_many([
+        {"_id": "cm-p1-main", "project_id": "p1", "contract_id": "primary", "contract_start_date": loa,
+         "week_basis": "loa_plus_weeks"},
+        {"_id": "cm-p1-depot", "project_id": "p1", "contract_id": "pkg-depot", "contract_start_date": depot_loa,
+         "week_basis": "loa_plus_weeks_minus_1"},
+    ])
+
+    def milestone(_id: str, contract: str, calculated: datetime, revision: int = 0) -> Dict[str, Any]:
+        return {"_id": _id, "project_id": "p1", "contract_id": contract, "contractual_week_number": 4,
+                "calculated_key_date": calculated, "current_revision": revision}
+
+    db.key_date_milestones.insert_many([
+        milestone("kd-main", "primary", loa + timedelta(days=28)),
+        milestone("kd-depot-right", "pkg-depot", depot_loa + timedelta(days=21)),
+        milestone("kd-depot-wrong", "pkg-depot", loa + timedelta(days=28)),           # from the main contract
+        milestone("kd-depot-wrong-revised", "pkg-depot", loa + timedelta(days=28), 1),
+        milestone("kd-civil", "pkg-civil", loa + timedelta(days=28)),                  # no LOA of its own
+    ])
+
+
 def _fingerprint(db: Any) -> Dict[str, str]:
     out: Dict[str, str] = {}
     for name in sorted(db.list_collection_names()):
@@ -159,6 +182,7 @@ def test_the_readings_are_right_change_nothing_and_name_no_one() -> None:
     db = client[name]
     try:
         _seed(db)
+        _seed_key_dates(db)
         before = _fingerprint(db)
         rows = reader.collect(
             db, environ={"ARBITRATION_REVIEWER_ROLE_MATRIX": "readiness=senior_legal_approver"}, now=NOW,
@@ -168,7 +192,7 @@ def test_the_readings_are_right_change_nothing_and_name_no_one() -> None:
         assert after == before, "the readings changed the database"
 
         by_code = {row["reading"]: row for row in rows}
-        assert [row["reading"] for row in rows] == ["DB"] + [f"P-{n:02d}" for n in range(2, 16)]
+        assert [row["reading"] for row in rows] == ["DB"] + [f"P-{n:02d}" for n in range(2, 17)]
         assert by_code["DB"]["initialised"] is True and by_code["DB"]["database"] == name
         assert all(row["status"] == "read" for row in rows), [r for r in rows if r["status"] != "read"]
 
@@ -234,6 +258,18 @@ def test_the_readings_are_right_change_nothing_and_name_no_one() -> None:
         assert p15["only_by_inheritance_by_seed_role"] == {"contractmgr_org": 1}
         assert p15["role_documents_by_path"] == {"named": 1, "dms_admin": 2}
         assert "u3" not in json.dumps(p15)
+
+        p16 = by_code["P-16"]
+        assert p16["milestones_total"] == 5
+        assert p16["milestones_by_contract_kind"] == {"primary_or_unset": 1, "other": 4}
+        assert p16["projects_with_several_contracts"] == 1
+        assert p16["secondary_milestones"] == {
+            "secondary_milestones": 4, "own_contract_has_no_loa": 1, "matches_own_contract": 1,
+            "matches_main_contract_not_own": 2, "matches_neither": 0, "no_stored_calculation": 0,
+        }
+        assert p16["calculated_from_main_contract_with_no_approved_revision"] == 1
+        assert p16["projects_affected"] == 1
+        assert "kd-depot" not in json.dumps(p16) and "pkg-depot" not in json.dumps(p16)
 
         text = json.dumps(rows, default=str)
         for secret in PRIVATE:
