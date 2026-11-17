@@ -68,7 +68,8 @@ from .arbitration_drafting.case_workspace import ArbitrationCaseWorkspaceService
 from .arbitration_drafting.matrix_registry import MATRIX_COLLECTIONS
 from .audit_event_service import AuditEventService
 from .claim_bench import initial_head
-from .claim_submission import ClaimSubmissions, SubmissionRecord, format_amount, head_amount, head_days
+from .claim_submission import ClaimSubmissions, SubmissionRecord, format_paise, head_amount, head_days
+from .quantum_formulas import rupees
 from .document_relationship_service import DocumentRelationshipError, DocumentRelationshipService
 
 logger = logging.getLogger(__name__)
@@ -212,7 +213,9 @@ def build_carry(
 
     for head in record.heads:
         days, assessed = head_days(record, head)
-        amount, built = head_amount(record, head)
+        amount_paise, built = head_amount(record, head)
+        # The matrix row keeps rupees (its existing shape), derived from the paise held.
+        amount = rupees(amount_paise) if amount_paise is not None else None
         states = {key: (head.elements.get(key) or HeadElement()).state for key in ELEMENT_KEYS}
         for key, state in states.items():
             if state in (None, "weak", "missing"):
@@ -222,7 +225,7 @@ def build_carry(
         if days is not None:
             relief.append(f"Extension of time of {days} day{'' if days == 1 else 's'}")
         if amount is not None:
-            relief.append(f"Payment of {format_amount(amount, record.currency)}")
+            relief.append(f"Payment of {format_paise(amount_paise, record.currency)}")
         view = record.quantum.get(head.head_id)
         evidence_ids = sorted(
             {proof.document_id for item in (view.lines if view else []) if not item.locked for proof in item.line.records}
@@ -242,6 +245,7 @@ def build_carry(
                     "claim_head": head.title,
                     "amount_or_days": (amount if amount is not None else (f"{days} days" if days is not None else None)),
                     "amount": amount,
+                    "amount_paise": amount_paise,
                     "eot_days": days,
                     "currency": record.currency,
                     "clause_ids": list(head.clause_refs),
@@ -282,7 +286,7 @@ def build_carry(
         if view and view.locked_count:
             left.append(
                 f"{head.head_id}: {view.locked_count} cost line{'' if view.locked_count == 1 else 's'} "
-                f"({format_amount(view.locked_total, record.currency)}) whose proof is not linked"
+                f"({format_paise(view.locked_total_paise, record.currency)}) whose proof is not linked"
             )
         delay = record.delay.get(head.head_id)
         for overlap in delay.overlaps if delay else []:

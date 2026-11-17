@@ -80,10 +80,10 @@ export const FORMULA_INPUTS: Record<Exclude<QuantumFormula, "none">, { key: stri
     { key: "contract_period_days", label: "Contract period (days)" },
   ],
   eichleay: [
-    { key: "contract_billings", label: "Final contract sum, excluding the overhead claim" },
-    { key: "total_billings", label: "Total revenue over the contract period" },
-    { key: "total_overhead", label: "Head-office overhead during actual performance" },
-    { key: "performance_days", label: "Days of actual performance" },
+    { key: "contract_billings", label: "Billings on this contract during actual performance, excluding this overhead claim" },
+    { key: "total_billings", label: "Total company billings for the same period" },
+    { key: "total_overhead", label: "Head-office overhead for the same period, excluding profit" },
+    { key: "performance_days", label: "Days of actual performance (the same period)" },
   ],
 };
 

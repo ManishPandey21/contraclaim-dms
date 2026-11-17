@@ -156,3 +156,36 @@ def test_the_claim_total_keeps_paise_beyond_what_a_float_holds(monkeypatch) -> N
             assert claim["amount_claimed_paise"] == 270_000_000_000_000_003
 
     _run(scenario())
+
+
+def test_eichleay_figures_that_cannot_be_true_together_are_refused_and_a_calculation_is_not_a_finding(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            await _prepared(env)
+
+            def eichleay(contract_billings: str) -> dict:
+                return {
+                    "category": "overhead_formula", "description": "Unabsorbed overhead", "formula": "eichleay",
+                    "period_start": "2026-03-01T00:00:00", "period_end": "2026-04-14T00:00:00",  # 45 days
+                    "formula_inputs": {
+                        "contract_billings": {"value": contract_billings, "document_id": DOC_IN_ID},
+                        "total_billings": {"value": "2000000000", "document_id": DOC_IN_ID},
+                        "total_overhead": {"value": "160000000", "document_id": DOC_IN_ID},
+                        "performance_days": {"value": "500", "document_id": DOC_IN_ID},
+                    },
+                    "records": [{"document_id": DOC_OUT_ID, "role": "actual_loss"}],
+                }
+
+            refused = await env.call("POST", "org_admin", LINES, json={"board_version": await _version(env), **eichleay("2000000001")})
+            assert refused.status_code == 422 and _code(refused) == "quantum_formula_inputs_inconsistent", refused.text[:300]
+            assert "cannot exceed the company's total billings" in refused.json()["detail"]["user_message"]
+
+            added = await env.call("POST", "org_admin", LINES, json={"board_version": await _version(env), **eichleay("300000000")})
+            assert added.status_code == 200, added.text[:300]
+            view = added.json()
+            line = view["lines"][0]
+            assert line["line"]["amount_paise"] == 216_000_000  # Rs 21,60,000.00, worked in tests/test_quantum_formulas.py
+            assert line["calculated"] is True and "not a finding that this amount is recoverable" in line["calculation_note"]
+            assert view["calculated_total_paise"] == 216_000_000
+
+    _run(scenario())

@@ -25,6 +25,25 @@ which cites the SCL Delay and Disruption Protocol):
 
 Contract period and actual performance are in days, so the period ratio is
 exact whichever unit a source uses for both.
+
+**Eichleay is billings-based** (owner review 2026-11-17): the contract's share is
+its billings during the period of actual performance over the company's total
+billings for the *same* period, applied to the head-office overhead of that same
+period. Every Eichleay figure is labelled with that period, and the figures are
+checked for consistency (the contract's billings cannot exceed the company's;
+the compensable delay cannot be longer than the performance period). Profit is
+not part of Eichleay's overhead pool; Hudson and Emden carry "overhead and
+profit" as their published statements do.
+
+**A calculation, not a determination.** What this module returns is arithmetic
+from the figures typed. It does not decide that head-office overhead was in fact
+unabsorbed, that the delay is compensable under the contract, that the
+formula's preconditions are met (for Eichleay, typically standby and inability
+to take other work), or that the figures are evidenced. The quantum view marks
+every formula line as calculated, and two formula lines over the same days are
+locked as double recovery. Worked examples: hand-worked fixtures in
+tests/test_quantum_formulas.py; reproducing a published worked example is an
+open item in the ticket register (the PMI paper could not be fetched here).
 """
 
 from __future__ import annotations
@@ -74,10 +93,12 @@ FORMULA_INPUTS: Dict[str, Tuple[FormulaInputSpec, ...]] = {
         FormulaInputSpec("contract_period_days", "Contract period (days)", "days"),
     ),
     "eichleay": (
-        FormulaInputSpec("contract_billings", "Final contract sum, excluding the overhead claim", "money"),
-        FormulaInputSpec("total_billings", "Total revenue over the contract period", "money"),
-        FormulaInputSpec("total_overhead", "Head-office overhead during actual performance", "money"),
-        FormulaInputSpec("performance_days", "Days of actual performance", "days"),
+        FormulaInputSpec(
+            "contract_billings", "Billings on this contract during actual performance, excluding this overhead claim", "money"
+        ),
+        FormulaInputSpec("total_billings", "Total company billings for the same period", "money"),
+        FormulaInputSpec("total_overhead", "Head-office overhead for the same period, excluding profit", "money"),
+        FormulaInputSpec("performance_days", "Days of actual performance (the same period)", "days"),
     ),
 }
 
@@ -99,6 +120,19 @@ def missing_inputs(formula: str, inputs: Mapping[str, Any]) -> List[str]:
         elif spec.kind == "percent" and number > 100:
             missing.append(spec.label)
     return missing
+
+
+def inconsistencies(formula: str, inputs: Mapping[str, Any], delay_days: Optional[int]) -> List[str]:
+    """Figures that are each valid but cannot all be true together. Call after ``missing_inputs``."""
+    found: List[str] = []
+    if formula == "emden" and _value(inputs, "overhead_and_profit") >= _value(inputs, "turnover"):
+        found.append("Head-office overhead and profit cannot be as large as the turnover in the same accounts.")
+    if formula == "eichleay":
+        if _value(inputs, "contract_billings") > _value(inputs, "total_billings"):
+            found.append("This contract's billings cannot exceed the company's total billings for the same period.")
+        if delay_days is not None and Decimal(delay_days) > _value(inputs, "performance_days"):
+            found.append("The period of delay cannot be longer than the period of actual performance it falls within.")
+    return found
 
 
 def _value(inputs: Mapping[str, Any], key: str) -> Decimal:

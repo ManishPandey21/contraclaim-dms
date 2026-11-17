@@ -247,6 +247,32 @@ describe("Quantum tab", () => {
     expect(screen.getByLabelText("Supported")).toBeInTheDocument();
   });
 
+  it("shows amounts from paise and marks a formula line as a calculation, not a finding (4B-24)", async () => {
+    const note = "Calculated from the figures entered. A calculation is not a finding that this amount is recoverable.";
+    api.fetchHeadQuantum.mockResolvedValue(
+      quantum({
+        lines: [
+          {
+            line: {
+              line_id: "Q1", category: "overhead_formula", description: "Head-office overhead", amount: 41095.89,
+              amount_paise: 4109589, formula: "hudson", records: [{ document_id: "doc-1", role: "actual_loss" }],
+            },
+            locked: false, lock_reasons: [], calculated: true, calculation_note: note,
+          },
+        ],
+        // The float a server would derive is deliberately off by a paisa: the paise figure is shown.
+        claimed_total: 41095.88, supported_total: 41095.88, locked_total: 0, locked_count: 0,
+        claimed_total_paise: 4109589, supported_total_paise: 4109589, locked_total_paise: 0, calculated_total_paise: 4109589,
+      })
+    );
+    mount(<QuantumTab claimId="c1" headId="H1" boardVersion={4} readOnly={false} />);
+    const totals = (await screen.findByRole("heading", { name: "Build-up of this head" })).closest("section")!;
+    expect(within(totals).getAllByText("₹41,095.89")).toHaveLength(4); // claimed and supported, each with its short form
+    expect(within(totals).queryByText("₹41,095.88")).not.toBeInTheDocument();
+    expect(within(totals).getByText(/is calculated by a formula. A calculation is not a finding/)).toBeInTheDocument();
+    expect(screen.getByText(note)).toBeInTheDocument();
+  });
+
   it("adds a line citing a document of the claim, against the board version", async () => {
     api.saveQuantumLine.mockResolvedValue(quantum());
     mount(<QuantumTab claimId="c1" headId="H1" boardVersion={4} readOnly={false} />);

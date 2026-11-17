@@ -8,7 +8,7 @@ import { Label } from "@/components/ui/label";
 import { useHeadAnalysis } from "@/hooks/useClaimBench";
 import { parseAmount } from "@/lib/claim-bench-logic";
 import { CATEGORY_LABEL, FORMULA_INPUTS, FORMULA_LABEL, RECORD_ROLE_LABEL, missingFormulaFigures } from "@/lib/delay-lab-logic";
-import { formatCrore, formatDateIN, formatINR, fromDateInput, toDateInput } from "@/lib/format-in";
+import { formatCrore, formatDateIN, formatINR, formatPaise, fromDateInput, toDateInput } from "@/lib/format-in";
 import { listEntityDocumentLinks } from "@/services/document-relationships-api";
 import type {
   QuantumCategory,
@@ -150,18 +150,31 @@ const QuantumTab: React.FC<Props> = ({ claimId, headId, boardVersion, readOnly }
           Build-up of this head
         </h2>
         <dl className="grid grid-cols-3 gap-2 text-sm">
-          {[
-            ["Claimed", view.claimed_total, "text-foreground"],
-            ["Supported", view.supported_total, "text-green-800"],
-            ["Locked", view.locked_total, view.locked_total > 0 ? "text-red-800" : "text-muted-foreground"],
-          ].map(([label, value, tone]) => (
-            <div key={label as string} className="rounded-md bg-muted/50 p-2">
+          {(
+            [
+              ["Claimed", view.claimed_total, view.claimed_total_paise, "text-foreground"],
+              ["Supported", view.supported_total, view.supported_total_paise, "text-green-800"],
+              ["Locked", view.locked_total, view.locked_total_paise, view.locked_total > 0 ? "text-red-800" : "text-muted-foreground"],
+            ] as [string, number, number | undefined, string][]
+          ).map(([label, value, paise, tone]) => (
+            <div key={label} className="rounded-md bg-muted/50 p-2">
               <dt className="text-xs text-muted-foreground">{label}</dt>
-              <dd className={`font-semibold tabular-nums ${tone}`}>{formatINR(value as number, view.currency)}</dd>
-              <dd className="text-xs text-muted-foreground">{formatCrore(value as number, view.currency)}</dd>
+              {/* The paise figure is authoritative; the rupee float is for older servers only. */}
+              <dd className={`font-semibold tabular-nums ${tone}`}>
+                {paise != null ? formatPaise(paise, view.currency) : formatINR(value, view.currency)}
+              </dd>
+              <dd className="text-xs text-muted-foreground">
+                {formatCrore(paise != null ? paise / 100 : value, view.currency)}
+              </dd>
             </div>
           ))}
         </dl>
+        {(view.calculated_total_paise ?? 0) > 0 && (
+          <p className="text-xs text-muted-foreground">
+            Of the amount claimed, {formatPaise(view.calculated_total_paise, view.currency)} is calculated by a formula. A
+            calculation is not a finding that the amount is recoverable.
+          </p>
+        )}
         <p className="text-xs text-muted-foreground">
           {view.lines.length === 0
             ? "No lines yet. Until there is a build-up, the head's amount is the figure typed on the Elements tab."
@@ -180,7 +193,7 @@ const QuantumTab: React.FC<Props> = ({ claimId, headId, boardVersion, readOnly }
           </Button>
         </div>
         <ul className="space-y-2">
-          {view.lines.map(({ line, locked, lock_reasons }) => (
+          {view.lines.map(({ line, locked, lock_reasons, calculation_note }) => (
             <li key={line.line_id} className={`space-y-1 rounded-md border p-3 ${locked ? "border-red-700 bg-red-50/40" : ""}`}>
               <div className="flex flex-wrap items-start justify-between gap-2">
                 <div className="min-w-0">
@@ -200,7 +213,9 @@ const QuantumTab: React.FC<Props> = ({ claimId, headId, boardVersion, readOnly }
                   </p>
                 </div>
                 <div className="flex items-center gap-1">
-                  <span className="mr-2 text-sm font-semibold tabular-nums">{formatINR(line.amount, view.currency)}</span>
+                  <span className="mr-2 text-sm font-semibold tabular-nums">
+                    {line.amount_paise != null ? formatPaise(line.amount_paise, view.currency) : formatINR(line.amount, view.currency)}
+                  </span>
                   <Button size="sm" variant="ghost" disabled={disabled || draft !== null} aria-label={`Edit ${line.line_id}`} onClick={() => setDraft(toDraft(line))}>
                     <Pencil className="h-4 w-4" aria-hidden="true" />
                   </Button>
@@ -222,6 +237,7 @@ const QuantumTab: React.FC<Props> = ({ claimId, headId, boardVersion, readOnly }
                   ))}
                 </ul>
               )}
+              {calculation_note && <p className="pl-6 text-xs text-muted-foreground">{calculation_note}</p>}
             </li>
           ))}
         </ul>

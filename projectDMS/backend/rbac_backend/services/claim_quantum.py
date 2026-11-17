@@ -26,6 +26,7 @@ is computed from its inputs (services/quantum_formulas.py) and never typed.
 
 from __future__ import annotations
 
+import itertools
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Set
@@ -36,7 +37,7 @@ from pydantic import BaseModel, Field
 from . import claim_contract_scope as contract_scope
 from ..models.claim import ClaimBench, ClaimHead
 from ..models.claim_delay import FormulaInput, QuantumLine, QuantumRecord
-from .quantum_formulas import FORMULA_INPUTS, compute_paise, delay_days, missing_inputs, rupees, to_paise
+from .quantum_formulas import FORMULA_INPUTS, compute_paise, delay_days, inconsistencies, missing_inputs, rupees, to_paise
 from .claim_delay_engine import compensable_days, days_outside
 from .claim_delay_lab import ClaimDelayLab, _day, _head, engine_events, head_treatments
 
@@ -66,11 +67,21 @@ class QuantumLineRequest(QuantumLineInput):
     board_version: int = Field(..., ge=0)
 
 
+CALCULATION_NOTE = (
+    "Calculated from the figures entered. A calculation is not a finding that this amount is "
+    "recoverable: entitlement under the contract, evidence that the overhead was in fact unabsorbed, "
+    "and whether the formula's conditions are met are decided separately."
+)
+
+
 class QuantumLineView(BaseModel):
     line: QuantumLine
     locked: bool
     # Each entry is one thing that would have to be true for the line to unlock.
     lock_reasons: List[str] = Field(default_factory=list)
+    #: A formula line: its amount is arithmetic from the figures, not a determination.
+    calculated: bool = False
+    calculation_note: Optional[str] = None
 
 
 class QuantumView(BaseModel):
@@ -85,6 +96,8 @@ class QuantumView(BaseModel):
     supported_total: float = 0.0
     locked_total: float = 0.0
     locked_count: int = 0
+    #: Of the claimed total, the part calculated by a formula (a calculation, not a determination).
+    calculated_total_paise: int = 0
 
 
 _ROLE_WORDS = {"support": "supporting record", "actual_loss": "record of actual loss", "work_declined": "record of work declined"}
@@ -148,9 +161,16 @@ def build_quantum_view(
     head: ClaimHead, compensable: Set[date], currency: str = "INR", linked: Optional[Set[str]] = None
 ) -> QuantumView:
     views = []
+    overlaps = formula_overlaps(head.quantum_lines)
     for line in head.quantum_lines:
-        reasons = line_lock_reasons(line, compensable, linked)
-        views.append(QuantumLineView(line=line, locked=bool(reasons), lock_reasons=reasons))
+        reasons = line_lock_reasons(line, compensable, linked) + overlaps.get(line.line_id, [])
+        calculated = line.formula in FORMULA_INPUTS
+        views.append(
+            QuantumLineView(
+                line=line, locked=bool(reasons), lock_reasons=reasons,
+                calculated=calculated, calculation_note=CALCULATION_NOTE if calculated else None,
+            )
+        )
     claimed = sum(int(view.line.amount_paise or 0) for view in views)
     locked = sum(int(view.line.amount_paise or 0) for view in views if view.locked)
     return QuantumView(
@@ -164,7 +184,32 @@ def build_quantum_view(
         supported_total=rupees(claimed - locked),
         locked_total=rupees(locked),
         locked_count=sum(1 for view in views if view.locked),
+        calculated_total_paise=sum(int(view.line.amount_paise or 0) for view in views if view.calculated),
     )
+
+
+def formula_overlaps(lines: List[QuantumLine]) -> Dict[str, List[str]]:
+    """Head-office overhead recovered twice: formula lines whose periods share days.
+
+    Every such pair locks both lines, each naming the other, until one period is
+    changed or one line removed. Days are counted with both ends included."""
+    formula_lines = [
+        (index, line) for index, line in enumerate(lines, start=1)
+        if line.formula in FORMULA_INPUTS and line.period_start is not None and line.period_end is not None
+    ]
+    found: Dict[str, List[str]] = {}
+    for (i, first), (j, second) in itertools.combinations(formula_lines, 2):
+        start = max(_day(first.period_start), _day(second.period_start))
+        end = min(_day(first.period_end), _day(second.period_end))
+        if start is None or end is None or end < start:
+            continue
+        days = (end - start).days + 1
+        for (own, other_index, other) in ((first, j, second), (second, i, first)):
+            found.setdefault(own.line_id, []).append(
+                f"Overlaps line {other_index} ({other.formula.title()}) for {days} day{'s' if days != 1 else ''}: "
+                "head-office overhead would be recovered twice for those days. Change one period or remove one line."
+            )
+    return found
 
 
 def _refusal(status_code: int, code: str, message: str) -> HTTPException:
@@ -236,6 +281,9 @@ class ClaimQuantum:
                     422, "quantum_formula_period_required",
                     "State the period of delay, start and end, for the formula: it is the number of days it multiplies.",
                 )
+            inconsistent = inconsistencies(payload.formula, payload.formula_inputs, days)
+            if inconsistent:
+                raise _refusal(422, "quantum_formula_inputs_inconsistent", " ".join(inconsistent))
             return compute_paise(payload.formula, payload.formula_inputs, days)
         if payload.formula_inputs:
             raise _refusal(422, "quantum_formula_inputs_missing", "Formula inputs apply only to a Hudson, Emden or Eichleay line.")

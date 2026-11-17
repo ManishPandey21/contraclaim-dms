@@ -134,8 +134,8 @@ def test_a_formula_input_without_its_record_or_unlinked_locks_the_line() -> None
 
 
 def test_totals_stay_exact_where_a_float_cannot_hold_paise() -> None:
-    # Rs 9,00,00,00,00,00,000.01 has 17 significant digits; a binary float holds about 15.
-    # Three such lines total Rs 27,00,00,00,00,00,000.03, i.e. 270,000,000,000,000,003 paise.
+    # Rs 90,00,00,00,00,00,000.01 has 17 significant digits; a binary float holds about 15.
+    # Three such lines total Rs 2,70,00,00,00,00,00,000.03, i.e. 270,000,000,000,000,003 paise.
     head = ClaimHead(
         head_id="H1", title="Large",
         quantum_lines=[
@@ -147,3 +147,85 @@ def test_totals_stay_exact_where_a_float_cannot_hold_paise() -> None:
     view = build_quantum_view(head, set(), linked={"d"})
     assert view.claimed_total_paise == 270_000_000_000_000_003
     assert sum(line.amount for line in head.quantum_lines) * 100 != 270_000_000_000_000_003  # what floats would give
+
+
+def test_the_client_names_each_figure_exactly_as_the_server_does() -> None:
+    # The Quantum tab asks for the figures by these labels (client/src/lib/delay-lab-logic.ts).
+    from pathlib import Path
+
+    from rbac_backend.services.quantum_formulas import FORMULA_INPUTS
+
+    client = (Path(__file__).resolve().parents[3] / "client/src/lib/delay-lab-logic.ts").read_text(encoding="utf-8")
+    for specs in FORMULA_INPUTS.values():
+        for spec in specs:
+            assert f'{{ key: "{spec.key}", label: "{spec.label}" }}' in client, spec
+
+
+def test_eichleay_figures_are_billings_for_one_period_and_checked_together() -> None:
+    from rbac_backend.services.quantum_formulas import FORMULA_INPUTS, inconsistencies
+
+    labels = [spec.label for spec in FORMULA_INPUTS["eichleay"]]
+    assert labels[0].startswith("Billings on this contract during actual performance")
+    assert all("same period" in label for label in labels[1:])
+    assert "excluding profit" in labels[2]
+    sound = _inputs(contract_billings="300000000", total_billings="2000000000", total_overhead="160000000", performance_days="500")
+    assert inconsistencies("eichleay", sound, 45) == []
+    assert inconsistencies("eichleay", sound, 501) == [
+        "The period of delay cannot be longer than the period of actual performance it falls within."
+    ]
+    larger = _inputs(contract_billings="2000000001", total_billings="2000000000", total_overhead="160000000", performance_days="500")
+    assert inconsistencies("eichleay", larger, 45) == [
+        "This contract's billings cannot exceed the company's total billings for the same period."
+    ]
+    emden = _inputs(overhead_and_profit="150", turnover="150", contract_sum="1", contract_period_days="1")
+    assert inconsistencies("emden", emden, 1) == [
+        "Head-office overhead and profit cannot be as large as the turnover in the same accounts."
+    ]
+
+
+def test_a_formula_line_is_marked_as_a_calculation_and_overlapping_formula_lines_lock() -> None:
+    def hudson(line_id: str, start: int, end: int) -> QuantumLine:
+        return QuantumLine(
+            line_id=line_id, category="overhead_formula", description="HO", amount_paise=1000, formula="hudson",
+            period_start=datetime(2026, 3, start), period_end=datetime(2026, 3, end),
+            formula_inputs={key: FormulaInput(value="1", document_id="d") for key in
+                            ("tender_percentage", "contract_sum", "contract_period_days")},
+            records=[QuantumRecord(document_id="d", role="actual_loss")],
+        )
+
+    compensable = {date(2026, 3, day) for day in range(1, 32)}
+    direct = QuantumLine(line_id="Q9", category="direct", description="Plant", amount_paise=500, records=[QuantumRecord(document_id="d")])
+    head = ClaimHead(head_id="H1", title="Overheads", quantum_lines=[hudson("Q1", 1, 10), hudson("Q2", 20, 31), direct])
+    view = build_quantum_view(head, compensable, linked={"d"})
+    assert [line.calculated for line in view.lines] == [True, True, False]
+    assert view.lines[0].calculation_note and "not a finding that this amount is recoverable" in view.lines[0].calculation_note
+    assert view.lines[2].calculation_note is None
+    assert view.calculated_total_paise == 2000 and view.locked_total_paise == 0
+
+    # Q2 now starts on 8 March: 8, 9 and 10 March are claimed twice.
+    head.quantum_lines[1] = hudson("Q2", 8, 31)
+    view = build_quantum_view(head, compensable, linked={"d"})
+    assert view.lines[0].locked and view.lines[1].locked and not view.lines[2].locked
+    assert view.lines[0].lock_reasons == [
+        "Overlaps line 2 (Hudson) for 3 days: head-office overhead would be recovered twice for those days. "
+        "Change one period or remove one line."
+    ]
+    assert "Overlaps line 1 (Hudson) for 3 days" in view.lines[1].lock_reasons[0]
+    assert view.supported_total_paise == 500 and view.locked_total_paise == 2000
+
+    # Sharing a single day (10 March, both ends counted) is still recovering it twice; adjacent periods are not.
+    head.quantum_lines[1] = hudson("Q2", 10, 31)
+    assert "for 1 day:" in build_quantum_view(head, compensable, linked={"d"}).lines[0].lock_reasons[0]
+    head.quantum_lines[1] = hudson("Q2", 11, 31)
+    assert not build_quantum_view(head, compensable, linked={"d"}).lines[0].locked
+
+
+def test_the_export_states_amounts_from_paise_exactly() -> None:
+    from rbac_backend.services.claim_submission import format_amount, format_paise
+
+    assert format_paise(4_109_589) == "INR 41,095.89"
+    assert format_paise(270_000_000_000_000_003) == "INR 2,70,00,00,00,00,00,000.03"
+    assert format_paise(-1001) == "INR -10.01"
+    # A rupee figure is read through its decimal text: 1.005 is Rs 1.01, as typed, not 1.00 as binary would give.
+    assert f"{1.005:.2f}" == "1.00" and format_amount(1.005) == "INR 1.01"
+    assert format_amount(125000.5) == format_paise(12_500_050)

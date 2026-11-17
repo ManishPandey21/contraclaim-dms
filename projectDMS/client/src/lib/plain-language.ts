@@ -102,6 +102,8 @@ export const ERROR_CODE_MESSAGES = {
     "A claim's contract cannot be changed once it is set: the records linked to it belong to that contract.",
   quantum_formula_amount_computed: "A formula line's amount is worked out from its inputs, so it cannot be typed.",
   quantum_formula_inputs_missing: "Enter every figure the formula needs, each as a positive number.",
+  quantum_formula_inputs_inconsistent:
+    "These figures cannot all be true together. Check that they come from the same period and the same accounts.",
   quantum_formula_period_required: "State the start and end of the delay period: the formula multiplies by its days.",
   quantum_amount_required: "Enter the amount of this line.",
   determination_reviewer_not_authorised:

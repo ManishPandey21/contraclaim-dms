@@ -56,6 +56,7 @@ from ..models.claim_skill_outputs import SUBMISSION_SECTION_SCHEMA_KEY, Submissi
 from ..utils.datetime import now_utc
 from .claim_delay_lab import ClaimDelayLab, DelayView, build_view
 from .claim_quantum import ClaimQuantum, QuantumView
+from .quantum_formulas import rupees, to_paise
 from .docx_xml import w_paragraph, w_table
 from .letter_drafting.prompts import UNTRUSTED_CONTENT_GUARD, register_default_template
 from .submission_figures import clauses_in, invented_figures, reserves_rights
@@ -141,8 +142,16 @@ def format_day(value: Any) -> str:
 
 
 def format_amount(value: float, currency: str = "INR") -> str:
-    """Indian digit grouping: 1,23,45,678.00."""
-    whole, _, fraction = f"{abs(float(value)):.2f}".partition(".")
+    """Indian digit grouping: 1,23,45,678.00. A rupee figure is read through its decimal
+    text into paise first, so it prints exactly as format_paise would (4B-24)."""
+    return format_paise(to_paise(repr(float(value))), currency)
+
+
+def format_paise(paise: int, currency: str = "INR") -> str:
+    """Integer paise as rupees with Indian digit grouping, with no floating point: the
+    figure exported is the figure held (4B-24)."""
+    value = int(paise)
+    whole, fraction = str(abs(value) // 100), f"{abs(value) % 100:02d}"
     if len(whole) > 3:
         head, tail = whole[:-3], whole[-3:]
         groups = []
@@ -236,14 +245,19 @@ def head_days(record: SubmissionRecord, head: ClaimHead) -> tuple[Optional[int],
     return head.eot_days_claimed, False
 
 
-def head_amount(record: SubmissionRecord, head: ClaimHead) -> tuple[Optional[float], bool]:
-    """The amount a head asks for, and whether it comes from a build-up. Locked lines are left out."""
+def head_amount(record: SubmissionRecord, head: ClaimHead) -> tuple[Optional[int], bool]:
+    """The amount a head asks for, in paise, and whether it comes from a build-up. Locked
+    lines are left out. Totals are summed in paise, never in rupee floats (4B-24)."""
     if head.kind == "time":
         return None, False
     view = record.quantum.get(head.head_id)
     if view is not None and view.lines:
-        return view.supported_total, True
-    return head.amount_claimed, False
+        return int(view.supported_total_paise), True
+    if head.amount_claimed is None:
+        return None, False
+    if head.amount_claimed_paise is not None and rupees(head.amount_claimed_paise) == head.amount_claimed:
+        return int(head.amount_claimed_paise), False
+    return to_paise(repr(float(head.amount_claimed))), False
 
 
 def _kind(head: ClaimHead) -> str:
@@ -278,7 +292,7 @@ def compose_record_sections(record: SubmissionRecord) -> Dict[str, SubmissionSec
             *[_src("head", head.head_id, head.title) for head in record.heads],
         )
     )
-    total = 0.0
+    total = 0  # paise
     any_amount = False
     for head in record.heads:
         days, assessed = head_days(record, head)
@@ -292,7 +306,7 @@ def compose_record_sections(record: SubmissionRecord) -> Dict[str, SubmissionSec
             else:
                 notes.append(f"{head.head_id}: the days are the figure entered on the head; no delay assessment supports them.")
         if amount is not None:
-            parts.append(f"payment of {format_amount(amount, record.currency)}")
+            parts.append(f"payment of {format_paise(amount, record.currency)}")
             total += amount
             any_amount = True
             if built:
@@ -301,14 +315,14 @@ def compose_record_sections(record: SubmissionRecord) -> Dict[str, SubmissionSec
                 if locked:
                     notes.append(
                         f"{head.head_id}: {locked} cost line{'' if locked == 1 else 's'} "
-                        f"({format_amount(record.quantum[head.head_id].locked_total, record.currency)}) left out: proof not linked."
+                        f"({format_paise(record.quantum[head.head_id].locked_total_paise, record.currency)}) left out: proof not linked."
                     )
             else:
                 notes.append(f"{head.head_id}: the amount is the figure entered on the head; it has no build-up.")
         if parts:
             paragraphs.append(_p(f"Under head {head.head_id} the Contractor claims " + " and ".join(parts) + ".", *sources))
     if any_amount and len(record.heads) > 1:
-        paragraphs.append(_p(f"The total amount claimed is {format_amount(total, record.currency)}.", claim_source))
+        paragraphs.append(_p(f"The total amount claimed is {format_paise(total, record.currency)}.", claim_source))
     _section("executive_summary", paragraphs, notes)
 
     # --------------------------------------------------- contractual basis
@@ -447,7 +461,7 @@ def compose_record_sections(record: SubmissionRecord) -> Dict[str, SubmissionSec
         if view is None or not view.lines:
             if head.amount_claimed is not None:
                 paragraphs.append(
-                    _p(f"Head {head.head_id}: the amount claimed is {format_amount(head.amount_claimed, record.currency)}.", _src("head", head.head_id, head.title))
+                    _p(f"Head {head.head_id}: the amount claimed is {format_paise(head_amount(record, head)[0] or 0, record.currency)}.", _src("head", head.head_id, head.title))
                 )
                 notes.append(f"{head.head_id}: the amount has no build-up; the section states the figure only.")
             continue
@@ -463,12 +477,12 @@ def compose_record_sections(record: SubmissionRecord) -> Dict[str, SubmissionSec
             paragraphs.append(
                 _p(
                     f"Head {head.head_id}, {item.line.category.replace('_', ' ')}: {item.line.description}{period}: "
-                    f"{format_amount(item.line.amount, record.currency)}.",
+                    f"{format_paise(item.line.amount_paise or 0, record.currency)}.",
                     source,
                     *[_src("document", proof.document_id, _evidence_label(record, proof.document_id)) for proof in item.line.records],
                 )
             )
-        paragraphs.append(_p(f"The amount claimed under head {head.head_id} is {format_amount(view.supported_total, record.currency)}.", source))
+        paragraphs.append(_p(f"The amount claimed under head {head.head_id} is {format_paise(view.supported_total_paise, record.currency)}.", source))
     if not paragraphs and not notes:
         paragraphs.append(_p("No payment is claimed in this submission.", claim_source))
     _section("quantum", paragraphs, notes)
@@ -482,7 +496,7 @@ def compose_record_sections(record: SubmissionRecord) -> Dict[str, SubmissionSec
         if days is not None:
             relief.append(f"an extension of time of {_days(days)} under head {head.head_id}")
         if amount is not None:
-            relief.append(f"payment of {format_amount(amount, record.currency)} under head {head.head_id}")
+            relief.append(f"payment of {format_paise(amount, record.currency)} under head {head.head_id}")
         sources.append(_src("head", head.head_id, head.title))
     paragraphs = []
     if relief:
@@ -885,6 +899,7 @@ __all__ = [
     "compose_record_sections",
     "evidence_schedule",
     "format_amount",
+    "format_paise",
     "format_day",
     "numbers_in",
     "submission_docx",

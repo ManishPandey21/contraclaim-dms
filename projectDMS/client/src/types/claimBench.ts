@@ -364,7 +364,16 @@ export type QuantumLineInput = Omit<QuantumLine, "line_id" | "amount" | "amount_
 export interface QuantumView {
   head_id: string;
   currency: string;
-  lines: { line: QuantumLine; locked: boolean; lock_reasons: string[] }[];
+  lines: {
+    line: QuantumLine;
+    locked: boolean;
+    lock_reasons: string[];
+    /** A formula line: its amount is arithmetic from the figures, not a determination. */
+    calculated?: boolean;
+    calculation_note?: string | null;
+  }[];
+  /** Of the claimed total, the part calculated by a formula. */
+  calculated_total_paise?: number;
   /** Totals in integer paise; the rupee totals are derived from them. */
   claimed_total_paise?: number;
   supported_total_paise?: number;

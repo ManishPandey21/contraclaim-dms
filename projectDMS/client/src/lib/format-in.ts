@@ -25,6 +25,26 @@ export function formatINR(amount?: number | null, currency: string | null = "INR
   return symbol ? `${symbol}${groupIndian(amount)}` : `${code} ${groupIndian(amount)}`;
 }
 
+/**
+ * Integer paise as rupees, grouped the Indian way, with no floating point on the way:
+ * formatPaise(12500050) -> "₹1,25,000.50". Exact for any whole number of paise a JSON
+ * number carries exactly (up to 2^53, about ₹90 lakh crore).
+ */
+export function formatPaise(paise?: number | null, currency: string | null = "INR"): string {
+  if (paise == null || !Number.isSafeInteger(paise)) return DASH;
+  const negative = paise < 0;
+  const digits = String(Math.abs(paise)).padStart(3, "0");
+  const whole = digits.slice(0, -2);
+  const fraction = digits.slice(-2);
+  const head = whole.length > 3 ? whole.slice(0, -3) : "";
+  const tail = whole.slice(-3);
+  const grouped = head ? `${head.replace(/\B(?=(\d{2})+(?!\d))/g, ",")},${tail}` : tail;
+  const text = `${negative ? "-" : ""}${fraction !== "00" ? `${grouped}.${fraction}` : grouped}`;
+  const code = (currency || "INR").toUpperCase();
+  const symbol = SYMBOLS[code];
+  return symbol ? `${symbol}${text}` : `${code} ${text}`;
+}
+
 /** Short form in lakh / crore: formatCrore(184500000) -> "₹18.45 Cr". */
 export function formatCrore(amount?: number | null, currency: string | null = "INR"): string {
   if (amount == null || !Number.isFinite(amount)) return DASH;

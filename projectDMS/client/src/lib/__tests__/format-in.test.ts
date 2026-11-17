@@ -78,3 +78,21 @@ describe("dates", () => {
     expect(fromDateInput("02/03/2026")).toBeUndefined();
   });
 });
+
+describe("formatPaise (4B-24: amounts shown from integer paise)", () => {
+  it("formats paise exactly, with no floating point on the way", async () => {
+    const { formatPaise } = await import("../format-in");
+    expect(formatPaise(12500050)).toBe("₹1,25,000.50");
+    expect(formatPaise(4109589)).toBe("₹41,095.89");
+    expect(formatPaise(216000000)).toBe("₹21,60,000");
+    expect(formatPaise(5)).toBe("₹0.05");
+    expect(formatPaise(-1001)).toBe(formatINR(-10.01)); // the same sign placement as formatINR
+    // 0.1 + 0.2 rupees as paise is 30, never 30.000000000000004.
+    expect(formatPaise(30)).toBe("₹0.30");
+    // A total a float would round: 10^15 + 1 paise.
+    // 10^15 + 1 paise = Rs 10^13 + 1 paisa (14 digits of rupees).
+    expect(formatPaise(1_000_000_000_000_001)).toBe("₹1,00,00,00,00,00,000.01");
+    expect(formatPaise(null)).toBe(formatPaise(undefined));
+    expect(formatPaise(1.5)).toBe(formatPaise(null));
+  });
+});
