@@ -315,6 +315,86 @@ def net_eot(
     )
 
 
+@dataclass
+class NetEotRow:
+    """One line of the net-EOT table (plan 4B-25). ``days`` adds to the lower (settled)
+    figure; ``up_to`` adds only to the higher one, while an overlap is undecided."""
+
+    key: str
+    label: str
+    days: int = 0
+    up_to: int = 0
+    overlap_id: Optional[str] = None
+    treatment: Optional[str] = None
+
+
+def net_eot_table(
+    facts: DelayFacts,
+    treatments: Dict[str, Treatment],
+    *,
+    previously_granted: int = 0,
+    include_neutral: bool = False,
+) -> Tuple[List[NetEotRow], NetEot]:
+    """The net-EOT figure as a table whose rows add up to it exactly.
+
+    Built from the same day sets as ``net_eot``, in the same order, so each row is the
+    days it adds that no earlier row counted: the sum of ``days`` is ``net.low`` and
+    adding ``up_to`` gives ``net.high``. Returns the rows and the engine's own figure;
+    a mismatch raises, so the table can never disagree with the figure it explains.
+    """
+    net = net_eot(facts, treatments, previously_granted=previously_granted, include_neutral=include_neutral)
+    rows: List[NetEotRow] = []
+    counted: Set[date] = set(facts.employer_only)
+    rows.append(NetEotRow("employer_only", "Employer delay with no Contractor delay on the same day", len(counted)))
+    if include_neutral:
+        neutral_new = set(facts.neutral_only) - counted
+        rows.append(
+            NetEotRow("neutral_only", "Neutral delay with no Contractor delay, where the contract gives time", len(neutral_new))
+        )
+        counted |= neutral_new
+    relevant = [o for o in facts.overlaps if o.kind == EMPLOYER_CONTRACTOR or include_neutral]
+    apportioned: List[Tuple[Overlap, int]] = []
+    for overlap in relevant:
+        treatment = treatments.get(overlap.overlap_id)
+        name = treatment.treatment if treatment is not None else None
+        if name in FULL_TIME_TREATMENTS:
+            new = overlap.day_set - counted
+            rows.append(NetEotRow("overlap_time", "Overlap decided as carrying time", len(new), overlap_id=overlap.overlap_id, treatment=name))
+            counted |= new
+        elif name == "apportioned":
+            assert treatment is not None
+            apportioned.append((overlap, treatment_days(overlap, treatment)))
+        elif name == "no_eot":
+            rows.append(NetEotRow("overlap_none", "Overlap decided as carrying no time", 0, overlap_id=overlap.overlap_id, treatment=name))
+    union: Set[date] = set()
+    per_overlap = 0
+    for overlap, days in apportioned:
+        share = min(days, len(overlap.day_set - counted))
+        per_overlap += share
+        union |= overlap.day_set
+        rows.append(NetEotRow("overlap_apportioned", "Overlap apportioned: the days decided as time", share,
+                              overlap_id=overlap.overlap_id, treatment="apportioned"))
+    cap = min(per_overlap, len(union - counted))
+    if cap < per_overlap:
+        rows.append(NetEotRow("apportioned_shared", "Days that more than one apportioned overlap would count", cap - per_overlap))
+    granted = max(0, int(previously_granted))
+    if granted:
+        rows.append(NetEotRow("previously_granted", "Already granted", -granted))
+    subtotal = sum(row.days for row in rows)
+    if subtotal < 0:
+        rows.append(NetEotRow("floor", "An extension is never less than none", -subtotal))
+    if not net.settled:
+        rows.append(NetEotRow(
+            "undecided", "Overlaps with no decided treatment: counted only in the higher figure",
+            0, up_to=net.high - net.low,
+        ))
+    low = sum(row.days for row in rows)
+    high = low + sum(row.up_to for row in rows)
+    if (low, high) != (net.low, net.high):  # pragma: no cover - the invariant the tests pin
+        raise AssertionError(f"net-EOT table ({low}, {high}) disagrees with the engine ({net.low}, {net.high})")
+    return rows, net
+
+
 def compensable_days(
     events: Iterable[EngineEvent],
     as_of: Optional[date],
@@ -349,6 +429,8 @@ def days_outside(period_start: date, period_end: date, allowed: Set[date]) -> Tu
 
 
 __all__ = [
+    "NetEotRow",
+    "net_eot_table",
     "COMPENSABLE_TREATMENTS",
     "EMPLOYER_CONTRACTOR",
     "NEUTRAL_CONTRACTOR",

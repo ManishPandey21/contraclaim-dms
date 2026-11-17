@@ -230,7 +230,14 @@ export async function decideDelayEvent(
   headId: string,
   eventId: string,
   boardVersion: number,
-  decision: { risk_owner?: string; criticality?: string; clear?: boolean; note?: string }
+  decision: {
+    risk_owner?: string;
+    criticality?: string;
+    clear?: boolean;
+    /** Clear one decision and keep the other (4B-25). */
+    clear_fields?: ("risk_owner" | "criticality")[];
+    note?: string;
+  }
 ): Promise<DelayView> {
   const { data } = await api.put<DelayView>(
     `${headPath(claimId, headId)}/delay/events/${encodeURIComponent(eventId)}`,

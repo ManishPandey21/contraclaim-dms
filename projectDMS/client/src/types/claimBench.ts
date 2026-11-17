@@ -286,6 +286,25 @@ export interface LinkedRecordView {
   revision_current: boolean;
 }
 
+/** One line of the net-EOT table. `days` adds to the lower (settled) figure; `up_to` only to the higher. */
+export interface NetEotRow {
+  key:
+    | "employer_only"
+    | "neutral_only"
+    | "overlap_time"
+    | "overlap_none"
+    | "overlap_apportioned"
+    | "apportioned_shared"
+    | "previously_granted"
+    | "floor"
+    | "undecided";
+  label: string;
+  days: number;
+  up_to: number;
+  overlap_id?: string | null;
+  treatment?: string | null;
+}
+
 export interface DelayView {
   head_id: string;
   method?: DelayMethod | null;
@@ -311,6 +330,8 @@ export interface DelayView {
     overlap_days_to_eot: number;
     neutral_days_included: number;
   };
+  /** The net-EOT table (4B-25): rows add up to `net` exactly. */
+  net_table?: NetEotRow[];
   compensable_periods: { start_date: string; end_date: string; days: number }[];
   blockers: string[];
   stale_links: number;

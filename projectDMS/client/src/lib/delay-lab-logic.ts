@@ -3,6 +3,7 @@ import type {
   DelayEventView,
   DelayMethod,
   DelayView,
+  LinkedRecordView,
   OverlapTreatment,
   OverlapView,
   QuantumCategory,
@@ -128,6 +129,8 @@ export interface Timeline {
   totalDays: number;
   bars: TimelineBar[];
   overlaps: { id: string; left: number; width: number; decided: boolean }[];
+  /** EOT submissions and determinations linked to the head, at their dates (4B-25). */
+  milestones: { id: string; label: string; date: string; left: number; granted?: number | null }[];
 }
 
 /**
@@ -135,7 +138,9 @@ export interface Timeline {
  * risk owner a person decided, and in "Not decided" until then, so the picture
  * never shows a proposal as a decision. Returns null when nothing can be drawn.
  */
-export function buildTimeline(view: Pick<DelayView, "events" | "overlaps" | "as_of_date">): Timeline | null {
+export function buildTimeline(
+  view: Pick<DelayView, "events" | "overlaps" | "as_of_date"> & Partial<Pick<DelayView, "records">>
+): Timeline | null {
   const asOf = view.as_of_date ? view.as_of_date.slice(0, 10) : null;
   const spans = view.events
     .map((event) => ({ event, start: event.start_date.slice(0, 10), end: event.end_date?.slice(0, 10) ?? asOf }))
@@ -145,8 +150,10 @@ export function buildTimeline(view: Pick<DelayView, "events" | "overlaps" | "as_
     end: string;
   }[];
   if (spans.length === 0) return null;
-  const first = Math.min(...spans.map((item) => utc(item.start)));
-  const last = Math.max(...spans.map((item) => utc(item.end)));
+  const dated = (view.records ?? []).filter((record) => record.date) as (LinkedRecordView & { date: string })[];
+  // The axis covers the events and every linked record's date, so no milestone falls off it.
+  const first = Math.min(...spans.map((item) => utc(item.start)), ...dated.map((record) => utc(record.date.slice(0, 10))));
+  const last = Math.max(...spans.map((item) => utc(item.end)), ...dated.map((record) => utc(record.date.slice(0, 10))));
   const totalDays = Math.round((last - first) / DAY) + 1;
   const place = (start: string, end: string) => ({
     left: ((utc(start) - first) / DAY / totalDays) * 100,
@@ -169,7 +176,21 @@ export function buildTimeline(view: Pick<DelayView, "events" | "overlaps" | "as_
       decided: Boolean(overlap.finding),
       ...place(overlap.start_date.slice(0, 10), overlap.end_date.slice(0, 10)),
     })),
+    milestones: dated
+      .map((record) => ({
+        id: record.link_id,
+        label: record.label,
+        date: record.date.slice(0, 10),
+        left: ((utc(record.date.slice(0, 10)) - first) / DAY / totalDays) * 100,
+        granted: record.granted_days,
+      }))
+      .sort((a, b) => a.left - b.left),
   };
+}
+
+/** The overlaps' short names, as the timeline draws them: O1, O2, ... in the order the server lists them. */
+export function overlapNames(view: Pick<DelayView, "overlaps">): Record<string, string> {
+  return Object.fromEntries(view.overlaps.map((overlap, index) => [overlap.overlap_id, `O${index + 1}`]));
 }
 
 /** The extension in words. A range is stated as a range, never rounded to one figure. */

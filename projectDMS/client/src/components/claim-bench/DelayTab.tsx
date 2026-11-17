@@ -21,6 +21,7 @@ import {
   eventNeedsDecision,
   netEotExplanation,
   netEotText,
+  overlapNames,
 } from "@/lib/delay-lab-logic";
 import { formatDateIN, fromDateInput, toDateInput } from "@/lib/format-in";
 import { fetchDelayCandidates } from "@/services/claim-bench-api";
@@ -49,6 +50,14 @@ const LANE_BAR: Record<string, string> = {
   undecided: "bg-white border-2 border-dashed border-slate-500",
 };
 
+/** Label colour on each bar: white on the filled lanes, dark on the white "Not decided" one. */
+const LANE_TEXT: Record<string, string> = {
+  employer: "text-white",
+  contractor: "text-white",
+  neutral: "text-white",
+  undecided: "text-slate-800",
+};
+
 const select = "h-9 rounded-md border border-input bg-background px-2 text-sm disabled:opacity-50";
 
 const Timeline: React.FC<{ view: DelayView }> = ({ view }) => {
@@ -74,13 +83,39 @@ const Timeline: React.FC<{ view: DelayView }> = ({ view }) => {
                   <span
                     key={bar.id}
                     title={`${bar.label}${bar.counted ? "" : " (not counted)"}${bar.openEnded ? ", runs to the analysis date" : ""}`}
-                    className={`absolute top-1 h-4 rounded-sm ${LANE_BAR[bar.lane]} ${bar.counted ? "" : "opacity-50"}`}
+                    className={`absolute top-0.5 flex h-5 items-center overflow-hidden rounded-sm ${LANE_BAR[bar.lane]} ${bar.counted ? "" : "opacity-50"}`}
                     style={{ left: `${bar.left}%`, width: `max(${bar.width}%, 4px)` }}
-                  />
+                  >
+                    {/* The label is on the bar itself, not only in a tooltip (4B-25). */}
+                    <span className={`truncate whitespace-nowrap px-1 text-[10px] font-medium ${LANE_TEXT[bar.lane]}`}>
+                      {bar.label}
+                      {bar.counted ? "" : " (not counted)"}
+                    </span>
+                  </span>
                 ))}
             </div>
           </div>
         ))}
+        {timeline.milestones.length > 0 && (
+          <div className="flex items-center gap-2 border-t py-1.5">
+            <span className="w-24 shrink-0 text-xs font-medium text-muted-foreground">Milestones</span>
+            <ol aria-label="EOT submissions and determinations" className="relative h-6 flex-1 rounded bg-muted/40">
+              {timeline.milestones.map((milestone) => (
+                <li
+                  key={milestone.id}
+                  className="absolute top-0 flex h-6 -translate-x-1/2 items-center gap-1"
+                  style={{ left: `${milestone.left}%` }}
+                >
+                  <span aria-hidden="true" className="h-2.5 w-2.5 rotate-45 bg-slate-700" />
+                  <span className="whitespace-nowrap text-[10px] font-medium text-slate-800">
+                    {milestone.label} · {formatDateIN(milestone.date)}
+                    {milestone.granted != null ? ` · ${milestone.granted} days granted` : ""}
+                  </span>
+                </li>
+              ))}
+            </ol>
+          </div>
+        )}
         {/* Overlaps span every lane: hatched while undecided, outlined once decided. */}
         <div className="pointer-events-none absolute inset-y-0 left-[6.5rem] right-0">
           {timeline.overlaps.map((overlap, index) => (
@@ -108,6 +143,59 @@ const Timeline: React.FC<{ view: DelayView }> = ({ view }) => {
         <span>{formatDateIN(timeline.end)}</span>
       </figcaption>
     </figure>
+  );
+};
+
+/** How the extension is made up (4B-25). The rows add up to the figure above, exactly. */
+const NetEotTable: React.FC<{ view: DelayView }> = ({ view }) => {
+  const rows = view.net_table ?? [];
+  if (rows.length === 0) return null;
+  const names = overlapNames(view);
+  const ranged = rows.some((row) => row.up_to > 0);
+  const label = (row: (typeof rows)[number]) => {
+    if (!row.overlap_id) return row.label;
+    const treatment = row.treatment ? TREATMENT_LABEL[row.treatment as OverlapTreatment] ?? row.treatment : "";
+    return `${names[row.overlap_id] ?? "Overlap"}: ${treatment || row.label}`;
+  };
+  const signed = (value: number) => (value < 0 ? `−${Math.abs(value)}` : String(value));
+  return (
+    <table className="w-full text-sm" aria-label="How the extension is made up">
+      <thead>
+        <tr className="border-b text-left text-xs text-muted-foreground">
+          <th scope="col" className="py-1 font-medium">
+            Component
+          </th>
+          <th scope="col" className="py-1 text-right font-medium">
+            Days
+          </th>
+          {ranged && (
+            <th scope="col" className="py-1 text-right font-medium">
+              Up to
+            </th>
+          )}
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((row, index) => (
+          <tr key={`${row.key}-${row.overlap_id ?? index}`} className="border-b last:border-b-0">
+            <th scope="row" className="py-1 text-left font-normal">
+              {label(row)}
+            </th>
+            <td className="py-1 text-right tabular-nums">{signed(row.days)}</td>
+            {ranged && <td className="py-1 text-right tabular-nums">{row.up_to > 0 ? `+${row.up_to}` : ""}</td>}
+          </tr>
+        ))}
+      </tbody>
+      <tfoot>
+        <tr className="border-t font-semibold">
+          <th scope="row" className="py-1 text-left">
+            Extension of time
+          </th>
+          <td className="py-1 text-right tabular-nums">{view.net.low}</td>
+          {ranged && <td className="py-1 text-right tabular-nums">{view.net.high}</td>}
+        </tr>
+      </tfoot>
+    </table>
   );
 };
 
@@ -288,6 +376,7 @@ const DelayTab: React.FC<Props> = ({ claimId, headId, boardVersion, readOnly }) 
                 the higher all of them.
               </p>
             )}
+            <NetEotTable view={view} />
             <dl className="grid grid-cols-2 gap-2 pt-1 text-xs sm:grid-cols-4">
               {[
                 ["Employer critical days", view.employer_critical_days],
@@ -477,7 +566,11 @@ const DelayTab: React.FC<Props> = ({ claimId, headId, boardVersion, readOnly }) 
                     value={event.decision.risk_owner ?? ""}
                     disabled={disabled}
                     onChange={(e) =>
-                      e.target.value && decideEvent.mutate({ eventId: event.event_id, risk_owner: e.target.value as RiskOwner })
+                      decideEvent.mutate(
+                        e.target.value
+                          ? { eventId: event.event_id, risk_owner: e.target.value as RiskOwner }
+                          : { eventId: event.event_id, clear_fields: ["risk_owner"] }
+                      )
                     }
                   >
                     <option value="">Not decided</option>
@@ -498,7 +591,11 @@ const DelayTab: React.FC<Props> = ({ claimId, headId, boardVersion, readOnly }) 
                     value={event.decision.criticality ?? ""}
                     disabled={disabled}
                     onChange={(e) =>
-                      e.target.value && decideEvent.mutate({ eventId: event.event_id, criticality: e.target.value as Criticality })
+                      decideEvent.mutate(
+                        e.target.value
+                          ? { eventId: event.event_id, criticality: e.target.value as Criticality }
+                          : { eventId: event.event_id, clear_fields: ["criticality"] }
+                      )
                     }
                   >
                     <option value="">Not decided</option>

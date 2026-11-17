@@ -167,6 +167,48 @@ describe("Delay tab", () => {
     expect(screen.getByText("Treatment not decided")).toBeInTheDocument();
   });
 
+  it("shows how the extension is made up, adding up to the figure (4B-25)", async () => {
+    api.fetchHeadDelay.mockResolvedValue(
+      delay({
+        net_table: [
+          { key: "employer_only", label: "Employer delay with no Contractor delay on the same day", days: 19, up_to: 0 },
+          { key: "previously_granted", label: "Already granted", days: -4, up_to: 0 },
+          { key: "undecided", label: "Overlaps with no decided treatment: counted only in the higher figure", days: 0, up_to: 12 },
+        ],
+        net: { ...delay().net, low: 15, high: 27, previously_granted: 4 },
+        records: [
+          {
+            link_id: "l-sub", target_type: "eot_submission", target_id: "S1", label: "EOT submission EOT-3",
+            date: "2026-04-05T00:00:00", granted_days: null, counted: false, revision_current: true,
+          },
+        ],
+      })
+    );
+    mount(<DelayTab claimId="c1" headId="H1" boardVersion={4} readOnly={false} />);
+    const table = await screen.findByRole("table", { name: "How the extension is made up" });
+    const rows = within(table).getAllByRole("row");
+    const cells = rows.slice(1, -1).map((row) => within(row).getAllByRole("cell").map((cell) => cell.textContent));
+    expect(cells).toEqual([["19", ""], ["−4", ""], ["0", "+12"]]);
+    // The totals row equals the figure, and the rows add up to it.
+    expect(within(rows[rows.length - 1]).getAllByRole("cell").map((cell) => cell.textContent)).toEqual(["15", "27"]);
+    expect(19 - 4).toBe(15);
+    // Bars carry their labels on the bar; the submission sits in the milestone lane at its date.
+    const timeline = screen.getByRole("figure", { name: "Delay events by risk owner" });
+    expect(within(timeline).getByText("Hindrance HR-C1")).toBeInTheDocument();
+    const milestones = within(timeline).getByRole("list", { name: "EOT submissions and determinations" });
+    expect(within(milestones).getByText("EOT submission EOT-3 · 05-04-2026")).toBeInTheDocument();
+  });
+
+  it("lets a decision go back to 'Not decided' without touching the other (4B-25)", async () => {
+    api.decideDelayEvent.mockResolvedValue(delay());
+    mount(<DelayTab claimId="c1" headId="H1" boardVersion={4} readOnly={false} />);
+    const critical = await screen.findByLabelText("Critical path", { selector: "#critical-C1" });
+    await userEvent.selectOptions(critical, "");
+    await waitFor(() =>
+      expect(api.decideDelayEvent).toHaveBeenCalledWith("c1", "H1", "C1", 4, { clear_fields: ["criticality"] })
+    );
+  });
+
   it("will not record a treatment without a basis, then sends it with the board version", async () => {
     api.decideDelayOverlap.mockResolvedValue(delay());
     mount(<DelayTab claimId="c1" headId="H1" boardVersion={4} readOnly={false} />);

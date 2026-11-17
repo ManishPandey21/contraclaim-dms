@@ -219,7 +219,13 @@ export function useHeadAnalysis(claimId: string, headId: string, boardVersion: n
       (settings) => setDelaySettings(claimId, headId, boardVersion, settings),
       "The setting could not be saved"
     ),
-    decideEvent: delayEdit<{ eventId: string; risk_owner?: string; criticality?: string; clear?: boolean }>(
+    decideEvent: delayEdit<{
+      eventId: string;
+      risk_owner?: string;
+      criticality?: string;
+      clear?: boolean;
+      clear_fields?: ("risk_owner" | "criticality")[];
+    }>(
       ({ eventId, ...decision }) => decideDelayEvent(claimId, headId, eventId, boardVersion, decision),
       "Your call could not be saved"
     ),

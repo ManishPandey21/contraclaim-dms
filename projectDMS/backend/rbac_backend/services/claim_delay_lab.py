@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from bson import ObjectId
 from fastapi import HTTPException
@@ -47,6 +47,7 @@ from .claim_delay_engine import (
     compensable_days,
     compute_facts,
     net_eot,
+    net_eot_table,
     treatment_days,
 )
 from .key_date_determination_rule import FINAL_DETERMINATION_STATUSES, governing_determination_id, superseded_by
@@ -102,6 +103,8 @@ class EventDecisionRequest(BaseModel):
     risk_owner: Optional[str] = None
     criticality: Optional[str] = None
     clear: bool = False
+    #: Clear one decision and keep the other (4B-25: each select can go back to "Not decided").
+    clear_fields: List[Literal["risk_owner", "criticality"]] = Field(default_factory=list)
     note: Optional[str] = Field(default=None, max_length=2000)
 
 
@@ -207,6 +210,18 @@ class NetEotView(BaseModel):
     neutral_days_included: int = 0
 
 
+class NetEotRowView(BaseModel):
+    """One line of the net-EOT table (4B-25): ``days`` adds to the lower (settled)
+    figure, ``up_to`` only to the higher. The rows add up to ``net`` exactly."""
+
+    key: str
+    label: str
+    days: int = 0
+    up_to: int = 0
+    overlap_id: Optional[str] = None
+    treatment: Optional[str] = None
+
+
 class DelayView(BaseModel):
     head_id: str
     method: Optional[str] = None
@@ -222,6 +237,7 @@ class DelayView(BaseModel):
     neutral_critical_days: int = 0
     contractor_only_days: int = 0
     net: NetEotView = Field(default_factory=NetEotView)
+    net_table: List[NetEotRowView] = Field(default_factory=list)
     compensable_periods: List[DelayPeriod] = Field(default_factory=list)
     blockers: List[str] = Field(default_factory=list)
     stale_links: int = 0
@@ -416,7 +432,7 @@ def build_view(
     facts = compute_facts(events, as_of, include_neutral=head.delay.include_neutral)
     treatments = head_treatments(head.delay)
     granted = previously_granted(active)
-    net = net_eot(facts, treatments, previously_granted=granted, include_neutral=head.delay.include_neutral)
+    table, net = net_eot_table(facts, treatments, previously_granted=granted, include_neutral=head.delay.include_neutral)
     counted = set(facts.counted_event_ids)
     by_id = {event.event_id: event for event in events}
 
@@ -524,6 +540,7 @@ def build_view(
             overlap_days_to_eot=net.overlap_days_to_eot,
             neutral_days_included=net.neutral_days_included,
         ),
+        net_table=[NetEotRowView(**vars(row)) for row in table],
         compensable_periods=periods,
         blockers=delay_blockers(head, active),
         stale_links=sum(1 for link in active if not _is_current(link)),
@@ -819,6 +836,10 @@ class ClaimDelayLab:
     async def decide_event(
         self, claim: Dict[str, Any], head_id: str, event_id: str, request: EventDecisionRequest, user_id: Optional[str]
     ) -> DelayView:
+        if ("risk_owner" in request.clear_fields and request.risk_owner is not None) or (
+            "criticality" in request.clear_fields and request.criticality is not None
+        ):
+            raise HTTPException(status_code=422, detail="A decision cannot be set and cleared in the same request")
         if not request.clear:
             if request.risk_owner is not None and request.risk_owner not in _VALID_OWNERS:
                 raise HTTPException(status_code=422, detail="risk_owner must be employer, contractor or neutral")
@@ -833,6 +854,15 @@ class ClaimDelayLab:
             if request.clear:
                 decision.risk_owner, decision.criticality = None, None
                 decision.decided_by, decision.decided_at = None, None
+            elif request.clear_fields:
+                if "risk_owner" in request.clear_fields:
+                    decision.risk_owner = None
+                if "criticality" in request.clear_fields:
+                    decision.criticality = None
+                if decision.risk_owner is None and decision.criticality is None:
+                    decision.decided_by, decision.decided_at = None, None
+                else:
+                    decision.decided_by, decision.decided_at = user_id, now_utc()
             else:
                 if request.risk_owner is not None:
                     decision.risk_owner = request.risk_owner  # type: ignore[assignment]
