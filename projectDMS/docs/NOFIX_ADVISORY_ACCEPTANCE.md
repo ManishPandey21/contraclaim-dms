@@ -414,7 +414,7 @@ patched release exists. Same class as R3.
 
 Owner instruction 2026-11-17: prepare an advisory-specific exception of at most 30 days
 for authorised review; do not activate it or change the gate until the security owner
-approves. The package is `projectDMS/docs/security/R5_PICOMATCH_GATE_PROPOSED.patch`, a
+approves. The package is `projectDMS/docs/hotfix/R5_PICOMATCH_GATE_PROPOSED.patch`, a
 `git apply`-able patch to `.github/scripts/` that `git apply --check` accepts on the
 branch tip. Nothing in `.github/` is changed until it is applied after approval.
 
@@ -454,7 +454,7 @@ Run against the real client with the patch: the gate passes with the exception b
 Without the patch (the repository as it is): the gate fails on GHSA-fc5q-39xc-vjpf, and
 stays failing.
 
-**To apply after approval:** `git apply projectDMS/docs/security/R5_PICOMATCH_GATE_PROPOSED.patch`,
+**To apply after approval:** `git apply projectDMS/docs/hotfix/R5_PICOMATCH_GATE_PROPOSED.patch`,
 set `EXPIRES` to the approved date, run `python -m pytest -q .github/scripts/test_npm_audit_gate.py`,
 and record the approval (who, when, expiry) here.
 
