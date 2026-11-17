@@ -32,7 +32,7 @@ personas on a real MongoDB.
 | Path | Mechanism | Survives explicit-grant-only? |
 |---|---|---|
 | Named on a role | the role document lists the permission | yes |
-| Named by catalogue id | the role lists the permission document's id; the Permissions page saves roles this way | yes (see §4) |
+| Named by catalogue id | the role lists the permission document's id; the role API accepts catalogue ids (`POST /api/roles/{id}/permissions/{permission_id}`, or a role update listing the ids `GET /api/permissions` returns); the Permissions page saves names | yes (see §4) |
 | `dms.admin` widening | `PolicyService.has_permission` also accepts `dms.admin` for any `dms.*` check | **no** |
 | `*` wildcard | a role listing `*` | **no** |
 | Super Admin shortcut | the `superadmin` key on the principal; a system alias such as `super-admin` keeps it | **no** |
@@ -86,11 +86,15 @@ number of affected people is unknown, and nothing in §5 may proceed past step 1
 
 ## 4. A defect found and fixed in passing (4B-10)
 
-The Permissions page saves a role's permissions by catalogue id (an ObjectId string),
-not by name. `has_permission` honoured that, but the explicit check that 4B-10 put on
-`dms.claim.determine` and `dms.claim.strategy.read` did not. A grant of either made
-through the product therefore never worked. 4B-49 makes the explicit check accept the
-catalogue id (and a catalogue label) of the same permission. `*`, `dms.admin` and the
+A role can hold a permission by its catalogue id (an ObjectId string) instead of its
+name. The Permissions page saves names, but the role API accepts ids
+(`POST /api/roles/{id}/permissions/{permission_id}`, or a role update listing the ids
+`GET /api/permissions` returns), and roles written by older tools may hold them.
+Reading P-15 counts such holders (`by_name_through_a_catalogue_id_only`).
+`has_permission` honoured ids, but the explicit check that 4B-10 put on
+`dms.claim.determine` and `dms.claim.strategy.read` did not, so a grant of either saved
+by id was refused. 4B-49 makes the explicit check accept the catalogue id (and a
+catalogue label) of the same permission. `*`, `dms.admin` and the
 Super Admin shortcut are still refused. Proof:
 `test_a_grant_saved_by_catalogue_id_is_a_grant_by_name` (real MongoDB, real route). It
 fails without the fix with `explicit_grant_required`.
@@ -99,11 +103,15 @@ Production effect: none today. Claim Bench is off there, and `dms.document.revie
 not yet explicit-only. It matters for step 3 below: without it, closing the inheritance
 would also withdraw grants an administrator made deliberately.
 
-Related, not fixed (separate task): `GET` effective permissions sends the client the
-catalogue id rather than the name for such grants. So the client hides screens that
-are gated on the name, the extraction-review queue among them, even though the server
-allows them. That affects every permission granted through the Permissions page, not
-only this one.
+Related, fixed separately (2026-11-17): `GET /api/me` sent the client the catalogue id
+rather than the name for such grants, so the client hid screens gated on the name
+(the extraction-review queue among them) although the server allowed them. It now
+sends the names (`get_effective_permission_names`; proof
+`tests/integration/test_effective_permission_names_mongo.py`).
+
+Correction (2026-11-17): the first version of this section said the Permissions page
+saves ids, so that no grant made through the product worked. That was wrong: the page
+saves names. The fixes stand for roles that hold ids.
 
 ## 5. Proposed migration path (explicit-grant-only)
 

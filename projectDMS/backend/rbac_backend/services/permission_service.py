@@ -748,6 +748,33 @@ class PermissionService:
             logger.error(f"Failed to get permissions for user {user_id}: {str(e)}")
             return []
 
+    async def _catalogue_names(self, db: Any, entries: set[str]) -> set[str]:
+        """The permission names `get_user_permissions` reads role `entries` as.
+
+        The same lookup: an entry that parses as an ObjectId is a catalogue id, any
+        other is matched against documents' `name`; each document found is named by
+        `_build_permission_from_doc`. An entry that is already a canonical name adds
+        nothing new.
+        """
+        perm_ids: List[ObjectId] = []
+        perm_names: List[str] = []
+        for entry in entries:
+            if entry == "*":
+                continue
+            try:
+                perm_ids.append(ObjectId(entry))
+            except Exception:
+                perm_names.append(entry)
+        ors: List[Dict[str, Any]] = []
+        if perm_ids:
+            ors.append({"_id": {"$in": perm_ids}})
+        if perm_names:
+            ors.append({"name": {"$in": perm_names}})
+        if not ors:
+            return set()
+        documents = await db.permissions.find({"$or": ors}).to_list(length=None)
+        return {self._build_permission_from_doc(document).name for document in documents}
+
     async def get_effective_permission_names(self, user_id: str) -> List[str]:
         """
         Return the current user's effective permission names without requiring
@@ -774,6 +801,7 @@ class PermissionService:
                 if permission is not None and str(permission).strip()
             }
             role_names: set[str] = set()
+            role_entries: set[str] = set()
 
             for rid in user_doc.get("roles", []) or []:
                 resolution = await self._load_role(db, rid)
@@ -796,14 +824,22 @@ class PermissionService:
                     if normalized_name:
                         role_names.add(normalized_name)
 
-                raw_permissions.update(
+                role_entries.update(
                     str(permission)
                     for permission in (role.get("permissions", []) or [])
                     if permission is not None and str(permission).strip()
                 )
 
+            raw_permissions.update(role_entries)
             if "superadmin" in role_names or "*" in raw_permissions:
                 return ["*"]
+
+            # A role can hold catalogue ids (the role API accepts them), which
+            # `user_has_permission` honours through `get_user_permissions`. Advertise the
+            # names those ids (and catalogue labels) stand for, or the client hides what
+            # the server allows. Role entries only: the user's own `permissions` field is
+            # not read by the check, so resolving it would advertise more than it grants.
+            raw_permissions.update(await self._catalogue_names(db, role_entries))
 
             if role_names & {"orgadmin", "orguser", "projectadmin", "projectuser"}:
                 raw_permissions.add("users:read")
@@ -911,11 +947,12 @@ class PermissionService:
     async def _catalogue_spellings(self, db: Any, lookup_keys: set) -> set:
         """Other role entries that name one of `lookup_keys` through its permission document.
 
-        The Permissions page saves a role's permissions by catalogue id (an ObjectId
-        string), and `get_user_permissions` reads such an entry, or a document's own
-        `name` where that is a label, as the permission the document stands for. Both
-        are the permission held by name on the role (4B-49): a grant an administrator
-        ticked is deliberate whichever spelling was stored.
+        A role can hold a permission by catalogue id (an ObjectId string): the role
+        API accepts ids, though the Permissions page saves names. `get_user_permissions`
+        reads such an entry, or a document's own `name` where that is a label, as the
+        permission the document stands for. Both are the permission held by name on
+        the role (4B-49): a grant an administrator made is deliberate whichever
+        spelling was stored.
         """
         keys = sorted(lookup_keys)
         cursor = db.permissions.find(

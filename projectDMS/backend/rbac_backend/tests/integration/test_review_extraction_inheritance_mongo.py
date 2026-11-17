@@ -8,7 +8,7 @@ this test checks that:
 - the classifier reading P-15 uses (``review_extraction_grant_paths``) agrees with
   ``PolicyService.has_permission`` (does the check pass?) and with
   ``PolicyService.has_explicit_grant`` (is it held by name, or by the catalogue id the
-  Permissions page saves?);
+  role API accepts?);
 - the paths are the pinned CURRENT behaviour - including the inheritance AQ-12 is
   about, which this ticket records and does not close;
 - the live review route (``GET /api/documents/{id}/extraction-review``) offers

@@ -155,13 +155,13 @@ def test_revoking_the_grant_takes_effect_on_the_next_request(monkeypatch) -> Non
 
 
 def test_a_grant_saved_by_catalogue_id_is_a_grant_by_name(monkeypatch) -> None:
-    """4B-49: the Permissions page saves a role's permissions by catalogue id.
+    """4B-49: a role can hold a permission by catalogue id.
 
-    Ticking ``dms.claim.strategy.read`` there stores the permission document's
-    ObjectId. That is a deliberate grant on the user's own role and must count as
-    one; before 4B-49 it passed ``has_permission`` but failed the explicit check, so
-    no grant made through the product could open the strategy note. The id of a
-    different permission still grants nothing privileged.
+    The role API accepts ids (the Permissions page saves names). A role holding the
+    permission document's ObjectId for ``dms.claim.strategy.read`` is a deliberate
+    grant on the user's own role and must count as one; before 4B-49 it passed
+    ``has_permission`` but failed the explicit check. The id of a different
+    permission still grants nothing privileged.
     """
 
     async def scenario() -> None:

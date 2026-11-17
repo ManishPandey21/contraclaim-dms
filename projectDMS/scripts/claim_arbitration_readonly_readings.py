@@ -432,7 +432,7 @@ SUPER_ADMIN_KEY = "superadmin"
 
 #: How a user can come to hold REVIEW_EXTRACTION. The two named paths survive
 #: explicit-grant-only (PolicyService.has_explicit_grant): the permission's name on one
-#: of the user's roles, or its catalogue id there (the Permissions page saves ids). The
+#: of the user's roles, or its catalogue id there (the role API accepts ids). The
 #: rest are inheritance.
 NAMED = "named"
 NAMED_BY_PERMISSION_DOCUMENT = "named_by_permission_document"
