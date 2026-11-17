@@ -161,10 +161,45 @@ async def list_claim_signals(
     bench.ensure_enabled(org or getattr(current_user, "organization_id", None))
     scope = build_scope_query(current_user, organization_id=org, project_id=project)
     hindrances = scope if await _may(policy, current_user, Permissions.HINDRANCE_VIEW, org, project) else None
-    boards = scope if await _may(policy, current_user, Permissions.DRAFTING_REQUEST_VIEW, org, project) else None
-    return await ClaimSignalService(db).list(
+    # RU-1: letter signals need dms.claim.signal.view on the project, by explicit grant
+    # (never Super Admin, a wildcard or dms.admin). drafting.request.view no longer shows them.
+    boards = scope if await _may(policy, current_user, Permissions.CLAIM_SIGNAL_VIEW, org, project) else None
+    signals = await ClaimSignalService(db).list(
         organization_id=org, hindrance_query=hindrances, board_query=boards
     )
+    return [shown for shown in [await _letter_signal_for(signal, db, current_user, policy) for signal in signals] if shown]
+
+
+#: RU-1: what a letter signal shows to someone who may know the letter exists but may not read it.
+NEUTRAL_LETTER_LABEL = "Incoming letter"
+NEUTRAL_LETTER_TITLE = "An incoming letter raises a possible claim (you cannot open the letter)"
+
+
+async def _readable_letter(letter_id: str, db, current_user: CurrentUser, policy: PolicyService) -> tuple:
+    """(document, readable). document is None when the letter no longer resolves."""
+    from ..services.publication_policy import is_consumable, resolve_canonical_document
+
+    document = await resolve_canonical_document(db, str(letter_id))
+    if not document or not is_consumable(document):
+        return None, False
+    try:
+        await policy.authorize_document(current_user, Permissions.DOCUMENT_VIEW, document, resource_type="document")
+    except HTTPException:
+        return document, False
+    return document, True
+
+
+async def _letter_signal_for(signal, db, current_user: CurrentUser, policy: PolicyService):
+    """RU-1: a letter signal in full to a reader of the letter; neutral (no subject, no
+    reference) to someone who may not read it; left out when the letter no longer resolves."""
+    if signal.source_type != "letter_bench":
+        return signal
+    document, readable = await _readable_letter(signal.source_id, db, current_user, policy)
+    if document is None:
+        return None
+    if readable:
+        return signal
+    return signal.model_copy(update={"source_id": "", "label": NEUTRAL_LETTER_LABEL, "title": NEUTRAL_LETTER_TITLE})
 
 
 @router.post("/claims/bench/potential", response_model=PotentialClaimResponse)
@@ -184,18 +219,32 @@ async def raise_potential_claim(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source record not found")
     await selection.require_record(source)
     bench.ensure_enabled(str(source.get("organization_id") or "") or getattr(current_user, "organization_id", None))
-    source_permission = (
-        Permissions.HINDRANCE_VIEW if payload.source_type == "hindrance" else Permissions.DRAFTING_REQUEST_VIEW
-    )
-    await policy.authorize_document(current_user, source_permission, source, resource_type=payload.source_type)
+    if payload.source_type == "hindrance":
+        await policy.authorize_document(current_user, Permissions.HINDRANCE_VIEW, source, resource_type="hindrance")
+    else:
+        # RU-1: the signal permission on the board's project, and the letter itself readable. An
+        # organisation-less board takes the organisation the claim will take (4B-13).
+        selected_org, _selected_project = await selection.list_filters(None, None)
+        await policy.authorize(
+            current_user,
+            Permissions.CLAIM_SIGNAL_VIEW,
+            resource_type="letter_bench",
+            organization_id=str(source.get("organization_id") or selected_org or getattr(current_user, "organization_id", "") or "") or None,
+            project_id=str(source.get("project_id") or "") or None,
+        )
+        _document, readable = await _readable_letter(payload.source_id, db, current_user, policy)
+        if not readable:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You cannot raise a claim from a letter you cannot open.")
+    selected_org, _project = await selection.list_filters(None, None)
+    # An organisation-less board: the claim takes the selected organisation (4B-13), so that is
+    # where the caller must be able to create it. Before RU-1 only Super Admin raised these.
     await policy.authorize(
         current_user,
         Permissions.CLAIM_CREATE,
         resource_type="claim",
-        organization_id=source.get("organization_id"),
+        organization_id=source.get("organization_id") or selected_org or getattr(current_user, "organization_id", None),
         project_id=source.get("project_id"),
     )
-    selected_org, _project = await selection.list_filters(None, None)
     claim, created = await signals.raise_potential(
         payload.source_type, source, current_user, selected_organization_id=selected_org
     )

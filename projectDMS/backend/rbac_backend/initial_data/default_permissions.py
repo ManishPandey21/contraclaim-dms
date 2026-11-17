@@ -75,6 +75,9 @@ DEFAULT_PERMISSIONS = [
     {"_id": "dms.claim.assess", "name": "Assess Claims"},
     {"_id": "dms.claim.determine", "name": "Determine Claims"},
     {"_id": "dms.claim.strategy.read", "name": "View Privileged Claim Analysis"},
+    # Owner decisions 2026-11-17 (OD-1, RU-1): explicit grants only, in no default role.
+    {"_id": "dms.claim.evidence.confirm_contract", "name": "Confirm the Contract of Claim Evidence"},
+    {"_id": "dms.claim.signal.view", "name": "View Claim Signals from Letters"},
     {"_id": "dms.contract.appraisal.view", "name": "View Contract Appraisal"},
     {"_id": "dms.contract.appraisal.generate", "name": "Generate Contract Appraisal"},
     {"_id": "dms.contract.appraisal.edit", "name": "Edit Contract Appraisal"},

@@ -45,11 +45,11 @@ const ClaimSignalsStrip: React.FC<{ onRaised: () => void }> = ({ onRaised }) => 
         The notice period for each is already running. Raise a potential claim to start tracking it.
       </p>
       <ul className="mt-3 space-y-2">
-        {signals.data.map((signal) => {
+        {signals.data.map((signal, index) => {
           const notice = describeNotice(signal.notice_assessment);
           return (
             <li
-              key={`${signal.source_type}-${signal.source_id}`}
+              key={`${signal.source_type}-${signal.source_id || `neutral-${index}`}`}
               className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-white p-3"
             >
               <div className="min-w-0">
@@ -67,9 +67,14 @@ const ClaimSignalsStrip: React.FC<{ onRaised: () => void }> = ({ onRaised }) => 
                     </Badge>
                   </span>
                 )}
-                <Button size="sm" variant="outline" disabled={raise.isPending} onClick={() => raise.mutate(signal)}>
-                  Raise potential claim
-                </Button>
+                {signal.source_id ? (
+                  <Button size="sm" variant="outline" disabled={raise.isPending} onClick={() => raise.mutate(signal)}>
+                    Raise potential claim
+                  </Button>
+                ) : (
+                  // RU-1: a letter you cannot open. Its existence and clock are shown, nothing else.
+                  <span className="text-xs text-muted-foreground">Someone who can open the letter must raise it.</span>
+                )}
               </div>
             </li>
           );

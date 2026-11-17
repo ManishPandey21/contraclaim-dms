@@ -31,6 +31,7 @@ CLIENT_DMS_PERMISSIONS: List[str] = [
     "dms.claim.determine",
     "dms.claim.strategy.read",
     "dms.claim.evidence.confirm_contract",
+    "dms.claim.signal.view",
     "dms.contract.appraisal.view",
     "dms.contract.appraisal.generate",
     "dms.contract.appraisal.edit",
@@ -210,6 +211,8 @@ class Permissions:
     CLAIM_STRATEGY_READ = "dms.claim.strategy.read"
     #: OD-1 (owner decision 2026-11-17): confirm which contract a piece of evidence belongs to.
     CLAIM_EVIDENCE_CONFIRM_CONTRACT = "dms.claim.evidence.confirm_contract"
+    #: RU-1 (owner decision 2026-11-17): see Letter Bench claim signals of a project.
+    CLAIM_SIGNAL_VIEW = "dms.claim.signal.view"
     CONTRACT_APPRAISAL_VIEW = "dms.contract.appraisal.view"
     CONTRACT_APPRAISAL_GENERATE = "dms.contract.appraisal.generate"
     CONTRACT_APPRAISAL_EDIT = "dms.contract.appraisal.edit"
@@ -369,6 +372,8 @@ EXPLICIT_GRANT_ONLY_PERMISSIONS: frozenset = frozenset(
         "dms.claim.strategy.read",
         # OD-1: confirming the contract of evidence is a deliberate, assigned duty.
         "dms.claim.evidence.confirm_contract",
+        # RU-1: claim signals drawn from letters are granted deliberately, never by default.
+        "dms.claim.signal.view",
     }
 )
 
@@ -381,6 +386,7 @@ SUPERADMIN_EXCLUDED_PERMISSIONS: frozenset = frozenset(
         "dms.claim.determine",
         "dms.claim.strategy.read",
         "dms.claim.evidence.confirm_contract",
+        "dms.claim.signal.view",
     }
 )
 
