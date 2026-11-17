@@ -282,8 +282,9 @@ class ReviewerAssignmentService:
         await self._collection.update_many(
             {**key, "active": True, "expires_at": {"$ne": None, "$lte": now}}, {"$unset": {"active": ""}}
         )
-        doc = {
-            "_id": uuid.uuid4().hex,
+        assignment_id = uuid.uuid4().hex
+        doc: Dict[str, Any] = {
+            "_id": assignment_id,
             **key,
             "granted_by": actor_id,
             "reason": payload.reason,
@@ -307,7 +308,7 @@ class ReviewerAssignmentService:
             action="reviewer_assignment.granted",
             actor_id=actor_id,
             resource_type="reviewer_role_assignment",
-            resource_id=doc["_id"],
+            resource_id=assignment_id,
             organization_id=organization_id,
             project_id=project_id,
             reason=payload.reason,
