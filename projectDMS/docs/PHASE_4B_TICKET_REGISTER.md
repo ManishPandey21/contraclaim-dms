@@ -8,7 +8,7 @@ Method. A ticket is "Implemented" only where the code was found in the source tr
 
 Paths: `T/` = `backend/rbac_backend/tests/`, `I/` = `backend/rbac_backend/tests/integration/`, `C/` = `client/src/`.
 
-Totals at `19f6d61`: 25 Implemented, 3 Partial, 21 Not started. After commit `8726558` (4B-06, 4B-07): 27 Implemented, 3 Partial, 19 Not started. After 4B-08 and 4B-09: 29 Implemented, 3 Partial, 17 Not started. After 4B-15: 30 Implemented, 3 Partial, 16 Not started. After 4B-18: 31 Implemented, 3 Partial, 15 Not started. After 4B-19: 32 Implemented, 3 Partial, 14 Not started.
+Totals at `19f6d61`: 25 Implemented, 3 Partial, 21 Not started. After commit `8726558` (4B-06, 4B-07): 27 Implemented, 3 Partial, 19 Not started. After 4B-08 and 4B-09: 29 Implemented, 3 Partial, 17 Not started. After 4B-15: 30 Implemented, 3 Partial, 16 Not started. After 4B-18: 31 Implemented, 3 Partial, 15 Not started. After 4B-19, 4B-23 and 4B-24: 34 Implemented, 3 Partial, 12 Not started.
 
 **Four separate stages** (owner instruction, 2026-11-17). Each is its own fact, and none implies the next.
 
