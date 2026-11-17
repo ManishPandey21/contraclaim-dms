@@ -888,7 +888,7 @@ All must hold, each with recorded evidence:
 3. The RBAC matrix (6.4) and the concurrency (6.5) and security (6.6) suites are green.
 4. Mocked Playwright suites are green in CI. The staging suite has passed twice consecutively on the deployed stack, with a Statement of Claim drafted from an escalated claim passing every existing gate.
 5. Gate 6 fresh-install runs are recorded for the final migration count, and route inventories are regenerated and diffed.
-6. Readings P-01 to P-15 are recorded for staging and production, each as read or as not read with its reason, and decisions D-09, D-10 and AQ-3 are finalised against them. (Reconciled 2026-11-17: P-13, P-14 and P-15 were added after this criterion was first written.)
+6. Readings P-01 to P-16 are recorded for staging and production, each as read or as not read with its reason, and decisions D-09, D-10 and AQ-3 are finalised against them. (Reconciled 2026-11-17: P-13, P-14, P-15 and P-16 were added after this criterion was first written. P-16 is the KD-1 key-date reading; no stored key date is recalculated without it and project-specific approval.)
 7. Claims and EOT golden-set baseline runs are recorded (section 7). No pack is published.
 8. AQ-1 to AQ-10 are decided (section 13), and AQ-11 has been resolved by authorised read-only access. AQ-12 is decided (2026-11-17); its remediation (4B-49 steps 2 to 5) is a separate release with its own approval and is not an exit condition, but no step of it may have been taken without P-15.
 9. The owner has accepted Phase 4b in writing in this document's decision record.
@@ -976,7 +976,7 @@ Proof
 
 - [ ] Real-dependency route tests; RBAC matrix; concurrency; security corpora
 - [ ] Mocked Playwright suites in CI; staging suite green twice on the deployed stack
-- [ ] Gate 6 runs; route inventories; readings P-01 to P-15 recorded
+- [ ] Gate 6 runs; route inventories; readings P-01 to P-16 recorded
 - [ ] Golden-set baselines recorded; no pack published
 - [ ] Real-MongoDB suites run in CI (4B-47); the complete claim → escalation → pleading → approval journey passes with real dependencies
 - [ ] Backward compatibility for `POST /arbitration/drafts` (4B-45); backend privilege-wall and provenance suite (4B-46)
@@ -991,6 +991,8 @@ Proof
 | 2026-11-16 | Plan approved in principle subject to amendments B.1 to B.7; AQ-1 to AQ-10 decided; implementation authorised from Wave 0 and independent security groundwork; PR #114 stays draft | Owner |
 | 2026-11-17 | Phase 4b **not** accepted as complete; Phase 5 remains blocked. Implementation continues under this plan in dependency order (reviewer authorisation first), with no production deployment, merge, skill publication or rollout activation. AQ-11: readings P-01 to P-15 stay mandatory. AQ-12: decided as recorded in section 11. The two secret-scan findings are assessed as non-credentials; the fingerprint-only exception goes to authorised security review. Ticket register: `docs/PHASE_4B_TICKET_REGISTER.md` | Owner |
 | 2026-11-17 | 4B-13 and 4B-14 accepted as implemented and CI-verified, not for production release. 4B-13: `drafting.request.view` not widened; signal visibility is separate item RU-1 (ticket register). 4B-14: P-14 mandatory before any historical notice record changes; no automatic revocation or reclassification. PR #114 has a single integration owner. | Owner |
+| 2026-11-17 | 4B-23, 4B-24, 4B-26 provisionally accepted as implemented, subject to corrections (done; ticket register). OD-1: option B (a person confirms the contract of unconfirmed evidence before export or escalation; mismatches stay blocked; no legacy rewrite). KD-1 registered as High (second-contract key dates used the main contract's LOA). RU-1: design a project-scoped `dms.claim.signal.view`. 4B-25 provisionally accepted. 4B-24: read McDermott and the PMI paper; fixture with the paper's rounding. picomatch GHSA-fc5q-39xc-vjpf: investigate, no weakened gate. | Owner |
+| 2026-11-17 | OD-1: a dedicated, explicitly granted, project-scoped `dms.claim.evidence.confirm_contract`; reason, source reference, reviewer identity, immutable audit; the confirmer independent of the evidence-linking user; bound to the evidence revision and contract identity. KD-1: a read-only recalculation dry-run approved; P-16 by authorised read-only access; no stored date recalculated without project-specific approval. RU-1: `dms.claim.signal.view` approved - explicit grant, no default role, not through Super Admin, wildcard or `dms.admin`; neutral title where the letter may be known but not read; omitted where existence or reference is restricted; after or alongside 4B-27, with real-MongoDB RBAC and privacy tests. R5 (picomatch): prepare a maximum 30-day advisory-specific exception for authorised review; not activated. Next: 4B-27, 4B-31, 4B-32 (after 4B-27), 4B-41; then 4B-46 after 4B-27 and 4B-42 after 4B-41. As built: ticket register, "Owner decisions of 2026-11-17 (third review)". | Owner |
 | — | Phase 4b exit criteria met and accepted; Phase 5 may start | Pending |
 
 ## 13. Owner review, 2026-11-16
