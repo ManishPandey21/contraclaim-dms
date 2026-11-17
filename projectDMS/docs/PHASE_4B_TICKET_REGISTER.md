@@ -41,14 +41,14 @@ CI column derived mechanically from CI run 398 (`f31ace1`, 2026-11-17): each row
 | 4B-16 | Yes | Yes, run 398 at `f31ace1` | None required | Not accepted |
 | 4B-17 | Yes | Yes, run 398 at `f31ace1` | None required | Not accepted |
 | 4B-18 | Yes (not released) | Yes, run 398 at `f31ace1` | Pending: P-03 (existing claims; how many projects hold several contracts) | Not accepted |
-| 4B-19 | Yes (not released) | Not yet: no CI run recorded for this commit | Pending: P-03 (what legacy claims actually hold) | Not accepted |
+| 4B-19 | Yes (not released) | Yes, run 405 at `442b9ef` | Pending: P-03 (what legacy claims actually hold) | Not accepted |
 | 4B-20 | No | — | None required | Not accepted |
 | 4B-21 | Yes | Yes, run 398 at `f31ace1` | Pending: P-03, P-07 | Not accepted |
 | 4B-22 | Yes | Yes, run 398 at `f31ace1` | Pending: P-03, P-07 | Not accepted |
-| 4B-23 | Yes | Not yet (added to the real-Mongo list) | Pending: P-03 | Not accepted |
-| 4B-24 | Yes | Not yet (added to the real-Mongo list) | None required | Not accepted |
+| 4B-23 | Yes; owner-review correction `303823c` | Original rule: yes, run 405 at `442b9ef`. Correction: not yet | Pending: P-03 (claims with no contract; evidence with no or unconfirmed contract) | Provisionally accepted as implemented (2026-11-17), subject to the corrections; **not for production release** |
+| 4B-24 | Yes; owner-review correction `f23de0c` | Original: yes, run 405 at `442b9ef`. Correction: not yet | None required. Not production evidence but still open: a published worked example reproduced, and the McDermott reasoning (see "4B-24 sources") | Provisionally accepted as implemented (2026-11-17), subject to the corrections; **not for production release** |
 | 4B-25 | No | — | None required | Not accepted |
-| 4B-26 | Yes | Not yet (added to the real-Mongo list) | None required | Not accepted |
+| 4B-26 | Yes; owner-review correction `fb2baa0` | Original: yes, run 405 at `442b9ef`. Correction: not yet | None required | Provisionally accepted as implemented (2026-11-17), subject to the corrections; **not for production release** |
 | 4B-27 | No | — | None required | Not accepted |
 | 4B-28 | Yes | Yes, run 398 at `f31ace1` | None required | Not accepted |
 | 4B-29 | Yes | Yes, run 398 at `f31ace1` | Pending: AQ-7 | Not accepted |
@@ -71,13 +71,38 @@ CI column derived mechanically from CI run 398 (`f31ace1`, 2026-11-17): each row
 | 4B-46 | No | — | None required | Not accepted |
 | 4B-47 | Yes | Yes, run 398 at `f31ace1` | None required | Not accepted |
 | 4B-48 | No | — | None required | Not accepted |
-| 4B-49 | Yes (audit only) | Yes, run 398 at `f31ace1` | Pending: P-15 (AQ-11) | Not accepted |
+| 4B-49 | Yes (audit only) | Yes, run 405 at `442b9ef` (the names fix `19f6d61` included) | Pending: P-15 (AQ-11) | Not accepted |
 
 ### Owner decisions, 2026-11-17
 
 - **4B-13.** Accepted as implemented and CI-verified; not for production release. Letter Bench signal visibility keeps its existing permission (`drafting.request.view`), which is not to be widened to expose claim signals. The visibility gap is a separate RBAC/usability item, RU-1 below. No further 4B-13 implementation unless a new defect is found.
 - **4B-14.** Accepted as implemented and CI-verified; not for production release. P-14 is mandatory before any historical notice-verification record is changed. Existing records are preserved; those needing re-verification are identified only from the authorised production reading. No notice period is revoked or reclassified on repository assumptions alone.
-- **Integration.** PR #114 has a single integration owner. Parallel sessions work on separate branches or worktrees, and their work is integrated into `claude/zen-ptolemy-695liz` only after independent verification.
+- **Integration.** PR #114 has a single integration owner. Parallel sessions work on separate branches or worktrees, and their work is integrated into `claude/zen-ptolemy-695liz` only after independent verification. Reaffirmed in the owner review of 2026-11-17: other sessions submit verified commits to the integration owner; no session force-pushes or silently merges unrelated changes into the shared branch. Observed: a parallel session pushed directly to this branch on 2026-11-17 (`f78cee9`, `95d899b`, `2e2e6d2`, `64a102c` and register edits); the integration owner merged them without force and re-ran the full suites on the merge (`6563a82`).
+
+### Owner review of 4B-23, 4B-24 and 4B-26, 2026-11-17
+
+Decision: provisionally accepted as implemented, subject to the corrections below; none approved for production release. Nothing is classed CI-verified until its required checks pass; the secret scan is recorded separately (an authorised security-review dependency). The corrections are implemented and their proof was run here; **CI has not yet run them** (they are not pushed at the time of writing).
+
+| Ticket | Correction asked | Done | Commit | Proof | Left open |
+|---|---|---|---|---|---|
+| 4B-26 | Membership, express permission and capacity valid at the time of approval or return, not only at selection | Approve and return re-run the approver picker's rule (project member, a person, holding `dms.claim.determine` by name) at decision time: 403 `determination_reviewer_no_longer_authorised`; capacity re-read. The view says whether the reviewer is still an approver and offers Approve only then. A determination whose reviewer lost the authority goes to another approver via `POST .../reassign`, by its maker or sender only (403 otherwise), refused while the reviewer can still decide (409) or to someone not eligible (422); findings untouched; history records it. Client shows the reason and a "Send to another approver" picker; refusal wording is the same codes both sides. | `fb2baa0` | `I/test_determination_four_eyes_mongo.py` 7 passed (3 new: lost authority, left the project or became a service account, stale and cross-project); `T/test_claim_findings.py`; `C/.../FindingsPanels.test.tsx` 13 passed; 6 mutants each failed the suites | Revoking authority through the route's own gate gives the generic 403 first (the new code is reached when the gate passes but the picker rule does not: service account, global role). |
+| 4B-23 | Contract identity refers to the same Contract Master record throughout; distinguish verified from no-metadata records; assess extra verification; no automatic rewrite | Contract Master is keyed by project and `contract_id` (every project's main contract is `"primary"`); claims are validated against it at creation (4B-18), and key-date records carry the same key. The rule compared the bare key, so `"primary"` of another project matched; identity is now project + key. `identity_review` sorts the claim's evidence into verified, unverified (names the claim's key but the project's Contract Master holds no such entry) and unidentified (no contract). The last two are shown in the escalation preview and beside the submission as warnings; nothing is refused or rewritten. | `303823c` | `I/test_claim_contract_scope_mongo.py` 10 passed (2 new); client tests for both warnings; 5 mutants each failed it | **Owner decision OD-1** below. Key-date records default to `"primary"` and are not checked against Contract Master at creation (not changed). |
+| 4B-24 | Independent verification against McDermott, literature and the PMI Eichleay example; review the Eichleay label; period consistency, overhead evidence, compensable delay, profit, overlap, entitlement; calculation separate from determination; paise reconciled in UI and export | Eichleay relabelled as the billings-based allocation, every figure tied to one period, overhead "excluding profit". Figures that cannot all be true are refused (422 `quantum_formula_inputs_inconsistent`: contract billings above the company's; delay longer than performance; Emden overhead and profit ≥ turnover). A formula line is marked a calculation with a fixed note (not a finding that the amount is recoverable); `calculated_total_paise`. Two formula lines over the same days lock each other (double recovery). The Quantum tab, the submission and the escalation carry state amounts from integer paise; the submission totals in paise; the matrix row keeps rupees and gains `amount_paise`. Client/server label parity test. | `f23de0c` | `T/test_quantum_formulas.py` 20 passed; `I/test_quantum_paise_formulas_mongo.py` 5 passed; client format and Quantum tab tests; 8 mutants each failed (one only after a single-shared-day case was added) | See "4B-24 sources". Overlap is checked within a head, not across heads. Evidence of actual unabsorbed overhead and the formula's preconditions are not modelled; the note says they are decided separately. |
+| Debt | Import cycle (claim_quantum, Delay Lab, skills executor, letter drafting): regression test in fresh processes and different orders; fix the direction | The cycle was `skills.executor` → leaf `letter_drafting.prompts` → package `__init__` eagerly importing `DraftRunService` → `bench` → `skills.executor`. In a fresh process, importing the executor, Delay Lab, Quantum, determinations, submission or escalation first raised `ImportError`. The package now loads `DraftRunService` on first use (PEP 562); its public import is unchanged. | `b41b8e5` | `T/test_import_order.py`: 14 modules each first in a new interpreter, the 4-module chain in all 24 orders (39 cases; 24 fail with the old `__init__`). Two test-file ordering workarounds removed. mypy gate output identical to `442b9ef`. | — |
+
+#### OD-1 (owner decision): evidence whose contract is not confirmed
+
+Today such evidence may support a contract-specific claim, with a warning. Options: (a) keep the warning only; (b) require a person to confirm each such record for the claim's contract before escalation, recording who and when; (c) block until the record itself carries a contract confirmed against Contract Master. (b) or (c) changes what existing claims can do, so it waits for P-03 to say how many records are affected. Nothing is built for (b) or (c).
+
+#### 4B-24 sources
+
+- **PMI, "Calculation and Recovery of Home Office Overhead"** (the owner's reference): the PMI page answers automated fetches with HTTP 403, and fetching copies of the paper from other hosts was refused by this session's permission controls. The worked example has not been read, so it is **not reproduced**; nothing about it is stated from memory. Needed: the paper's text (pasted or attached), then a fixture with its inputs, intermediate values and rounding.
+- **McDermott International Inc. v. Burn Standard Co. Ltd. (2006)**: the judgment text could not be retrieved (the Indian Kanoon id tried returned no judgment). Its reasoning is not cited or relied on. Needed: the text, then a short note of what it holds on the choice of formula and proof of loss.
+- What stands until then: the formulas follow the published statements cited in `services/quantum_formulas.py`, with hand-worked fixtures; the arithmetic is tested to the paisa; a formula amount is presented as a calculation only.
+
+### Found in passing (not fixed)
+
+- **Key dates of a second contract.** `KeyDateService._start_and_basis` reads the Contract Master row with `contract_id: "primary"` whatever contract the milestone belongs to, so on a project with several contracts a milestone of another contract is calculated from the main contract's LOA date and week basis. Changing it changes stored key dates; it waits for P-03/P-07.
 
 ### RU-1: claim-signal visibility (separate RBAC/usability item, open)
 
@@ -172,6 +197,7 @@ CI column derived mechanically from CI run 398 (`f31ace1`, 2026-11-17): each row
 - Backend lint and tests: failed on `db05a3f` (one test, a missing plain-language message; fixed in `627ea02`) and on `15ab9a1` (a trailing blank line; fixed in `58089d1`). No failure has been reported on any later commit up to `19f6d61`.
 - Secret scan: fails on every push with the same two findings, both assessed by the owner as non-credentials. The fingerprint-only exception is with security review (`docs/SECRET_SCAN_EXCEPTION_REQUEST_2026-11-16.md`); it is not applied.
 - Exit criterion "final CI security checks passing" is not met while the secret scan is red.
+- **Queried result, `442b9ef` (CI run 405, read from the run's own logs on 2026-11-17).** Backend lint and tests (pre-commit, including the mypy gate): success. General test step: 8,184 passed, 1,014 skipped (the opt-in real-Mongo suites skip there by design), 4 xfailed. Exhibit confinement: 20 passed. Real-Mongo step: "all 60 module(s) ran: 917 test case(s)", no skips; it includes the 4B-19, 4B-23, 4B-24, 4B-26 and 4B-49 modules. Frontend lint, tests, mocked Playwright and build: success. Dependency scan and Docker build/scan: success. Secret scan: failure, the same two findings (security-review dependency, not a code failure). Runs 401 to 404 failed on the backend type gate (an import from the 4B-23 module, introduced by this session's push and fixed by the parallel session in `64a102c`).
 - **Queried result, `f31ace1` (CI run 398, 2026-11-17, read from the run's own logs on 2026-11-17).** Backend lint and tests: success. In it, the general test step: 8,103 passed, 988 skipped (the opt-in real-Mongo suites skip there by design), 4 xfailed. The real-Mongo step: "all 56 module(s) ran: 891 test case(s)", 891 passed, 0 skipped; the step itself fails on any skip or any module with no executed test. Frontend lint, tests and build (including the mocked Playwright suites): success. Docker build and image scan: success. Dependency scan: success. Secret scan: failure (the two known findings). This is the first recorded CI pass for the rows that cite it; other rows have not been re-checked against it here.
 
 ## Changes since the verification
@@ -182,6 +208,7 @@ CI column derived mechanically from CI run 398 (`f31ace1`, 2026-11-17): each row
 | c6971ae | 4B-08, 4B-09 | Rows rewritten. Closes the 4B-07 gap "refusal proven at the service only": the approval route is now exercised over HTTP. Full backend suite 8,299 passed, 0 failed, 761 skipped; frontend 938 passed, 3 skipped. |
 | 94a3d67 | 4B-15 | Row rewritten. |
 | `667ee72` | 4B-18 | Row rewritten. Migrations 30 → 31; Gate 6 fresh install recorded for 31. |
+| `fb2baa0`, `b41b8e5`, `303823c`, `f23de0c` | 4B-26, debt, 4B-23, 4B-24 | Owner review of 2026-11-17: corrections table, OD-1, "4B-24 sources", "Found in passing"; status rows for 4B-19, 4B-23, 4B-24, 4B-26 and 4B-49 updated from CI run 405. |
 
 Fixed since the verification: the order-dependent test in `I/test_caseless_draft_compat_mongo.py` (4B-45) now passes alone, as a file and after another suite; the case-less draft line in `docs/CLAIM_BENCH.md` describes both modes. CI's type gate failed on `8726558` to `edb3dfd` for one finding in `services/reviewer_assignments.py`, fixed in `92c37ab`.
 
