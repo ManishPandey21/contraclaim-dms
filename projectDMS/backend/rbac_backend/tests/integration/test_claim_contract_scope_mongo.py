@@ -160,7 +160,7 @@ def test_a_document_or_letter_of_another_contract_is_not_linked_to_the_claim(mon
             )
             assert refused.status_code == 422, (refused.status_code, refused.text[:300])
             assert "different contract" in refused.text
-            assert await env.db.document_relationships.count_documents({"target_id": CLAIM, "removed_at": None}) == 0
+            assert await env.db.entity_document_links.count_documents({"target_type": "claim", "target_id": CLAIM, "removed_at": None}) == 0
 
             # A document that names no contract, or the claim's own, is linked as before.
             await env.db.documents.update_one({"_id": DOC_OUT}, {"$set": {"contract_id": "primary"}})
@@ -169,6 +169,9 @@ def test_a_document_or_letter_of_another_contract_is_not_linked_to_the_claim(mon
                 json={"links": [{"document_id": DOC_OUT_ID, "relationship_role": "supporting_document"}]},
             )
             assert linked.status_code in (200, 201), linked.text[:300]
+            assert await env.db.entity_document_links.count_documents(
+                {"target_type": "claim", "target_id": CLAIM, "removed_at": None}
+            ) == 1
 
     _run(scenario())
 
