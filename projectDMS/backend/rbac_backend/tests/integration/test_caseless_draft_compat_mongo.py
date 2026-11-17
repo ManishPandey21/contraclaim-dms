@@ -43,13 +43,38 @@ def _id(response: Any) -> str:
     return str(body.get("id") or body.get("_id"))
 
 
-def test_an_older_caller_gets_a_scratch_draft_with_a_deprecation_and_no_gate_is_bypassed(monkeypatch, caplog) -> None:
+class _Captured(logging.Handler):
+    """Collects records on the router's own logger.
+
+    ``caplog`` listens on the root logger. When this is the first test in the
+    process to start the app, the app's logging setup replaces the root handlers
+    and the warning never reaches it, so the test passed or failed by its
+    position in the run. A handler on the emitting logger does not depend on that.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(record.getMessage())
+
+
+def test_an_older_caller_gets_a_scratch_draft_with_a_deprecation_and_no_gate_is_bypassed(monkeypatch) -> None:
     async def scenario() -> None:
         async with _env(monkeypatch) as env:
-            caplog.set_level(logging.WARNING, logger="rbac_backend.routers.arbitration_drafting")
-            created = await env.client.request(
-                "POST", DRAFTS, json=BODY, headers={**env.headers("org_admin"), "User-Agent": "legacy-integration/1.4"}
-            )
+            captured = _Captured()
+            router_logger = logging.getLogger("rbac_backend.routers.arbitration_drafting")
+            monkeypatch.setattr(router_logger, "disabled", False)
+            if router_logger.getEffectiveLevel() > logging.WARNING:
+                monkeypatch.setattr(router_logger, "level", logging.WARNING)
+            router_logger.addHandler(captured)
+            try:
+                created = await env.client.request(
+                    "POST", DRAFTS, json=BODY, headers={**env.headers("org_admin"), "User-Agent": "legacy-integration/1.4"}
+                )
+            finally:
+                router_logger.removeHandler(captured)
             assert created.status_code == 201, created.text[:300]
             assert created.headers.get("Deprecation") == "true"
             assert "scratch" in created.headers.get("Warning", "")
@@ -57,7 +82,7 @@ def test_an_older_caller_gets_a_scratch_draft_with_a_deprecation_and_no_gate_is_
             draft_id = _id(created)
             stored = await env.db.arbitration_drafts.find_one({"_id": draft_id})
             assert stored["is_scratch"] is True and not stored.get("case_id")
-            logged = [record.getMessage() for record in caplog.records if "implicit_scratch" in record.getMessage()]
+            logged = [message for message in captured.messages if "implicit_scratch" in message]
             assert logged and "legacy-integration/1.4" in logged[0] and "user-org_admin" in logged[0]
 
             # Give it a passing version: it is still neither approvable nor exportable for filing.
