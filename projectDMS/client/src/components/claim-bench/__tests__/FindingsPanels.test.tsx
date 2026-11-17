@@ -47,6 +47,17 @@ vi.mock("@/services/enhanced-api", () => ({
   },
 }));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
+// The approver comes from the server's picker: only project members holding determination authority.
+const pickers = vi.hoisted(() => ({
+  listPickerUsers: vi.fn().mockResolvedValue({
+    items: [
+      { id: "user-1", name: "Asha Rao" },
+      { id: "user-2", name: "Vikram Nair" },
+    ],
+    truncated: false,
+  }),
+}));
+vi.mock("@/services/pickers-api", () => pickers);
 
 const INTERNAL = "Internal analysis — not a determination";
 const NOT_FOR_ISSUE = "Internal — not for issue";
@@ -91,6 +102,7 @@ const determination = (over: Partial<DeterminationView["determination"]> = {}, v
 
 const determinations = (over: Partial<DeterminationsResponse> = {}): DeterminationsResponse => ({
   claim_id: "c1",
+  project_id: "p1",
   perspective: "engineer",
   can_author: true,
   items: [determination()],
@@ -183,6 +195,19 @@ describe("Determinations", () => {
     );
   });
 
+  it("in an Engineer's workspace, a received determination defaults to the Employer, never to itself (4B-26)", async () => {
+    api.fetchDeterminations.mockResolvedValue(determinations({ perspective: "engineer", items: [] }));
+    api.createDetermination.mockResolvedValue(determination());
+    mount(<DeterminationsPanel claimId="c1" readOnly={false} />);
+    await userEvent.click(await screen.findByRole("button", { name: "Record one received" }));
+    expect(screen.getByLabelText("Issued by")).toHaveValue("employer");
+    await userEvent.selectOptions(await screen.findByLabelText("The document it arrived in"), "doc-1");
+    await userEvent.click(screen.getByRole("button", { name: "Start the transcription" }));
+    await waitFor(() =>
+      expect(api.createDetermination).toHaveBeenCalledWith("c1", expect.objectContaining({ origin: "received", issued_by: "employer" }))
+    );
+  });
+
   it("shows a proposal as a proposal and records a finding only when the person saves it", async () => {
     api.fetchDeterminations.mockResolvedValue(determinations());
     api.setHeadFinding.mockResolvedValue(determination());
@@ -234,6 +259,30 @@ describe("Determinations", () => {
     await userEvent.selectOptions(approver, "user-2");
     await userEvent.click(submit);
     await waitFor(() => expect(api.submitDetermination).toHaveBeenCalledWith("c1", "det-1", 2, "user-2"));
+    expect(pickers.listPickerUsers).toHaveBeenCalledWith({ projectId: "p1", permission: "dms.claim.determine", q: "" });
+  });
+
+  it("offers Approve and Return only to the named reviewer (4B-26)", async () => {
+    const inReview = (mayDecide: boolean) =>
+      determinations({
+        items: [
+          determination(
+            { status: "in_review", reviewer_id: "user-2" },
+            { editable: false, blockers: [], may_decide: mayDecide }
+          ),
+        ],
+      });
+    api.fetchDeterminations.mockResolvedValue(inReview(false));
+    const first = mount(<DeterminationsPanel claimId="c1" readOnly={false} />);
+    expect(await screen.findByText(/Only they can approve it or send it back/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Approve/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Return for changes/ })).not.toBeInTheDocument();
+    first.unmount();
+
+    api.fetchDeterminations.mockResolvedValue(inReview(true));
+    mount(<DeterminationsPanel claimId="c1" readOnly={false} />);
+    expect(await screen.findByRole("button", { name: /Approve/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Return for changes/ })).toBeInTheDocument();
   });
 
   it("shows an approved determination read-only and offers a revision, not an edit", async () => {

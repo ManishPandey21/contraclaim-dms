@@ -23,6 +23,8 @@ import re
 from types import SimpleNamespace
 from typing import Any, Dict, FrozenSet, List, Optional
 
+from bson import ObjectId
+
 from pydantic import BaseModel, Field
 
 from ..core.permissions import Permissions
@@ -86,6 +88,31 @@ class PickerService:
         self.policy = policy or PolicyService(db=db)
         self.scope = ScopeService(db)
 
+    async def _eligible(self, doc: Dict[str, Any], *, organization_id: str, project_id: str, permission: str) -> bool:
+        """The one rule for who may be picked: a person (no global role, not a service
+        account), allowed in the project's scope, holding ``permission``."""
+        user = _as_user(doc)
+        if {role.lower() for role in user.roles} & GLOBAL_ROLE_KEYS:
+            return False
+        if str(user.account_type or "").lower() in NON_PERSON_ACCOUNT_TYPES:
+            return False
+        if not await self.scope.is_client_scope_allowed(user, organization_id=str(organization_id), project_id=str(project_id)):
+            return False
+        return bool(await self.policy.has_permission(user, permission))
+
+    async def is_eligible(self, user_id: str, *, organization_id: str, project_id: str, permission: str) -> bool:
+        """Whether one person may be picked for ``permission`` on this project: the same rule
+        as the picker list, for a server that must check a person it is given (4B-26)."""
+        if not user_id:
+            return False
+        keys: List[Any] = [str(user_id)]
+        if ObjectId.is_valid(str(user_id)):
+            keys.append(ObjectId(str(user_id)))
+        doc = await self.db.users.find_one({"_id": {"$in": keys}, "disabled": {"$ne": True}})
+        if not doc:
+            return False
+        return await self._eligible(doc, organization_id=organization_id, project_id=project_id, permission=permission)
+
     async def eligible_users(
         self,
         *,
@@ -133,18 +160,8 @@ class PickerService:
 
         eligible: List[PickerUser] = []
         for doc in docs[:MAX_CANDIDATES]:
-            user = _as_user(doc)
-            if {role.lower() for role in user.roles} & GLOBAL_ROLE_KEYS:
-                continue
-            if str(user.account_type or "").lower() in NON_PERSON_ACCOUNT_TYPES:
-                continue
-            if not await self.scope.is_client_scope_allowed(
-                user, organization_id=str(organization_id), project_id=str(project_id)
-            ):
-                continue
-            if not await self.policy.has_permission(user, permission):
-                continue
-            eligible.append(PickerUser(id=user.id, name=display_name(doc)))
+            if await self._eligible(doc, organization_id=organization_id, project_id=project_id, permission=permission):
+                eligible.append(PickerUser(id=str(doc.get("_id")), name=display_name(doc)))
 
         eligible.sort(key=lambda person: (person.name.lower(), person.id))
         return PickerUsersResponse(items=eligible[:limit], truncated=len(eligible) > limit or not examined_all)

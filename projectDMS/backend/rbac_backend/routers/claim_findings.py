@@ -29,6 +29,7 @@ from ..core.tenant_context import ActiveScope, active_scope
 from ..models.claim_findings import ClaimSimulation
 from ..services.audit_event_service import AuditEventService
 from ..services.claim_bench import ClaimBenchService
+from ..services.picker_service import PickerService
 from ..services.claim_determinations import (
     ClaimDeterminations,
     DeterminationCreateRequest,
@@ -116,7 +117,9 @@ async def list_claim_determinations(
     """Determinations of a claim: those made here and those received from the other side."""
     claim = await _claim(claim_id, Permissions.CLAIM_VIEW, db, current_user, policy, selection, bench)
     return await ClaimDeterminations(db, bench).list(
-        claim, holds_authority=await _holds(policy, current_user, Permissions.CLAIM_DETERMINE, claim)
+        claim,
+        holds_authority=await _holds(policy, current_user, Permissions.CLAIM_DETERMINE, claim),
+        viewer_id=_user_id(current_user),
     )
 
 
@@ -160,7 +163,7 @@ async def get_claim_determination(
     selection: ActiveScope = Depends(active_scope),
 ):
     claim = await _claim(claim_id, Permissions.CLAIM_VIEW, db, current_user, policy, selection, bench)
-    return await ClaimDeterminations(db, bench).get(claim, determination_id)
+    return await ClaimDeterminations(db, bench).get(claim, determination_id, _user_id(current_user))
 
 
 @router.put(
@@ -214,7 +217,20 @@ async def submit_claim_determination(
     selection: ActiveScope = Depends(active_scope),
 ):
     claim, service = await _for_determination(claim_id, determination_id, db, current_user, policy, selection, bench)
-    return await service.submit(claim, determination_id, payload, _user_id(current_user))
+    pickers = PickerService(db, policy)
+
+    async def reviewer_eligible(user_id: str) -> bool:
+        # The approver picker's own rule: a project member holding determination authority by name.
+        return await pickers.is_eligible(
+            user_id,
+            organization_id=str(claim.get("organization_id") or ""),
+            project_id=str(claim.get("project_id") or ""),
+            permission=Permissions.CLAIM_DETERMINE,
+        )
+
+    return await service.submit(
+        claim, determination_id, payload, _user_id(current_user), reviewer_eligible=reviewer_eligible
+    )
 
 
 @router.post("/claims/{claim_id}/determinations/{determination_id}/approve", response_model=DeterminationView)

@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 import { CheckCircle2, FilePlus2, Mail, RotateCcw, Send, Sparkles } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
+import UserPicker from "@/components/pickers/UserPicker";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -353,23 +354,19 @@ const DeterminationsPanel: React.FC<Props> = ({ claimId, readOnly }) => {
                   </Link>
                 </Button>
                 <div className="ml-auto flex items-end gap-2">
-                  <div className="space-y-1">
-                    <Label htmlFor={`reviewer-${item._id}`}>Approver</Label>
-                    <select
-                      id={`reviewer-${item._id}`}
-                      className={`${select} min-w-48`}
+                  <div className="min-w-56 space-y-1">
+                    <UserPicker
+                      projectId={data.project_id ?? ""}
+                      permission="dms.claim.determine"
+                      label="Approver"
+                      hint="People on this project who hold determination authority, other than whoever made the findings."
                       value={reviewer}
-                      onChange={(event) => setReviewer(event.target.value)}
-                    >
-                      <option value="">Choose a person</option>
-                      {(people.data ?? [])
-                        .filter((person) => person.id !== item.created_by)
-                        .map((person) => (
-                          <option key={person.id} value={person.id}>
-                            {person.name}
-                          </option>
-                        ))}
-                    </select>
+                      onChange={(userId) => setReviewer(userId)}
+                      excludeIds={[
+                        item.created_by ?? "",
+                        ...item.heads.map((finding) => finding.decided_by ?? ""),
+                      ].filter(Boolean)}
+                    />
                   </div>
                   <Button
                     size="sm"
@@ -394,7 +391,13 @@ const DeterminationsPanel: React.FC<Props> = ({ claimId, readOnly }) => {
           </footer>
         )}
 
-        {item.status === "in_review" && data.can_author && !readOnly && (
+        {item.status === "in_review" && !view.may_decide && (
+          <p className="border-t pt-3 text-xs text-muted-foreground">
+            With {nameOf(item.reviewer_id) || "its reviewer"} for approval. Only they can approve it or send it back.
+          </p>
+        )}
+
+        {item.status === "in_review" && view.may_decide && !readOnly && (
           <footer className="space-y-2 border-t pt-3">
             <Label htmlFor={`comment-${item._id}`}>Comment (needed to return it)</Label>
             <Textarea id={`comment-${item._id}`} rows={2} value={comment} onChange={(event) => setComment(event.target.value)} />
@@ -455,7 +458,19 @@ const DeterminationsPanel: React.FC<Props> = ({ claimId, readOnly }) => {
               Start a determination
             </Button>
           )}
-          <Button variant="outline" size="sm" disabled={busy || readOnly} onClick={() => setReceiving((value) => !value)}>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={busy || readOnly}
+            onClick={() => {
+              // Default to a party the project does not act for: its own determinations are authored, not received.
+              setReceived((current) => ({
+                ...current,
+                issued_by: otherSides.includes(current.issued_by as "engineer" | "employer") ? current.issued_by : otherSides[0],
+              }));
+              setReceiving((value) => !value);
+            }}
+          >
             Record one received
           </Button>
         </div>

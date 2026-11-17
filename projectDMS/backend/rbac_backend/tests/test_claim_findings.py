@@ -241,6 +241,11 @@ async def test_a_finding_is_validated_against_the_head() -> None:
     assert view.determination.heads[0].information_required[0].item == "As-built programme"
 
 
+async def _only_reviewer(user_id: str) -> bool:
+    """The reviewer check the router supplies (PickerService.is_eligible); here, REVIEWER alone."""
+    return user_id == REVIEWER
+
+
 async def test_approval_is_by_a_second_person_and_then_the_determination_does_not_change() -> None:
     db, service, _ = _setup(capacity="engineer")
     await service.open(await _claim(db), USER)
@@ -249,18 +254,15 @@ async def test_approval_is_by_a_second_person_and_then_the_determination_does_no
     det_id = view.determination.id
     with pytest.raises(HTTPException) as unfinished:
         await determinations.submit(
-            await _claim(db), det_id, DeterminationSubmitRequest(version=view.determination.version, reviewer_id=REVIEWER), USER
-        )
+            await _claim(db), det_id, DeterminationSubmitRequest(version=view.determination.version, reviewer_id=REVIEWER), USER, reviewer_eligible=_only_reviewer)
     _refused(unfinished, 409, "No finding yet")
     view = await _found(determinations, db, view)
     with pytest.raises(HTTPException) as self_review:
         await determinations.submit(
-            await _claim(db), det_id, DeterminationSubmitRequest(version=view.determination.version, reviewer_id=USER), USER
-        )
+            await _claim(db), det_id, DeterminationSubmitRequest(version=view.determination.version, reviewer_id=USER), USER, reviewer_eligible=_only_reviewer)
     _refused(self_review, 422, "someone other")
     view = await determinations.submit(
-        await _claim(db), det_id, DeterminationSubmitRequest(version=view.determination.version, reviewer_id=REVIEWER), USER
-    )
+        await _claim(db), det_id, DeterminationSubmitRequest(version=view.determination.version, reviewer_id=REVIEWER), USER, reviewer_eligible=_only_reviewer)
     assert view.determination.status == "in_review" and not view.editable
     with pytest.raises(HTTPException) as in_review:
         await _found(determinations, db, view)
@@ -282,7 +284,8 @@ async def test_approval_is_by_a_second_person_and_then_the_determination_does_no
     # A revision is a new record; the approved one is exactly as it was.
     revision = await determinations.revise(await _claim(db), det_id, USER, holds_authority=True)
     assert revision.determination.revision == 2 and revision.determination.supersedes_id == det_id
-    assert revision.determination.status == "draft" and revision.determination.heads[0].result == "partial"
+    # D-13 (4B-26): a revision keeps the reasons but clears every result, to be decided again.
+    assert revision.determination.status == "draft" and revision.determination.heads[0].result is None
     assert revision.determination.heads[0].decided_by is None
     assert await db[DETERMINATIONS].find_one({"_id": det_id}) == approved
     # No contractual fact was written at any point.
@@ -296,8 +299,7 @@ async def test_a_returned_determination_needs_a_reason_and_can_be_reworked() -> 
     view = await _found(determinations, db, view)
     view = await determinations.submit(
         await _claim(db), view.determination.id,
-        DeterminationSubmitRequest(version=view.determination.version, reviewer_id=REVIEWER), USER,
-    )
+        DeterminationSubmitRequest(version=view.determination.version, reviewer_id=REVIEWER), USER, reviewer_eligible=_only_reviewer)
     with pytest.raises(HTTPException) as silent:
         await determinations.send_back(
             await _claim(db), view.determination.id, DeterminationVersionRequest(version=view.determination.version), REVIEWER
@@ -343,8 +345,7 @@ async def test_a_received_determination_is_tied_to_its_document_and_is_not_an_au
     with pytest.raises(HTTPException) as submit:
         await determinations.submit(
             await _claim(db), view.determination.id,
-            DeterminationSubmitRequest(version=view.determination.version, reviewer_id=REVIEWER), USER,
-        )
+            DeterminationSubmitRequest(version=view.determination.version, reviewer_id=REVIEWER), USER, reviewer_eligible=_only_reviewer)
     _refused(submit, 409, "recorded, not submitted")
     with pytest.raises(HTTPException) as propose:
         await determinations.propose(

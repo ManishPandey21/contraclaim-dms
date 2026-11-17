@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
@@ -139,6 +139,10 @@ class HeadFigures(BaseModel):
     amount_locked: Optional[float] = None
 
 
+def _refusal(status_code: int, code: str, message: str) -> HTTPException:
+    return HTTPException(status_code=status_code, detail={"code": code, "user_message": message, "detail": message})
+
+
 class DeterminationView(BaseModel):
     determination: ClaimDetermination
     figures: List[HeadFigures] = Field(default_factory=list)
@@ -146,10 +150,15 @@ class DeterminationView(BaseModel):
     board_changed: bool = False
     editable: bool = False
     blockers: List[str] = Field(default_factory=list)
+    #: The viewer is the named reviewer of a determination in review: only they may
+    #: approve it or send it back (D-13, 4B-26).
+    may_decide: bool = False
 
 
 class DeterminationsResponse(BaseModel):
     claim_id: str
+    #: The claim's project, for the approver picker (people holding authority there).
+    project_id: Optional[str] = None
     # The party this project acts for.
     perspective: Optional[str] = None
     can_author: bool = False
@@ -299,7 +308,13 @@ class ClaimDeterminations:
             result.append(figures)
         return result
 
-    async def _view(self, claim: Dict[str, Any], determination: ClaimDetermination, figures: List[HeadFigures]) -> DeterminationView:
+    async def _view(
+        self,
+        claim: Dict[str, Any],
+        determination: ClaimDetermination,
+        figures: List[HeadFigures],
+        viewer_id: Optional[str] = None,
+    ) -> DeterminationView:
         bench = self.bench._bench_of(claim)
         editable = determination.status in {"draft", "returned"}
         return DeterminationView(
@@ -310,10 +325,15 @@ class ClaimDeterminations:
                 and bench.board_version != determination.board_version
             ),
             editable=editable,
+            may_decide=bool(
+                viewer_id and determination.status == "in_review" and determination.reviewer_id == viewer_id
+            ),
             blockers=submit_blockers(determination) if editable else [],
         )
 
-    async def list(self, claim: Dict[str, Any], *, holds_authority: bool) -> DeterminationsResponse:
+    async def list(
+        self, claim: Dict[str, Any], *, holds_authority: bool, viewer_id: Optional[str] = None
+    ) -> DeterminationsResponse:
         perspective = await self.bench._perspective(claim)
         bench = self.bench._bench_of(claim)
         rows = await self._collection.find({"claim_id": str(claim["_id"])}).to_list(length=200)
@@ -326,7 +346,8 @@ class ClaimDeterminations:
             perspective=perspective,
             can_author=reason is None,
             cannot_author_reason=reason,
-            items=[await self._view(claim, item, figures) for item in items],
+            project_id=str(claim.get("project_id") or "") or None,
+            items=[await self._view(claim, item, figures, viewer_id) for item in items],
         )
 
     @staticmethod
@@ -342,16 +363,35 @@ class ClaimDeterminations:
             return "You do not hold determination authority on this project."
         return None
 
+    async def _require_capacity(self, claim: Dict[str, Any], determination: ClaimDetermination) -> None:
+        """Re-read the party the project acts for on every write (D-13, 4B-26; left here by 4B-15).
+
+        A determination made here belongs to the party that made it: if the project now
+        acts for someone else, nothing more is written to it. A received one must still
+        come from the other side.
+        """
+        perspective = await self.bench._perspective(claim)
+        if determination.origin == "authored":
+            changed = perspective != determination.issued_by
+        else:
+            changed = perspective is not None and perspective == determination.issued_by
+        if changed:
+            raise _refusal(
+                409, "determination_capacity_changed",
+                "The party this project acts for has changed since this determination was started. "
+                "It can no longer be changed or decided here.",
+            )
+
     async def _load(self, claim: Dict[str, Any], determination_id: str) -> ClaimDetermination:
         row = await self._collection.find_one({"_id": determination_id, "claim_id": str(claim["_id"])})
         if not row:
             raise HTTPException(status_code=404, detail="Determination not found")
         return ClaimDetermination(**row)
 
-    async def get(self, claim: Dict[str, Any], determination_id: str) -> DeterminationView:
+    async def get(self, claim: Dict[str, Any], determination_id: str, viewer_id: Optional[str] = None) -> DeterminationView:
         determination = await self._load(claim, determination_id)
         bench = self.bench._bench_of(claim)
-        return await self._view(claim, determination, await self.figures(claim, bench) if bench else [])
+        return await self._view(claim, determination, await self.figures(claim, bench) if bench else [], viewer_id)
 
     # -------------------------------------------------------------- writes
     async def _save(self, determination: ClaimDetermination, expected_version: int) -> None:
@@ -447,15 +487,17 @@ class ClaimDeterminations:
             history=[DeterminationEvent(action="revised" if supersedes else "created", actor_id=user_id)],
         )
         await self._collection.insert_one(determination.model_dump(by_alias=True))
-        return await self._view(claim, determination, await self.figures(claim, bench))
+        return await self._view(claim, determination, await self.figures(claim, bench), user_id)
 
     @staticmethod
     def _carried(head: ClaimHead, previous: ClaimDetermination) -> HeadFinding:
-        """A new revision starts from the approved findings, each to be confirmed again."""
+        """A new revision starts from the approved findings' reasons and figures, but every
+        result is cleared: each head must be decided again before it can be submitted (D-13)."""
         for finding in previous.heads:
             if finding.head_id == head.head_id:
                 copy = finding.model_copy(deep=True)
                 copy.head_title = head.title
+                copy.result = None
                 copy.decided_by, copy.decided_at, copy.proposal = None, None, None
                 return copy
         return HeadFinding(head_id=head.head_id, head_title=head.title)
@@ -466,6 +508,15 @@ class ClaimDeterminations:
         previous = await self._load(claim, determination_id)
         if previous.origin != "authored" or previous.status != "approved":
             raise HTTPException(status_code=409, detail="Only an approved determination made here can be revised.")
+        later = await self._collection.find_one(
+            {"claim_id": str(claim["_id"]), "origin": "authored", "revision": {"$gt": previous.revision}}
+        )
+        if later:
+            raise _refusal(
+                409, "determination_superseded",
+                f"Revision {previous.revision} has already been revised. Only the latest revision can be revised.",
+            )
+        await self._require_capacity(claim, previous)
         return await self.create(
             claim, DeterminationCreateRequest(origin="authored"), user_id,
             holds_authority=holds_authority, supersedes=previous,
@@ -476,6 +527,7 @@ class ClaimDeterminations:
     ) -> DeterminationView:
         determination = await self._load(claim, determination_id)
         self._editable(determination, request.version)
+        await self._require_capacity(claim, determination)
         bench = self.bench._require_bench(claim)
         head = next((item for item in bench.heads if item.head_id == head_id), None)
         finding = next((item for item in determination.heads if item.head_id == head_id), None)
@@ -491,7 +543,7 @@ class ClaimDeterminations:
         finding.decided_by = user_id if request.result is not None else None
         finding.decided_at = now_utc() if request.result is not None else None
         await self._save(determination, request.version)
-        return await self._view(claim, determination, await self.figures(claim, bench))
+        return await self._view(claim, determination, await self.figures(claim, bench), user_id)
 
     async def propose(
         self, claim: Dict[str, Any], determination_id: str, request: DeterminationVersionRequest, user_id: Optional[str]
@@ -501,6 +553,7 @@ class ClaimDeterminations:
         self._editable(determination, request.version)
         if determination.origin != "authored":
             raise HTTPException(status_code=409, detail="A received determination is transcribed, not proposed.")
+        await self._require_capacity(claim, determination)
         bench = self.bench._require_bench(claim)
         role = determination.issued_by
         known = {finding.head_id: finding for finding in determination.heads}
@@ -548,7 +601,7 @@ class ClaimDeterminations:
         determination.heads = [finding for finding in determination.heads if finding.head_id in {h.head_id for h in bench.heads}]
         determination.board_version = bench.board_version
         await self._save(determination, request.version)
-        return await self._view(claim, determination, await self.figures(claim, bench))
+        return await self._view(claim, determination, await self.figures(claim, bench), user_id)
 
     async def _transition(
         self,
@@ -563,11 +616,20 @@ class ClaimDeterminations:
         await self._save(determination, version)
         logger.info("claim determination %s: %s by %s", determination.id, action, user_id)
         bench = self.bench._bench_of(claim)
-        return await self._view(claim, determination, await self.figures(claim, bench) if bench else [])
+        return await self._view(claim, determination, await self.figures(claim, bench) if bench else [], user_id)
 
     async def submit(
-        self, claim: Dict[str, Any], determination_id: str, request: DeterminationSubmitRequest, user_id: Optional[str]
+        self,
+        claim: Dict[str, Any],
+        determination_id: str,
+        request: DeterminationSubmitRequest,
+        user_id: Optional[str],
+        *,
+        reviewer_eligible: Callable[[str], Awaitable[bool]],
     ) -> DeterminationView:
+        """Send for approval to a named reviewer who exists, is a member of the project and
+        holds determination authority by name (D-13). ``reviewer_eligible`` is the picker's
+        own rule (services/picker_service.PickerService.is_eligible)."""
         determination = await self._load(claim, determination_id)
         self._editable(determination, request.version)
         if determination.origin != "authored":
@@ -575,8 +637,16 @@ class ClaimDeterminations:
         blockers = submit_blockers(determination)
         if blockers:
             raise HTTPException(status_code=409, detail="; ".join(blockers))
-        if request.reviewer_id == determination.created_by or request.reviewer_id == user_id:
+        await self._require_capacity(claim, determination)
+        authors = {determination.created_by, user_id} | {finding.decided_by for finding in determination.heads}
+        if request.reviewer_id in authors:
             raise HTTPException(status_code=422, detail="The reviewer must be someone other than the person who made the findings.")
+        if not await reviewer_eligible(request.reviewer_id):
+            raise _refusal(
+                422, "determination_reviewer_not_authorised",
+                "That person cannot approve this determination: the approver must be a member of the project "
+                "who holds determination authority.",
+            )
         determination.status = "in_review"
         determination.reviewer_id = request.reviewer_id
         determination.submitted_by, determination.submitted_at = user_id, now_utc()
@@ -590,12 +660,18 @@ class ClaimDeterminations:
         authors = {determination.created_by, determination.submitted_by} | {f.decided_by for f in determination.heads}
         if user_id is None or user_id in authors:
             raise HTTPException(status_code=403, detail="A determination cannot be approved or returned by a person who made its findings.")
+        if user_id != determination.reviewer_id:
+            raise _refusal(
+                403, "determination_not_the_reviewer",
+                "Only the person this determination was sent to can approve it or send it back.",
+            )
 
     async def approve(
         self, claim: Dict[str, Any], determination_id: str, request: DeterminationVersionRequest, user_id: Optional[str]
     ) -> DeterminationView:
         determination = await self._load(claim, determination_id)
         self._guard_decider(determination, request.version, user_id)
+        await self._require_capacity(claim, determination)
         determination.status = "approved"
         determination.decided_by, determination.decided_at = user_id, now_utc()
         return await self._transition(claim, determination, request.version, "approved", user_id, request.comment)
@@ -605,6 +681,7 @@ class ClaimDeterminations:
     ) -> DeterminationView:
         determination = await self._load(claim, determination_id)
         self._guard_decider(determination, request.version, user_id)
+        await self._require_capacity(claim, determination)
         if not (request.comment or "").strip():
             raise HTTPException(status_code=422, detail="Say what needs to change.")
         determination.status = "returned"
@@ -619,6 +696,7 @@ class ClaimDeterminations:
         self._editable(determination, request.version)
         if determination.origin != "received":
             raise HTTPException(status_code=409, detail="A determination made here goes through approval.")
+        await self._require_capacity(claim, determination)
         blockers = submit_blockers(determination)
         if blockers:
             raise HTTPException(status_code=409, detail="; ".join(blockers))

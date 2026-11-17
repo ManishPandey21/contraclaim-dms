@@ -42,14 +42,28 @@ def _equals(actual: Any, expected: Any) -> bool:
     return actual == expected
 
 
+_OPERATORS = {"$in", "$ne", "$exists", "$gt", "$gte", "$lt", "$lte"}
+
+
 def _match(doc: Dict[str, Any], query: Dict[str, Any]) -> bool:
     for key, expected in query.items():
         actual = _get(doc, key)
         if isinstance(expected, dict) and any(k.startswith("$") for k in expected):
+            unknown = {k for k in expected if k.startswith("$")} - _OPERATORS
+            if unknown:
+                # A fake that ignores an operator answers "match" for queries that would not
+                # match in MongoDB; refuse instead, so a test cannot pass on that.
+                raise NotImplementedError(f"FakeDB does not implement {sorted(unknown)}")
             if "$in" in expected and not any(_equals(actual, option) for option in expected["$in"]):
                 return False
             if "$ne" in expected and _equals(actual, expected["$ne"]):
                 return False
+            if "$exists" in expected and (actual is not None) != bool(expected["$exists"]):
+                return False
+            for op, test in (("$gt", lambda a, b: a > b), ("$gte", lambda a, b: a >= b),
+                             ("$lt", lambda a, b: a < b), ("$lte", lambda a, b: a <= b)):
+                if op in expected and (actual is None or not test(actual, expected[op])):
+                    return False
         elif not _equals(actual, expected):
             return False
     return True

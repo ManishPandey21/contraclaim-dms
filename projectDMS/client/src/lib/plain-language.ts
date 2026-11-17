@@ -104,6 +104,12 @@ export const ERROR_CODE_MESSAGES = {
   quantum_formula_inputs_missing: "Enter every figure the formula needs, each as a positive number.",
   quantum_formula_period_required: "State the start and end of the delay period: the formula multiplies by its days.",
   quantum_amount_required: "Enter the amount of this line.",
+  determination_reviewer_not_authorised:
+    "That person cannot approve this determination. Choose someone on this project who holds determination authority.",
+  determination_not_the_reviewer: "Only the person this determination was sent to can approve it or send it back.",
+  determination_capacity_changed:
+    "The party this project acts for has changed since this determination was started, so it cannot be changed or decided here.",
+  determination_superseded: "This revision has already been revised. Only the latest revision can be revised.",
   claim_contract_mismatch:
     "A record of another contract cannot support this claim. Only records of the claim's own contract can be linked or relied on.",
 } as const;

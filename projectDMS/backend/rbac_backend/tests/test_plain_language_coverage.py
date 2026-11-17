@@ -75,6 +75,8 @@ def test_every_structured_error_code_from_the_phase_4b_routes_has_a_message() ->
         BACKEND / "services" / "claim_contract_scope.py",
         # Quantum in paise and computed formulas (4B-24).
         BACKEND / "services" / "claim_quantum.py",
+        # Determination four-eyes (4B-26).
+        BACKEND / "services" / "claim_determinations.py",
     ]
     codes: Set[str] = set()
     for path in routes:

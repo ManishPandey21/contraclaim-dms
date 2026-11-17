@@ -73,10 +73,14 @@ export interface DeterminationView {
   board_changed: boolean;
   editable: boolean;
   blockers: string[];
+  /** The viewer is the named reviewer of a determination in review (4B-26). */
+  may_decide?: boolean;
 }
 
 export interface DeterminationsResponse {
   claim_id: string;
+  /** The claim's project: the approver is chosen from people holding authority there. */
+  project_id?: string | null;
   perspective?: Perspective | null;
   can_author: boolean;
   cannot_author_reason?: string | null;
