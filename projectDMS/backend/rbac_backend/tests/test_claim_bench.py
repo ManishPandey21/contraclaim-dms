@@ -545,3 +545,255 @@ async def test_a_bench_that_is_off_answers_not_found() -> None:
     with pytest.raises(HTTPException) as exc:
         service.ensure_enabled(ORG)
     _refused(exc, 404, "not enabled")
+
+
+# --------------------------------------------------------------------------- #
+# 4B-19 (D-10, C-23): a claim that predates the board opens safely
+# --------------------------------------------------------------------------- #
+from decimal import Decimal  # noqa: E402
+
+from bson.decimal128 import Decimal128  # noqa: E402
+
+from rbac_backend.services.claim_bench import (  # noqa: E402
+    coerce_legacy_amount,
+    coerce_legacy_days,
+    unrecognised_status,
+)
+
+
+@pytest.mark.parametrize(
+    "recorded, amount",
+    [
+        (1250000, 1250000.0),
+        (1250000.5, 1250000.5),
+        (0, 0.0),
+        ("1250000", 1250000.0),
+        (" 1250000.50 ", 1250000.5),
+        (Decimal("99.25"), 99.25),
+        (Decimal128("4200000.00"), 4200000.0),
+    ],
+)
+def test_an_unambiguous_legacy_amount_is_carried(recorded, amount) -> None:
+    assert coerce_legacy_amount(recorded) == (amount, None)
+    head = initial_head({"title": "T", "amount_claimed": recorded})
+    assert head.amount_claimed == amount and head.figures_to_reenter == []
+
+
+@pytest.mark.parametrize(
+    "recorded",
+    [
+        "12,50,000",  # lakh grouping
+        "1,250,000",
+        "1.250,00",  # decimal comma
+        "INR 1250000",
+        "₹1250000",
+        "12.5 lakh",
+        "1e6",
+        "-500",
+        "+500",
+        "0x10",
+        "١٢٣",  # digits, but not ones the register writes
+        ".5",
+        "5.",
+        "1.23456",
+        "99.255",
+        99.255,
+        Decimal("99.2551"),
+        "9" * 16,
+        -500,
+        float("nan"),
+        float("inf"),
+        Decimal("NaN"),
+        True,
+        ["1250000"],
+        {"value": 5},
+    ],
+)
+def test_an_ambiguous_legacy_amount_is_left_empty_and_listed_for_re_entry(
+    recorded,
+) -> None:
+    amount, text = coerce_legacy_amount(recorded)
+    assert amount is None and text
+    head = initial_head({"title": "T", "amount_claimed": recorded, "type": "variation"})
+    assert head.amount_claimed is None
+    assert [(item.field, item.recorded) for item in head.figures_to_reenter] == [
+        ("amount_claimed", text)
+    ]
+    # What the record holds still decides the kind: this was a cost claim.
+    assert head.kind == "cost"
+
+
+@pytest.mark.parametrize(
+    "recorded, days",
+    [(30, 30), (30.0, 30), ("30", 30), (" 045 ", 45), (0, 0), (0.0, 0)],
+)
+def test_whole_legacy_days_are_carried_as_an_integer(recorded, days) -> None:
+    head = initial_head({"title": "T", "eot_days_claimed": recorded, "type": "eot"})
+    assert head.eot_days_claimed == days and type(head.eot_days_claimed) is int
+    assert head.figures_to_reenter == [] and head.kind == "time"
+
+
+@pytest.mark.parametrize(
+    "recorded",
+    [
+        30.5,
+        "30.0",
+        "30 days",
+        "thirty",
+        -3,
+        -3.0,
+        float("nan"),
+        True,
+        10**7,
+        "1234567",
+        [30],
+    ],
+)
+def test_part_days_and_unclear_days_are_not_rounded_or_guessed(recorded) -> None:
+    days, text = coerce_legacy_days(recorded)
+    assert days is None and text
+    head = initial_head({"title": "T", "eot_days_claimed": recorded, "type": "eot"})
+    assert head.eot_days_claimed is None
+    assert [(item.field, item.recorded) for item in head.figures_to_reenter] == [
+        ("eot_days_claimed", text)
+    ]
+    assert head.kind == "time"
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        {},
+        {"amount_claimed": None, "eot_days_claimed": None},
+        {"amount_claimed": "", "eot_days_claimed": "  "},
+    ],
+)
+def test_a_claim_with_no_figures_opens_with_none_and_nothing_to_re_enter(
+    claim: dict,
+) -> None:
+    head = initial_head({"title": "T", **claim})
+    assert head.amount_claimed is None and head.eot_days_claimed is None
+    assert head.figures_to_reenter == [] and head.kind == "time_and_cost"
+
+
+def test_the_rest_of_a_legacy_record_cannot_stop_the_board_opening() -> None:
+    head = initial_head(
+        {
+            "title": "   ",
+            "description": "x" * 9000,
+            "contract_clauses": "Clause 8.4; 20.1, 20.1",
+            "amount_claimed": "abc" * 100,
+        }
+    )
+    assert head.title == "Head of claim"
+    assert len(head.event_summary or "") == 4000
+    assert head.clause_refs == ["8.4", "20.1"]
+    assert len(head.figures_to_reenter[0].recorded) == 80
+    assert (
+        initial_head(
+            {"title": 42, "contract_clauses": {"a": 1}, "description": 0}
+        ).clause_refs
+        == []
+    )
+
+
+@pytest.mark.parametrize(
+    "status, unknown",
+    [
+        ("draft", None),
+        ("under_review", None),
+        (None, None),
+        ("", None),
+        ("Open", "Open"),
+        ("DRAFT", "DRAFT"),
+        ("settled", "settled"),
+        (7, "7"),
+    ],
+)
+def test_a_status_outside_the_list_is_named_and_a_missing_one_is_a_draft(
+    status, unknown
+) -> None:
+    assert unrecognised_status({"status": status}) == unknown
+
+
+async def test_a_claim_with_an_unrecognised_status_is_read_only_and_cannot_be_opened_or_changed() -> (
+    None
+):
+    db, service, _ = _setup(claim={"status": "settled"})
+    claim = await _claim(db)
+    shown = await service.get(claim)
+    assert shown.read_only is True and shown.exists is False
+    assert '"settled"' in (shown.read_only_reason or "") and "read-only" in (
+        shown.read_only_reason or ""
+    )
+    with pytest.raises(HTTPException) as refused:
+        await service.open(claim, USER)
+    assert refused.value.status_code == 409
+    assert (await _claim(db)).get("bench") is None
+
+    # A board made while the status was valid is still shown, and no longer changes.
+    db.claims.docs[0]["status"] = "draft"
+    await service.open(await _claim(db), USER)
+    db.claims.docs[0]["status"] = "settled"
+    claim = await _claim(db)
+    shown = await service.get(claim)
+    assert (
+        shown.read_only is True and shown.exists is True and len(shown.bench.heads) == 1
+    )
+    with pytest.raises(HTTPException) as refused:
+        await service.patch_head(
+            claim, "H1", HeadPatchRequest(board_version=0, title="Changed"), USER
+        )
+    assert refused.value.status_code == 409
+
+
+async def test_a_figure_awaiting_re_entry_blocks_the_lock_until_it_is_entered_or_set_aside() -> (
+    None
+):
+    db, service, _ = _setup(
+        claim={"amount_claimed": "12,50,000", "eot_days_claimed": 30.5}
+    )
+    opened = await service.open(await _claim(db), USER)
+    head = opened.bench.heads[0]
+    assert {item.field: item.recorded for item in head.figures_to_reenter} == {
+        "amount_claimed": "12,50,000",
+        "eot_days_claimed": "30.5",
+    }
+    assert (
+        "2 figures from the claim record need re-entry" in opened.gate.blockers
+        and not opened.gate.can_lock
+    )
+    # The record's text is on the head, so replacing the register figure loses nothing.
+    assert (await _claim(db))["amount_claimed"] is None
+
+    # Saving the head with the fields still empty (what the form sends) settles nothing.
+    saved = await service.patch_head(
+        await _claim(db),
+        "H1",
+        HeadPatchRequest(
+            board_version=0, title="Late access", clear_amount=True, clear_eot_days=True
+        ),
+        USER,
+    )
+    assert len(saved.bench.heads[0].figures_to_reenter) == 2
+
+    entered = await service.patch_head(
+        await _claim(db),
+        "H1",
+        HeadPatchRequest(board_version=1, amount_claimed=1250000),
+        USER,
+    )
+    assert [item.field for item in entered.bench.heads[0].figures_to_reenter] == [
+        "eot_days_claimed"
+    ]
+    assert "1 figure from the claim record needs re-entry" in entered.gate.blockers
+
+    set_aside = await service.patch_head(
+        await _claim(db),
+        "H1",
+        HeadPatchRequest(board_version=2, figures_not_needed=["eot_days_claimed"]),
+        USER,
+    )
+    assert set_aside.bench.heads[0].figures_to_reenter == []
+    assert not any("re-entry" in blocker for blocker in set_aside.gate.blockers)
+    assert set_aside.bench.heads[0].eot_days_claimed is None

@@ -306,6 +306,8 @@ class ClaimQuantum:
             total = sum(int(line.amount_paise or 0) for line in head.quantum_lines)
             head.amount_claimed_paise = total
             head.amount_claimed = rupees(total)
+            # The build-up is the amount now; a legacy figure awaiting re-entry is superseded (4B-19).
+            head.figures_to_reenter = [item for item in head.figures_to_reenter if item.field != "amount_claimed"]
         else:
             head.amount_claimed_paise = None
             head.amount_claimed = None

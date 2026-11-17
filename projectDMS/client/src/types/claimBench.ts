@@ -20,6 +20,14 @@ export interface HeadElement {
   decided_at?: string | null;
 }
 
+export type FigureField = "amount_claimed" | "eot_days_claimed";
+
+/** A figure on the claim record that was not carried onto the board; a person re-enters it. */
+export interface FigureToReenter {
+  field: FigureField;
+  recorded: string;
+}
+
 export interface ClaimHead {
   head_id: string;
   title: string;
@@ -28,6 +36,7 @@ export interface ClaimHead {
   clause_refs: string[];
   amount_claimed?: number | null;
   eot_days_claimed?: number | null;
+  figures_to_reenter?: FigureToReenter[];
   elements: Record<ElementKey, HeadElement>;
   proposed_classification?: HeadClassification | null;
   classification?: HeadClassification | null;
@@ -177,6 +186,7 @@ export interface HeadPatch {
   clear_amount?: boolean;
   eot_days_claimed?: number;
   clear_eot_days?: boolean;
+  figures_not_needed?: FigureField[];
   classification?: HeadClassification;
   clear_classification?: boolean;
 }

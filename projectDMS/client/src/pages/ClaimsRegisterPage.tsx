@@ -499,6 +499,11 @@ const ClaimsRegisterPage: React.FC = () => {
                       {c.contract_label && (
                         <div className="text-xs font-normal text-muted-foreground">{c.contract_label}</div>
                       )}
+                      {(c.record_notes ?? []).map((note) => (
+                        <div key={note} role="note" className="text-xs font-normal text-amber-800">
+                          {note}
+                        </div>
+                      ))}
                     </TableCell>
                     <TableCell>{typeLabel(c.type)}</TableCell>
                     <TableCell>
