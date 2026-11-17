@@ -201,4 +201,6 @@ export interface SubmissionView {
   approved_for_issue: boolean;
   can_export: boolean;
   cannot_export_reason?: string | null;
+  /** Evidence not confirmed against the Contract Master, or naming no contract. Warnings only. */
+  evidence_notes?: string[];
 }

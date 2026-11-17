@@ -272,3 +272,80 @@ def test_cost_evidence_of_another_contract_is_refused(monkeypatch) -> None:
             assert refused.status_code == 422 and _code(refused) == "claim_contract_mismatch", refused.text[:300]
 
     _run(scenario())
+
+
+# --------------------------------------------------------------------------- #
+# Owner review 2026-11-17: contract identity is the Contract Master entry -
+# project and key together - and evidence whose contract is not confirmed is
+# reported, never refused or rewritten.
+# --------------------------------------------------------------------------- #
+async def _case(env: Any) -> str:
+    created = await env.call(
+        "POST", "org_admin", "/api/arbitration/cases",
+        json={"organization_id": ORG_A, "project_id": PROJ_A1, "title": "ABC v. Authority", "party_perspective": "claimant"},
+    )
+    assert created.status_code in (200, 201), created.text[:300]
+    return str(created.json().get("id") or created.json().get("_id"))
+
+
+def test_the_same_contract_key_in_another_project_is_another_contract(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            await apply_m05(env.db, False)
+            await _open(env, "primary")
+            await env.db.delay_events.insert_one(_hindrance("HP", contract_id="primary"))
+            assert (await _link(env, "hindrance", "HP")).status_code == 200
+            case_id = await _case(env)
+            preview = await env.call("POST", "org_admin", PREVIEW, json={"claim_ids": [CLAIM], "case_id": case_id})
+            assert not any("contract" in item for item in preview.json()["blockers"]), preview.json()["blockers"]
+
+            # The hindrance now belongs to another project's main contract: same key, different contract.
+            await env.db.delay_events.update_one({"_id": "HP"}, {"$set": {"project_id": "proj-a2"}})
+            preview = await env.call("POST", "org_admin", PREVIEW, json={"claim_ids": [CLAIM], "case_id": case_id})
+            assert preview.status_code == 200, preview.text[:300]
+            assert preview.json()["can_escalate"] is False
+            assert any("different contract" in item for item in preview.json()["blockers"]), preview.json()["blockers"]
+
+    _run(scenario())
+
+
+def test_evidence_not_confirmed_against_the_contract_master_is_reported_not_blocked(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            await apply_m05(env.db, False)
+            await _open(env, "primary")
+            await env.db.contract_master.delete_many({"project_id": PROJ_A1})
+            await env.db.delay_events.insert_many([_hindrance("HP", contract_id="primary"), _hindrance("HN")])
+            for target in ("HP", "HN"):
+                assert (await _link(env, "hindrance", target)).status_code == 200
+            linked = await env.call(
+                "POST", "org_admin", DOC_LINKS,
+                json={"links": [{"document_id": DOC_IN_ID, "relationship_role": "supporting_document"}]},
+            )
+            assert linked.status_code in (200, 201), linked.text[:300]
+            case_id = await _case(env)
+
+            preview = (await env.call("POST", "org_admin", PREVIEW, json={"claim_ids": [CLAIM], "case_id": case_id})).json()
+            assert not any("contract" in item for item in preview["blockers"]), preview["blockers"]
+            notes = preview["evidence_notes"]
+            assert len(notes) == 2, notes
+            unverified = next(note for note in notes if "holds no such contract" in note)
+            unidentified = next(note for note in notes if "does not say which contract" in note)
+            assert unidentified.count(",") >= 1 and "Document" in unidentified  # the hindrance HN and the letter
+            assert "Document" not in unverified
+            view = (await env.call("GET", "org_admin", f"/api/claims/{CLAIM}/submission")).json()
+            assert [note.split(": ", 1)[-1] for note in notes] == view["evidence_notes"]
+
+            # Once the project's Contract Master holds its main contract, HP is confirmed.
+            await env.db.contract_master.insert_one(
+                {"_id": "cm-primary", "organization_id": ORG_A, "project_id": PROJ_A1, "contract_id": "primary",
+                 "contract_name": "Main works"}
+            )
+            preview = (await env.call("POST", "org_admin", PREVIEW, json={"claim_ids": [CLAIM], "case_id": case_id})).json()
+            assert len(preview["evidence_notes"]) == 1 and "does not say which contract" in preview["evidence_notes"][0]
+
+            # Nothing was rewritten.
+            assert (await env.db.delay_events.find_one({"_id": "HN"})).get("contract_id") is None
+            assert (await env.db.documents.find_one({"_id": DOC_IN})).get("contract_id") is None
+
+    _run(scenario())

@@ -23,6 +23,8 @@ export interface EscalationPreview {
   totals: Record<string, number>;
   blockers: string[];
   can_escalate: boolean;
+  /** Evidence not confirmed against the Contract Master, or naming no contract. Warnings only. */
+  evidence_notes?: string[];
 }
 
 export interface EscalationResult {

@@ -432,6 +432,14 @@ describe("Internal analysis", () => {
 });
 
 describe("Submission", () => {
+  it("lists evidence whose contract is not confirmed beside the submission (4B-23 review)", async () => {
+    const note = "Document L-12: does not say which contract it belongs to. Check it belongs to this claim's contract before relying on it.";
+    api.fetchSubmission.mockResolvedValue(submission({ evidence_notes: [note] }));
+    mount(<SubmissionPanel claimId="c1" readOnly={false} />);
+    const section = (await screen.findByRole("heading", { name: "Evidence whose contract is not confirmed" })).closest("section")!;
+    expect(within(section).getByText(note)).toBeInTheDocument();
+  });
+
   it("keeps notes to the reader apart from the document, shows provenance, and blocks export while stale", async () => {
     api.fetchSubmission.mockResolvedValue(submission());
     api.composeSubmission.mockResolvedValue(submission({ stale_sections: 0, can_export: true, cannot_export_reason: null }));

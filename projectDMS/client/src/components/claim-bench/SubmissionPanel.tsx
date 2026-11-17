@@ -127,6 +127,18 @@ const SubmissionPanel: React.FC<Props> = ({ claimId, readOnly }) => {
           {view.cannot_export_reason}
         </p>
       )}
+      {(view.evidence_notes ?? []).length > 0 && (
+        <section aria-labelledby="submission-contract-notes" className="rounded-md border border-amber-600 bg-amber-50 p-3 text-amber-950">
+          <h3 id="submission-contract-notes" className="text-sm font-semibold">
+            Evidence whose contract is not confirmed
+          </h3>
+          <ul className="mt-1 list-disc space-y-1 pl-5 text-sm">
+            {(view.evidence_notes ?? []).map((note) => (
+              <li key={note}>{note}</li>
+            ))}
+          </ul>
+        </section>
+      )}
       {view.exists && !view.approved_for_issue && (
         <p role="note" className="text-xs text-muted-foreground">
           The claim has not been approved, so an export is marked “Draft. Not approved for issue.” Approval is given on

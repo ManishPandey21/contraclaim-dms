@@ -53,7 +53,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional, Set
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
@@ -157,6 +157,9 @@ class EscalationPreview(BaseModel):
     totals: Dict[str, int] = Field(default_factory=dict)
     blockers: List[str] = Field(default_factory=list)
     can_escalate: bool = False
+    #: Evidence whose contract is not confirmed, or that names none (owner review of
+    #: 4B-23). Shown before escalating; nothing here blocks.
+    evidence_notes: List[str] = Field(default_factory=list)
 
 
 class EscalationResult(BaseModel):
@@ -436,14 +439,22 @@ class ClaimEscalation:
         links = await ClaimDelayLab(self.db, self.bench).links_for_claim(str(claim["_id"]))
         return await contract_scope.evidence_conflicts(self.db, claim, links, document_ids)
 
-    async def _contract_blockers(self, claims: List[Dict[str, Any]], documents: Dict[str, Set[str]]) -> List[str]:
+    async def _contract_review(
+        self, claims: List[Dict[str, Any]], documents: Dict[str, Set[str]]
+    ) -> Tuple[List[str], List[str]]:
+        """Blockers (records of another contract) and notes (records not confirmed against
+        the Contract Master, or naming no contract) for each claim."""
         blockers: List[str] = []
+        notes: List[str] = []
+        lab = ClaimDelayLab(self.db, self.bench)
         for claim in claims:
-            foreign = await self._foreign_evidence(claim, documents.get(str(claim["_id"]), set()))
-            if foreign:
-                reference = str(claim.get("claim_ref") or claim["_id"])
-                blockers.append(f"{reference}: {contract_scope.message(claim, foreign)}")
-        return blockers
+            links = await lab.links_for_claim(str(claim["_id"]))
+            review = await contract_scope.identity_review(self.db, claim, links, documents.get(str(claim["_id"]), set()))
+            reference = str(claim.get("claim_ref") or claim["_id"])
+            if review.conflicts:
+                blockers.append(f"{reference}: {contract_scope.message(claim, review.conflicts)}")
+            notes.extend(f"{reference}: {note}" for note in contract_scope.identity_notes(claim, review))
+        return blockers, notes
 
     @staticmethod
     def _blockers(claims: List[Dict[str, Any]], case: Optional[Dict[str, Any]]) -> List[str]:
@@ -484,13 +495,15 @@ class ClaimEscalation:
         for carry in carries:
             for slug, count in carry.rows.items():
                 totals[slug] = totals.get(slug, 0) + count
-        blockers = self._blockers(claims, case) + await self._contract_blockers(claims, documents)
+        contract_blockers, notes = await self._contract_review(claims, documents)
+        blockers = self._blockers(claims, case) + contract_blockers
         return EscalationPreview(
             project_id=str(claims[0].get("project_id") or "") or None,
             claims=carries,
             totals={slug: totals[slug] for slug in MATRIX_ORDER if slug in totals},
             blockers=blockers,
             can_escalate=not blockers,
+            evidence_notes=notes,
         )
 
     async def escalate(

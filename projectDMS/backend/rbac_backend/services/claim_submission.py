@@ -127,6 +127,9 @@ class SubmissionView(BaseModel):
     approved_for_issue: bool = False
     can_export: bool = False
     cannot_export_reason: Optional[str] = None
+    #: Evidence whose contract is not confirmed against the Contract Master, or that
+    #: names no contract (owner review of 4B-23). Warnings: nothing here blocks.
+    evidence_notes: List[str] = Field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #
@@ -747,6 +750,12 @@ class ClaimSubmissions:
             approved_for_issue=await self._approved(claim),
             can_export=export_reason is None,
             cannot_export_reason=export_reason,
+            evidence_notes=contract_scope.identity_notes(
+                claim,
+                await contract_scope.identity_review(
+                    self.db, claim, await ClaimDelayLab(self.db, self.bench).links_for_claim(str(claim["_id"])), document_ids
+                ),
+            ),
         )
 
     async def compose(

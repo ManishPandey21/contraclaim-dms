@@ -157,6 +157,15 @@ describe("Escalate to arbitration", () => {
     expect(await screen.findByText("CLM-014 is already in another arbitration case.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Escalate" })).toBeDisabled();
   });
+
+  it("shows evidence whose contract is not confirmed as a warning, not a blocker (4B-23 review)", async () => {
+    const note = "CLM-014: Hindrance H-7: does not say which contract it belongs to. Check it belongs to this claim's contract before relying on it.";
+    api.previewEscalation.mockResolvedValue(preview({ evidence_notes: [note] }));
+    mount();
+    const section = (await screen.findByRole("heading", { name: "Evidence whose contract is not confirmed" })).closest("section")!;
+    expect(within(section).getByText(note)).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
 });
 
 describe("Draft citation panel", () => {

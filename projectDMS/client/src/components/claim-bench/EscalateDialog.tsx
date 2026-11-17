@@ -161,6 +161,18 @@ const EscalateDialog: React.FC<Props> = ({ claimIds, claimTitle, projectId, open
                   ))}
                 </ul>
               )}
+              {(preview.evidence_notes ?? []).length > 0 && (
+                <section aria-labelledby="contract-notes-heading" className="rounded-md border border-amber-600 bg-amber-50 p-3 text-amber-950">
+                  <h3 id="contract-notes-heading" className="text-sm font-semibold">
+                    Evidence whose contract is not confirmed
+                  </h3>
+                  <ul className="mt-1 list-disc space-y-1 pl-5 text-sm">
+                    {(preview.evidence_notes ?? []).map((note) => (
+                      <li key={note}>{note}</li>
+                    ))}
+                  </ul>
+                </section>
+              )}
 
               <section aria-labelledby="carried-heading" className="space-y-1">
                 <h3 id="carried-heading" className="font-semibold">
