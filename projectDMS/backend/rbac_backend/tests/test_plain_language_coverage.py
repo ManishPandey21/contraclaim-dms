@@ -71,6 +71,8 @@ def test_every_structured_error_code_from_the_phase_4b_routes_has_a_message() ->
         BACKEND / "services" / "project_perspective.py",
         # The contract a claim is made under (4B-18).
         BACKEND / "services" / "claim_contracts.py",
+        # No cross-contract evidence on a claim (4B-23).
+        BACKEND / "services" / "claim_contract_scope.py",
     ]
     codes: Set[str] = set()
     for path in routes:

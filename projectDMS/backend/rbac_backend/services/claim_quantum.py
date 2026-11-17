@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional, Set
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
+from . import claim_contract_scope as contract_scope
 from ..models.claim import ClaimBench, ClaimHead
 from ..models.claim_delay import QuantumLine, QuantumRecord
 from .claim_delay_engine import compensable_days, days_outside
@@ -182,6 +183,15 @@ class ClaimQuantum:
             records=records,
         )
 
+    async def _refuse_foreign_records(
+        self, claim: Dict[str, Any], request: QuantumLineRequest, allowed_documents: Set[str]
+    ) -> None:
+        """4B-23 (D-23): a quantum line never cites a record of another contract."""
+        cited = {record.document_id for record in request.records if record.document_id in allowed_documents}
+        foreign = await contract_scope.evidence_conflicts(self.db, claim, [], cited)
+        if foreign:
+            raise contract_scope.refusal(claim, foreign)
+
     @staticmethod
     def _roll_up(head: ClaimHead) -> None:
         # Once a head has a build-up, its amount is the build-up, not a typed figure.
@@ -197,6 +207,8 @@ class ClaimQuantum:
     async def add_line(
         self, claim: Dict[str, Any], head_id: str, request: QuantumLineRequest, allowed_documents: Set[str], user_id: Optional[str]
     ) -> QuantumView:
+        await self._refuse_foreign_records(claim, request, allowed_documents)
+
         def _apply(fresh: ClaimBench) -> None:
             head = _head(fresh, head_id)
             if len(head.quantum_lines) >= MAX_LINES:
@@ -217,6 +229,8 @@ class ClaimQuantum:
         allowed_documents: Set[str],
         user_id: Optional[str],
     ) -> QuantumView:
+        await self._refuse_foreign_records(claim, request, allowed_documents)
+
         def _apply(fresh: ClaimBench) -> None:
             head = _head(fresh, head_id)
             for index, line in enumerate(head.quantum_lines):

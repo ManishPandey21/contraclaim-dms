@@ -53,7 +53,9 @@ def _setup():
     db.projects.docs.append({"_id": PROJECT, "organization_id": ORG, "contractual_capacity": "contractor"})
     db.claims.docs.append(
         {"_id": CLAIM_ID, "title": "Delayed handover", "type": "eot", "status": "submitted",
-         "event_date": datetime(2026, 3, 1), "organization_id": ORG, "project_id": PROJECT, "currency": "INR", "bench": None}
+         "event_date": datetime(2026, 3, 1), "organization_id": ORG, "project_id": PROJECT, "currency": "INR", "bench": None,
+         # Under the contract its determinations belong to (4B-23: no cross-contract evidence).
+         "contract_id": "primary"}
     )
     db.delay_events.docs.extend(
         [
