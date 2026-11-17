@@ -27,6 +27,16 @@ from fastapi import HTTPException, status
 
 ERROR_CODE = "claim_contract_mismatch"
 
+# Where each kind of linked record is kept. Named here, not imported from the
+# Delay Lab: this module is imported by the document relationship service, and
+# importing the Delay Lab from it would pull the key-date services into every
+# module that links a document. A test pins these to the Delay Lab's names.
+_RECORD_COLLECTIONS = {
+    "hindrance": "delay_events",
+    "eot_submission": "key_date_eot_submissions",
+    "eot_determination": "key_date_eot_determinations",
+}
+
 
 def contract_of(record: Optional[Mapping[str, Any]]) -> Optional[str]:
     """The contract a record or claim says it belongs to, or None."""
@@ -93,9 +103,7 @@ async def evidence_conflicts(db: Any, claim: Mapping[str, Any], links: Iterable[
     """
     from bson import ObjectId
 
-    from .claim_delay_lab import DETERMINATIONS, HINDRANCES, SUBMISSIONS
-
-    collections = {"hindrance": HINDRANCES, "eot_submission": SUBMISSIONS, "eot_determination": DETERMINATIONS}
+    collections = _RECORD_COLLECTIONS
     found: List[Tuple[str, Optional[Mapping[str, Any]]]] = []
     for link in links:
         collection = collections.get(str(getattr(link, "target_type", "")))
