@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..utils.datetime import now_utc
 
@@ -143,16 +143,54 @@ class QuantumRecord(BaseModel):
     role: RecordRole = "support"
 
 
+class FormulaInput(BaseModel):
+    """One typed input to a head-office overhead formula, and the record it is taken from (4B-24)."""
+
+    #: Decimal text, never a binary float: "12500000.50", "7.5", "730".
+    value: str = Field(..., min_length=1, max_length=40)
+    document_id: Optional[str] = None
+
+    @field_validator("value")
+    @classmethod
+    def _decimal_text(cls, value: str) -> str:
+        from decimal import Decimal, InvalidOperation
+
+        text = str(value).replace(",", "").strip()
+        try:
+            number = Decimal(text)
+        except InvalidOperation as exc:
+            raise ValueError("must be a number") from exc
+        if not number.is_finite() or number < 0:
+            raise ValueError("must be a positive number")
+        return text
+
+
 class QuantumLine(BaseModel):
     line_id: str
     category: QuantumCategory
     description: str = Field(..., min_length=1, max_length=500)
-    amount: float = Field(..., ge=0)
+    #: Money is held in integer paise (D-14, 4B-24). ``amount`` is the rupee figure
+    #: derived from it, kept for display and older readers; nothing sums it.
+    amount_paise: Optional[int] = Field(default=None, ge=0)
+    amount: float = Field(default=0.0, ge=0)
     period_start: Optional[datetime] = None
     period_end: Optional[datetime] = None
     formula: QuantumFormula = "none"
+    #: Hudson, Emden or Eichleay inputs, by key (services/quantum_formulas.FORMULA_INPUTS).
+    formula_inputs: Dict[str, FormulaInput] = Field(default_factory=dict)
     basis: Optional[str] = Field(default=None, max_length=1000)
     records: List[QuantumRecord] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _paise_are_authoritative(self) -> "QuantumLine":
+        from ..services.quantum_formulas import rupees, to_paise
+
+        # A line stored before 4B-24 has only the rupee float; read it through its
+        # decimal text. It is written in paise on its next save.
+        if self.amount_paise is None:
+            self.amount_paise = to_paise(repr(float(self.amount)))
+        self.amount = rupees(self.amount_paise)
+        return self
 
 
 __all__ = [
@@ -163,6 +201,7 @@ __all__ = [
     "Criticality",
     "DelayMethod",
     "EventDecision",
+    "FormulaInput",
     "HeadDelay",
     "LinkTargetType",
     "OverlapTreatment",

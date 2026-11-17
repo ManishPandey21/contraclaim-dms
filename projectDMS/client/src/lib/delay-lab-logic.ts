@@ -10,6 +10,7 @@ import type {
   RecordRole,
   RiskOwner,
 } from "@/types/claimBench";
+import { parseAmount } from "@/lib/claim-bench-logic";
 
 // Pure helpers for the Delay Lab and Quantum Builder screens. Every number
 // shown comes from the server; these only lay it out and word it.
@@ -59,6 +60,31 @@ export const CATEGORY_LABEL: Record<QuantumCategory, string> = {
   overhead_formula: "Overheads by formula",
   loss_of_profit: "Loss of profit",
   interest: "Interest",
+};
+
+/**
+ * The figures each head-office overhead formula needs, as the server computes it
+ * (backend services/quantum_formulas.py FORMULA_INPUTS). Each figure is taken
+ * from a record linked to the claim. The delay is the line's own period.
+ */
+export const FORMULA_INPUTS: Record<Exclude<QuantumFormula, "none">, { key: string; label: string }[]> = {
+  hudson: [
+    { key: "tender_percentage", label: "Head-office overhead and profit in the tender (%)" },
+    { key: "contract_sum", label: "Contract sum" },
+    { key: "contract_period_days", label: "Contract period (days)" },
+  ],
+  emden: [
+    { key: "overhead_and_profit", label: "Head-office overhead and profit in the accounts" },
+    { key: "turnover", label: "Turnover in the same accounts" },
+    { key: "contract_sum", label: "Contract sum" },
+    { key: "contract_period_days", label: "Contract period (days)" },
+  ],
+  eichleay: [
+    { key: "contract_billings", label: "Final contract sum, excluding the overhead claim" },
+    { key: "total_billings", label: "Total revenue over the contract period" },
+    { key: "total_overhead", label: "Head-office overhead during actual performance" },
+    { key: "performance_days", label: "Days of actual performance" },
+  ],
 };
 
 export const FORMULA_LABEL: Record<QuantumFormula, string> = {
@@ -171,3 +197,18 @@ export function netEotExplanation(view: DelayView): string {
 export function eventNeedsDecision(event: DelayEventView): boolean {
   return !event.decision.risk_owner || !event.decision.criticality;
 }
+
+/** The figures a formula line still needs, by label. Empty when the line can be sent. */
+export const missingFormulaFigures = (
+  category: QuantumCategory,
+  formula: QuantumFormula,
+  inputs: Record<string, { value: string } | undefined>
+): string[] => {
+  if (category !== "overhead_formula" || formula === "none") return [];
+  return FORMULA_INPUTS[formula]
+    .filter(({ key }) => {
+      const value = parseAmount(inputs[key]?.value ?? "");
+      return typeof value !== "number" || value <= 0;
+    })
+    .map(({ label }) => label);
+};

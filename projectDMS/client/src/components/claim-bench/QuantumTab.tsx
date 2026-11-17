@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useHeadAnalysis } from "@/hooks/useClaimBench";
 import { parseAmount } from "@/lib/claim-bench-logic";
-import { CATEGORY_LABEL, FORMULA_LABEL, RECORD_ROLE_LABEL } from "@/lib/delay-lab-logic";
+import { CATEGORY_LABEL, FORMULA_INPUTS, FORMULA_LABEL, RECORD_ROLE_LABEL, missingFormulaFigures } from "@/lib/delay-lab-logic";
 import { formatCrore, formatDateIN, formatINR, fromDateInput, toDateInput } from "@/lib/format-in";
 import { listEntityDocumentLinks } from "@/services/document-relationships-api";
 import type {
@@ -35,6 +35,8 @@ interface Draft {
   formula: QuantumFormula;
   basis: string;
   records: { document_id: string; role: RecordRole }[];
+  /** Formula figures by key: the value as typed, and the record it is taken from. */
+  inputs: Record<string, { value: string; document_id: string }>;
 }
 
 const EMPTY: Draft = {
@@ -46,6 +48,7 @@ const EMPTY: Draft = {
   formula: "none",
   basis: "",
   records: [],
+  inputs: {},
 };
 
 const select = "h-9 w-full rounded-md border border-input bg-background px-2 text-sm disabled:opacity-50";
@@ -61,6 +64,12 @@ const toDraft = (line: QuantumLine): Draft => ({
   formula: line.formula,
   basis: line.basis ?? "",
   records: line.records.map((record) => ({ ...record })),
+  inputs: Object.fromEntries(
+    Object.entries(line.formula_inputs ?? {}).map(([key, input]) => [
+      key,
+      { value: input.value, document_id: input.document_id ?? "" },
+    ])
+  ),
 });
 
 /**
@@ -83,7 +92,13 @@ const QuantumTab: React.FC<Props> = ({ claimId, headId, boardVersion, readOnly }
 
   const disabled = readOnly || saveLine.isPending || removeLine.isPending;
   const amount = draft ? parseAmount(draft.amount) : null;
-  const ready = draft !== null && draft.description.trim() !== "" && typeof amount === "number";
+  // A formula line's amount is computed on the server from its figures; it is never typed.
+  const isFormula = draft !== null && draft.category === "overhead_formula" && draft.formula !== "none";
+  const missingFigures = draft ? missingFormulaFigures(draft.category, draft.formula, draft.inputs) : [];
+  const ready =
+    draft !== null &&
+    draft.description.trim() !== "" &&
+    (isFormula ? missingFigures.length === 0 : typeof amount === "number");
   const docs = (documents.data ?? []).map((link) => ({
     id: String(link.document_id),
     name: link.document?.subject || link.document?.filename || String(link.document_id),
@@ -91,11 +106,23 @@ const QuantumTab: React.FC<Props> = ({ claimId, headId, boardVersion, readOnly }
   const nameOf = (id: string) => docs.find((doc) => doc.id === id)?.name ?? id;
 
   const submit = () => {
-    if (!draft || typeof amount !== "number") return;
+    if (!draft || !ready) return;
+    const formulaInputs = isFormula
+      ? Object.fromEntries(
+          FORMULA_INPUTS[draft.formula as Exclude<QuantumFormula, "none">].map(({ key }) => [
+            key,
+            {
+              value: String(parseAmount(draft.inputs[key]?.value ?? "")),
+              document_id: draft.inputs[key]?.document_id || null,
+            },
+          ])
+        )
+      : {};
     const line: QuantumLineInput = {
       category: draft.category,
       description: draft.description.trim(),
-      amount,
+      ...(isFormula ? {} : { amount: amount as number }),
+      formula_inputs: formulaInputs,
       period_start: PERIOD.has(draft.category) ? fromDateInput(draft.period_start) ?? null : null,
       period_end: PERIOD.has(draft.category) ? fromDateInput(draft.period_end) ?? null : null,
       formula: draft.category === "overhead_formula" ? draft.formula : "none",
@@ -217,8 +244,16 @@ const QuantumTab: React.FC<Props> = ({ claimId, headId, boardVersion, readOnly }
               </div>
               <div>
                 <Label htmlFor="q-amount" className="text-xs">Amount</Label>
-                <Input id="q-amount" inputMode="decimal" value={draft.amount} aria-invalid={amount === undefined} onChange={(e) => setDraft({ ...draft, amount: e.target.value })} />
-                {typeof amount === "number" && <p className="pt-1 text-xs text-muted-foreground">{formatCrore(amount, view.currency)}</p>}
+                {isFormula ? (
+                  <p id="q-amount" className="pt-2 text-xs text-muted-foreground">
+                    Worked out from the formula's figures when the line is saved.
+                  </p>
+                ) : (
+                  <>
+                    <Input id="q-amount" inputMode="decimal" value={draft.amount} aria-invalid={amount === undefined} onChange={(e) => setDraft({ ...draft, amount: e.target.value })} />
+                    {typeof amount === "number" && <p className="pt-1 text-xs text-muted-foreground">{formatCrore(amount, view.currency)}</p>}
+                  </>
+                )}
               </div>
               {PERIOD.has(draft.category) && (
                 <>
@@ -241,6 +276,38 @@ const QuantumTab: React.FC<Props> = ({ claimId, headId, boardVersion, readOnly }
                     ))}
                   </select>
                 </div>
+              )}
+              {isFormula && (
+                <fieldset className="space-y-2 sm:col-span-3">
+                  <legend className="text-xs font-medium">
+                    {FORMULA_LABEL[draft.formula]} figures, each from a record linked to this claim
+                  </legend>
+                  {FORMULA_INPUTS[draft.formula as Exclude<QuantumFormula, "none">].map(({ key, label }) => {
+                    const input = draft.inputs[key] ?? { value: "", document_id: "" };
+                    const setInput = (next: Partial<typeof input>) =>
+                      setDraft({ ...draft, inputs: { ...draft.inputs, [key]: { ...input, ...next } } });
+                    return (
+                      <div key={key} className="grid gap-2 sm:grid-cols-2">
+                        <div>
+                          <Label htmlFor={`q-input-${key}`} className="text-xs">{label}</Label>
+                          <Input id={`q-input-${key}`} inputMode="decimal" value={input.value} onChange={(e) => setInput({ value: e.target.value })} />
+                        </div>
+                        <div>
+                          <Label htmlFor={`q-input-${key}-record`} className="text-xs">Taken from</Label>
+                          <select id={`q-input-${key}-record`} className={select} value={input.document_id} onChange={(e) => setInput({ document_id: e.target.value })}>
+                            <option value="">No record yet (the line stays locked)</option>
+                            {docs.map((doc) => (
+                              <option key={doc.id} value={doc.id}>{doc.name}</option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {missingFigures.length > 0 && (
+                    <p className="text-xs text-muted-foreground">Still needed: {missingFigures.join("; ")}.</p>
+                  )}
+                </fieldset>
               )}
               <div className="sm:col-span-3">
                 <Label htmlFor="q-basis" className="text-xs">Basis (clause, rate or how it is calculated)</Label>

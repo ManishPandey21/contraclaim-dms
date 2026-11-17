@@ -326,11 +326,21 @@ export type QuantumCategory =
 export type QuantumFormula = "none" | "hudson" | "emden" | "eichleay";
 export type RecordRole = "support" | "actual_loss" | "work_declined";
 
+export interface FormulaInputValue {
+  /** Decimal text, never a binary float. */
+  value: string;
+  document_id?: string | null;
+}
+
 export interface QuantumLine {
   line_id: string;
   category: QuantumCategory;
   description: string;
+  /** Rupees, derived from amount_paise for display. */
   amount: number;
+  /** The authoritative amount, in integer paise (4B-24). */
+  amount_paise?: number;
+  formula_inputs?: Record<string, FormulaInputValue>;
   period_start?: string | null;
   period_end?: string | null;
   formula: QuantumFormula;
@@ -338,12 +348,17 @@ export interface QuantumLine {
   records: { document_id: string; role: RecordRole }[];
 }
 
-export type QuantumLineInput = Omit<QuantumLine, "line_id">;
+/** A formula line sends formula_inputs and no amount: the server computes it. */
+export type QuantumLineInput = Omit<QuantumLine, "line_id" | "amount" | "amount_paise"> & { amount?: number };
 
 export interface QuantumView {
   head_id: string;
   currency: string;
   lines: { line: QuantumLine; locked: boolean; lock_reasons: string[] }[];
+  /** Totals in integer paise; the rupee totals are derived from them. */
+  claimed_total_paise?: number;
+  supported_total_paise?: number;
+  locked_total_paise?: number;
   claimed_total: number;
   supported_total: number;
   locked_total: number;

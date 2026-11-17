@@ -16,12 +16,18 @@ Locks, by category:
 - **loss_of_profit**: a record of work that was available and declined.
 - **interest**: a stated basis (the clause or rate relied on).
 
-Records are documents already linked to the claim.
+Records are documents already linked to the claim. Every lock re-checks that a
+record (and each formula input's record) is still linked, against the claim's
+whole set of linked documents, not the viewer's: two people see the same locks.
+
+Money is integer paise (4B-24, D-14). A Hudson, Emden or Eichleay line's amount
+is computed from its inputs (services/quantum_formulas.py) and never typed.
 """
 
 from __future__ import annotations
 
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Any, Dict, List, Optional, Set
 
 from fastapi import HTTPException
@@ -29,7 +35,8 @@ from pydantic import BaseModel, Field
 
 from . import claim_contract_scope as contract_scope
 from ..models.claim import ClaimBench, ClaimHead
-from ..models.claim_delay import QuantumLine, QuantumRecord
+from ..models.claim_delay import FormulaInput, QuantumLine, QuantumRecord
+from .quantum_formulas import FORMULA_INPUTS, compute_paise, delay_days, missing_inputs, rupees, to_paise
 from .claim_delay_engine import compensable_days, days_outside
 from .claim_delay_lab import ClaimDelayLab, _day, _head, engine_events, head_treatments
 
@@ -43,7 +50,11 @@ _PERIOD_CATEGORIES = {"prolongation", "overhead_formula"}
 class QuantumLineInput(BaseModel):
     category: str
     description: str = Field(..., min_length=1, max_length=500)
-    amount: float = Field(..., ge=0)
+    #: Rupees, read through its decimal text; or ``amount_paise``. Neither is sent for
+    #: a formula line, whose amount is computed.
+    amount: Optional[Decimal] = Field(default=None, ge=0)
+    amount_paise: Optional[int] = Field(default=None, ge=0)
+    formula_inputs: Dict[str, FormulaInput] = Field(default_factory=dict)
     period_start: Optional[datetime] = None
     period_end: Optional[datetime] = None
     formula: str = "none"
@@ -66,17 +77,44 @@ class QuantumView(BaseModel):
     head_id: str
     currency: str = "INR"
     lines: List[QuantumLineView] = Field(default_factory=list)
+    #: Totals in integer paise; the rupee figures are derived from them.
+    claimed_total_paise: int = 0
+    supported_total_paise: int = 0
+    locked_total_paise: int = 0
     claimed_total: float = 0.0
     supported_total: float = 0.0
     locked_total: float = 0.0
     locked_count: int = 0
 
 
-def line_lock_reasons(line: QuantumLine, compensable: Set[date]) -> List[str]:
-    """Why a line is locked. Empty means it counts as supported."""
+_ROLE_WORDS = {"support": "supporting record", "actual_loss": "record of actual loss", "work_declined": "record of work declined"}
+
+
+def line_lock_reasons(line: QuantumLine, compensable: Set[date], linked: Optional[Set[str]] = None) -> List[str]:
+    """Why a line is locked. Empty means it counts as supported.
+
+    ``linked`` is the claim's whole set of linked documents. A record that is no
+    longer in it does not count, and the line says which one to link again.
+    """
     reasons: List[str] = []
-    roles = {record.role for record in line.records}
-    if line.category in {"direct", "disruption", "prolongation"} and not line.records:
+    live = [record for record in line.records if linked is None or record.document_id in linked]
+    for position, record in enumerate(line.records, start=1):
+        if linked is not None and record.document_id not in linked:
+            reasons.append(
+                f"Record {position} on this line ({_ROLE_WORDS.get(record.role, 'record')}) is no longer linked to "
+                "this claim. Link it to the claim again, or remove it from the line."
+            )
+    if line.formula in FORMULA_INPUTS:
+        for spec in FORMULA_INPUTS[line.formula]:
+            entry = line.formula_inputs.get(spec.key)
+            if entry is None or not entry.document_id:
+                reasons.append(f"Link the record that \"{spec.label}\" is taken from. A formula input is not accepted on assertion.")
+            elif linked is not None and entry.document_id not in linked:
+                reasons.append(
+                    f"The record for \"{spec.label}\" is no longer linked to this claim. Link it to the claim again."
+                )
+    roles = {record.role for record in live}
+    if line.category in {"direct", "disruption", "prolongation"} and not live:
         reasons.append("Link at least one record that supports this cost (invoice, timesheet, plant or site record).")
     if line.category in _PERIOD_CATEGORIES:
         start, end = _day(line.period_start), _day(line.period_end)
@@ -106,22 +144,31 @@ def line_lock_reasons(line: QuantumLine, compensable: Set[date]) -> List[str]:
     return reasons
 
 
-def build_quantum_view(head: ClaimHead, compensable: Set[date], currency: str = "INR") -> QuantumView:
+def build_quantum_view(
+    head: ClaimHead, compensable: Set[date], currency: str = "INR", linked: Optional[Set[str]] = None
+) -> QuantumView:
     views = []
     for line in head.quantum_lines:
-        reasons = line_lock_reasons(line, compensable)
+        reasons = line_lock_reasons(line, compensable, linked)
         views.append(QuantumLineView(line=line, locked=bool(reasons), lock_reasons=reasons))
-    claimed = sum(view.line.amount for view in views)
-    locked = sum(view.line.amount for view in views if view.locked)
+    claimed = sum(int(view.line.amount_paise or 0) for view in views)
+    locked = sum(int(view.line.amount_paise or 0) for view in views if view.locked)
     return QuantumView(
         head_id=head.head_id,
         currency=currency,
         lines=views,
-        claimed_total=round(claimed, 2),
-        supported_total=round(claimed - locked, 2),
-        locked_total=round(locked, 2),
+        claimed_total_paise=claimed,
+        supported_total_paise=claimed - locked,
+        locked_total_paise=locked,
+        claimed_total=rupees(claimed),
+        supported_total=rupees(claimed - locked),
+        locked_total=rupees(locked),
         locked_count=sum(1 for view in views if view.locked),
     )
+
+
+def _refusal(status_code: int, code: str, message: str) -> HTTPException:
+    return HTTPException(status_code=status_code, detail={"code": code, "user_message": message, "detail": message})
 
 
 def _next_line_id(head: ClaimHead) -> str:
@@ -145,10 +192,58 @@ class ClaimQuantum:
             include_neutral=head.delay.include_neutral,
         )
 
+    async def linked_documents(self, claim: Dict[str, Any]) -> Set[str]:
+        """Every document linked to the claim, whoever is looking (4B-24).
+
+        Locks are judged against this set, not the viewer's filtered one, so two
+        people with different document access see the same locks. Only ids are read.
+        """
+        rows = await self.db.entity_document_links.find(
+            {"target_type": "claim", "target_id": str(claim["_id"]), "removed_at": None}, {"document_id": 1}
+        ).to_list(length=None)
+        linked = {str(row.get("document_id")) for row in rows if row.get("document_id")}
+        linked.update(str(item) for item in (claim.get("linked_document_ids") or []) if item)
+        return linked
+
     async def view(self, claim: Dict[str, Any], head_id: str) -> QuantumView:
         bench = self.bench._require_bench(claim)
         head = _head(bench, head_id)
-        return build_quantum_view(head, await self._compensable(claim, head), str(claim.get("currency") or "INR"))
+        return build_quantum_view(
+            head, await self._compensable(claim, head), str(claim.get("currency") or "INR"), await self.linked_documents(claim)
+        )
+
+    @staticmethod
+    def _amount_paise(payload: QuantumLineInput) -> int:
+        """The line's amount: computed for a formula line, typed otherwise (4B-24, D-14)."""
+        if payload.formula in FORMULA_INPUTS:
+            if payload.amount is not None or payload.amount_paise is not None:
+                raise _refusal(
+                    422, "quantum_formula_amount_computed",
+                    "A formula line's amount is computed from its inputs; it is not typed.",
+                )
+            unknown = sorted(set(payload.formula_inputs) - {spec.key for spec in FORMULA_INPUTS[payload.formula]})
+            if unknown:
+                raise _refusal(422, "quantum_formula_inputs_missing", "Unknown formula input: " + ", ".join(unknown))
+            missing = missing_inputs(payload.formula, payload.formula_inputs)
+            if missing:
+                raise _refusal(
+                    422, "quantum_formula_inputs_missing",
+                    "Enter every input the formula needs, as a positive figure: " + "; ".join(missing) + ".",
+                )
+            days = delay_days(payload.period_start, payload.period_end)
+            if days is None:
+                raise _refusal(
+                    422, "quantum_formula_period_required",
+                    "State the period of delay, start and end, for the formula: it is the number of days it multiplies.",
+                )
+            return compute_paise(payload.formula, payload.formula_inputs, days)
+        if payload.formula_inputs:
+            raise _refusal(422, "quantum_formula_inputs_missing", "Formula inputs apply only to a Hudson, Emden or Eichleay line.")
+        if payload.amount_paise is not None:
+            return int(payload.amount_paise)
+        if payload.amount is None:
+            raise _refusal(422, "quantum_amount_required", "Enter the amount of this line.")
+        return to_paise(payload.amount)
 
     def _build(self, line_id: str, payload: QuantumLineInput, allowed_documents: Set[str]) -> QuantumLine:
         if payload.category not in _CATEGORIES:
@@ -157,6 +252,13 @@ class ClaimQuantum:
             raise HTTPException(status_code=422, detail="Unknown formula")
         if payload.formula != "none" and payload.category != "overhead_formula":
             raise HTTPException(status_code=422, detail="A formula applies only to an overhead-by-formula line")
+        amount_paise = self._amount_paise(payload)
+        for entry in payload.formula_inputs.values():
+            if entry.document_id and entry.document_id not in allowed_documents:
+                raise HTTPException(
+                    status_code=422,
+                    detail="A formula input's record must be a document already linked to this claim",
+                )
         seen: Set[tuple] = set()
         records: List[QuantumRecord] = []
         for record in payload.records:
@@ -175,7 +277,8 @@ class ClaimQuantum:
             line_id=line_id,
             category=payload.category,  # type: ignore[arg-type]
             description=payload.description.strip(),
-            amount=payload.amount,
+            amount_paise=amount_paise,
+            formula_inputs=dict(payload.formula_inputs),
             period_start=payload.period_start,
             period_end=payload.period_end,
             formula=payload.formula,  # type: ignore[arg-type]
@@ -188,6 +291,7 @@ class ClaimQuantum:
     ) -> None:
         """4B-23 (D-23): a quantum line never cites a record of another contract."""
         cited = {record.document_id for record in request.records if record.document_id in allowed_documents}
+        cited |= {entry.document_id for entry in request.formula_inputs.values() if entry.document_id in allowed_documents}
         foreign = await contract_scope.evidence_conflicts(self.db, claim, [], cited)
         if foreign:
             raise contract_scope.refusal(claim, foreign)
@@ -198,8 +302,12 @@ class ClaimQuantum:
         # Removing the last line clears it: the old total is no longer supported by
         # anything (D-14, 4B-17, C-07). Only line operations call this.
         if head.quantum_lines:
-            head.amount_claimed = round(sum(line.amount for line in head.quantum_lines), 2)
+            # Summed in paise; the head's rupee figure is derived from the sum (4B-24).
+            total = sum(int(line.amount_paise or 0) for line in head.quantum_lines)
+            head.amount_claimed_paise = total
+            head.amount_claimed = rupees(total)
         else:
+            head.amount_claimed_paise = None
             head.amount_claimed = None
 
     async def add_line(

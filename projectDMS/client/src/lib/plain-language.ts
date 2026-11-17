@@ -100,6 +100,10 @@ export const ERROR_CODE_MESSAGES = {
   claim_contract_not_valid: "That contract is not one of this project's contracts, or you cannot read it.",
   claim_contract_fixed:
     "A claim's contract cannot be changed once it is set: the records linked to it belong to that contract.",
+  quantum_formula_amount_computed: "A formula line's amount is worked out from its inputs, so it cannot be typed.",
+  quantum_formula_inputs_missing: "Enter every figure the formula needs, each as a positive number.",
+  quantum_formula_period_required: "State the start and end of the delay period: the formula multiplies by its days.",
+  quantum_amount_required: "Enter the amount of this line.",
   claim_contract_mismatch:
     "A record of another contract cannot support this claim. Only records of the claim's own contract can be linked or relied on.",
 } as const;

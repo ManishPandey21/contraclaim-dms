@@ -29,6 +29,7 @@ from typing import Any, Callable, Dict, List, Optional
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
+from .quantum_formulas import rupees, to_paise
 from ..core.config import settings
 from ..models.claim import (
     ELEMENT_KEYS,
@@ -524,6 +525,15 @@ def _facts_text(
 # --------------------------------------------------------------------------- #
 # Service
 # --------------------------------------------------------------------------- #
+def _head_paise(head: ClaimHead) -> int:
+    """A head's amount in paise: its build-up's own paise while they still match its rupee
+    figure, else the rupee figure read through its decimal text (a typed amount)."""
+    paise = head.amount_claimed_paise
+    if paise is not None and rupees(paise) == head.amount_claimed:
+        return int(paise)
+    return to_paise(repr(float(head.amount_claimed or 0)))
+
+
 class ClaimBenchService:
     def __init__(
         self,
@@ -583,11 +593,14 @@ class ClaimBenchService:
         bench.updated_at = now_utc()
         bench.updated_by = user_id
         update: Dict[str, Any] = {"bench": bench.model_dump(mode="python"), "updated_at": datetime.utcnow(), "updated_by": user_id}
-        amounts = [head.amount_claimed for head in bench.heads if head.amount_claimed is not None]
+        amounts = [head for head in bench.heads if head.amount_claimed is not None]
         # The register's figure follows the heads, including when every head amount
         # is cleared: then the claim has no amount (D-14, 4B-17, C-07). Days are not
         # summed: heads can overlap in time, and adding them would overstate the claim.
-        update["amount_claimed"] = float(sum(amounts)) if amounts else None
+        # Summed in integer paise, each head read through its decimal text (4B-24).
+        total_paise = sum(_head_paise(head) for head in amounts) if amounts else None
+        update["amount_claimed"] = rupees(total_paise) if total_paise is not None else None
+        update["amount_claimed_paise"] = total_paise
         condition: Dict[str, Any] = {"_id": claim["_id"]}
         if expected_version is None:
             condition["bench"] = None

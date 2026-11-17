@@ -99,6 +99,8 @@ def _setup(
             "organization_id": ORG,
             "project_id": PROJECT,
             "bench": None,
+            # The documents these tests cite are linked to the claim (4B-24 re-checks it).
+            "linked_document_ids": ["doc-1", "doc-2"],
             **(claim or {}),
         }
     )
