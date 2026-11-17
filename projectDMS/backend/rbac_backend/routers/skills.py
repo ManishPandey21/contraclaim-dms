@@ -16,7 +16,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from ..core.config import settings
 from ..core.database import get_database
-from ..core.permissions import actor_role_names
+from ..services.reviewer_assignments import platform_reviewer_roles
 from ..core.security import CurrentUser, get_current_user
 from ..models.skill import (
     EffectiveSkill,
@@ -57,10 +57,10 @@ async def get_approval_service() -> SkillApprovalService:
     return SkillApprovalService(await get_database())
 
 
-def _is_named_reviewer(record: SkillVersion, current_user: CurrentUser) -> bool:
-    """True when the user holds a reviewer role this version asks an approval from."""
+async def _is_named_reviewer(record: SkillVersion, current_user: CurrentUser) -> bool:
+    """True when the user holds, at platform scope, a reviewer role this version asks an approval from."""
     wanted = {item.reviewer_role for item in required_reviews(record)}
-    return bool(wanted & actor_role_names(current_user))
+    return bool(wanted & await platform_reviewer_roles(await get_database(), current_user))
 
 
 def _user_id(current_user: CurrentUser) -> str:
@@ -130,7 +130,7 @@ async def get_skill_version(
     record = await registry.get_version(skill_key, version)
     if record is None:
         raise HTTPException(status_code=404, detail="Skill version not found")
-    if record.status == "draft" and not _is_named_reviewer(record, current_user):
+    if record.status == "draft" and not await _is_named_reviewer(record, current_user):
         # Drafts are unpublished, unreviewed text: not visible through the drafter
         # route. The reviewers a draft names must be able to read what they sign.
         raise HTTPException(status_code=404, detail="Skill version not found")

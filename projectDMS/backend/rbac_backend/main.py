@@ -32,6 +32,7 @@ from .routers import (
     claim_findings,
     claim_escalation,
     pickers,
+    reviewer_assignments,
     key_dates,
     variations,
     bank_guarantees,
@@ -272,6 +273,7 @@ app.include_router(claim_bench.router, prefix="/api", tags=["claim-bench"])
 app.include_router(claim_findings.router, prefix="/api", tags=["claim-findings"])
 app.include_router(claim_escalation.router, prefix="/api", tags=["claim-escalation"])
 app.include_router(pickers.router, prefix="/api", tags=["pickers"])
+app.include_router(reviewer_assignments.router, prefix="/api", tags=["reviewer-assignments"])
 app.include_router(contract_appraisal.router, prefix="/api", tags=["contract-appraisal"])
 app.include_router(contract_clauses.router, prefix="/api", tags=["contract-clauses"])
 app.include_router(contract_master.router, prefix="/api", tags=["contract-master"])

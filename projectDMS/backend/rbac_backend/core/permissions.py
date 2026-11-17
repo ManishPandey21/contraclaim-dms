@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from datetime import datetime, timezone
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 CLIENT_DMS_PERMISSIONS: List[str] = [
     "dms.document.view",
@@ -495,6 +496,95 @@ def actor_role_names(user: Any) -> set[str]:
         if name:
             result.add(str(name).strip().lower())
     return result
+
+
+#: Reviewer identities (plan D-06, AQ-3). A role key here is an identity, never a
+#: permission bundle: its role document carries no permissions. The first four
+#: sign off skill packs (platform scope) and, at organisation or project scope,
+#: arbitration gates; the rest answer arbitration gates only.
+SKILL_REVIEWER_ROLE_KEYS: frozenset = frozenset(
+    {
+        "chief_contract_expert",
+        "delay_planning_expert",
+        "arbitration_case_preparation_expert",
+        "senior_legal_approver",
+    }
+)
+ARBITRATION_REVIEWER_ROLE_KEYS: frozenset = frozenset(
+    {"legal_reviewer", "contract_reviewer", "delay_reviewer", "quantum_reviewer", "export_authorizer"}
+)
+REVIEWER_ROLE_KEYS: frozenset = SKILL_REVIEWER_ROLE_KEYS | ARBITRATION_REVIEWER_ROLE_KEYS
+
+REVIEWER_SCOPE_PLATFORM = "platform"
+REVIEWER_SCOPE_ORGANIZATION = "organization"
+REVIEWER_SCOPE_PROJECT = "project"
+REVIEWER_SCOPE_TYPES: frozenset = frozenset(
+    {REVIEWER_SCOPE_PLATFORM, REVIEWER_SCOPE_ORGANIZATION, REVIEWER_SCOPE_PROJECT}
+)
+
+
+def reviewer_assignment_is_live(assignment: Mapping[str, Any], now: datetime) -> bool:
+    """An assignment counts only while it is neither revoked nor expired."""
+    if assignment.get("revoked_at") is not None:
+        return False
+    expires_at = assignment.get("expires_at")
+    if expires_at is None:
+        return True
+    if not isinstance(expires_at, datetime):
+        return False  # an unreadable expiry is not an open-ended grant
+    if expires_at.tzinfo is not None:
+        expires_at = expires_at.astimezone(timezone.utc).replace(tzinfo=None)
+    moment = now.astimezone(timezone.utc).replace(tzinfo=None) if now.tzinfo is not None else now
+    return expires_at > moment
+
+
+def reviewer_roles_from_assignments(
+    assignments: Iterable[Mapping[str, Any]],
+    *,
+    user_id: str,
+    scope_type: str,
+    organization_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    now: datetime,
+) -> set[str]:
+    """The reviewer roles a user's assignments confer for one scope (plan D-06).
+
+    The single rule, stated once:
+
+    - ``platform``: only a live platform assignment answers. An organisation or
+      project assignment never does, whatever its role key.
+    - ``organization``: only a live assignment for that organisation answers.
+    - ``project``: a live assignment for that project, or for the organisation
+      that owns it, answers. A platform assignment does not: platform authority
+      is for skill packs, not for one tenant's case.
+
+    Nothing is inferred from role names, account type or Super Admin status.
+    """
+    wanted_user = str(user_id or "")
+    if not wanted_user or scope_type not in REVIEWER_SCOPE_TYPES:
+        return set()
+    organization = str(organization_id or "")
+    project = str(project_id or "")
+    roles: set[str] = set()
+    for item in assignments:
+        if str(item.get("user_id") or "") != wanted_user:
+            continue
+        role_key = str(item.get("role_key") or "").strip().lower()
+        if role_key not in REVIEWER_ROLE_KEYS or not reviewer_assignment_is_live(item, now):
+            continue
+        held = str(item.get("scope_type") or "")
+        if scope_type == REVIEWER_SCOPE_PLATFORM:
+            if held == REVIEWER_SCOPE_PLATFORM:
+                roles.add(role_key)
+            continue
+        if not organization or str(item.get("organization_id") or "") != organization:
+            continue
+        if held == REVIEWER_SCOPE_ORGANIZATION:
+            roles.add(role_key)
+        elif held == REVIEWER_SCOPE_PROJECT and scope_type == REVIEWER_SCOPE_PROJECT:
+            if project and str(item.get("project_id") or "") == project:
+                roles.add(role_key)
+    return roles
 
 
 def equivalent_permissions(permission: str) -> set[str]:

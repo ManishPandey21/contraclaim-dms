@@ -119,7 +119,20 @@ def actor_roles(user: Any) -> set[str]:
     return actor_role_names(user)
 
 
-def enforce_gate_role(gate: str, claimed_role: str, user: Any) -> str:
+def _held_roles(user: Any, roles: Optional[Iterable[str]]) -> set[str]:
+    """The roles a gate reads.
+
+    ``roles`` is what ``services.reviewer_assignments.arbitration_reviewer_roles``
+    resolved for the case's organisation and project: scoped assignments plus the
+    user's own role list (plan 4B-07, D-06). When a caller has none to pass, the
+    role list alone answers, as before.
+    """
+    if roles is None:
+        return actor_roles(user)
+    return {str(role).strip().lower() for role in roles if role}
+
+
+def enforce_gate_role(gate: str, claimed_role: str, user: Any, roles: Optional[Iterable[str]] = None) -> str:
     claimed = str(claimed_role or "").strip().lower()
     allowed = _configured_roles(gate)
     if allowed and claimed not in allowed:
@@ -127,7 +140,7 @@ def enforce_gate_role(gate: str, claimed_role: str, user: Any) -> str:
             status_code=status.HTTP_403_FORBIDDEN,
             detail={"message": "Reviewer role is not permitted for this arbitration gate", "gate": gate, "allowed_roles": sorted(allowed)},
         )
-    actual = actor_roles(user)
+    actual = _held_roles(user, roles)
     # Route permission grants access to the operation, not a legal specialty.
     # The semantic gate role must always be present in signed identity claims.
     if claimed not in actual:
@@ -139,6 +152,7 @@ def enforce_matrix_reviewer_role(
     claimed_role: str,
     user: Any,
     assignments: Sequence[Mapping[str, Any]],
+    roles: Optional[Iterable[str]] = None,
 ) -> str:
     """Resolve a matrix reviewer role from server claims or an assignment.
 
@@ -152,7 +166,7 @@ def enforce_matrix_reviewer_role(
     allowed_claims = MATRIX_ROLE_CLAIMS.get(claimed)
     if not allowed_claims:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Unknown arbitration matrix reviewer role")
-    actual = actor_roles(user)
+    actual = _held_roles(user, roles)
     if actual.intersection(allowed_claims):
         return claimed
 
@@ -172,11 +186,11 @@ def enforce_matrix_reviewer_role(
     )
 
 
-def resolve_gate_role(gate: str, user: Any) -> str:
-    """Derive a privileged gate role exclusively from signed identity claims."""
+def resolve_gate_role(gate: str, user: Any, roles: Optional[Iterable[str]] = None) -> str:
+    """Derive a privileged gate role from server-held identity: role claims and scoped assignments."""
 
     allowed = _configured_roles(gate)
-    actual = actor_roles(user)
+    actual = _held_roles(user, roles)
     matches = sorted(actual.intersection(allowed))
     if not matches:
         raise HTTPException(

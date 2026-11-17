@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import HTTPException
 
 from ...core.config import settings
-from ...core.permissions import actor_role_names
+from ..reviewer_assignments import platform_reviewer_roles
 from ...models.skill import (
     SkillApproval,
     SkillApprovalRequest,
@@ -197,9 +197,11 @@ class SkillApprovalService:
                     f"approval by {request.reviewer_role}"
                 ),
             )
-        if request.reviewer_role not in actor_role_names(actor):
-            # Deliberately no platform-role shortcut: administrative privilege
-            # is not specialist review.
+        if request.reviewer_role not in await platform_reviewer_roles(self.db, actor):
+            # Platform authority comes only from a live platform reviewer
+            # assignment (plan D-06). A role name on the user, an organisation or
+            # project assignment, and Super Admin status all count for nothing:
+            # administrative privilege is not specialist review.
             raise HTTPException(
                 status_code=403,
                 detail=f"Only a user holding the {request.reviewer_role} role can give this approval",
@@ -296,7 +298,7 @@ class SkillApprovalService:
     async def revoke(self, approval_id: str, reason: str, actor: Any) -> SkillApproval:
         """Withdraw an approval. If the published version relied on it, it is deprecated in the same transaction."""
         actor_id = _actor_id(actor)
-        holds_role = actor_role_names(actor)
+        holds_role = await platform_reviewer_roles(self.db, actor)
 
         async def decide(session: Optional[Any]) -> SkillApproval:
             kw = session_kwargs(session)

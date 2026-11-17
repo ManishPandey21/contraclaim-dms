@@ -28,6 +28,7 @@ from rbac_backend.services.skills.system_skills import (
     system_skill_version,
 )
 from rbac_backend.tests.bench_fakes import FakeDB
+from rbac_backend.tests.reviewer_assignment_helpers import hold_platform
 
 LEGAL = "senior_legal_approver"
 CONTRACT = "chief_contract_expert"
@@ -67,6 +68,9 @@ async def _draft(db: FakeDB, key: str = CLAIMS_SKILL_KEY, body: str = "method v1
 
 
 async def _approve(db: FakeDB, record, kind: str, role: str, actor, report: SkillEvalReport | None = None):
+    # A reviewer role is held through a platform assignment (4B-07). An actor with
+    # no reviewer role on its list gets none, and is refused as before.
+    await hold_platform(db, actor)
     return await SkillApprovalService(db).record(
         record, SkillApprovalRequest(kind=kind, reviewer_role=role, eval_report=report or _report()), actor
     )
@@ -414,7 +418,9 @@ async def test_only_the_reviewer_or_a_peer_in_the_same_role_can_revoke() -> None
     with pytest.raises(HTTPException) as exc:
         await service.revoke(approval.id, "not mine to withdraw", SUPERADMIN)
     _refused(exc, 403)
-    peer = await service.revoke(approval.id, "peer review found an error", _user("counsel-2", LEGAL))
+    peer_user = _user("counsel-2", LEGAL)
+    await hold_platform(db, peer_user)
+    peer = await service.revoke(approval.id, "peer review found an error", peer_user)
     assert peer.revoked_by == "counsel-2"
 
 

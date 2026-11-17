@@ -765,3 +765,85 @@ def test_a_failed_receipt_commit_undoes_the_grant() -> None:
 
     assert db.arbitration_rejoinder_matrix.rows[0]["permission_obtained"] is False
     assert db.arbitration_paragraph_responses.rows[0]["permission_obtained"] is False
+
+
+# ---------------------------------------------------------------------------
+# 4B-07: a scoped reviewer assignment answers the gate, and only inside its scope
+# ---------------------------------------------------------------------------
+
+ASSIGNED_ONLY = _FakeUser("panel-9", roles=["projectuser"])  # no reviewer role on the role list
+
+
+def _hold(db: _FakeDb, user, role: str, *, organization_id: str, project_id=None, **fields) -> None:
+    from backend.rbac_backend.tests.reviewer_assignment_helpers import hold_scoped
+
+    asyncio.run(hold_scoped(db, user.id, role, organization_id=organization_id, project_id=project_id, **fields))
+
+
+def test_a_reviewer_assigned_for_the_cases_project_approves_without_a_role_on_their_list(db: _FakeDb) -> None:
+    _edit(db, source_id="doc-2")
+    _hold(db, ASSIGNED_ONLY, "contract_reviewer", organization_id="org-1", project_id="project-1")
+    approved = _review(db, ASSIGNED_ONLY, action="approve", reviewer_role="contracts")
+    assert approved["approval_status"] == "approved"
+
+
+def test_a_reviewer_assigned_for_the_cases_organisation_approves(db: _FakeDb) -> None:
+    _edit(db, source_id="doc-2")
+    _hold(db, ASSIGNED_ONLY, "contract_reviewer", organization_id="org-1")
+    assert _review(db, ASSIGNED_ONLY, action="approve", reviewer_role="contracts")["approval_status"] == "approved"
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [
+        {"organization_id": "org-1", "project_id": "project-2"},  # another project of the same organisation
+        {"organization_id": "org-2"},  # another organisation
+        {"organization_id": "org-2", "project_id": "project-1"},  # the same project id under another organisation
+    ],
+)
+def test_an_assignment_for_another_scope_does_not_answer_this_case(db: _FakeDb, scope: dict) -> None:
+    _edit(db, source_id="doc-2")
+    _hold(db, ASSIGNED_ONLY, "contract_reviewer", **scope)
+    with pytest.raises(HTTPException) as refused:
+        _review(db, ASSIGNED_ONLY, action="approve", reviewer_role="contracts")
+    assert refused.value.status_code == 403
+    assert _row(db)["approval_status"] == "needs_review"
+
+
+def test_a_platform_assignment_does_not_answer_a_case_gate(db: _FakeDb) -> None:
+    from backend.rbac_backend.tests.reviewer_assignment_helpers import assignment_document
+
+    _edit(db, source_id="doc-2")
+    db.reviewer_role_assignments.rows.append(assignment_document(ASSIGNED_ONLY.id, "senior_legal_approver"))
+    with pytest.raises(HTTPException) as refused:
+        _review(db, ASSIGNED_ONLY, action="approve", reviewer_role="legal")
+    assert refused.value.status_code == 403
+
+
+@pytest.mark.parametrize("state", ["revoked", "expired"])
+def test_a_revoked_or_expired_assignment_stops_answering_the_gate(db: _FakeDb, state: str) -> None:
+    from datetime import datetime, timedelta
+
+    _edit(db, source_id="doc-2")
+    past = datetime.utcnow() - timedelta(minutes=1)
+    fields = {"revoked_at": past} if state == "revoked" else {"expires_at": past}
+    _hold(db, ASSIGNED_ONLY, "contract_reviewer", organization_id="org-1", project_id="project-1", **fields)
+    with pytest.raises(HTTPException) as refused:
+        _review(db, ASSIGNED_ONLY, action="approve", reviewer_role="contracts")
+    assert refused.value.status_code == 403
+
+
+def test_the_wrong_specialty_assigned_for_the_right_project_is_refused(db: _FakeDb) -> None:
+    _edit(db, source_id="doc-2")
+    _hold(db, ASSIGNED_ONLY, "quantum_reviewer", organization_id="org-1", project_id="project-1")
+    with pytest.raises(HTTPException) as refused:
+        _review(db, ASSIGNED_ONLY, action="approve", reviewer_role="contracts")
+    assert refused.value.status_code == 403
+
+
+def test_someone_holding_the_role_only_by_assignment_can_be_named_as_the_reviewer(db: _FakeDb) -> None:
+    db.users = _FakeCollection([{"_id": ASSIGNED_ONLY.id, "roles": ["projectuser"], "is_active": True}])
+    _edit(db, source_id="doc-2")
+    _hold(db, ASSIGNED_ONLY, "contract_reviewer", organization_id="org-1", project_id="project-1")
+    _review(db, ASSIGNER, action="assign", reviewer_role="contracts", reviewer_user_id=ASSIGNED_ONLY.id)
+    assert _row(db)["review_assignments"][0]["reviewer_user_id"] == ASSIGNED_ONLY.id

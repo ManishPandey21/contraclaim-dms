@@ -34,6 +34,7 @@ from rbac_backend.services.skills.approvals import SKILL_APPROVALS, SkillApprova
 from rbac_backend.services.skills.loader import LoadedSkill, bundle_hash
 from rbac_backend.services.skills.registry import SKILL_VERSIONS, SkillRegistry
 from rbac_backend.services.skills.system_skills import CLAIMS_SKILL_KEY, EOT_SKILL_KEY, system_skill_version
+from rbac_backend.tests.reviewer_assignment_helpers import hold_platform
 
 pytestmark = pytest.mark.integration
 
@@ -93,6 +94,8 @@ async def _draft(db: Any, version: str, key: str = CLAIMS_SKILL_KEY) -> SkillVer
 
 
 async def _approve(db: Any, record: SkillVersion, kind: str, role: str, actor: Any):
+    # A reviewer role is held through a platform assignment (4B-07).
+    await hold_platform(db, actor)
     return await SkillApprovalService(db).record(
         record, SkillApprovalRequest(kind=kind, reviewer_role=role, eval_report=REPORT), actor
     )
@@ -428,9 +431,11 @@ def test_revoking_an_approval_the_version_did_not_rely_on_does_not_deprecate_it(
             # A stale legal approval against a different evaluation result.
             other = SkillEvalReport(suite="claims-golden-v0", score=0.9, threshold=0.85, case_count=15,
                                     recorded_by="evaluator")
+            second_counsel = SimpleNamespace(id="counsel-2", roles=[LEGAL])
+            await hold_platform(db, second_counsel)
             stale = await SkillApprovalService(db).record(
                 record, SkillApprovalRequest(kind="legal", reviewer_role=LEGAL, eval_report=other),
-                SimpleNamespace(id="counsel-2", roles=[LEGAL]),
+                second_counsel,
             )
             await SkillRegistry(db).publish(CLAIMS_SKILL_KEY, "1.9.0", REPORT, PUBLISHER)
             await SkillApprovalService(db).revoke(stale.id, "superseded evaluation", COUNSEL)

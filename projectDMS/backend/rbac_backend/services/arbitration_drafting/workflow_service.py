@@ -796,7 +796,10 @@ class ArbitrationWorkflowService:
         }[gate]
         if str(run.get("current_node")) != expected_node:
             raise HTTPException(status_code=409, detail="Approval gate does not match the current workflow node")
-        role = enforce_gate_role(gate, payload.reviewer_role, current_user)
+        gate_case = await self.cases.get_case(case_id)
+        role = enforce_gate_role(
+            gate, payload.reviewer_role, current_user, roles=await self.cases.reviewer_roles(gate_case, current_user)
+        )
         actor = _actor_id(current_user)
         enforce_author_approver_separation(
             current_user,

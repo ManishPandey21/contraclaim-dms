@@ -43,6 +43,7 @@ from rbac_backend.services.skills.system_skills import (
     system_skill_version,
 )
 from rbac_backend.tests.bench_fakes import FakeDB
+from rbac_backend.tests.reviewer_assignment_helpers import hold_platform
 
 FIXTURES = Path(__file__).parent / "fixtures" / "letter_drafting_langgraph_phase0_cases.json"
 PASSING = SkillEvalReport(
@@ -67,6 +68,7 @@ async def _publish_approved(registry: SkillRegistry, key: str = VARIATIONS_SKILL
     (server floor, plan D-05), the letter packs included from their next version.
     """
     record = await registry.get_version(key, version)
+    await hold_platform(registry.db, LEGAL_APPROVER)
     await SkillApprovalService(registry.db).record(
         record, SkillApprovalRequest(kind="legal", reviewer_role="senior_legal_approver", eval_report=PASSING),
         LEGAL_APPROVER,

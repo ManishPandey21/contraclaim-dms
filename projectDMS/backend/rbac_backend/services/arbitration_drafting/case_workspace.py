@@ -10,7 +10,8 @@ import uuid
 import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from types import SimpleNamespace
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from fastapi import HTTPException, status
 from pymongo.errors import DuplicateKeyError
@@ -602,9 +603,11 @@ class ArbitrationCaseWorkspaceService:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Reviewer role is not required for this matrix row")
         # A reviewer specialty comes only from the actor's own signed role claim.
         # Assignments route work; none - new or already on record - confers it.
-        role = enforce_matrix_reviewer_role(claimed_role, current_user, [])
+        role = enforce_matrix_reviewer_role(
+            claimed_role, current_user, [], roles=await self.reviewer_roles(case, current_user)
+        )
         if action == "assign":
-            await self._require_qualified_assignee(payload.reviewer_user_id, role)
+            await self._require_qualified_assignee(payload.reviewer_user_id, role, case)
         comments = list(row.get("review_comments") or [])
         approval_log = list(row.get("approval_log") or [])
 
@@ -938,8 +941,19 @@ class ArbitrationCaseWorkspaceService:
         await self.readiness(case_id)
         return updated
 
-    async def _require_qualified_assignee(self, user_id: Any, role: str) -> None:
-        """403 unless the assignee is an active user holding this reviewer role's claim.
+    async def reviewer_roles(self, case: Mapping[str, Any], user: Any) -> set[str]:
+        """The reviewer roles ``user`` holds for this case: scoped assignments plus their role list."""
+        from ..reviewer_assignments import arbitration_reviewer_roles
+
+        return await arbitration_reviewer_roles(
+            self.db,
+            user,
+            organization_id=str(case.get("organization_id") or "") or None,
+            project_id=str(case.get("project_id") or "") or None,
+        )
+
+    async def _require_qualified_assignee(self, user_id: Any, role: str, case: Mapping[str, Any]) -> None:
+        """403 unless the assignee is an active user holding this reviewer role for the case.
 
         Fails closed when the user record cannot be found or read.
         """
@@ -952,8 +966,17 @@ class ArbitrationCaseWorkspaceService:
                 assignee = await users.find_one({"_id": {"$in": _expand_object_ids([str(user_id)])}})
             except Exception:
                 assignee = None
+        held: set[str] = set()
+        if assignee:
+            principal = SimpleNamespace(
+                id=str(assignee.get("_id")),
+                roles=[str(item) for item in (assignee.get("roles") or []) if item],
+                organization_id=assignee.get("organization_id"),
+                organizations=list(assignee.get("organizations") or []),
+            )
+            held = await self.reviewer_roles(case, principal)
         qualified = bool(assignee) and assignee.get("is_active", True) is not False and bool(
-            actor_roles(assignee) & MATRIX_ROLE_CLAIMS.get(role, frozenset())
+            held & MATRIX_ROLE_CLAIMS.get(role, frozenset())
         )
         if not qualified:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="The assignee does not hold this reviewer role")
@@ -1112,7 +1135,9 @@ class ArbitrationCaseWorkspaceService:
             )
         artifact = await self._readiness_artifact_state(case, draft_type)
         actor = _actor_id(current_user)
-        approver_role = resolve_gate_role("readiness", current_user)
+        approver_role = resolve_gate_role(
+            "readiness", current_user, roles=await self.reviewer_roles(case, current_user)
+        )
         if request.reviewer_role and str(request.reviewer_role).strip().lower() != approver_role:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,

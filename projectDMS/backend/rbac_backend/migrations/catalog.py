@@ -139,6 +139,14 @@ from .v20261120_0001_arbitration_matrix_origin_unique import DESCRIPTION as MATR
 from .v20261120_0001_arbitration_matrix_origin_unique import NAME as MATRIX_ORIGIN_NAME
 from .v20261120_0001_arbitration_matrix_origin_unique import VERSION as MATRIX_ORIGIN_VERSION
 from .v20261120_0001_arbitration_matrix_origin_unique import upgrade as upgrade_matrix_origin
+from .v20261121_0001_reviewer_role_identities import DESCRIPTION as REVIEWER_IDENTITIES_DESCRIPTION
+from .v20261121_0001_reviewer_role_identities import NAME as REVIEWER_IDENTITIES_NAME
+from .v20261121_0001_reviewer_role_identities import VERSION as REVIEWER_IDENTITIES_VERSION
+from .v20261121_0001_reviewer_role_identities import upgrade as upgrade_reviewer_identities
+from .v20261121_0002_reviewer_role_assignment_indexes import DESCRIPTION as REVIEWER_ASSIGNMENTS_DESCRIPTION
+from .v20261121_0002_reviewer_role_assignment_indexes import NAME as REVIEWER_ASSIGNMENTS_NAME
+from .v20261121_0002_reviewer_role_assignment_indexes import VERSION as REVIEWER_ASSIGNMENTS_VERSION
+from .v20261121_0002_reviewer_role_assignment_indexes import upgrade as upgrade_reviewer_assignments
 
 
 MIGRATIONS = [
@@ -309,5 +317,17 @@ MIGRATIONS = [
         name=MATRIX_ORIGIN_NAME,
         description=MATRIX_ORIGIN_DESCRIPTION,
         upgrade=upgrade_matrix_origin,
+    ),
+    Migration(
+        version=REVIEWER_IDENTITIES_VERSION,
+        name=REVIEWER_IDENTITIES_NAME,
+        description=REVIEWER_IDENTITIES_DESCRIPTION,
+        upgrade=upgrade_reviewer_identities,
+    ),
+    Migration(
+        version=REVIEWER_ASSIGNMENTS_VERSION,
+        name=REVIEWER_ASSIGNMENTS_NAME,
+        description=REVIEWER_ASSIGNMENTS_DESCRIPTION,
+        upgrade=upgrade_reviewer_assignments,
     ),
 ]

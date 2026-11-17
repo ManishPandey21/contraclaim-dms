@@ -441,6 +441,8 @@ class _FakeDb:
             ]
         )
         self.audit_events = _FakeCollection([])
+        # Scoped reviewer assignments (4B-07); empty means the role list alone answers.
+        self.reviewer_role_assignments = _FakeCollection([])
         self.claims = _FakeCollection(
             [
                 {
