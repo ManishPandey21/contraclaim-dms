@@ -142,6 +142,9 @@ class ClaimHead(BaseModel):
     event_summary: Optional[str] = Field(default=None, max_length=4000)
     clause_refs: List[str] = Field(default_factory=list)
     amount_claimed: Optional[float] = Field(default=None, ge=0)
+    #: The quantum build-up's total in integer paise (4B-24). Set only from quantum
+    #: lines; a typed head amount has none, and the roll-up then reads the rupee figure.
+    amount_claimed_paise: Optional[int] = Field(default=None, ge=0)
     eot_days_claimed: Optional[int] = Field(default=None, ge=0)
     # Legacy figures that need a person to re-enter them. Locking waits on these.
     figures_to_reenter: List[FigureToReenter] = Field(default_factory=list)

@@ -99,6 +99,8 @@ def _setup(
             "organization_id": ORG,
             "project_id": PROJECT,
             "bench": None,
+            # The documents these tests cite are linked to the claim (4B-24 re-checks it).
+            "linked_document_ids": ["doc-1", "doc-2"],
             **(claim or {}),
         }
     )
@@ -594,6 +596,9 @@ def test_an_unambiguous_legacy_amount_is_carried(recorded, amount) -> None:
         ".5",
         "5.",
         "1.23456",
+        "99.255",
+        99.255,
+        Decimal("99.2551"),
         "9" * 16,
         -500,
         float("nan"),

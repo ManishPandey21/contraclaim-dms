@@ -15,7 +15,7 @@ from typing import Any, Optional
 import pytest
 from fastapi import HTTPException
 
-from rbac_backend.models.claim_delay import QuantumLine, QuantumRecord
+from rbac_backend.models.claim_delay import FormulaInput, QuantumLine, QuantumRecord
 from rbac_backend.services.claim_bench import BoardVersionRequest, ClaimBenchService, ElementDecisionRequest, HeadPatchRequest
 from rbac_backend.services.claim_delay_lab import (
     ClaimDelayLab,
@@ -55,7 +55,9 @@ def _setup():
         {"_id": CLAIM_ID, "title": "Delayed handover", "type": "eot", "status": "submitted",
          "event_date": datetime(2026, 3, 1), "organization_id": ORG, "project_id": PROJECT, "currency": "INR", "bench": None,
          # Under the contract its determinations belong to (4B-23: no cross-contract evidence).
-         "contract_id": "primary"}
+         "contract_id": "primary",
+         # The documents quantum lines cite are linked to the claim (4B-24 re-checks this).
+         "linked_document_ids": ["doc-1", "doc-2", "x", "y"]}
     )
     db.delay_events.docs.extend(
         [
@@ -634,6 +636,11 @@ def test_a_formula_line_unlocks_only_with_actual_loss_shown() -> None:
     line = QuantumLine(
         line_id="Q", category="overhead_formula", description="Head office overheads", amount=5.0, formula="hudson",
         period_start=datetime(2026, 3, 1), period_end=datetime(2026, 3, 5),
+        formula_inputs={
+            "tender_percentage": FormulaInput(value="5", document_id="x"),
+            "contract_sum": FormulaInput(value="1000000", document_id="x"),
+            "contract_period_days": FormulaInput(value="350", document_id="x"),
+        },
         records=[QuantumRecord(document_id="x", role="support")],
     )
     assert any("actual loss" in reason for reason in line_lock_reasons(line, allowed))

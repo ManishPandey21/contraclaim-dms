@@ -269,11 +269,42 @@ describe("Quantum tab", () => {
           period_start: null,
           period_end: null,
           formula: "none",
+          formula_inputs: {},
           basis: null,
           records: [{ document_id: "doc-1", role: "support" }],
         },
         undefined,
       ),
     );
+  });
+
+  it("never asks for a formula line's amount: it sends the figures, each with its record (4B-24)", async () => {
+    api.saveQuantumLine.mockResolvedValue(quantum());
+    mount(<QuantumTab claimId="c1" headId="H1" boardVersion={4} readOnly={false} />);
+    await userEvent.click(await screen.findByRole("button", { name: "Add a line" }));
+    await userEvent.selectOptions(screen.getByLabelText("Kind of cost"), "overhead_formula");
+    await userEvent.selectOptions(screen.getByLabelText("Formula"), "hudson");
+    await userEvent.type(screen.getByLabelText("Description"), "Head-office overhead");
+    expect(screen.queryByRole("textbox", { name: "Amount" })).not.toBeInTheDocument();
+    expect(screen.getByText("Worked out from the formula's figures when the line is saved.")).toBeInTheDocument();
+
+    const add = screen.getByRole("button", { name: "Add line" });
+    await userEvent.type(screen.getByLabelText("Head-office overhead and profit in the tender (%)"), "5");
+    await userEvent.type(screen.getByLabelText("Contract sum"), "1,00,00,000");
+    expect(add).toBeDisabled();
+    expect(screen.getByText("Still needed: Contract period (days).")).toBeInTheDocument();
+    await userEvent.type(screen.getByLabelText("Contract period (days)"), "365");
+    const [firstRecord] = await screen.findAllByLabelText("Taken from");
+    await userEvent.selectOptions(firstRecord, "doc-1");
+    await userEvent.click(add);
+    await waitFor(() => expect(api.saveQuantumLine).toHaveBeenCalled());
+    const sent = api.saveQuantumLine.mock.calls[0][3];
+    expect(sent).not.toHaveProperty("amount");
+    expect(sent.formula).toBe("hudson");
+    expect(sent.formula_inputs).toEqual({
+      tender_percentage: { value: "5", document_id: "doc-1" },
+      contract_sum: { value: "10000000", document_id: null },
+      contract_period_days: { value: "365", document_id: null },
+    });
   });
 });

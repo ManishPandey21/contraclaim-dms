@@ -251,6 +251,7 @@ jobs:
             backend/rbac_backend/tests/integration/test_review_extraction_inheritance_mongo.py
             backend/rbac_backend/tests/integration/test_effective_permission_names_mongo.py
             backend/rbac_backend/tests/integration/test_claim_contract_scope_mongo.py
+            backend/rbac_backend/tests/integration/test_quantum_paise_formulas_mongo.py
             backend/rbac_backend/tests/integration/test_reviewer_assignments_mongo.py
             backend/rbac_backend/tests/integration/test_project_perspective_mongo.py
             backend/rbac_backend/tests/integration/test_claim_contract_identity_mongo.py

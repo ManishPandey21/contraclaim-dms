@@ -18,7 +18,7 @@ from bson.decimal128 import Decimal128
 from ..models.claim import ClaimStatus
 
 # ASCII digits only: ``\d`` would also accept digits of other scripts.
-_PLAIN_AMOUNT = re.compile(r"[0-9]{1,15}(\.[0-9]{1,4})?")
+_PLAIN_AMOUNT = re.compile(r"[0-9]{1,15}(\.[0-9]{1,2})?")
 _PLAIN_DAYS = re.compile(r"[0-9]{1,6}")
 _KNOWN_STATUSES = {item.value for item in ClaimStatus}
 
@@ -46,7 +46,9 @@ def coerce_legacy_amount(value: Any) -> Tuple[Optional[float], Optional[str]]:
     if isinstance(value, bool):
         return None, _recorded(value)
     if isinstance(value, (int, float)):
-        if math.isfinite(value) and value >= 0:
+        # Amounts are kept to the paisa (4B-24). A finer figure would be rounded
+        # on the first save, so it is re-entered rather than changed silently.
+        if math.isfinite(value) and value >= 0 and round(value, 2) == value:
             return float(value), None
         return None, _recorded(value)
     if isinstance(value, str):
