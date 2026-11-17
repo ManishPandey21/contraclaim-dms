@@ -45,7 +45,7 @@ CI column derived mechanically from CI run 398 (`f31ace1`, 2026-11-17): each row
 | 4B-20 | No | — | None required | Not accepted |
 | 4B-21 | Yes | Yes, run 398 at `f31ace1` | Pending: P-03, P-07 | Not accepted |
 | 4B-22 | Yes | Yes, run 398 at `f31ace1` | Pending: P-03, P-07 | Not accepted |
-| 4B-23 | No | — | Pending: P-03 | Not accepted |
+| 4B-23 | Yes | Not yet (added to the real-Mongo list) | Pending: P-03 | Not accepted |
 | 4B-24 | No | — | None required | Not accepted |
 | 4B-25 | No | — | None required | Not accepted |
 | 4B-26 | No | — | None required | Not accepted |
@@ -111,7 +111,7 @@ CI column derived mechanically from CI run 398 (`f31ace1`, 2026-11-17): each row
 | 4B-20 | 4B-11, 4B-12, 4B-18 | Not started. No `POST /claims/start`. | — | — | Not run (no test) | — | None | None (no test exists) | Not accepted |
 | 4B-21 | 4B-02 | Implemented. `services/key_date_determination_rule.py` shared with the register; snapshot fields; staleness. | c79241d | `T/test_claim_delay_quantum.py`; register: `T/test_key_date_revision_workflow.py`, `T/test_key_dates.py` | 45 passed, 0 failed, 0 skipped; 51 passed; 19 passed | Determination links recorded before 4B-21 are not counted until re-linked. | P-03, P-07 | No failure reported at `19f6d61`; a pass is not confirmed (see CI evidence below) | Not accepted |
 | 4B-22 | — | Implemented. Neutral overlaps, identity by events, day-set counting, cost basis with second-person review, reversed-event message. | 346ddab | `T/test_claim_delay_engine.py`; `I/test_delay_cost_basis_mongo.py`; `C/components/claim-bench/__tests__/OverlapCostBasis.test.tsx` | 113 passed, 0 failed, 0 skipped; 2 passed, real MongoDB; vitest 3 passed | Person-initiated merge of adjacent events not built. Reviewer route for `delay_planning_expert` waits on 4B-07. Findings stored before 4B-22 are orphaned and must be re-decided. | P-03, P-07 | No failure reported at `19f6d61`; a pass is not confirmed (see CI evidence below) | Not accepted |
-| 4B-23 | 4B-18 | Not started. No contract scope check on links. | — | — | Not run (no test) | — | P-03 | None (no test exists) | Not accepted |
+| 4B-23 | 4B-18 | Implemented. `services/claim_contract_scope.py`: a record of another contract never supports a claim (422 `claim_contract_mismatch`); a claim with no contract uses only records with none. Checked at head links, re-pinning, document/letter links, quantum records, cost evidence, submission compose and escalation. | (this commit) | `I/test_claim_contract_scope_mongo.py` | 8 passed, 0 failed, 0 skipped, real MongoDB; ten mutants each failed it | Hindrances, documents and letters carry no contract field today, so the rule bites on them only once one is stored. | P-03 (legacy claims with no contract whose evidence carries one) | Not yet run in CI | Not accepted |
 | 4B-24 | 4B-17 | Not started. No `amount_paise`, no formula computation. | — | — | Not run (no test) | — | None | None (no test exists) | Not accepted |
 | 4B-25 | 4B-21, 4B-22 | Not started. Engine `net_eot` exists; the table read model, milestone lane and clearable selects are not built. | — | — | Not run (no test) | — | None | None (no test exists) | Not accepted |
 | 4B-26 | 4B-07, 4B-10, 4B-11, 4B-15 | Not started. `services/claim_determinations.py` not changed on this branch. | — | — | Not run (no test) | — | None | None (no test exists) | Not accepted |

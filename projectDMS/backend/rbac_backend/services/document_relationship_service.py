@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any, Awaitable, Callable, Iterable, Optional, TypeVar
 
 from fastapi import HTTPException
+from . import claim_contract_scope as contract_scope
 from ..core.permissions import Permissions
 from ..models.document_relationship import (
     DocumentRelationship,
@@ -331,6 +332,11 @@ class DocumentRelationshipService:
                 raise DocumentRelationshipError("Relationship role is not valid for this target", 422)
             document = await self._document(actor, context, link.document_id)
             self._require_role_semantics(link.relationship_role, document)
+            if context.target_type == "claim" and contract_scope.conflicts(context.entity, document):
+                # 4B-23 (D-23): a document or letter of another contract never supports this claim.
+                raise DocumentRelationshipError(
+                    contract_scope.message(context.entity, [contract_scope.document_label(document or {})]), 422
+                )
             version_id = link.document_version_id
             if version_id:
                 version = await self.db.document_versions.find_one(

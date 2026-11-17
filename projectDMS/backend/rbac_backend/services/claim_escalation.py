@@ -59,6 +59,8 @@ from fastapi import HTTPException
 from pydantic import BaseModel, Field
 from pymongo.errors import DuplicateKeyError
 
+from . import claim_contract_scope as contract_scope
+from .claim_delay_lab import ClaimDelayLab
 from ..models.arbitration_drafting import ArbitrationCaseCreate, ArbitrationMatrixRowCreate
 from ..models.claim import ALLOWED_STATUS_TRANSITIONS, ELEMENT_KEYS, ClaimBench, ClaimStatus, HeadElement
 from ..utils.datetime import now_utc
@@ -430,6 +432,19 @@ class ClaimEscalation:
         # A notice letter is carried only if it is also among the documents the caller may see.
         return build_carry(claim, record, bench, [item for item in notice_ids if item in document_ids])
 
+    async def _foreign_evidence(self, claim: Dict[str, Any], document_ids: Set[str]) -> List[str]:
+        links = await ClaimDelayLab(self.db, self.bench).links_for_claim(str(claim["_id"]))
+        return await contract_scope.evidence_conflicts(self.db, claim, links, document_ids)
+
+    async def _contract_blockers(self, claims: List[Dict[str, Any]], documents: Dict[str, Set[str]]) -> List[str]:
+        blockers: List[str] = []
+        for claim in claims:
+            foreign = await self._foreign_evidence(claim, documents.get(str(claim["_id"]), set()))
+            if foreign:
+                reference = str(claim.get("claim_ref") or claim["_id"])
+                blockers.append(f"{reference}: {contract_scope.message(claim, foreign)}")
+        return blockers
+
     @staticmethod
     def _blockers(claims: List[Dict[str, Any]], case: Optional[Dict[str, Any]]) -> List[str]:
         blockers: List[str] = []
@@ -469,7 +484,7 @@ class ClaimEscalation:
         for carry in carries:
             for slug, count in carry.rows.items():
                 totals[slug] = totals.get(slug, 0) + count
-        blockers = self._blockers(claims, case)
+        blockers = self._blockers(claims, case) + await self._contract_blockers(claims, documents)
         return EscalationPreview(
             project_id=str(claims[0].get("project_id") or "") or None,
             claims=carries,
@@ -491,6 +506,11 @@ class ClaimEscalation:
         blockers = self._blockers(claims, case)
         if blockers:
             raise HTTPException(status_code=409, detail="; ".join(blockers))
+        # 4B-23 (D-23): nothing of another contract is carried into a case.
+        for claim in claims:
+            foreign = await self._foreign_evidence(claim, documents.get(str(claim["_id"]), set()))
+            if foreign:
+                raise contract_scope.refusal(claim, foreign)
         if case is None and request.new_case is None:
             raise HTTPException(status_code=422, detail="Choose an existing case or give the new case a title.")
         if case is None and not request.idempotency_key:

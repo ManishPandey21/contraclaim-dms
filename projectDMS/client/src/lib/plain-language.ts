@@ -100,6 +100,8 @@ export const ERROR_CODE_MESSAGES = {
   claim_contract_not_valid: "That contract is not one of this project's contracts, or you cannot read it.",
   claim_contract_fixed:
     "A claim's contract cannot be changed once it is set: the records linked to it belong to that contract.",
+  claim_contract_mismatch:
+    "A record of another contract cannot support this claim. Only records of the claim's own contract can be linked or relied on.",
 } as const;
 
 export type StatusKind = "claim" | "arbitration_case" | "arbitration_draft";

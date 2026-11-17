@@ -41,6 +41,7 @@ from bson import ObjectId
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
+from . import claim_contract_scope as contract_scope
 from ..models.claim import ClaimBench, ClaimHead, NoticeAssessment
 from ..models.claim_findings import (
     SECTION_ORDER,
@@ -758,6 +759,12 @@ class ClaimSubmissions:
         unknown = [key for key in request.sections if key not in SECTION_ORDER]
         if unknown:
             raise HTTPException(status_code=422, detail="Unknown section: " + ", ".join(unknown))
+        # 4B-23 (D-23): a submission never cites a record of another contract.
+        foreign = await contract_scope.evidence_conflicts(
+            self.db, claim, await ClaimDelayLab(self.db, self.bench).links_for_claim(str(claim["_id"])), document_ids
+        )
+        if foreign:
+            raise contract_scope.refusal(claim, foreign)
         record = await self.gather(claim, bench, document_ids)
         fresh = compose_record_sections(record)
         stored = await self._stored(claim)

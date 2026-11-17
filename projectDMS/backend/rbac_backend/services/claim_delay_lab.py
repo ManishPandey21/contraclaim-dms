@@ -25,6 +25,8 @@ from fastapi import HTTPException
 from pydantic import BaseModel, Field
 from pymongo.errors import DuplicateKeyError
 
+from . import claim_contract_scope as contract_scope
+from .claim_contract_scope import ensure_same_contract
 from ..models.claim import ClaimBench, ClaimHead
 from ..models.claim_delay import (
     UNAVAILABLE_METHODS,
@@ -670,6 +672,8 @@ class ClaimDelayLab:
         if any(link.target_type == request.target_type and link.target_id == request.target_id for link in existing):
             raise HTTPException(status_code=409, detail="This record is already linked to this head")
         snapshot, label = await self._snapshot(request.target_type, record, request.milestone_ref)
+        # 4B-23 (D-23): a record of another contract never supports this claim.
+        ensure_same_contract(claim, record, label)
         link = ClaimHeadLink(
             organization_id=str(claim.get("organization_id") or ""),
             project_id=str(claim.get("project_id") or ""),
@@ -715,6 +719,8 @@ class ClaimDelayLab:
             if record is None:
                 raise HTTPException(status_code=409, detail="The linked record no longer exists; remove the link instead")
             snapshot, label = await self._snapshot(link.target_type, record, link.detail.get("milestone_ref"))
+            # Re-pinning reads the record as it is now; a record moved to another contract is refused.
+            ensure_same_contract(claim, record, label)
             replacement = link.model_copy(
                 update={
                     "id": str(uuid.uuid4()),
@@ -928,6 +934,10 @@ class ClaimDelayLab:
                 status_code=422,
                 detail="Cost evidence must be documents linked to this claim that you can see",
             )
+        # 4B-23 (D-23): cost evidence of another contract never supports this claim.
+        foreign = await contract_scope.evidence_conflicts(self.db, claim, [], evidence)
+        if foreign:
+            raise contract_scope.refusal(claim, foreign)
         cost = CostBasis(
             contractual_basis=request.contractual_basis.strip(),
             causation=request.causation.strip(),
