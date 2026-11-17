@@ -18,9 +18,6 @@ from xml.etree import ElementTree
 
 import pytest
 
-# claim_submission cannot be imported first (a pre-existing import cycle through the skill
-# executor); the claim services import it after claim_bench, as the app does.
-from rbac_backend.services import claim_bench  # noqa: F401  isort: skip
 from rbac_backend.models.claim_findings import ClaimSubmission, EvidenceItem, SubmissionParagraph, SubmissionSection
 from rbac_backend.services.arbitration_drafting.exporter import ArbitrationDraftExporter
 from rbac_backend.services.claim_submission import submission_docx

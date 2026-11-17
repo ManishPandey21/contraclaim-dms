@@ -16,9 +16,6 @@ from decimal import Decimal
 import pytest
 
 from rbac_backend.models.claim import ClaimHead
-# claim_bench before claim_quantum: importing claim_quantum first meets an import cycle
-# (claim_delay_lab -> skills.executor -> letter_drafting) that predates 4B-24.
-from rbac_backend.services import claim_bench  # noqa: F401
 from rbac_backend.models.claim_delay import FormulaInput, QuantumLine, QuantumRecord
 from rbac_backend.services.claim_quantum import build_quantum_view, line_lock_reasons
 from rbac_backend.services.quantum_formulas import compute_paise, delay_days, missing_inputs, rupees, to_paise
