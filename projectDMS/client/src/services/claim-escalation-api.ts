@@ -1,3 +1,4 @@
+import type { EvidenceContractItem } from "./claim-findings-api";
 import { api } from "./api";
 
 // Escalation of claims into an arbitration case. Mirrors backend
@@ -25,6 +26,8 @@ export interface EscalationPreview {
   can_escalate: boolean;
   /** Evidence not confirmed against the Contract Master, or naming no contract. Warnings only. */
   evidence_notes?: string[];
+  /** OD-1: records awaiting a person's confirmation of their contract (each carries its claim_id). */
+  unconfirmed_evidence?: EvidenceContractItem[];
 }
 
 export interface EscalationResult {

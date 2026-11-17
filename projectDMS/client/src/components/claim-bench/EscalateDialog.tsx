@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import EvidenceContractConfirmations from "@/components/claim-bench/EvidenceContractConfirmations";
 import { errorMessage } from "@/hooks/useLetterBench";
 import { listArbitrationCases, type ArbitrationCase } from "@/services/arbitration-cases-api";
 import {
@@ -50,6 +51,7 @@ function newKey(): string {
 const EscalateDialog: React.FC<Props> = ({ claimIds, claimTitle, projectId, open, onOpenChange, onEscalated }) => {
   const claimKey = claimIds.join(",");
   const [preview, setPreview] = useState<EscalationPreview | null>(null);
+  const [reloads, setReloads] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [cases, setCases] = useState<ArbitrationCase[]>([]);
   const [target, setTarget] = useState(NEW);
@@ -92,7 +94,7 @@ const EscalateDialog: React.FC<Props> = ({ claimIds, claimTitle, projectId, open
     return () => {
       active = false;
     };
-  }, [open, claimKey, target]);
+  }, [open, claimKey, target, reloads]);
 
   const carries = preview?.claims ?? [];
   const needsAck = carries.filter((item) => item.weak.length > 0 && !item.board_locked);
@@ -161,7 +163,11 @@ const EscalateDialog: React.FC<Props> = ({ claimIds, claimTitle, projectId, open
                   ))}
                 </ul>
               )}
-              {(preview.evidence_notes ?? []).length > 0 && (
+              <EvidenceContractConfirmations
+                items={preview.unconfirmed_evidence ?? []}
+                onConfirmed={() => setReloads((count) => count + 1)}
+              />
+              {(preview.evidence_notes ?? []).length > 0 && (preview.unconfirmed_evidence ?? []).length === 0 && (
                 <section aria-labelledby="contract-notes-heading" className="rounded-md border border-amber-600 bg-amber-50 p-3 text-amber-950">
                   <h3 id="contract-notes-heading" className="text-sm font-semibold">
                     Evidence whose contract is not confirmed

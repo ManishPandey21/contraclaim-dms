@@ -35,9 +35,14 @@ into three kinds, for a contract-specific claim:
 - **unidentified**: carries no contract at all (hindrances, most documents and
   letters, records from before contracts were recorded).
 
-The last two are reported, never refused or rewritten: whether they need more
-verification before supporting a contract-specific claim is an owner decision
-(recorded in the ticket register). Production readings decide how many there are.
+**OD-1 (owner decision 2026-11-17, option B).** Unverified and unidentified
+evidence of a contract-specific claim needs an authorised, audited human
+confirmation that it belongs to the claim's contract before the submission is
+exported or the claim is escalated to arbitration. A confirmation is a separate
+record (``claim_evidence_contract_confirmations``: who, when, why, the record's
+state when confirmed); the evidence itself is never rewritten. A confirmed
+mismatch (a record naming another contract) cannot be confirmed and stays blocked.
+Release waits for P-03 and the release-impact assessment.
 """
 
 from __future__ import annotations
@@ -132,14 +137,41 @@ def document_label(document: Mapping[str, Any]) -> str:
     return "A linked document"
 
 
+CONFIRMATIONS = "claim_evidence_contract_confirmations"
+NEEDS_CONFIRMATION = ("unverified", "unidentified")
+
+
+@dataclass
+class EvidenceItem:
+    """One record the claim's evidence relies on whose contract a person must confirm (OD-1)."""
+
+    kind: str
+    record_id: str
+    label: str
+    state: str  # "unverified" | "unidentified"
+    confirmation_id: Optional[str] = None
+    confirmed_by: Optional[str] = None
+    confirmed_at: Optional[Any] = None
+    reason: Optional[str] = None
+
+
 @dataclass
 class EvidenceIdentity:
-    """The claim's evidence, sorted by what it says about its contract."""
+    """The claim's evidence, sorted by what it says about its contract.
+
+    ``unverified`` and ``unidentified`` hold the labels still awaiting a person's
+    confirmation; ``unconfirmed`` the same records in full; ``confirmed`` those a
+    person has confirmed for the claim's contract."""
 
     conflicts: List[str] = field(default_factory=list)
     verified: List[str] = field(default_factory=list)
     unverified: List[str] = field(default_factory=list)
     unidentified: List[str] = field(default_factory=list)
+    unconfirmed: List[EvidenceItem] = field(default_factory=list)
+    confirmed: List[EvidenceItem] = field(default_factory=list)
+
+
+Found = Tuple[str, Optional[Mapping[str, Any]], str, str]  # label, record, kind, record id
 
 
 async def _master_keys(db: Any, claim: Mapping[str, Any]) -> set:
@@ -153,24 +185,46 @@ async def _master_keys(db: Any, claim: Mapping[str, Any]) -> set:
     return {str(row.get("contract_id") or "").strip() for row in rows} - {""}
 
 
-def _sorted(claim: Mapping[str, Any], found: List[Tuple[str, Optional[Mapping[str, Any]]]], master: set) -> EvidenceIdentity:
+async def _active_confirmations(db: Any, claim: Mapping[str, Any]) -> Dict[Tuple[str, str], Dict[str, Any]]:
+    contract = contract_of(claim)
+    if contract is None:
+        return {}
+    rows = await db[CONFIRMATIONS].find(
+        {"claim_id": str(claim.get("_id")), "contract_id": contract, "status": "active"}
+    ).to_list(length=2000)
+    return {(str(row["record_kind"]), str(row["record_id"])): row for row in rows}
+
+
+def _sorted(
+    claim: Mapping[str, Any], found: List[Found], master: set, confirmations: Dict[Tuple[str, str], Dict[str, Any]]
+) -> EvidenceIdentity:
     result = EvidenceIdentity()
-    for label, record in found:
+    seen: set = set()
+    for label, record, kind, record_id in found:
+        if (kind, record_id) in seen:
+            continue
+        seen.add((kind, record_id))
         if conflicts(claim, record):
-            bucket = result.conflicts
-        elif contract_of(record) is None:
-            bucket = result.unidentified
-        elif contract_of(record) in master:
-            bucket = result.verified
-        else:
-            bucket = result.unverified
-        if label not in bucket:
-            bucket.append(label)
+            result.conflicts.append(label)
+            continue
+        if contract_of(record) is not None and contract_of(record) in master:
+            result.verified.append(label)
+            continue
+        state = "unidentified" if contract_of(record) is None else "unverified"
+        row = confirmations.get((kind, record_id))
+        item = EvidenceItem(kind=kind, record_id=record_id, label=label, state=state)
+        if row is not None:
+            item.confirmation_id = str(row["_id"])
+            item.confirmed_by, item.confirmed_at, item.reason = row.get("confirmed_by"), row.get("confirmed_at"), row.get("reason")
+            result.confirmed.append(item)
+            continue
+        result.unconfirmed.append(item)
+        (result.unidentified if state == "unidentified" else result.unverified).append(label)
     return result
 
 
 def identity_notes(claim: Mapping[str, Any], identity: EvidenceIdentity) -> List[str]:
-    """Plain warnings for a contract-specific claim. Nothing here blocks."""
+    """Plain words for each kind of evidence still awaiting a person's confirmation."""
     if contract_of(claim) is None:
         return []
 
@@ -191,6 +245,21 @@ def identity_notes(claim: Mapping[str, Any], identity: EvidenceIdentity) -> List
     return notes
 
 
+UNCONFIRMED_CODE = "claim_evidence_contract_unconfirmed"
+
+
+def unconfirmed_reason(claim: Mapping[str, Any], identity: EvidenceIdentity) -> Optional[str]:
+    """Why export or escalation must wait (OD-1), or None."""
+    if contract_of(claim) is None or not identity.unconfirmed:
+        return None
+    count = len(identity.unconfirmed)
+    return (
+        f"{count} record{'s' if count != 1 else ''} this claim relies on {'do' if count != 1 else 'does'} not show "
+        "which contract {it} belong{s} to. A person authorised to edit the claim must confirm each one belongs to "
+        "the claim's contract first.".format(it="they" if count != 1 else "it", s="" if count != 1 else "s")
+    )
+
+
 async def identity_review(
     db: Any, claim: Mapping[str, Any], links: Iterable[Any], document_ids: Iterable[str]
 ) -> EvidenceIdentity:
@@ -201,24 +270,25 @@ async def identity_review(
     caught. ``document_ids`` are the claim's linked documents.
     """
     found = await _records(db, links, document_ids)
-    master = await _master_keys(db, claim) if contract_of(claim) is not None else set()
-    return _sorted(claim, found, master)
+    has_contract = contract_of(claim) is not None
+    master = await _master_keys(db, claim) if has_contract else set()
+    confirmations = await _active_confirmations(db, claim) if has_contract else {}
+    return _sorted(claim, found, master, confirmations)
 
 
 async def evidence_conflicts(db: Any, claim: Mapping[str, Any], links: Iterable[Any], document_ids: Iterable[str]) -> List[str]:
     """Every record the claim's evidence relies on that belongs to another contract."""
-    return conflicting_labels(claim, await _records(db, links, document_ids))
+    return conflicting_labels(claim, [(label, record) for label, record, _kind, _id in await _records(db, links, document_ids)])
 
 
-async def _records(
-    db: Any, links: Iterable[Any], document_ids: Iterable[str]
-) -> List[Tuple[str, Optional[Mapping[str, Any]]]]:
+async def _records(db: Any, links: Iterable[Any], document_ids: Iterable[str]) -> List[Found]:
     from bson import ObjectId
 
     collections = _RECORD_COLLECTIONS
-    found: List[Tuple[str, Optional[Mapping[str, Any]]]] = []
+    found: List[Found] = []
     for link in links:
-        collection = collections.get(str(getattr(link, "target_type", "")))
+        kind = str(getattr(link, "target_type", ""))
+        collection = collections.get(kind)
         if collection is None:
             continue
         target_id = str(getattr(link, "target_id", ""))
@@ -226,7 +296,7 @@ async def _records(
         if ObjectId.is_valid(target_id):
             candidates.append(ObjectId(target_id))
         record = await db[collection].find_one({"_id": {"$in": candidates}}, {"contract_id": 1, "project_id": 1})
-        found.append((str(getattr(link, "target_label", "") or target_id), record))
+        found.append((str(getattr(link, "target_label", "") or target_id), record, kind, target_id))
     ids = [str(item) for item in document_ids if item]
     if ids:
         keys: List[Any] = list(ids) + [ObjectId(item) for item in ids if ObjectId.is_valid(item)]
@@ -234,5 +304,72 @@ async def _records(
             {"_id": {"$in": keys}},
             {"contract_id": 1, "project_id": 1, "letterNo": 1, "letter_no": 1, "subject": 1, "filename": 1},
         ).to_list(length=None)
-        found.extend((document_label(row), row) for row in rows)
+        found.extend((document_label(row), row, "document", str(row["_id"])) for row in rows)
     return found
+
+
+def _refuse(code: int, error_code: str, message: str) -> HTTPException:
+    return HTTPException(status_code=code, detail={"code": error_code, "user_message": message, "detail": message})
+
+
+async def confirm(
+    db: Any, claim: Mapping[str, Any], identity: EvidenceIdentity, *, kind: str, record_id: str, reason: str,
+    user_id: Optional[str],
+) -> Dict[str, Any]:
+    """Record a person's confirmation that one record belongs to the claim's contract (OD-1).
+
+    Only a record the claim's evidence relies on, whose contract is unknown or not in
+    the Contract Master, can be confirmed. A record naming another contract cannot."""
+    import uuid
+
+    from ..utils.datetime import now_utc
+
+    contract = contract_of(claim)
+    if contract is None:
+        raise _refuse(422, "claim_contract_required", "Set the claim's contract first; evidence is confirmed for that contract.")
+    text = (reason or "").strip()
+    if len(text) < 10:
+        raise _refuse(422, "evidence_confirmation_reason_required", "Say how you know this record belongs to the claim's contract.")
+    item = next((entry for entry in identity.unconfirmed if entry.kind == kind and entry.record_id == record_id), None)
+    if item is None:
+        if any(entry.kind == kind and entry.record_id == record_id for entry in identity.confirmed):
+            raise _refuse(409, "evidence_already_confirmed", "This record is already confirmed for the claim's contract.")
+        raise _refuse(
+            409, "evidence_confirmation_not_applicable",
+            "Only a record this claim relies on whose contract is unknown or not in the Contract Master can be "
+            "confirmed. A record of another contract cannot support the claim.",
+        )
+    row = {
+        "_id": str(uuid.uuid4()),
+        "claim_id": str(claim.get("_id")),
+        "contract_id": contract,
+        "organization_id": claim.get("organization_id"),
+        "project_id": claim.get("project_id"),
+        "record_kind": kind,
+        "record_id": record_id,
+        "record_label": item.label,
+        "state_at_confirmation": item.state,
+        "reason": text,
+        "confirmed_by": user_id,
+        "confirmed_at": now_utc(),
+        "status": "active",
+    }
+    await db[CONFIRMATIONS].insert_one(row)
+    return row
+
+
+async def withdraw(db: Any, claim: Mapping[str, Any], confirmation_id: str, *, reason: str, user_id: Optional[str]) -> Dict[str, Any]:
+    """Withdraw a confirmation: the record needs confirming again. Kept, never deleted."""
+    from ..utils.datetime import now_utc
+
+    text = (reason or "").strip()
+    if len(text) < 10:
+        raise _refuse(422, "evidence_confirmation_reason_required", "Say why the confirmation is withdrawn.")
+    row = await db[CONFIRMATIONS].find_one_and_update(
+        {"_id": confirmation_id, "claim_id": str(claim.get("_id")), "status": "active"},
+        {"$set": {"status": "withdrawn", "withdrawn_by": user_id, "withdrawn_at": now_utc(), "withdrawal_reason": text}},
+        return_document=True,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Confirmation not found")
+    return row

@@ -152,3 +152,37 @@ export async function downloadSubmission(claimId: string, format: "docx" | "pdf"
   window.URL.revokeObjectURL(url);
   return filename;
 }
+
+/** OD-1: one record the claim relies on whose contract a person must confirm. */
+export interface EvidenceContractItem {
+  kind: string;
+  record_id: string;
+  label: string;
+  state: "unverified" | "unidentified";
+  confirmation_id?: string | null;
+  confirmed_by?: string | null;
+  confirmed_at?: string | null;
+  reason?: string | null;
+  claim_id?: string;
+}
+
+export interface EvidenceContractReview {
+  claim_id: string;
+  contract_id?: string | null;
+  conflicts: string[];
+  unconfirmed: EvidenceContractItem[];
+  confirmed: EvidenceContractItem[];
+  blocking?: string | null;
+}
+
+/** Confirm that a record belongs to the claim's contract. Audited; the record itself is not changed. */
+export async function confirmEvidenceContract(
+  claimId: string,
+  input: { record_kind: string; record_id: string; reason: string }
+): Promise<EvidenceContractReview> {
+  const { data } = await api.post<EvidenceContractReview>(
+    `/claims/${encodeURIComponent(claimId)}/evidence-contract/confirmations`,
+    input
+  );
+  return data;
+}

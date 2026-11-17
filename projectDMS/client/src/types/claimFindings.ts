@@ -203,4 +203,7 @@ export interface SubmissionView {
   cannot_export_reason?: string | null;
   /** Evidence not confirmed against the Contract Master, or naming no contract. Warnings only. */
   evidence_notes?: string[];
+  /** OD-1: records awaiting a person's confirmation of their contract, and those confirmed. */
+  unconfirmed_evidence?: import("@/services/claim-findings-api").EvidenceContractItem[];
+  confirmed_evidence?: import("@/services/claim-findings-api").EvidenceContractItem[];
 }

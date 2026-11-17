@@ -161,6 +161,8 @@ class EscalationPreview(BaseModel):
     #: Evidence whose contract is not confirmed, or that names none (owner review of
     #: 4B-23). Shown before escalating; nothing here blocks.
     evidence_notes: List[str] = Field(default_factory=list)
+    #: OD-1: records awaiting a person's confirmation of their contract, per claim.
+    unconfirmed_evidence: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class EscalationResult(BaseModel):
@@ -444,7 +446,7 @@ class ClaimEscalation:
         return await contract_scope.evidence_conflicts(self.db, claim, links, document_ids)
 
     async def _contract_review(
-        self, claims: List[Dict[str, Any]], documents: Dict[str, Set[str]]
+        self, claims: List[Dict[str, Any]], documents: Dict[str, Set[str]], unconfirmed: Optional[List[Dict[str, Any]]] = None
     ) -> Tuple[List[str], List[str]]:
         """Blockers (records of another contract) and notes (records not confirmed against
         the Contract Master, or naming no contract) for each claim."""
@@ -457,6 +459,11 @@ class ClaimEscalation:
             reference = str(claim.get("claim_ref") or claim["_id"])
             if review.conflicts:
                 blockers.append(f"{reference}: {contract_scope.message(claim, review.conflicts)}")
+            waiting = contract_scope.unconfirmed_reason(claim, review)
+            if waiting:
+                blockers.append(f"{reference}: {waiting}")
+                if unconfirmed is not None:
+                    unconfirmed.extend({"claim_id": str(claim["_id"]), **vars(item)} for item in review.unconfirmed)
             notes.extend(f"{reference}: {note}" for note in contract_scope.identity_notes(claim, review))
         return blockers, notes
 
@@ -499,7 +506,8 @@ class ClaimEscalation:
         for carry in carries:
             for slug, count in carry.rows.items():
                 totals[slug] = totals.get(slug, 0) + count
-        contract_blockers, notes = await self._contract_review(claims, documents)
+        unconfirmed: List[Dict[str, Any]] = []
+        contract_blockers, notes = await self._contract_review(claims, documents, unconfirmed)
         blockers = self._blockers(claims, case) + contract_blockers
         return EscalationPreview(
             project_id=str(claims[0].get("project_id") or "") or None,
@@ -508,6 +516,7 @@ class ClaimEscalation:
             blockers=blockers,
             can_escalate=not blockers,
             evidence_notes=notes,
+            unconfirmed_evidence=unconfirmed,
         )
 
     async def escalate(
@@ -523,11 +532,21 @@ class ClaimEscalation:
         blockers = self._blockers(claims, case)
         if blockers:
             raise HTTPException(status_code=409, detail="; ".join(blockers))
-        # 4B-23 (D-23): nothing of another contract is carried into a case.
+        # 4B-23 (D-23): nothing of another contract is carried into a case; OD-1: nothing
+        # whose contract a person has not confirmed.
+        lab = ClaimDelayLab(self.db, self.bench)
         for claim in claims:
-            foreign = await self._foreign_evidence(claim, documents.get(str(claim["_id"]), set()))
-            if foreign:
-                raise contract_scope.refusal(claim, foreign)
+            review = await contract_scope.identity_review(
+                self.db, claim, await lab.links_for_claim(str(claim["_id"])), documents.get(str(claim["_id"]), set())
+            )
+            if review.conflicts:
+                raise contract_scope.refusal(claim, review.conflicts)
+            waiting = contract_scope.unconfirmed_reason(claim, review)
+            if waiting:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": contract_scope.UNCONFIRMED_CODE, "user_message": waiting, "detail": waiting},
+                )
         if case is None and request.new_case is None:
             raise HTTPException(status_code=422, detail="Choose an existing case or give the new case a title.")
         if case is None and not request.idempotency_key:

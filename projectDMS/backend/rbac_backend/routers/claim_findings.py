@@ -21,6 +21,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import Response
+from pydantic import BaseModel, Field
 
 from ..core.database import get_db
 from ..core.permissions import Permissions
@@ -46,6 +47,8 @@ from ..services.claim_privileged import (
     StrategyNoteRequest,
     StrategyNoteResponse,
 )
+from ..services import claim_contract_scope as contract_scope
+from ..services.claim_delay_lab import ClaimDelayLab
 from ..services.claim_submission import ClaimSubmissions, ComposeRequest, SubmissionView
 from ..services.policy_service import PolicyService
 from ..utils.error_handler import handle_exceptions
@@ -475,6 +478,109 @@ async def export_claim_submission(
         media_type=media_type,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# --------------------------------------------------------------------------- #
+# OD-1: a person confirms the contract of evidence whose contract is not shown
+# --------------------------------------------------------------------------- #
+class EvidenceConfirmationRequest(BaseModel):
+    record_kind: str = Field(..., min_length=1, max_length=40)
+    record_id: str = Field(..., min_length=1, max_length=200)
+    reason: str = Field(..., max_length=2000)
+
+
+class EvidenceWithdrawalRequest(BaseModel):
+    reason: str = Field(..., max_length=2000)
+
+
+async def _evidence_review(claim: dict, db, current_user: CurrentUser, bench: ClaimBenchService):
+    links = await ClaimDelayLab(db, bench).links_for_claim(str(claim["_id"]))
+    return await contract_scope.identity_review(db, claim, links, await _claim_documents(claim, db, current_user))
+
+
+def _review_body(claim: dict, review) -> dict:
+    return {
+        "claim_id": str(claim["_id"]),
+        "contract_id": contract_scope.contract_of(claim),
+        "conflicts": review.conflicts,
+        "unconfirmed": [vars(item) for item in review.unconfirmed] if contract_scope.contract_of(claim) else [],
+        "confirmed": [vars(item) for item in review.confirmed],
+        "blocking": contract_scope.unconfirmed_reason(claim, review),
+    }
+
+
+@router.get("/claims/{claim_id}/evidence-contract")
+@handle_exceptions
+async def get_claim_evidence_contract(
+    claim_id: str,
+    db=Depends(get_db),
+    bench: ClaimBenchService = Depends(get_bench),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
+):
+    """The claim's evidence whose contract a person must confirm before export or escalation (OD-1)."""
+    claim = await _claim(claim_id, Permissions.CLAIM_VIEW, db, current_user, policy, selection, bench)
+    return _review_body(claim, await _evidence_review(claim, db, current_user, bench))
+
+
+@router.post("/claims/{claim_id}/evidence-contract/confirmations")
+@handle_exceptions
+async def confirm_claim_evidence_contract(
+    claim_id: str,
+    payload: EvidenceConfirmationRequest,
+    db=Depends(get_db),
+    bench: ClaimBenchService = Depends(get_bench),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
+):
+    """Confirm that one record belongs to the claim's contract. Audited; the record is not changed."""
+    claim = await _claim(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection, bench)
+    review = await _evidence_review(claim, db, current_user, bench)
+    row = await contract_scope.confirm(
+        db, claim, review, kind=payload.record_kind, record_id=payload.record_id, reason=payload.reason,
+        user_id=_user_id(current_user),
+    )
+    await AuditEventService(db).emit(
+        action="claim.evidence_contract_confirmed",
+        actor_id=_user_id(current_user),
+        resource_type="claim",
+        resource_id=str(claim_id),
+        organization_id=claim.get("organization_id"),
+        project_id=claim.get("project_id"),
+        reason=row["reason"],
+        after={key: row[key] for key in ("_id", "contract_id", "record_kind", "record_id", "state_at_confirmation")},
+    )
+    return _review_body(claim, await _evidence_review(claim, db, current_user, bench))
+
+
+@router.post("/claims/{claim_id}/evidence-contract/confirmations/{confirmation_id}/withdraw")
+@handle_exceptions
+async def withdraw_claim_evidence_contract(
+    claim_id: str,
+    confirmation_id: str,
+    payload: EvidenceWithdrawalRequest,
+    db=Depends(get_db),
+    bench: ClaimBenchService = Depends(get_bench),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
+):
+    """Withdraw a confirmation; the record needs confirming again. Kept, audited."""
+    claim = await _claim(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection, bench)
+    row = await contract_scope.withdraw(db, claim, confirmation_id, reason=payload.reason, user_id=_user_id(current_user))
+    await AuditEventService(db).emit(
+        action="claim.evidence_contract_confirmation_withdrawn",
+        actor_id=_user_id(current_user),
+        resource_type="claim",
+        resource_id=str(claim_id),
+        organization_id=claim.get("organization_id"),
+        project_id=claim.get("project_id"),
+        reason=row.get("withdrawal_reason"),
+        after={"_id": row["_id"], "record_kind": row["record_kind"], "record_id": row["record_id"]},
+    )
+    return _review_body(claim, await _evidence_review(claim, db, current_user, bench))
 
 
 __all__ = ["router"]

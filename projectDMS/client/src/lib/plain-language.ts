@@ -118,6 +118,13 @@ export const ERROR_CODE_MESSAGES = {
     "Only the person who made or sent this determination can send it to another approver.",
   determination_reviewer_still_authorised:
     "The approver this was sent to can still decide it. It can go to another approver only if they lose determination authority on this project.",
+  claim_evidence_contract_unconfirmed:
+    "Some evidence does not show which contract it belongs to. A person who may edit the claim must confirm each record belongs to the claim's contract first.",
+  claim_contract_required: "Set the claim's contract first; evidence is confirmed for that contract.",
+  evidence_confirmation_reason_required: "Say how you know this record belongs to the claim's contract.",
+  evidence_already_confirmed: "This record is already confirmed for the claim's contract.",
+  evidence_confirmation_not_applicable:
+    "Only a record whose contract is unknown or not in the Contract Master can be confirmed. A record of another contract cannot support the claim.",
   claim_contract_mismatch:
     "A record of another contract cannot support this claim. Only records of the claim's own contract can be linked or relied on.",
 } as const;

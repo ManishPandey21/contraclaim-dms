@@ -131,6 +131,9 @@ class SubmissionView(BaseModel):
     #: Evidence whose contract is not confirmed against the Contract Master, or that
     #: names no contract (owner review of 4B-23). Warnings: nothing here blocks.
     evidence_notes: List[str] = Field(default_factory=list)
+    #: OD-1: records awaiting a person's confirmation of their contract, and those confirmed.
+    unconfirmed_evidence: List[Dict[str, Any]] = Field(default_factory=list)
+    confirmed_evidence: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #
@@ -741,6 +744,10 @@ class ClaimSubmissions:
                 fresh = current.get(section.key)
                 sections.append(SectionView(section=section, stale=fresh is None or fresh.input_hash != section.input_hash))
         stale = sum(1 for item in sections if item.stale)
+        review = await contract_scope.identity_review(
+            self.db, claim, await ClaimDelayLab(self.db, self.bench).links_for_claim(str(claim["_id"])), document_ids
+        )
+        unconfirmed = contract_scope.unconfirmed_reason(claim, review)
         if stored is None:
             export_reason: Optional[str] = "Compose the submission first."
         elif reason:
@@ -750,6 +757,9 @@ class ClaimSubmissions:
                 f"{stale} section{' no longer matches' if stale == 1 else 's no longer match'} the record. "
                 "Re-compose before exporting."
             )
+        elif unconfirmed:
+            # OD-1: the formal submission waits for a person to confirm each such record.
+            export_reason = unconfirmed
         else:
             export_reason = None
         return SubmissionView(
@@ -764,12 +774,9 @@ class ClaimSubmissions:
             approved_for_issue=await self._approved(claim),
             can_export=export_reason is None,
             cannot_export_reason=export_reason,
-            evidence_notes=contract_scope.identity_notes(
-                claim,
-                await contract_scope.identity_review(
-                    self.db, claim, await ClaimDelayLab(self.db, self.bench).links_for_claim(str(claim["_id"])), document_ids
-                ),
-            ),
+            evidence_notes=contract_scope.identity_notes(claim, review),
+            unconfirmed_evidence=[vars(item) for item in review.unconfirmed] if contract_scope.contract_of(claim) else [],
+            confirmed_evidence=[vars(item) for item in review.confirmed],
         )
 
     async def compose(

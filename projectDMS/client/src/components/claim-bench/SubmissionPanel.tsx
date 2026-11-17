@@ -3,6 +3,7 @@ import { Download, RefreshCw } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import EvidenceContractConfirmations from "@/components/claim-bench/EvidenceContractConfirmations";
 import { useSubmission } from "@/hooks/useClaimFindings";
 import { formatDateIN } from "@/lib/format-in";
 import type { ParagraphSource, SubmissionSection } from "@/types/claimFindings";
@@ -127,7 +128,13 @@ const SubmissionPanel: React.FC<Props> = ({ claimId, readOnly }) => {
           {view.cannot_export_reason}
         </p>
       )}
-      {(view.evidence_notes ?? []).length > 0 && (
+      <EvidenceContractConfirmations
+        items={view.unconfirmed_evidence ?? []}
+        claimId={claimId}
+        readOnly={readOnly}
+        onConfirmed={() => query.refetch()}
+      />
+      {(view.evidence_notes ?? []).length > 0 && (view.unconfirmed_evidence ?? []).length === 0 && (
         <section aria-labelledby="submission-contract-notes" className="rounded-md border border-amber-600 bg-amber-50 p-3 text-amber-950">
           <h3 id="submission-contract-notes" className="text-sm font-semibold">
             Evidence whose contract is not confirmed
