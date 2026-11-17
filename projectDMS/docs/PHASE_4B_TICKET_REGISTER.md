@@ -10,13 +10,80 @@ Paths: `T/` = `backend/rbac_backend/tests/`, `I/` = `backend/rbac_backend/tests/
 
 Totals at `19f6d61`: 25 Implemented, 3 Partial, 21 Not started. After commit `8726558` (4B-06, 4B-07): 27 Implemented, 3 Partial, 19 Not started. After 4B-08 and 4B-09: 29 Implemented, 3 Partial, 17 Not started. After 4B-15: 30 Implemented, 3 Partial, 16 Not started. After 4B-18: 31 Implemented, 3 Partial, 15 Not started.
 
-**Three separate statuses.** They are not the same thing and one never implies the next.
+**Four separate stages** (owner instruction, 2026-11-17). Each is its own fact, and none implies the next.
 
-- **Implementation** (this column): the code exists and its proof test was run here.
-- **Verified testing**: the proof ran with real dependencies where the plan asks for them, locally and in CI. The "Latest local result" and "CI evidence" columns carry this.
-- **Acceptance**: the owner's decision. On 2026-11-17 the owner recorded that Phase 4b is not accepted, so every row reads "Not accepted" whatever its other columns say.
+1. **Implemented**: the code exists and its proof test was run here.
+2. **CI-verified**: every proof file named in the register row ran in a recorded CI run and passed, with real dependencies where the plan asks for them (integration files in the real-Mongo step, which fails on any skip).
+3. **Production evidence**: the production or staging reading the ticket depends on (AQ-11). "Pending" means not read; it is never read as zero.
+4. **Owner acceptance**: the owner's decision, per ticket and for Phase 4b as a whole. **Phase 4b final acceptance: Pending.** Acceptance of a ticket as implemented is not acceptance for production release.
 
-Rows 4B-06 and 4B-07 were rewritten after the verification, by the session that implemented them, not by the independent verifier.
+### Status by stage
+
+CI column derived mechanically from CI run 398 (`f31ace1`, 2026-11-17): each row's proof files were matched against the run's real-Mongo module list (56 modules, 891 passed, 0 skipped) and the general step's skip list; frontend and mocked Playwright tests passed in the same run. A Partial ticket's CI pass covers only the part built.
+
+| Ticket | 1. Implemented | 2. CI-verified | 3. Production evidence | 4. Owner acceptance |
+|---|---|---|---|---|
+| 4B-01 | Yes (script only) | Yes, run 398 at `f31ace1` | Pending: P-01 to P-15; authorised read-only access (AQ-11) | Not accepted |
+| 4B-02 | Yes | Yes, run 398 at `f31ace1` | None required | Not accepted |
+| 4B-03 | Yes | Yes, run 398 at `f31ace1` | None required | Not accepted |
+| 4B-04 | Partial | Yes, run 398 at `f31ace1` (built part only) | Pending: P-02 (order of M-01) | Not accepted |
+| 4B-05 | Partial | Yes, run 398 at `f31ace1` (built part only) | None required | Not accepted |
+| 4B-06 | Yes (not released) | Yes, run 398 at `f31ace1` | Pending: P-05, P-10: release of M-02 waits for both | Not accepted |
+| 4B-07 | Yes | Yes, run 398 at `f31ace1` | Pending: P-05 (legacy role holders), P-10 | Not accepted |
+| 4B-08 | Yes | Yes, run 398 at `f31ace1` | Pending: P-06 (how many users lost roles to the old form) | Not accepted |
+| 4B-09 | Yes | Yes, run 398 at `f31ace1` | None required | Not accepted |
+| 4B-10 | Yes | Yes, run 398 at `f31ace1` | Pending: P-05 (role documents) | Not accepted |
+| 4B-11 | Yes | Yes, run 398 at `f31ace1` | None required | Not accepted |
+| 4B-12 | Yes | Yes, run 398 at `f31ace1` | Pending: P-04 | Not accepted |
+| 4B-13 | Yes | Yes, run 398 at `f31ace1` | None required | Accepted as implemented and CI-verified (2026-11-17); **not accepted for production release** |
+| 4B-14 | Yes | Yes, run 398 at `f31ace1` | Pending: P-14 | Accepted as implemented and CI-verified (2026-11-17); **not accepted for production release** |
+| 4B-15 | Yes | Yes, run 398 at `f31ace1` | Pending: P-09 (whether any project already records a position) | Not accepted |
+| 4B-16 | Yes | Yes, run 398 at `f31ace1` | None required | Not accepted |
+| 4B-17 | Yes | Yes, run 398 at `f31ace1` | None required | Not accepted |
+| 4B-18 | Yes (not released) | Yes, run 398 at `f31ace1` | Pending: P-03 (existing claims; how many projects hold several contracts) | Not accepted |
+| 4B-19 | No | — | Pending: P-03 | Not accepted |
+| 4B-20 | No | — | None required | Not accepted |
+| 4B-21 | Yes | Yes, run 398 at `f31ace1` | Pending: P-03, P-07 | Not accepted |
+| 4B-22 | Yes | Yes, run 398 at `f31ace1` | Pending: P-03, P-07 | Not accepted |
+| 4B-23 | No | — | Pending: P-03 | Not accepted |
+| 4B-24 | No | — | None required | Not accepted |
+| 4B-25 | No | — | None required | Not accepted |
+| 4B-26 | No | — | None required | Not accepted |
+| 4B-27 | No | — | None required | Not accepted |
+| 4B-28 | Yes | Yes, run 398 at `f31ace1` | None required | Not accepted |
+| 4B-29 | Yes | Yes, run 398 at `f31ace1` | Pending: AQ-7 | Not accepted |
+| 4B-30 | No | — | Pending: AQ-7 | Not accepted |
+| 4B-31 | No | — | None required | Not accepted |
+| 4B-32 | No | — | None required | Not accepted |
+| 4B-33 | Yes | Yes, run 398 at `f31ace1` | Pending: P-07, P-13 | Not accepted |
+| 4B-34 | Yes | Yes, run 398 at `f31ace1` | None required | Not accepted |
+| 4B-35 | Yes | Yes, run 398 at `f31ace1` | Pending: Whether production has that index, and duplicates, is not read (AQ-11) | Not accepted |
+| 4B-36 | Yes | Yes, run 398 at `f31ace1` | Pending: P-02, P-07 | Not accepted |
+| 4B-37 | Yes | Yes, run 398 at `f31ace1` | None required | Not accepted |
+| 4B-38 | Yes | Yes, run 398 at `f31ace1` | None required | Not accepted |
+| 4B-39 | Yes | Yes, run 398 at `f31ace1` | None required | Not accepted |
+| 4B-40 | Yes | Yes, run 398 at `f31ace1` | None required | Not accepted |
+| 4B-41 | No | — | Pending: P-08 | Not accepted |
+| 4B-42 | No | — | None required | Not accepted |
+| 4B-43 | Partial | Yes, run 398 at `f31ace1` (built part only) | None required | Not accepted |
+| 4B-44 | No | — | Pending: Staging stack; canary tenant | Not accepted |
+| 4B-45 | Yes | Yes, run 398 at `f31ace1` | Pending: P-12 (switch to `strict`) | Not accepted |
+| 4B-46 | No | — | None required | Not accepted |
+| 4B-47 | Yes | Yes, run 398 at `f31ace1` | None required | Not accepted |
+| 4B-48 | No | — | None required | Not accepted |
+| 4B-49 | Yes (audit only) | Yes, run 398 at `f31ace1` | Pending: P-15 (AQ-11) | Not accepted |
+
+### Owner decisions, 2026-11-17
+
+- **4B-13.** Accepted as implemented and CI-verified; not for production release. Letter Bench signal visibility keeps its existing permission (`drafting.request.view`), which is not to be widened to expose claim signals. The visibility gap is a separate RBAC/usability item, RU-1 below. No further 4B-13 implementation unless a new defect is found.
+- **4B-14.** Accepted as implemented and CI-verified; not for production release. P-14 is mandatory before any historical notice-verification record is changed. Existing records are preserved; those needing re-verification are identified only from the authorised production reading. No notice period is revoked or reclassified on repository assumptions alone.
+- **Integration.** PR #114 has a single integration owner. Parallel sessions work on separate branches or worktrees, and their work is integrated into `claude/zen-ptolemy-695liz` only after independent verification.
+
+### RU-1: claim-signal visibility (separate RBAC/usability item, open)
+
+- **What happens.** `GET /api/claims/bench/signals` lists hindrance signals and Letter Bench signals. Letter Bench boards are read with `drafting.request.view`, which a tenant role reaches only through a drafting-expert allocation. So an Organization or Project Admin sees hindrance signals but not the "a letter may be a claim not yet raised" signals.
+- **Not done, by decision.** `drafting.request.view` is not widened; that would expose drafting requests themselves, not only the signal.
+- **Assessment of a dedicated permission** (for the owner's decision, nothing built). A project-scoped `dms.claim.signal.view`, checked against the claim's project like the other claim permissions, would expose only the derived signal: the source letter's reference, date and the reason. It would not expose the Letter Bench board, its assertions or drafts. It fits the existing model: a `dms.*` name, entitlement-scoped, granted by name to claim roles. Points to decide: whether it is a new name or implied by `dms.claim.view` (the plan's rule is that claim permissions do not imply privileged material; a signal is not privileged, so implying it is defensible); whether the signal may name a letter the viewer cannot open (it should show "Restricted letter" instead, as 4B-27 does for documents); and a reading of how many projects use Letter Bench before release. Until decided, behaviour is unchanged.
 
 ## Register
 
@@ -34,8 +101,8 @@ Rows 4B-06 and 4B-07 were rewritten after the verification, by the session that 
 | 4B-10 | 4B-02 | Implemented. `SUPERADMIN_EXCLUDED_PERMISSIONS`; grant by name only; removed from default roles; `docs/CLAIM_BENCH.md` aligned. | f5460cd, 965e5e6, 19f6d61 | `I/test_claim_privileged_rbac_mongo.py`; `I/test_effective_permission_names_mongo.py`; `T/test_permission_catalog.py`; `T/test_claim_findings.py` | 6 passed, 0 failed, 0 skipped, real MongoDB; 3 passed, real MongoDB; 7 passed; 33 passed | Role-contract alignment inspect output on production data not taken. | P-05 (role documents) | No failure reported at `19f6d61`; a pass is not confirmed (see CI evidence below) | Not accepted |
 | 4B-11 | — | Implemented. `GET /api/pickers/users`; `UserPicker`, `DocumentPicker`, `LetterPicker`; `lib/plain-language.ts`. | fa31542, 627ea02 | `I/test_picker_users_mongo.py`; `T/test_plain_language_coverage.py`; `C/components/pickers/__tests__/{UserPicker,DocumentPicker}.test.tsx`; `C/lib/__tests__/plain-language.test.ts` | 5 passed, 0 failed, 0 skipped, real MongoDB; 4 passed; vitest 5, 4 and 5 passed | `LetterPicker` has no test file of its own. `UserPicker` is not yet used by the determination approver (that is 4B-26). | None | No failure reported at `19f6d61`; a pass is not confirmed (see CI evidence below) | Not accepted |
 | 4B-12 | 4B-02 | Implemented. Server-owned origin; create status limited; compare-and-set moves; frozen claims refuse PUT; explicit null; `sla_rules` coercion. | 5b2a508 | `I/test_claim_integrity_mongo.py` | 5 passed, 0 failed, 0 skipped, real MongoDB | None found | P-04 | No failure reported at `19f6d61`; a pass is not confirmed (see CI evidence below) | Not accepted |
-| 4B-13 | 4B-12 | Implemented. Claim-triggered boards excluded; eligibility re-read on raise; one organisation resolved. | 2bd1723 | `I/test_claim_signals_mongo.py`; `T/test_claim_notice_clock.py` | 7 passed, 0 failed, 0 skipped, real MongoDB; 26 passed (re-run at `f31ace1`, same counts) | Commit notes Letter Bench signals are visible only through `drafting.request.view`; not changed. | None | **Passed in CI** at `f31ace1`, run 398: both files ran, real-Mongo step 0 skipped (see CI evidence below) | Not accepted |
-| 4B-14 | 4B-12 | Implemented. Clause resolution, `entered_from_contract`, second-person verify, clause-read check, audit. | ead3cff | `I/test_notice_verification_mongo.py` | 5 passed, 0 failed, 0 skipped, real MongoDB (re-run at `f31ace1`, same count) | None found | P-14 | **Passed in CI** at `f31ace1`, run 398: the file ran in the real-Mongo step, 0 skipped (see CI evidence below) | Not accepted |
+| 4B-13 | 4B-12 | Implemented. Claim-triggered boards excluded; eligibility re-read on raise; one organisation resolved. | 2bd1723 | `I/test_claim_signals_mongo.py`; `T/test_claim_notice_clock.py` | 7 passed, 0 failed, 0 skipped, real MongoDB; 26 passed (re-run at `f31ace1`, same counts) | Commit notes Letter Bench signals are visible only through `drafting.request.view`; not changed. | None | **Passed in CI** at `f31ace1`, run 398: both files ran, real-Mongo step 0 skipped (see CI evidence below) | Accepted as implemented and CI-verified; not for production release (owner, 2026-11-17) |
+| 4B-14 | 4B-12 | Implemented. Clause resolution, `entered_from_contract`, second-person verify, clause-read check, audit. | ead3cff | `I/test_notice_verification_mongo.py` | 5 passed, 0 failed, 0 skipped, real MongoDB (re-run at `f31ace1`, same count) | None found | P-14 | **Passed in CI** at `f31ace1`, run 398: the file ran in the real-Mongo step, 0 skipped (see CI evidence below) | Accepted as implemented and CI-verified; not for production release (owner, 2026-11-17) |
 | 4B-15 | 4B-10 | Implemented. The party a project acts for is written only by `PATCH /projects/{id}/contractual-capacity`; a project create or update drops the field. Every change is audited with before, after and reason. Once a determination, simulation or submission exists, only an Organization Admin of that organisation changes it, with a reason; a Super Admin cannot. An organisation default answers for projects that state none. The Bench asks only people who can record it, and offers "Open the board" only to people who can edit. | 94a3d67 | `I/test_project_perspective_mongo.py`; `C/pages/__tests__/ClaimBenchPage.test.tsx` (three new) | 14 passed, 0 failed, 0 skipped, real MongoDB; five mutants of the lock, write path, Super Admin exclusion and reason rule each failed the suite; vitest 14 passed | "Determination writes re-check the capacity at the moment of writing" is left to 4B-26, whose proof names it. No screen sets the organisation default yet (route only). Not opened in a browser. Found while testing: `routers/projects.py` and `require_permission` keep `PermissionService` objects that cache their first database; harmless in production, but any multi-scenario test of project routes must reset it. | P-09 (whether any project already records a position) | Suite added to the CI real-Mongo list; no CI result yet | Not accepted |
 | 4B-16 | 4B-12 | Implemented. Stale test blocks lock; stale marking retried; unlock needs manage and a reason. | 2a695d9 | `I/test_bench_lock_stale_mongo.py`; `T/test_claim_bench.py`; `C/pages/__tests__/ClaimBenchPage.test.tsx` | 4 passed, 0 failed, 0 skipped, real MongoDB; 43 passed; vitest 11 passed | None found | None | No failure reported at `19f6d61`; a pass is not confirmed (see CI evidence below) | Not accepted |
 | 4B-17 | 4B-12 | Implemented. Register amount read-only once a board exists; roll-up clears; typed head amount refused with lines. | db05a3f | `I/test_claim_amount_source_mongo.py`; `C/pages/__tests__/ClaimsRegisterPage.board-amount.test.tsx` | 5 passed, 0 failed, 0 skipped, real MongoDB; vitest 2 passed | None found | None | No failure reported at `19f6d61`; a pass is not confirmed (see CI evidence below) | Not accepted |

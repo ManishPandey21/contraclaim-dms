@@ -963,6 +963,7 @@ Proof
 | 2026-11-16 | Audit findings accepted; D-05 to D-21 approved subject to the Phase 4b requirements; plan requested | Owner |
 | 2026-11-16 | Plan approved in principle subject to amendments B.1 to B.7; AQ-1 to AQ-10 decided; implementation authorised from Wave 0 and independent security groundwork; PR #114 stays draft | Owner |
 | 2026-11-17 | Phase 4b **not** accepted as complete; Phase 5 remains blocked. Implementation continues under this plan in dependency order (reviewer authorisation first), with no production deployment, merge, skill publication or rollout activation. AQ-11: readings P-01 to P-15 stay mandatory. AQ-12: decided as recorded in section 11. The two secret-scan findings are assessed as non-credentials; the fingerprint-only exception goes to authorised security review. Ticket register: `docs/PHASE_4B_TICKET_REGISTER.md` | Owner |
+| 2026-11-17 | 4B-13 and 4B-14 accepted as implemented and CI-verified, not for production release. 4B-13: `drafting.request.view` not widened; signal visibility is separate item RU-1 (ticket register). 4B-14: P-14 mandatory before any historical notice record changes; no automatic revocation or reclassification. PR #114 has a single integration owner. | Owner |
 | — | Phase 4b exit criteria met and accepted; Phase 5 may start | Pending |
 
 ## 13. Owner review, 2026-11-16
