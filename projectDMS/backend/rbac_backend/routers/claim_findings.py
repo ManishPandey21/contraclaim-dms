@@ -513,6 +513,19 @@ class EvidenceConfirmationRequest(BaseModel):
     record_kind: str = Field(..., min_length=1, max_length=40)
     record_id: str = Field(..., min_length=1, max_length=200)
     reason: str = Field(..., max_length=2000)
+    #: The letter, drawing or register entry that shows which contract the record belongs to.
+    source_reference: str = Field("", max_length=500)
+
+
+async def _linked_by(db, claim: dict, kind: str, record_id: str) -> set:
+    """Everyone who linked this record to this claim, at any time (OD-1 independence)."""
+    if kind == "document":
+        rows = db.entity_document_links.find(
+            {"target_type": "claim", "target_id": str(claim["_id"]), "document_id": record_id}, {"created_by": 1}
+        )
+    else:
+        rows = db.claim_head_links.find({"claim_id": str(claim["_id"]), "target_id": record_id}, {"created_by": 1})
+    return {str(row.get("created_by")) async for row in rows if row.get("created_by")}
 
 
 class EvidenceWithdrawalRequest(BaseModel):
@@ -575,8 +588,13 @@ async def confirm_claim_evidence_contract(
     policy: PolicyService = Depends(get_policy),
     selection: ActiveScope = Depends(active_scope),
 ):
-    """Confirm that one record belongs to the claim's contract. Audited; the record is not changed."""
-    claim = await _claim(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection, bench)
+    """Confirm that one record belongs to the claim's contract. Audited; the record is not changed.
+
+    Owner decision 2026-11-17: only a holder of ``dms.claim.evidence.confirm_contract`` by
+    explicit grant on the claim's project (never through Super Admin, a wildcard or
+    dms.admin), who did not link the record, giving a reason and a source reference."""
+    claim = await _claim(claim_id, Permissions.CLAIM_VIEW, db, current_user, policy, selection, bench)
+    await policy.authorize_document(current_user, Permissions.CLAIM_EVIDENCE_CONFIRM_CONTRACT, claim, resource_type="claim")
     review = await _evidence_review(claim, db, current_user, bench)
     accessible = await _claim_documents(claim, db, current_user)
     if payload.record_kind == "document" and payload.record_id not in accessible:
@@ -584,7 +602,10 @@ async def confirm_claim_evidence_contract(
         raise HTTPException(status_code=403, detail="You cannot confirm a record you are not allowed to read.")
     row = await contract_scope.confirm(
         db, claim, review, kind=payload.record_kind, record_id=payload.record_id, reason=payload.reason,
-        user_id=_user_id(current_user),
+        user_id=_user_id(current_user), source_reference=payload.source_reference,
+        linked_by=await _linked_by(db, claim, payload.record_kind, payload.record_id),
+        confirmer={"id": _user_id(current_user), "username": getattr(current_user, "username", None),
+                   "email": getattr(current_user, "email", None)},
     )
     await AuditEventService(db).emit(
         action="claim.evidence_contract_confirmed",
@@ -594,7 +615,10 @@ async def confirm_claim_evidence_contract(
         organization_id=claim.get("organization_id"),
         project_id=claim.get("project_id"),
         reason=row["reason"],
-        after={key: row[key] for key in ("_id", "contract_id", "record_kind", "record_id", "state_at_confirmation")},
+        after={key: row[key] for key in (
+            "_id", "contract_id", "project_id", "record_kind", "record_id", "state_at_confirmation", "record_revision",
+            "source_reference", "superseded_confirmation_id",
+        )},
     )
     return _review_body(claim, await _evidence_review(claim, db, current_user, bench), accessible)
 
@@ -612,7 +636,8 @@ async def withdraw_claim_evidence_contract(
     selection: ActiveScope = Depends(active_scope),
 ):
     """Withdraw a confirmation; the record needs confirming again. Kept, audited."""
-    claim = await _claim(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection, bench)
+    claim = await _claim(claim_id, Permissions.CLAIM_VIEW, db, current_user, policy, selection, bench)
+    await policy.authorize_document(current_user, Permissions.CLAIM_EVIDENCE_CONFIRM_CONTRACT, claim, resource_type="claim")
     row = await contract_scope.withdraw(db, claim, confirmation_id, reason=payload.reason, user_id=_user_id(current_user))
     await AuditEventService(db).emit(
         action="claim.evidence_contract_confirmation_withdrawn",

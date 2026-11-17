@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { errorMessage } from "@/hooks/useLetterBench";
@@ -29,6 +30,7 @@ interface Props {
 const EvidenceContractConfirmations: React.FC<Props> = ({ items, claimId, readOnly, onConfirmed }) => {
   const [open, setOpen] = useState<string | null>(null);
   const [reason, setReason] = useState("");
+  const [source, setSource] = useState("");
   const [busy, setBusy] = useState(false);
   if (items.length === 0) return null;
   const key = (item: EvidenceContractItem) => `${item.claim_id ?? claimId}:${item.kind}:${item.record_id}`;
@@ -40,10 +42,12 @@ const EvidenceContractConfirmations: React.FC<Props> = ({ items, claimId, readOn
         record_kind: item.kind,
         record_id: item.record_id,
         reason: reason.trim(),
+        source_reference: source.trim(),
       });
       toast.success("Confirmed for the claim's contract");
       setOpen(null);
       setReason("");
+      setSource("");
       onConfirmed();
     } catch (error) {
       toast.error(errorMessage(error, "The record could not be confirmed"));
@@ -58,8 +62,9 @@ const EvidenceContractConfirmations: React.FC<Props> = ({ items, claimId, readOn
         Confirm which contract this evidence belongs to
       </h3>
       <p className="text-xs">
-        Each record below must be confirmed by a person before the submission is exported or the claim is escalated.
-        The record itself is not changed; who confirmed it, when and why is kept.
+        Each record below must be confirmed before the submission is exported or the claim is escalated, by a person
+        assigned to confirm evidence who did not link it. The record itself is not changed; who confirmed it, when,
+        why and on what source is kept. A later change to the record means it must be confirmed again.
       </p>
       <ul className="space-y-2 text-sm">
         {items.map((item) => (
@@ -67,9 +72,10 @@ const EvidenceContractConfirmations: React.FC<Props> = ({ items, claimId, readOn
             <div className="flex flex-wrap items-center justify-between gap-2">
               <span>
                 <span className="font-medium">{item.label}</span> {STATE_TEXT[item.state]}.
+                {item.superseded_confirmation_id && " It was confirmed before, but has changed since."}
               </span>
               {!readOnly && open !== key(item) && (
-                <Button size="sm" variant="outline" onClick={() => { setOpen(key(item)); setReason(""); }}>
+                <Button size="sm" variant="outline" onClick={() => { setOpen(key(item)); setReason(""); setSource(""); }}>
                   Confirm…
                 </Button>
               )}
@@ -80,8 +86,12 @@ const EvidenceContractConfirmations: React.FC<Props> = ({ items, claimId, readOn
                   How do you know it belongs to the claim's contract?
                 </Label>
                 <Textarea id={`confirm-${key(item)}`} rows={2} value={reason} onChange={(event) => setReason(event.target.value)} />
+                <Label htmlFor={`source-${key(item)}`} className="text-xs">
+                  Source that shows the contract (letter, drawing or register reference)
+                </Label>
+                <Input id={`source-${key(item)}`} value={source} onChange={(event) => setSource(event.target.value)} />
                 <div className="flex gap-2">
-                  <Button size="sm" disabled={busy || reason.trim().length < 10} onClick={() => confirm(item)}>
+                  <Button size="sm" disabled={busy || reason.trim().length < 10 || source.trim().length < 3} onClick={() => confirm(item)}>
                     Confirm for this contract
                   </Button>
                   <Button size="sm" variant="ghost" onClick={() => setOpen(null)}>

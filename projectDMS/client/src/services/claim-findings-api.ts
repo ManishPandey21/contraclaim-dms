@@ -163,6 +163,9 @@ export interface EvidenceContractItem {
   confirmed_by?: string | null;
   confirmed_at?: string | null;
   reason?: string | null;
+  source_reference?: string | null;
+  /** A confirmation that no longer holds because the record changed since. */
+  superseded_confirmation_id?: string | null;
   claim_id?: string;
 }
 
@@ -178,7 +181,7 @@ export interface EvidenceContractReview {
 /** Confirm that a record belongs to the claim's contract. Audited; the record itself is not changed. */
 export async function confirmEvidenceContract(
   claimId: string,
-  input: { record_kind: string; record_id: string; reason: string }
+  input: { record_kind: string; record_id: string; reason: string; source_reference: string }
 ): Promise<EvidenceContractReview> {
   const { data } = await api.post<EvidenceContractReview>(
     `/claims/${encodeURIComponent(claimId)}/evidence-contract/confirmations`,

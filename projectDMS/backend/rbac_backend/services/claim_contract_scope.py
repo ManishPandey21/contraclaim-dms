@@ -140,6 +140,38 @@ def document_label(document: Mapping[str, Any]) -> str:
 CONFIRMATIONS = "claim_evidence_contract_confirmations"
 NEEDS_CONFIRMATION = ("unverified", "unidentified")
 
+#: The fields of a record that a confirmation of its contract rests on. A change to any
+#: of them is material: the confirmation no longer holds and the record needs confirming
+#: again (owner decision 2026-11-17). A tag, a view or a processing flag is not material.
+_MATERIAL_FIELDS = {
+    "document": (
+        "organization_id", "project_id", "contract_id", "sha256", "current_version_id", "version_id",
+        "file_object_id", "subject", "date", "letterNo", "letter_no", "from", "to", "uploadType",
+    ),
+    "hindrance": (
+        "organization_id", "project_id", "contract_id", "title", "start_date", "end_date", "responsibility",
+        "reference", "hindrance_no", "revision",
+    ),
+    "eot_submission": (
+        "organization_id", "project_id", "contract_id", "eot_reference", "revision_label", "status",
+        "contractor_submission_date", "requested_extension_days",
+    ),
+    "eot_determination": (
+        "organization_id", "project_id", "contract_id", "determination_reference", "revision_label", "status",
+        "determination_date", "granted_extension_days",
+    ),
+}
+
+
+def record_fingerprint(kind: str, record: Optional[Mapping[str, Any]]) -> str:
+    """The record as a confirmation of its contract relies on it (owner decision 2026-11-17)."""
+    import hashlib
+    import json
+
+    fields = _MATERIAL_FIELDS.get(kind, ("organization_id", "project_id", "contract_id"))
+    basis = {name: (record or {}).get(name) for name in fields}
+    return hashlib.sha256(json.dumps(basis, sort_keys=True, default=str).encode()).hexdigest()
+
 
 @dataclass
 class EvidenceItem:
@@ -149,10 +181,15 @@ class EvidenceItem:
     record_id: str
     label: str
     state: str  # "unverified" | "unidentified"
+    #: The record's fingerprint now; a confirmation must have been given against it.
+    revision: str = ""
+    #: A confirmation that no longer holds because the record changed materially since.
+    superseded_confirmation_id: Optional[str] = None
     confirmation_id: Optional[str] = None
     confirmed_by: Optional[str] = None
     confirmed_at: Optional[Any] = None
     reason: Optional[str] = None
+    source_reference: Optional[str] = None
 
 
 @dataclass
@@ -212,12 +249,21 @@ def _sorted(
             continue
         state = "unidentified" if contract_of(record) is None else "unverified"
         row = confirmations.get((kind, record_id))
-        item = EvidenceItem(kind=kind, record_id=record_id, label=label, state=state)
+        item = EvidenceItem(kind=kind, record_id=record_id, label=label, state=state, revision=record_fingerprint(kind, record))
         if row is not None:
-            item.confirmation_id = str(row["_id"])
-            item.confirmed_by, item.confirmed_at, item.reason = row.get("confirmed_by"), row.get("confirmed_at"), row.get("reason")
-            result.confirmed.append(item)
-            continue
+            # Bound to the record's revision and the claim's contract and project: a material
+            # change since, or a different contract identity, and it no longer holds.
+            holds = (
+                row.get("record_revision") == item.revision
+                and str(row.get("project_id") or "") == str(project_of(claim) or "")
+            )
+            if holds:
+                item.confirmation_id = str(row["_id"])
+                item.confirmed_by, item.confirmed_at = row.get("confirmed_by"), row.get("confirmed_at")
+                item.reason, item.source_reference = row.get("reason"), row.get("source_reference")
+                result.confirmed.append(item)
+                continue
+            item.superseded_confirmation_id = str(row["_id"])
         result.unconfirmed.append(item)
         (result.unidentified if state == "unidentified" else result.unverified).append(label)
     return result
@@ -295,14 +341,15 @@ async def _records(db: Any, links: Iterable[Any], document_ids: Iterable[str]) -
         candidates: List[Any] = [target_id]
         if ObjectId.is_valid(target_id):
             candidates.append(ObjectId(target_id))
-        record = await db[collection].find_one({"_id": {"$in": candidates}}, {"contract_id": 1, "project_id": 1})
+        projection = {name: 1 for name in _MATERIAL_FIELDS.get(kind, ())} | {"contract_id": 1, "project_id": 1}
+        record = await db[collection].find_one({"_id": {"$in": candidates}}, projection)
         found.append((str(getattr(link, "target_label", "") or target_id), record, kind, target_id))
     ids = [str(item) for item in document_ids if item]
     if ids:
         keys: List[Any] = list(ids) + [ObjectId(item) for item in ids if ObjectId.is_valid(item)]
         rows: List[Dict[str, Any]] = await db.documents.find(
             {"_id": {"$in": keys}},
-            {"contract_id": 1, "project_id": 1, "letterNo": 1, "letter_no": 1, "subject": 1, "filename": 1},
+            {name: 1 for name in _MATERIAL_FIELDS["document"]} | {"filename": 1},
         ).to_list(length=None)
         found.extend((document_label(row), row, "document", str(row["_id"])) for row in rows)
     return found
@@ -314,12 +361,17 @@ def _refuse(code: int, error_code: str, message: str) -> HTTPException:
 
 async def confirm(
     db: Any, claim: Mapping[str, Any], identity: EvidenceIdentity, *, kind: str, record_id: str, reason: str,
-    user_id: Optional[str],
+    user_id: Optional[str], source_reference: str = "", linked_by: Iterable[Optional[str]] = (),
+    confirmer: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Record a person's confirmation that one record belongs to the claim's contract (OD-1).
 
     Only a record the claim's evidence relies on, whose contract is unknown or not in
-    the Contract Master, can be confirmed. A record naming another contract cannot."""
+    the Contract Master, can be confirmed. A record naming another contract cannot.
+    Owner decision 2026-11-17: the confirmer holds ``dms.claim.evidence.confirm_contract``
+    by explicit grant (checked by the route), gives a reason and the source that shows
+    the contract, and is not a person who linked the record to the claim. The
+    confirmation is bound to the record's revision and the claim's contract and project."""
     import uuid
 
     from ..utils.datetime import now_utc
@@ -333,6 +385,18 @@ async def confirm(
     text = (reason or "").strip()
     if len(text) < 10:
         raise _refuse(422, "evidence_confirmation_reason_required", "Say how you know this record belongs to the claim's contract.")
+    source = (source_reference or "").strip()
+    if len(source) < 3:
+        raise _refuse(
+            422, "evidence_confirmation_source_required",
+            "Name the source that shows which contract this record belongs to (a letter, drawing or register reference).",
+        )
+    if user_id and user_id in {str(person) for person in linked_by if person}:
+        raise _refuse(
+            403, "evidence_confirmer_not_independent",
+            "The person who linked this record to the claim cannot also confirm its contract. Ask someone else "
+            "who holds the authority to confirm evidence.",
+        )
     item = next((entry for entry in identity.unconfirmed if entry.kind == kind and entry.record_id == record_id), None)
     if item is None:
         if any(entry.kind == kind and entry.record_id == record_id for entry in identity.confirmed):
@@ -352,8 +416,12 @@ async def confirm(
         "record_id": record_id,
         "record_label": item.label,
         "state_at_confirmation": item.state,
+        "record_revision": item.revision,
+        "superseded_confirmation_id": item.superseded_confirmation_id,
         "reason": text,
+        "source_reference": source[:500],
         "confirmed_by": user_id,
+        "confirmer": dict(confirmer or {}),
         "confirmed_at": now_utc(),
         "status": "active",
     }

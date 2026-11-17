@@ -27,12 +27,15 @@ describe("Confirming which contract evidence belongs to (OD-1)", () => {
     const send = screen.getByRole("button", { name: "Confirm for this contract" });
     expect(send).toBeDisabled();
     await userEvent.type(screen.getByLabelText(/How do you know/), "Main works site, chainage 12+400.");
+    expect(send).toBeDisabled(); // the source is required too
+    await userEvent.type(screen.getByLabelText(/Source that shows the contract/), "SI/114");
     await userEvent.click(send);
     await waitFor(() =>
       expect(api.confirmEvidenceContract).toHaveBeenCalledWith("c1", {
         record_kind: "hindrance",
         record_id: "HN",
         reason: "Main works site, chainage 12+400.",
+        source_reference: "SI/114",
       })
     );
     expect(reload).toHaveBeenCalled();

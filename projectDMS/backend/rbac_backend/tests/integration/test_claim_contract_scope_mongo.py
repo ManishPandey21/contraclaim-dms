@@ -21,6 +21,7 @@ import pytest
 from bson import ObjectId
 
 from rbac_backend.migrations.v20261120_0001_arbitration_matrix_origin_unique import upgrade as apply_m05
+from rbac_backend.tests.integration.test_claim_privileged_rbac_mongo import _add_actor
 from rbac_backend.tests.integration.test_claim_routes_real_deps_mongo import CLAIM, _env
 from rbac_backend.tests.integration.test_claim_signals_mongo import _hindrance
 from rbac_backend.tests.integration.test_variation_relationships_cl2_mongo import DOC_IN, DOC_IN_ID, DOC_OUT, DOC_OUT_ID, ORG_A, PROJ_A1
@@ -34,6 +35,9 @@ LINES = f"{BENCH}/heads/H1/quantum/lines"
 DOC_LINKS = f"/api/entities/claim/{CLAIM}/document-links:batch"
 PREVIEW = "/api/claims/escalation/preview"
 RUN = "/api/claims/escalation/run"
+# OD-1 (2026-11-17): the confirmer's role. It reads the claim and its documents and holds the
+# confirmation duty by name; it does not edit the claim or link evidence.
+CONFIRMER = ["dms.claim.view", "dms.document.view", "dms.claim.evidence.confirm_contract"]
 
 
 def _run(coro: Any) -> Any:
@@ -363,12 +367,14 @@ def test_evidence_not_confirmed_against_the_contract_master_waits_for_a_person(m
 
 
 def test_a_person_confirms_unidentified_evidence_audited_and_nothing_is_rewritten(monkeypatch) -> None:
-    """OD-1 option B: confirm, withdraw, RBAC, a mismatch cannot be confirmed, and escalation follows."""
+    """OD-1 as decided 2026-11-17: an explicitly granted, independent confirmer, a reason and a
+    source, bound to the record's revision; a mismatch cannot be confirmed; escalation follows."""
 
     async def scenario() -> None:
         async with _env(monkeypatch) as env:
             await apply_m05(env.db, False)
             await _open(env, "primary")
+            await _add_actor(env.db, "confirmer", "role-confirmer", CONFIRMER)
             await env.db.contract_master.insert_one(
                 {"_id": "cm-primary", "organization_id": ORG_A, "project_id": PROJ_A1, "contract_id": "primary"}
             )
@@ -377,50 +383,67 @@ def test_a_person_confirms_unidentified_evidence_audited_and_nothing_is_rewritte
                 assert (await _link(env, "hindrance", target)).status_code == 200
             case_id = await _case(env)
             EVIDENCE = f"/api/claims/{CLAIM}/evidence-contract"
+            body = {"record_kind": "hindrance", "record_id": "HN",
+                    "reason": "The hindrance is at the main works site, chainage 12+400.",
+                    "source_reference": "Site instruction SI/114, main works"}
 
             review = (await env.call("GET", "project_admin", EVIDENCE)).json()
             assert [item["record_id"] for item in review["unconfirmed"]] == ["HN"] and review["blocking"]
 
-            # Reading is not confirming: a viewer cannot confirm (the claim's edit permission is needed).
-            await env.db.users.update_one({"_id": "user-project_admin"}, {"$set": {"roles": ["viewer"]}})
-            denied = await env.call("POST", "project_admin", f"{EVIDENCE}/confirmations",
-                                    json={"record_kind": "hindrance", "record_id": "HN", "reason": "Site diary of the main works."})
-            assert denied.status_code == 403, denied.text[:300]
+            # Not by the claim's edit permission, nor through dms.admin: only by explicit grant.
+            for persona in ("org_admin", "project_admin"):
+                denied = await env.call("POST", persona, f"{EVIDENCE}/confirmations", json=body)
+                assert denied.status_code == 403, (persona, denied.text[:300])
 
-            short = await env.call("POST", "org_admin", f"{EVIDENCE}/confirmations",
-                                   json={"record_kind": "hindrance", "record_id": "HN", "reason": "yes"})
+            short = await env.call("POST", "confirmer", f"{EVIDENCE}/confirmations", json={**body, "reason": "yes"})
             assert short.status_code == 422 and _code(short) == "evidence_confirmation_reason_required"
-            # A verified record, and a record of another contract, cannot be "confirmed".
+            sourceless = await env.call("POST", "confirmer", f"{EVIDENCE}/confirmations", json={**body, "source_reference": ""})
+            assert sourceless.status_code == 422 and _code(sourceless) == "evidence_confirmation_source_required"
+
+            # The person who linked the record cannot confirm it.
+            await env.db.claim_head_links.update_many({"claim_id": CLAIM, "target_id": "HN"}, {"$set": {"created_by": "user-confirmer"}})
+            own = await env.call("POST", "confirmer", f"{EVIDENCE}/confirmations", json=body)
+            assert own.status_code == 403 and _code(own) == "evidence_confirmer_not_independent", own.text[:300]
+            await env.db.claim_head_links.update_many({"claim_id": CLAIM, "target_id": "HN"}, {"$set": {"created_by": "user-org_admin"}})
+
+            # A record of another contract cannot be "confirmed".
             await env.db.delay_events.update_one({"_id": "HX"}, {"$set": {"contract_id": "pkg-depot"}})
-            mismatch = await env.call("POST", "org_admin", f"{EVIDENCE}/confirmations",
-                                      json={"record_kind": "hindrance", "record_id": "HX", "reason": "It is ours, honestly."})
+            mismatch = await env.call("POST", "confirmer", f"{EVIDENCE}/confirmations",
+                                      json={**body, "record_id": "HX"})
             assert mismatch.status_code == 409 and _code(mismatch) == "evidence_confirmation_not_applicable"
             await env.db.delay_events.update_one({"_id": "HX"}, {"$set": {"contract_id": "primary"}})
 
-            confirmed = await env.call("POST", "org_admin", f"{EVIDENCE}/confirmations",
-                                       json={"record_kind": "hindrance", "record_id": "HN",
-                                             "reason": "The hindrance is at the main works site, chainage 12+400."})
+            confirmed = await env.call("POST", "confirmer", f"{EVIDENCE}/confirmations", json=body)
             assert confirmed.status_code == 200, confirmed.text[:300]
-            body = confirmed.json()
-            assert body["unconfirmed"] == [] and body["blocking"] is None
-            (item,) = body["confirmed"]
-            assert item["record_id"] == "HN" and item["confirmed_by"] == "user-org_admin" and item["state"] == "unidentified"
-            again = await env.call("POST", "org_admin", f"{EVIDENCE}/confirmations",
-                                   json={"record_kind": "hindrance", "record_id": "HN", "reason": "Confirming once more."})
-            assert again.status_code == 409 and _code(again) == "evidence_already_confirmed"
-
+            result = confirmed.json()
+            assert result["unconfirmed"] == [] and result["blocking"] is None
+            (item,) = result["confirmed"]
+            assert item["confirmed_by"] == "user-confirmer" and item["source_reference"] == body["source_reference"]
+            stored = await env.db.claim_evidence_contract_confirmations.find_one({"_id": item["confirmation_id"]})
+            assert stored["record_revision"] and stored["confirmer"]["id"] == "user-confirmer"
+            assert stored["contract_id"] == "primary" and stored["project_id"] == PROJ_A1
             audit = await env.db.audit_events.find_one({"action": "claim.evidence_contract_confirmed"})
-            assert audit and audit["actor_id"] == "user-org_admin" and audit["after"]["record_id"] == "HN"
+            assert audit["actor_id"] == "user-confirmer" and audit["after"]["source_reference"] == body["source_reference"]
+            assert audit["after"]["record_revision"] == stored["record_revision"]
             assert (await env.db.delay_events.find_one({"_id": "HN"})).get("contract_id") is None  # not rewritten
 
             preview = (await env.call("POST", "org_admin", PREVIEW, json={"claim_ids": [CLAIM], "case_id": case_id})).json()
-            assert not any("confirm" in item for item in preview["blockers"]), preview["blockers"]
+            assert not any("confirm" in entry for entry in preview["blockers"]), preview["blockers"]
 
-            # Withdrawn: escalation waits again, and the run itself refuses.
-            withdrawn = await env.call("POST", "org_admin", f"{EVIDENCE}/confirmations/{item['confirmation_id']}/withdraw",
+            # A material change to the record (its dates) and the confirmation no longer holds.
+            await env.db.delay_events.update_one({"_id": "HN"}, {"$set": {"end_date": datetime(2026, 4, 30)}})
+            changed = (await env.call("GET", "project_admin", EVIDENCE)).json()
+            (again,) = changed["unconfirmed"]
+            assert again["record_id"] == "HN" and again["superseded_confirmation_id"] == item["confirmation_id"]
+            assert changed["blocking"]
+            # The confirmation row itself is kept unchanged.
+            assert (await env.db.claim_evidence_contract_confirmations.find_one({"_id": item["confirmation_id"]}))["status"] == "active"
+            # Confirmed again against the new revision; then withdrawn: escalation waits and the run refuses.
+            second = (await env.call("POST", "confirmer", f"{EVIDENCE}/confirmations", json=body)).json()
+            (now,) = second["confirmed"]
+            withdrawn = await env.call("POST", "confirmer", f"{EVIDENCE}/confirmations/{now['confirmation_id']}/withdraw",
                                        json={"reason": "Chainage was wrong; this is the depot site."})
             assert withdrawn.status_code == 200 and withdrawn.json()["blocking"], withdrawn.text[:300]
-            assert (await env.db.claim_evidence_contract_confirmations.find_one({"_id": item["confirmation_id"]}))["status"] == "withdrawn"
             run = await env.call("POST", "org_admin", RUN,
                                  json={"claim_ids": [CLAIM], "case_id": case_id, "acknowledged_weak": [CLAIM]})
             assert run.status_code == 409 and _code(run) == "claim_evidence_contract_unconfirmed", run.text[:300]
@@ -447,8 +470,13 @@ def test_the_formal_submission_waits_for_confirmation(monkeypatch) -> None:
             assert view["can_export"] is False and "must confirm each one" in view["cannot_export_reason"]
             exported = await env.call("GET", "org_admin", f"/api/claims/{CLAIM}/submission/export?format=docx")
             assert exported.status_code == 409, exported.text[:300]
-            await env.call("POST", "org_admin", f"/api/claims/{CLAIM}/evidence-contract/confirmations",
-                           json={"record_kind": "document", "record_id": DOC_IN_ID, "reason": "Letter is on the main works file."})
+            await _add_actor(env.db, "confirmer", "role-confirmer", CONFIRMER)
+            confirmed = await env.call(
+                "POST", "confirmer", f"/api/claims/{CLAIM}/evidence-contract/confirmations",
+                json={"record_kind": "document", "record_id": DOC_IN_ID, "reason": "Letter is on the main works file.",
+                      "source_reference": "Main works correspondence register, entry 42"},
+            )
+            assert confirmed.status_code == 200, confirmed.text[:300]
             view = (await env.call("GET", "org_admin", f"/api/claims/{CLAIM}/submission")).json()
             assert view["unconfirmed_evidence"] == [] and "must confirm" not in (view["cannot_export_reason"] or "")
 

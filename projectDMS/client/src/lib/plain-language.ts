@@ -123,6 +123,10 @@ export const ERROR_CODE_MESSAGES = {
     "Some evidence does not show which contract it belongs to. A person who may edit the claim must confirm each record belongs to the claim's contract first.",
   evidence_confirmation_contract_required: "Set the claim's contract first; evidence is confirmed for that contract.",
   evidence_confirmation_reason_required: "Say how you know this record belongs to the claim's contract.",
+  evidence_confirmation_source_required:
+    "Name the source that shows which contract this record belongs to: a letter, drawing or register reference.",
+  evidence_confirmer_not_independent:
+    "The person who linked this record to the claim cannot also confirm its contract. Ask someone else who holds the authority.",
   evidence_already_confirmed: "This record is already confirmed for the claim's contract.",
   evidence_confirmation_not_applicable:
     "Only a record whose contract is unknown or not in the Contract Master can be confirmed. A record of another contract cannot support the claim.",
