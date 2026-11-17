@@ -247,3 +247,81 @@ def test_each_formula_line_carries_the_courts_caution_for_that_formula() -> None
 
 
 FORMULA_INPUTS_KEYS = ("hudson", "emden", "eichleay")
+
+
+# --------------------------------------------------------------------------- #
+# Published worked example: J. G. Zack, "Calculation and recovery of home office
+# overhead", PMI Annual Seminars & Symposium, Houston (2000). Owner-supplied PDF,
+# read 2026-11-17. One hypothetical case, worked by several formulas. Figures are
+# US dollars; the formulas are currency-neutral, so they are entered as given.
+#
+# The paper's convention, recovered from its own figures: the share (billings or
+# turnover ratio) is rounded to six decimal places, every money step and the daily
+# rate to whole dollars (half-up), and the amount is the rounded rate times the days.
+# Under it every Eichleay figure printed below is reproduced exactly. Without the
+# six-place ratio, step 1 comes to $5,832,784, not the printed $5,832,787.
+# --------------------------------------------------------------------------- #
+from rbac_backend.services.quantum_formulas import Rounding, steps  # noqa: E402
+
+PMI = Rounding(ratio_places=6, step_unit=Decimal("1"))
+PMI_DELAY_DAYS = 235  # "Owner-caused Delay 235 cd's"
+
+
+def test_pmi_eichleay_example_reproduced_with_its_rounding() -> None:
+    # "($76,866,128 ÷ $381,095,333) x $28,918,417 = $5,832,787"
+    # "($5,832,787 ÷ 655 cd's) = $8,905/cd"
+    # "$8,905 x 235 cd's = $2,092,675"
+    inputs = _inputs(contract_billings="76866128", total_billings="381095333", total_overhead="28918417", performance_days="655")
+    worked = steps("eichleay", inputs, PMI_DELAY_DAYS, PMI)
+    assert worked["share"] == Decimal("0.201698")
+    assert worked["allocable_overhead"] == Decimal("5832787")
+    assert worked["daily_rate"] == Decimal("8905")
+    assert worked["amount"] == Decimal("2092675")
+
+    # The product does not round on the way: the same inputs give $2,092,678.21.
+    assert compute_paise("eichleay", inputs, PMI_DELAY_DAYS) == 209_267_821
+    assert to_paise(steps("eichleay", inputs, PMI_DELAY_DAYS)["amount"]) == 209_267_821
+    assert steps("eichleay", inputs, PMI_DELAY_DAYS, Rounding(step_unit=Decimal("1")))["allocable_overhead"] == Decimal("5832784")
+
+
+@pytest.mark.parametrize(
+    ("label", "total_billings", "total_overhead", "days", "allocable", "rate", "amount"),
+    [
+        # Modified Eichleay, variation 1: original-period revenue and overhead, planned 365 days.
+        ("variation 1", "247711967", "16265000", "365", "5047095", "13828", "3249580"),
+        # Variation 2: "($76,866,128 ÷ $ 254,824,241) x $16,265,000 = $4,906,240"; "$13,442/cd"; "$3,158,870".
+        ("variation 2", "254824241", "16265000", "365", "4906240", "13442", "3158870"),
+    ],
+)
+def test_pmi_modified_eichleay_variations_reproduced(label, total_billings, total_overhead, days, allocable, rate, amount) -> None:
+    inputs = _inputs(contract_billings="76866128", total_billings=total_billings, total_overhead=total_overhead, performance_days=days)
+    worked = steps("eichleay", inputs, PMI_DELAY_DAYS, PMI)
+    assert (worked["allocable_overhead"], worked["daily_rate"], worked["amount"]) == (
+        Decimal(allocable), Decimal(rate), Decimal(amount)
+    ), label
+
+
+def test_pmi_hudson_and_emden_reproduced() -> None:
+    # Hudson: 7.0% bid overhead and profit, original contract $68,500,000 over 365 days.
+    # Printed "7.0% x ($68,500,000 x 365 cd's) = $13,137/cd" - the "x 365" is a misprint for
+    # "÷ 365" (the paper's own formula divides by the original contract period, and only
+    # division gives $13,137). "$13,137 x 235 cd's = $3,087,195".
+    hudson = steps("hudson", _inputs(tender_percentage="7.0", contract_sum="68500000", contract_period_days="365"), PMI_DELAY_DAYS, PMI)
+    assert (hudson["daily_rate"], hudson["amount"]) == (Decimal("13137"), Decimal("3087195"))
+    # Emden: total overhead and profit $37,156,795 on total revenue $381,095,333 (actual period);
+    # "($37,156,795/$381,095,333 ÷ 100) x ($68,500,000 ÷ 365 cd's) = $18,298/cd"; "$4,300,030".
+    emden = steps(
+        "emden",
+        _inputs(overhead_and_profit="37156795", turnover="381095333", contract_sum="68500000", contract_period_days="365"),
+        PMI_DELAY_DAYS, PMI,
+    )
+    assert (emden["daily_rate"], emden["amount"]) == (Decimal("18298"), Decimal("4300030"))
+
+
+def test_steps_without_rounding_agree_with_the_product_figure() -> None:
+    for formula, inputs in (
+        ("hudson", _inputs(tender_percentage="5", contract_sum="10000000", contract_period_days="365")),
+        ("emden", _inputs(overhead_and_profit="120000000", turnover="1500000000", contract_sum="500000000", contract_period_days="730")),
+        ("eichleay", _inputs(contract_billings="300000000", total_billings="2000000000", total_overhead="160000000", performance_days="500")),
+    ):
+        assert to_paise(steps(formula, inputs, 61)["amount"]) == compute_paise(formula, inputs, 61), formula

@@ -43,7 +43,7 @@ to take other work), or that the figures are evidenced. The quantum view marks
 every formula line as calculated, and two formula lines over the same days are
 locked as double recovery. Worked examples: hand-worked fixtures in
 tests/test_quantum_formulas.py; reproducing a published worked example is an
-open item in the ticket register (the PMI paper could not be fetched here).
+reproduced in tests/test_quantum_formulas.py (Zack, PMI 2000), with its rounding convention, via ``steps``.
 """
 
 from __future__ import annotations
@@ -174,6 +174,55 @@ def compute_paise(formula: str, inputs: Mapping[str, Any], delay_days: int) -> i
     else:
         raise ValueError(f"unknown formula: {formula}")
     return to_paise(amount)
+
+
+@dataclass(frozen=True)
+class Rounding:
+    """Where a worked calculation rounds on the way, if anywhere.
+
+    The product's own convention is the default: no intermediate rounding, the
+    final amount to the paisa (``compute_paise``). A published worked example may
+    round as it goes; ``steps`` reproduces it exactly when given its convention.
+    """
+
+    #: Decimal places the share (Eichleay billings ratio, Emden percentage) is rounded to.
+    ratio_places: Optional[int] = None
+    #: Unit each money step (allocable overhead, daily rate) is rounded to, e.g. Decimal("1").
+    step_unit: Optional[Decimal] = None
+
+
+def _r(value: Decimal, unit: Optional[Decimal]) -> Decimal:
+    return value.quantize(unit, rounding=ROUND_HALF_UP) if unit is not None else value
+
+
+def steps(formula: str, inputs: Mapping[str, Any], delay_days: int, rounding: Rounding = Rounding()) -> Dict[str, Decimal]:
+    """The formula's working, step by step, in the inputs' currency unit (rupees).
+
+    Returns the share (where the formula has one), the allocable overhead (Eichleay),
+    the daily rate and the amount. With the default ``Rounding`` the amount is exact
+    and ``to_paise(amount)`` equals ``compute_paise``. A worked example that rounds
+    each step is reproduced by passing its convention (tests/test_quantum_formulas.py,
+    the PMI fixture)."""
+    ratio_unit = Decimal(1).scaleb(-rounding.ratio_places) if rounding.ratio_places is not None else None
+    delay = Decimal(delay_days)
+    out: Dict[str, Decimal] = {}
+    if formula == "hudson":
+        rate = _r(_value(inputs, "tender_percentage") / 100 * _value(inputs, "contract_sum") / _value(inputs, "contract_period_days"), rounding.step_unit)
+    elif formula == "emden":
+        share = _r(_value(inputs, "overhead_and_profit") / _value(inputs, "turnover"), ratio_unit)
+        out["share"] = share
+        rate = _r(share * _value(inputs, "contract_sum") / _value(inputs, "contract_period_days"), rounding.step_unit)
+    elif formula == "eichleay":
+        share = _r(_value(inputs, "contract_billings") / _value(inputs, "total_billings"), ratio_unit)
+        out["share"] = share
+        allocable = _r(share * _value(inputs, "total_overhead"), rounding.step_unit)
+        out["allocable_overhead"] = allocable
+        rate = _r(allocable / _value(inputs, "performance_days"), rounding.step_unit)
+    else:
+        raise ValueError(f"unknown formula: {formula}")
+    out["daily_rate"] = rate
+    out["amount"] = _r(rate * delay, rounding.step_unit)
+    return out
 
 
 def delay_days(start: Optional[Any], end: Optional[Any]) -> Optional[int]:

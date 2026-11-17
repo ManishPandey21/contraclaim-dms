@@ -107,14 +107,64 @@ Proof of actual loss (Sections 55 and 73, Indian Contract Act):
    line locks if that record is unlinked (4B-24). Whether the record proves actual
    loss is a person's decision, not the calculation's.
 
-## 2. PMI, "Calculation and Recovery of Home Office Overhead"
+## 2. PMI: Zack, "Calculation and recovery of home office overhead" (2000)
 
-Owner-supplied URL: https://www.pmi.org/learning/library/calculation-recovery-home-office-overhead-8913
+Source read: the owner-supplied PDF of the PMI page (the web page itself answers
+automated requests with HTTP 403). As printed: "Zack, J. G. (2000). Calculation and
+recovery of home office overhead. Paper presented at Project Management Institute
+Annual Seminars & Symposium, Houston, TX." Conference paper dated 7 September 2000.
+The McDermott quotations in section 1 were also checked, word for word, against the
+owner-supplied PDF of the judgment.
 
-**Not read.** On 2026-11-17 the page returned HTTP 403 with PMI's own error page to
-both the fetch tool and a direct request from this environment (the site refuses
-non-browser clients). Fetching copies from other hosts was refused by this session's
-permission controls earlier the same day. Nothing from the paper is reproduced or
-relied on, and **the PMI Eichleay fixture is not added.** To close the gap: attach or
-paste the paper (or its worked-example page); the fixture will then reproduce its
-inputs, each intermediate value and its rounding exactly as printed.
+### The worked case and how it rounds
+
+The paper works one hypothetical case through eight formulas (figures in US dollars):
+contract billings in the actual period $76,866,128 (also "Total Contract Value (before
+claim)"); total firm revenue, actual period $381,095,333; company overhead, actual
+period $28,918,417; actual duration 655 calendar days; owner-caused delay 235 days;
+planned duration 365 days; original contract value $68,500,000; bid overhead and
+profit 7.0%; total overhead and profit, actual period $37,156,795.
+
+Its printed Eichleay working: "($76,866,128 ÷ $381,095,333) x $28,918,417 =
+$5,832,787", then "$8,905/cd", then "$8,905 x 235 cd's = $2,092,675".
+
+**Rounding convention, recovered from its figures.** The ratio is rounded to six
+decimal places (0.201698); each money step and the daily rate to whole dollars; the
+amount is the rounded daily rate times the days. This reproduces every Eichleay
+figure in the paper, including both Modified Eichleay variations, and its Hudson
+($13,137/day, $3,087,195) and Emden ($18,298/day, $4,300,030) results. Without the
+six-place ratio, step 1 is $5,832,784, not the printed $5,832,787.
+
+**Misprint noted.** The Hudson line is printed "7.0% x ($68,500,000 x 365 cd's) =
+$13,137/cd"; the paper's own formula divides by the original contract period, and
+only division gives $13,137.
+
+**The product's convention differs on purpose.** It does not round on the way and
+states the amount to the paisa: the same Eichleay inputs give 2,092,678.21, against
+the paper's 2,092,675. `quantum_formulas.steps` takes a `Rounding` so a worked
+example can be reproduced exactly; tests/test_quantum_formulas.py does so for the
+paper.
+
+### What the paper says about entitlement (summarised, with short quotations)
+
+- It presents the formulas as estimating, not accounting: what "is generally
+  presented as an accounting technique is obviously an estimating approach that
+  yields wildly different results, even when applied to the same case" (Eichleay
+  $2,092,675 against Emden $4,300,030 on the same facts).
+- Prerequisites it derives from US Federal decisions for unabsorbed overhead:
+  compensable (owner-caused) delay proven; a "reduction in the stream of income";
+  inability to take on new work during the delay (the unknown-duration rule); in
+  its summary rules also standby, and delay not arising from directed changes; it
+  notes "no recovery can be had when concurrent delay can be shown".
+- These are US Federal rules; the paper says most State courts had not adopted them.
+  They are not Indian law. McDermott (section 1) is the governing authority here.
+
+### What follows for the product
+
+- The Eichleay labels already follow the paper's terms: billings of this contract in
+  the actual period (before the claim), total company billings and overhead for the
+  same period, days of actual performance.
+- The calculation note and per-formula cautions stand: a formula gives an estimate;
+  entitlement (owner-caused delay, reduced income, inability to mitigate, no
+  concurrency) is decided separately, and the delay assessment's compensable days
+  are the days the line may use.
