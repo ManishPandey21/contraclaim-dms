@@ -63,6 +63,26 @@ async def _holds(policy: PolicyService, current_user: CurrentUser, permission: s
     )
 
 
+def _approver_rule(db, policy: PolicyService, claim: dict):
+    """The approver picker's own rule, read at the time it is asked (4B-26): a member of
+    the claim's project holding determination authority by name."""
+    pickers = PickerService(db, policy)
+
+    async def eligible(user_id: str) -> bool:
+        return await pickers.is_eligible(
+            user_id,
+            organization_id=str(claim.get("organization_id") or ""),
+            project_id=str(claim.get("project_id") or ""),
+            permission=Permissions.CLAIM_DETERMINE,
+        )
+
+    return eligible
+
+
+def _determinations(db, bench: ClaimBenchService, policy: PolicyService, claim: dict) -> ClaimDeterminations:
+    return ClaimDeterminations(db, bench, approver_rule=_approver_rule(db, policy, claim))
+
+
 async def _for_determination(
     claim_id: str,
     determination_id: str,
@@ -78,7 +98,7 @@ async def _for_determination(
     one received from the other side needs only the right to edit the claim.
     """
     claim = await _claim(claim_id, Permissions.CLAIM_VIEW, db, current_user, policy, selection, bench)
-    service = ClaimDeterminations(db, bench)
+    service = _determinations(db, bench, policy, claim)
     determination = await service._load(claim, determination_id)
     permission = Permissions.CLAIM_DETERMINE if determination.origin == "authored" else Permissions.CLAIM_EDIT
     await policy.authorize_document(current_user, permission, claim, resource_type="claim")
@@ -116,7 +136,7 @@ async def list_claim_determinations(
 ):
     """Determinations of a claim: those made here and those received from the other side."""
     claim = await _claim(claim_id, Permissions.CLAIM_VIEW, db, current_user, policy, selection, bench)
-    return await ClaimDeterminations(db, bench).list(
+    return await _determinations(db, bench, policy, claim).list(
         claim,
         holds_authority=await _holds(policy, current_user, Permissions.CLAIM_DETERMINE, claim),
         viewer_id=_user_id(current_user),
@@ -163,7 +183,7 @@ async def get_claim_determination(
     selection: ActiveScope = Depends(active_scope),
 ):
     claim = await _claim(claim_id, Permissions.CLAIM_VIEW, db, current_user, policy, selection, bench)
-    return await ClaimDeterminations(db, bench).get(claim, determination_id, _user_id(current_user))
+    return await _determinations(db, bench, policy, claim).get(claim, determination_id, _user_id(current_user))
 
 
 @router.put(
@@ -217,20 +237,27 @@ async def submit_claim_determination(
     selection: ActiveScope = Depends(active_scope),
 ):
     claim, service = await _for_determination(claim_id, determination_id, db, current_user, policy, selection, bench)
-    pickers = PickerService(db, policy)
-
-    async def reviewer_eligible(user_id: str) -> bool:
-        # The approver picker's own rule: a project member holding determination authority by name.
-        return await pickers.is_eligible(
-            user_id,
-            organization_id=str(claim.get("organization_id") or ""),
-            project_id=str(claim.get("project_id") or ""),
-            permission=Permissions.CLAIM_DETERMINE,
-        )
-
     return await service.submit(
-        claim, determination_id, payload, _user_id(current_user), reviewer_eligible=reviewer_eligible
+        claim, determination_id, payload, _user_id(current_user), reviewer_eligible=_approver_rule(db, policy, claim)
     )
+
+
+@router.post("/claims/{claim_id}/determinations/{determination_id}/reassign", response_model=DeterminationView)
+@handle_exceptions
+async def reassign_claim_determination(
+    claim_id: str,
+    determination_id: str,
+    payload: DeterminationSubmitRequest,
+    db=Depends(get_db),
+    bench: ClaimBenchService = Depends(get_bench),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
+):
+    """Send a determination in review to another approver, only when its reviewer no longer
+    holds determination authority on the project (4B-26)."""
+    claim, service = await _for_determination(claim_id, determination_id, db, current_user, policy, selection, bench)
+    return await service.reassign(claim, determination_id, payload, _user_id(current_user))
 
 
 @router.post("/claims/{claim_id}/determinations/{determination_id}/approve", response_model=DeterminationView)
@@ -247,7 +274,7 @@ async def approve_claim_determination(
 ):
     """Approve a determination. Never by a person who made its findings."""
     claim = await _claim(claim_id, Permissions.CLAIM_DETERMINE, db, current_user, policy, selection, bench)
-    return await ClaimDeterminations(db, bench).approve(claim, determination_id, payload, _user_id(current_user))
+    return await _determinations(db, bench, policy, claim).approve(claim, determination_id, payload, _user_id(current_user))
 
 
 @router.post("/claims/{claim_id}/determinations/{determination_id}/return", response_model=DeterminationView)
@@ -263,7 +290,7 @@ async def return_claim_determination(
     selection: ActiveScope = Depends(active_scope),
 ):
     claim = await _claim(claim_id, Permissions.CLAIM_DETERMINE, db, current_user, policy, selection, bench)
-    return await ClaimDeterminations(db, bench).send_back(claim, determination_id, payload, _user_id(current_user))
+    return await _determinations(db, bench, policy, claim).send_back(claim, determination_id, payload, _user_id(current_user))
 
 
 @router.post("/claims/{claim_id}/determinations/{determination_id}/record", response_model=DeterminationView)

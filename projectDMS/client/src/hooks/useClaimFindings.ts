@@ -12,6 +12,7 @@ import {
   fetchStrategyNote,
   fetchSubmission,
   generateStrategyNote,
+  reassignDetermination,
   reviseDetermination,
   saveStrategyNote,
   setHeadFinding,
@@ -70,8 +71,14 @@ export function useDeterminations(claimId: string) {
     "The determination could not be submitted",
     "Submitted for approval"
   );
+  const reassign = change(
+    (input: { id: string; version: number; reviewerId: string }) =>
+      reassignDetermination(claimId, input.id, input.version, input.reviewerId),
+    "The determination could not be sent to another approver",
+    "Sent to another approver"
+  );
   const revise = change((id: string) => reviseDetermination(claimId, id), "A new revision could not be started");
-  return { query, create, setFinding, act, submit, revise };
+  return { query, create, setFinding, act, submit, reassign, revise };
 }
 
 /** Privileged. Only mounted for a person who holds access to it; the server refuses anyone else. */

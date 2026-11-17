@@ -125,6 +125,9 @@ class DeterminationSubmitRequest(DeterminationVersionRequest):
     reviewer_id: str = Field(..., min_length=1)
 
 
+ApproverRule = Callable[[str], Awaitable[bool]]
+
+
 class HeadFigures(BaseModel):
     """What the record holds for a head, offered beside the finding. Never written into it."""
 
@@ -153,6 +156,12 @@ class DeterminationView(BaseModel):
     #: The viewer is the named reviewer of a determination in review: only they may
     #: approve it or send it back (D-13, 4B-26).
     may_decide: bool = False
+    #: In review, and the named reviewer still holds determination authority as a
+    #: member of the project, read now (4B-26). None when not in review.
+    reviewer_eligible: Optional[bool] = None
+    #: The viewer made or submitted it, and its reviewer has lost the authority:
+    #: they may send it to another approver.
+    may_reassign: bool = False
 
 
 class DeterminationsResponse(BaseModel):
@@ -278,9 +287,18 @@ def submit_blockers(determination: ClaimDetermination) -> List[str]:
 # Service
 # --------------------------------------------------------------------------- #
 class ClaimDeterminations:
-    def __init__(self, db: Any, bench: Any) -> None:
+    def __init__(self, db: Any, bench: Any, approver_rule: Optional[ApproverRule] = None) -> None:
+        """``approver_rule`` is the approver picker's own rule (a project member holding
+        determination authority by name; PickerService.is_eligible), read at the time of
+        each decision, not only when the reviewer was named (4B-26)."""
         self.db = db
         self.bench = bench
+        self.approver_rule = approver_rule
+
+    async def _approver_eligible(self, user_id: Optional[str]) -> bool:
+        if self.approver_rule is None:
+            raise RuntimeError("ClaimDeterminations needs the approver rule to decide or reassign")
+        return bool(user_id) and await self.approver_rule(str(user_id))
 
     @property
     def _collection(self) -> Any:
@@ -317,6 +335,10 @@ class ClaimDeterminations:
     ) -> DeterminationView:
         bench = self.bench._bench_of(claim)
         editable = determination.status in {"draft", "returned"}
+        reviewer_eligible: Optional[bool] = None
+        if determination.status == "in_review" and self.approver_rule is not None:
+            reviewer_eligible = await self._approver_eligible(determination.reviewer_id)
+        authors = {determination.created_by, determination.submitted_by}
         return DeterminationView(
             determination=determination,
             figures=figures,
@@ -327,7 +349,10 @@ class ClaimDeterminations:
             editable=editable,
             may_decide=bool(
                 viewer_id and determination.status == "in_review" and determination.reviewer_id == viewer_id
+                and reviewer_eligible
             ),
+            reviewer_eligible=reviewer_eligible,
+            may_reassign=bool(viewer_id and viewer_id in authors and reviewer_eligible is False),
             blockers=submit_blockers(determination) if editable else [],
         )
 
@@ -666,12 +691,61 @@ class ClaimDeterminations:
                 "Only the person this determination was sent to can approve it or send it back.",
             )
 
+    async def _require_still_approver(self, user_id: Optional[str]) -> None:
+        """The named reviewer must still be an approver when they decide (4B-26): a member
+        of the project holding determination authority by name, read now."""
+        if not await self._approver_eligible(user_id):
+            raise _refusal(
+                403, "determination_reviewer_no_longer_authorised",
+                "You can no longer approve or return this determination: you no longer hold determination "
+                "authority as a member of this project. The person who sent it can send it to another approver.",
+            )
+
+    async def reassign(
+        self, claim: Dict[str, Any], determination_id: str, request: DeterminationSubmitRequest, user_id: Optional[str]
+    ) -> DeterminationView:
+        """Send a determination in review to another approver, only when its reviewer no
+        longer holds the authority. The findings are not touched (4B-26)."""
+        determination = await self._load(claim, determination_id)
+        if determination.status != "in_review":
+            raise HTTPException(status_code=409, detail="Only a determination that is in review can be sent to another approver.")
+        if determination.version != request.version:
+            raise HTTPException(status_code=409, detail="This determination changed since you loaded it.")
+        if user_id is None or user_id not in {determination.created_by, determination.submitted_by}:
+            raise _refusal(
+                403, "determination_reassign_not_sender",
+                "Only the person who made or sent this determination can send it to another approver.",
+            )
+        await self._require_capacity(claim, determination)
+        if await self._approver_eligible(determination.reviewer_id):
+            raise _refusal(
+                409, "determination_reviewer_still_authorised",
+                "The approver this was sent to can still decide it. It can go to another approver only if "
+                "they lose determination authority on this project.",
+            )
+        authors = {determination.created_by, determination.submitted_by, user_id} | {
+            finding.decided_by for finding in determination.heads
+        }
+        if request.reviewer_id in authors:
+            raise HTTPException(status_code=422, detail="The reviewer must be someone other than the person who made the findings.")
+        if not await self._approver_eligible(request.reviewer_id):
+            raise _refusal(
+                422, "determination_reviewer_not_authorised",
+                "That person cannot approve this determination: the approver must be a member of the project "
+                "who holds determination authority.",
+            )
+        previous = determination.reviewer_id
+        determination.reviewer_id = request.reviewer_id
+        comment = (request.comment or "").strip() or f"Sent to another approver; {previous} no longer holds the authority."
+        return await self._transition(claim, determination, request.version, "reassigned", user_id, comment)
+
     async def approve(
         self, claim: Dict[str, Any], determination_id: str, request: DeterminationVersionRequest, user_id: Optional[str]
     ) -> DeterminationView:
         determination = await self._load(claim, determination_id)
         self._guard_decider(determination, request.version, user_id)
         await self._require_capacity(claim, determination)
+        await self._require_still_approver(user_id)
         determination.status = "approved"
         determination.decided_by, determination.decided_at = user_id, now_utc()
         return await self._transition(claim, determination, request.version, "approved", user_id, request.comment)
@@ -682,6 +756,7 @@ class ClaimDeterminations:
         determination = await self._load(claim, determination_id)
         self._guard_decider(determination, request.version, user_id)
         await self._require_capacity(claim, determination)
+        await self._require_still_approver(user_id)
         if not (request.comment or "").strip():
             raise HTTPException(status_code=422, detail="Say what needs to change.")
         determination.status = "returned"

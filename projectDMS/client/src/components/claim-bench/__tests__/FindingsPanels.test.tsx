@@ -22,6 +22,7 @@ const api = vi.hoisted(() => ({
   setHeadFinding: vi.fn(),
   actOnDetermination: vi.fn(),
   submitDetermination: vi.fn(),
+  reassignDetermination: vi.fn(),
   reviseDetermination: vi.fn(),
   fetchSimulations: vi.fn(),
   simulateResponse: vi.fn(),
@@ -283,6 +284,38 @@ describe("Determinations", () => {
     mount(<DeterminationsPanel claimId="c1" readOnly={false} />);
     expect(await screen.findByRole("button", { name: /Approve/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Return for changes/ })).toBeInTheDocument();
+  });
+
+  it("when the reviewer loses the authority, nobody is offered Approve and the sender may send it on (4B-26)", async () => {
+    const lost = (mayReassign: boolean) =>
+      determinations({
+        items: [
+          determination(
+            { status: "in_review", reviewer_id: "user-2", created_by: "user-1", submitted_by: "user-1" },
+            { editable: false, blockers: [], may_decide: false, reviewer_eligible: false, may_reassign: mayReassign }
+          ),
+        ],
+      });
+    api.fetchDeterminations.mockResolvedValue(lost(false));
+    const first = mount(<DeterminationsPanel claimId="c1" readOnly={false} />);
+    expect(await screen.findByText(/no longer holds determination authority/)).toBeInTheDocument();
+    expect(screen.getByText(/The person who sent it can send it to another approver/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Send to another approver/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Approve/ })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Only they can approve it or send it back/)).not.toBeInTheDocument();
+    first.unmount();
+
+    api.fetchDeterminations.mockResolvedValue(lost(true));
+    api.reassignDetermination.mockResolvedValue(determination());
+    mount(<DeterminationsPanel claimId="c1" readOnly={false} />);
+    const send = await screen.findByRole("button", { name: /Send to another approver/ });
+    expect(send).toBeDisabled();
+    const approver = screen.getByLabelText("New approver");
+    await waitFor(() => expect(within(approver).getByRole("option", { name: "Vikram Nair" })).toBeInTheDocument());
+    expect(within(approver).queryByRole("option", { name: "Asha Rao" })).not.toBeInTheDocument();
+    await userEvent.selectOptions(approver, "user-2");
+    await userEvent.click(send);
+    await waitFor(() => expect(api.reassignDetermination).toHaveBeenCalledWith("c1", "det-1", 2, "user-2"));
   });
 
   it("shows an approved determination read-only and offers a revision, not an edit", async () => {

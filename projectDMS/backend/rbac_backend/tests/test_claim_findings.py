@@ -127,7 +127,7 @@ def _refused(exc: pytest.ExceptionInfo, status: int, *fragments: str) -> None:
 
 
 async def _draft(db: FakeDB, service: ClaimBenchService, user: str = USER):
-    determinations = ClaimDeterminations(db, service)
+    determinations = ClaimDeterminations(db, service, approver_rule=_only_reviewer)
     view = await determinations.create(
         await _claim(db), DeterminationCreateRequest(origin="authored"), user, holds_authority=True
     )
@@ -326,7 +326,7 @@ async def test_only_one_determination_is_prepared_at_a_time() -> None:
 async def test_a_received_determination_is_tied_to_its_document_and_is_not_an_authored_one() -> None:
     db, service, _ = _setup(capacity="contractor")
     await service.open(await _claim(db), USER)
-    determinations = ClaimDeterminations(db, service)
+    determinations = ClaimDeterminations(db, service, approver_rule=_only_reviewer)
 
     async def _receive(**over: Any):
         request = {"origin": "received", "issued_by": "engineer", "source_document_id": "doc-1", "reference": "ENG/DET/7", **over}

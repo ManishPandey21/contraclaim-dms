@@ -79,6 +79,20 @@ export async function submitDetermination(
   return data;
 }
 
+/** Send a determination in review to another approver: only when its reviewer no longer holds the authority (4B-26). */
+export async function reassignDetermination(
+  claimId: string,
+  determinationId: string,
+  version: number,
+  reviewerId: string
+): Promise<DeterminationView> {
+  const { data } = await api.post<DeterminationView>(`${one(claimId, determinationId)}/reassign`, {
+    version,
+    reviewer_id: reviewerId,
+  });
+  return data;
+}
+
 export async function reviseDetermination(claimId: string, determinationId: string): Promise<DeterminationView> {
   const { data } = await api.post<DeterminationView>(`${one(claimId, determinationId)}/revise`);
   return data;

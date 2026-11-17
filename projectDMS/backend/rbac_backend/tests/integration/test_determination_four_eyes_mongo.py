@@ -27,7 +27,7 @@ import pytest
 
 from rbac_backend.tests.integration.test_claim_privileged_rbac_mongo import _add_actor
 from rbac_backend.tests.integration.test_claim_routes_real_deps_mongo import CLAIM, _env
-from rbac_backend.tests.integration.test_variation_relationships_cl2_mongo import ORG_B, PROJ_A1
+from rbac_backend.tests.integration.test_variation_relationships_cl2_mongo import ORG_B, PROJ_A1, PROJ_A2
 
 pytestmark = pytest.mark.integration
 
@@ -179,5 +179,108 @@ def test_every_write_re_reads_the_party_the_project_acts_for(monkeypatch) -> Non
             back = await env.call("POST", "reviewer", f"{BASE}/{det['_id']}/return",
                                   json={"version": det["version"], "comment": "Days not explained."})
             assert back.status_code == 409 and _code(back) == "determination_capacity_changed", back.text[:300]
+
+    _run(scenario())
+
+
+# --------------------------------------------------------------------------- #
+# Correction (owner review 2026-11-17): the reviewer's membership, authority and
+# the project's capacity are read when they decide, not only when they were named.
+# --------------------------------------------------------------------------- #
+async def _in_review(env: Any) -> Dict[str, Any]:
+    await _prepared(env)
+    det = await _decided_draft(env)
+    return (await _ok(await _submit(env, det, "user-reviewer")))["determination"]
+
+
+async def _unchanged(env: Any, det: Dict[str, Any]) -> None:
+    stored = await env.db.claim_determinations.find_one({"_id": det["_id"]})
+    assert stored["status"] == "in_review" and stored.get("decided_by") is None
+    assert stored["reviewer_id"] == det["reviewer_id"] and stored["version"] == det["version"]
+
+
+def test_a_reviewer_who_loses_the_authority_cannot_decide_and_the_sender_can_send_it_on(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            det = await _in_review(env)
+            await env.db.roles.update_one({"_id": "role-reviewer"}, {"$set": {"permissions": ["dms.claim.view"]}})
+            for action, body in (("approve", {}), ("return", {"comment": "Days not explained."})):
+                refused = await env.call("POST", "reviewer", f"{BASE}/{det['_id']}/{action}",
+                                         json={"version": det["version"], **body})
+                assert refused.status_code == 403, (action, refused.text[:300])
+            await _unchanged(env, det)
+
+            listed = (await _ok(await env.call("GET", "author", BASE)))["items"][0]
+            assert listed["reviewer_eligible"] is False and listed["may_reassign"] is True
+            # Not the sender: the colleague may not move it.
+            moved = await env.call("POST", "colleague", f"{BASE}/{det['_id']}/reassign",
+                                   json={"version": det["version"], "reviewer_id": "user-colleague"})
+            assert moved.status_code == 403 and _code(moved) == "determination_reassign_not_sender", moved.text[:300]
+            # To someone without the authority: refused; to the colleague: done.
+            refused = await env.call("POST", "author", f"{BASE}/{det['_id']}/reassign",
+                                     json={"version": det["version"], "reviewer_id": "user-reviewer"})
+            assert refused.status_code == 422 and _code(refused) == "determination_reviewer_not_authorised"
+            moved = await _ok(await env.call("POST", "author", f"{BASE}/{det['_id']}/reassign",
+                                             json={"version": det["version"], "reviewer_id": "user-colleague"}))
+            det = moved["determination"]
+            assert det["reviewer_id"] == "user-colleague" and det["history"][-1]["action"] == "reassigned"
+            assert det["heads"][0]["result"] == "partial"  # the findings are not touched
+            approved = await _ok(await env.call("POST", "colleague", f"{BASE}/{det['_id']}/approve",
+                                                json={"version": det["version"]}))
+            assert approved["determination"]["decided_by"] == "user-colleague"
+
+    _run(scenario())
+
+
+def test_a_reviewer_who_leaves_the_project_or_becomes_a_service_account_cannot_decide(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            det = await _in_review(env)
+            # Still holds the authority and passes the route's gate, but is no longer a person:
+            # only the decision-time approver rule refuses this one.
+            await env.db.users.update_one({"_id": "user-reviewer"}, {"$set": {"account_type": "service_account"}})
+            refused = await env.call("POST", "reviewer", f"{BASE}/{det['_id']}/approve", json={"version": det["version"]})
+            assert refused.status_code == 403, refused.text[:300]
+            assert _code(refused) == "determination_reviewer_no_longer_authorised"
+            listed = (await _ok(await env.call("GET", "reviewer", BASE)))["items"][0]
+            assert listed["may_decide"] is False and listed["reviewer_eligible"] is False
+            await _unchanged(env, det)
+
+            await env.db.users.update_one({"_id": "user-reviewer"}, {"$set": {"account_type": "client_user", "projects": []}})
+            refused = await env.call("POST", "reviewer", f"{BASE}/{det['_id']}/approve", json={"version": det["version"]})
+            assert refused.status_code == 403, refused.text[:300]
+            await _unchanged(env, det)
+
+            # Back on the project: the same reviewer decides, and reassignment is now refused.
+            await env.db.users.update_one({"_id": "user-reviewer"}, {"$set": {"projects": [PROJ_A1]}})
+            kept = await env.call("POST", "author", f"{BASE}/{det['_id']}/reassign",
+                                  json={"version": det["version"], "reviewer_id": "user-colleague"})
+            assert kept.status_code == 409 and _code(kept) == "determination_reviewer_still_authorised"
+            await _ok(await env.call("POST", "reviewer", f"{BASE}/{det['_id']}/approve", json={"version": det["version"]}))
+
+    _run(scenario())
+
+
+def test_stale_and_cross_project_attempts_are_refused(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            det = await _in_review(env)
+            stale = await env.call("POST", "reviewer", f"{BASE}/{det['_id']}/approve", json={"version": det["version"] - 1})
+            assert stale.status_code == 409, stale.text[:300]
+            await _unchanged(env, det)
+            # A member of another project of the same organisation, holding the authority there.
+            await _add_actor(env.db, "elsewhere", "role-elsewhere", AUTHORITY)
+            await env.db.users.update_one({"_id": "user-elsewhere"}, {"$set": {"projects": [PROJ_A2]}})
+            decided = await env.call("POST", "elsewhere", f"{BASE}/{det['_id']}/approve", json={"version": det["version"]})
+            assert decided.status_code in (403, 404), decided.text[:300]
+            moved = await env.call("POST", "author", f"{BASE}/{det['_id']}/reassign",
+                                   json={"version": det["version"], "reviewer_id": "user-elsewhere"})
+            assert moved.status_code == 409  # the reviewer is still an approver: nothing moves
+            await _unchanged(env, det)
+            # A second submission of the same draft version is stale.
+            again = await env.call("POST", "author", f"{BASE}/{det['_id']}/submit",
+                                   json={"version": det["version"] - 1, "reviewer_id": "user-colleague"})
+            assert again.status_code == 409, again.text[:300]
+            await _unchanged(env, det)
 
     _run(scenario())

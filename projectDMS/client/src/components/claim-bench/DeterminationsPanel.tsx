@@ -247,7 +247,7 @@ interface Person {
  * received from the other side and transcribed. Neither changes the claim.
  */
 const DeterminationsPanel: React.FC<Props> = ({ claimId, readOnly }) => {
-  const { query, create, setFinding, act, submit, revise } = useDeterminations(claimId);
+  const { query, create, setFinding, act, submit, reassign, revise } = useDeterminations(claimId);
   const [receiving, setReceiving] = useState(false);
   const [received, setReceived] = useState({ issued_by: "engineer", document: "", reference: "", date: "" });
   const [reviewer, setReviewer] = useState("");
@@ -274,7 +274,8 @@ const DeterminationsPanel: React.FC<Props> = ({ claimId, readOnly }) => {
   if (query.isLoading) return <p className="p-4 text-sm text-muted-foreground">Loading determinations…</p>;
   if (!data) return <p role="alert" className="p-4 text-sm text-destructive">Determinations could not be loaded.</p>;
 
-  const busy = create.isPending || setFinding.isPending || act.isPending || submit.isPending || revise.isPending;
+  const busy =
+    create.isPending || setFinding.isPending || act.isPending || submit.isPending || reassign.isPending || revise.isPending;
   const open = data.items.find((item) => item.determination.origin === "authored" && item.determination.status !== "approved");
   const otherSides = (["engineer", "employer"] as const).filter((party) => party !== data.perspective);
   const nameOf = (id?: string | null) => people.data?.find((person) => person.id === id)?.name || id || "";
@@ -391,10 +392,47 @@ const DeterminationsPanel: React.FC<Props> = ({ claimId, readOnly }) => {
           </footer>
         )}
 
-        {item.status === "in_review" && !view.may_decide && (
+        {item.status === "in_review" && !view.may_decide && view.reviewer_eligible !== false && (
           <p className="border-t pt-3 text-xs text-muted-foreground">
             With {nameOf(item.reviewer_id) || "its reviewer"} for approval. Only they can approve it or send it back.
           </p>
+        )}
+
+        {item.status === "in_review" && view.reviewer_eligible === false && (
+          <footer className="space-y-2 border-t pt-3">
+            <p role="status" className="text-xs text-amber-700 dark:text-amber-400">
+              {nameOf(item.reviewer_id) || "Its reviewer"} no longer holds determination authority on this project, so
+              cannot approve it or send it back.
+              {view.may_reassign ? " You can send it to another approver; the findings stay as they are." : " The person who sent it can send it to another approver."}
+            </p>
+            {view.may_reassign && !readOnly && (
+              <div className="flex items-end gap-2">
+                <div className="min-w-56 space-y-1">
+                  <UserPicker
+                    projectId={data.project_id ?? ""}
+                    permission="dms.claim.determine"
+                    label="New approver"
+                    hint="People on this project who hold determination authority, other than whoever made the findings."
+                    value={reviewer}
+                    onChange={(userId) => setReviewer(userId)}
+                    excludeIds={[
+                      item.created_by ?? "",
+                      item.submitted_by ?? "",
+                      ...item.heads.map((finding) => finding.decided_by ?? ""),
+                    ].filter(Boolean)}
+                  />
+                </div>
+                <Button
+                  size="sm"
+                  disabled={busy || !reviewer}
+                  onClick={() => reassign.mutate({ id: item._id, version: item.version, reviewerId: reviewer })}
+                >
+                  <Send className="mr-2 h-4 w-4" aria-hidden="true" />
+                  Send to another approver
+                </Button>
+              </div>
+            )}
+          </footer>
         )}
 
         {item.status === "in_review" && view.may_decide && !readOnly && (

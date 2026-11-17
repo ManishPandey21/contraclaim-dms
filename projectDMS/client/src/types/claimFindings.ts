@@ -50,6 +50,7 @@ export interface ClaimDetermination {
   reviewer_id?: string | null;
   created_by?: string | null;
   created_at: string;
+  submitted_by?: string | null;
   decided_by?: string | null;
   decided_at?: string | null;
   history: { action: string; actor_id?: string | null; at: string; comment?: string | null }[];
@@ -75,6 +76,10 @@ export interface DeterminationView {
   blockers: string[];
   /** The viewer is the named reviewer of a determination in review (4B-26). */
   may_decide?: boolean;
+  /** In review: whether the named reviewer still holds the authority on this project, read now. */
+  reviewer_eligible?: boolean | null;
+  /** The viewer made or sent it and its reviewer has lost the authority: it can go to another approver. */
+  may_reassign?: boolean;
 }
 
 export interface DeterminationsResponse {

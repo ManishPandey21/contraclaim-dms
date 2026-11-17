@@ -110,6 +110,12 @@ export const ERROR_CODE_MESSAGES = {
   determination_capacity_changed:
     "The party this project acts for has changed since this determination was started, so it cannot be changed or decided here.",
   determination_superseded: "This revision has already been revised. Only the latest revision can be revised.",
+  determination_reviewer_no_longer_authorised:
+    "You no longer hold determination authority on this project, so you cannot approve or return this determination. The person who sent it can send it to another approver.",
+  determination_reassign_not_sender:
+    "Only the person who made or sent this determination can send it to another approver.",
+  determination_reviewer_still_authorised:
+    "The approver this was sent to can still decide it. It can go to another approver only if they lose determination authority on this project.",
   claim_contract_mismatch:
     "A record of another contract cannot support this claim. Only records of the claim's own contract can be linked or relied on.",
 } as const;
