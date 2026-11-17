@@ -38,7 +38,7 @@
 #   GATE6_BACKEND_IMAGE        use this image instead of building one. Its
 #                              org.opencontainers.image.revision label must
 #                              equal the checked-out commit.
-#   GATE6_EXPECTED_MIGRATIONS  catalogue size this run must find (default 28)
+#   GATE6_EXPECTED_MIGRATIONS  catalogue size this run must find (default 30)
 #   GATE6_MONGO_IMAGE          default mongo:8.0, the image CI uses
 #   GATE6_OUT_DIR              where step logs go (default: a new temp dir)
 #   GATE6_KEEP=1               leave the containers and network up afterwards
@@ -48,7 +48,7 @@
 set -Eeuo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-EXPECTED=${GATE6_EXPECTED_MIGRATIONS:-28}
+EXPECTED=${GATE6_EXPECTED_MIGRATIONS:-30}
 MONGO_IMAGE=${GATE6_MONGO_IMAGE:-mongo:8.0}
 # Lower case throughout: the name is also the server's hostname, and URL parsers
 # fold hostnames to lower case.
