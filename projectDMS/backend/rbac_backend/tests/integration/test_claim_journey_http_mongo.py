@@ -424,15 +424,12 @@ def test_the_claim_journey_from_start_to_the_pleading_gate_over_http(monkeypatch
                                         json={"trigger_type": "determination", "trigger_id": det["_id"]}))
             assert opened["created"] is True
             letter_path = f"/api/letters/{opened['letter_id']}/bench"
-            # GAP (reported): the client user who opened the letter cannot read its board. Reading needs
-            # drafting.request.view, which policy_service grants a client user only through a ContraClaim
-            # staff expert allocation; opening needs only drafting.request.create.
-            own_read = await env.call("GET", "eng_drafter", letter_path, project=ENGINEER)
-            assert own_read.status_code == 403 and "missing_expert_allocation" in own_read.text, own_read.text[:300]
-            superadmin = {**env.headers("superadmin", ENGINEER), "X-Org-Id": ORG_A}
-            letter_bench = _ok(await env.client.get(letter_path, headers=superadmin))
+            # JG-2 (fixed): the client drafter who opened the letter reads its board, read-only.
+            letter_bench = _ok(await env.call("GET", "eng_drafter", letter_path, project=ENGINEER))
+            assert letter_bench["read_only"] is True
             board_text = json.dumps(letter_bench)
             assert "10 days extension of time" in board_text and "INR 12,50,000.50" in board_text, board_text[:600]
+            _refused(await env.call("GET", "foreign_org_admin", letter_path, project=PROJ_B1))
             assert (await _anonymous(env, "POST", "/api/letters/bench/open", project=ENGINEER,
                                      json={"trigger_type": "determination", "trigger_id": det["_id"]})).status_code == 401
             _refused(await env.call("POST", "foreign_org_admin", "/api/letters/bench/open", project=PROJ_B1,

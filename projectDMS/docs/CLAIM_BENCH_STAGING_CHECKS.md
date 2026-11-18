@@ -40,7 +40,6 @@ The spec header lists every variable; none is ever printed. Summary:
 | `E2E_CJ_VERIFIER_*` | A second person (claim manage, clause read) who verifies the notice period; also the pleading approver |
 | `E2E_CJ_ENG_AUTHOR_*`, `E2E_CJ_ENG_REVIEWER_*` | Two people holding `dms.claim.determine` by name in the Engineer project (four-eyes) |
 | `E2E_CJ_ENG_DRAFTER_*` | Client drafter in the Engineer project (`drafting.request.create`) |
-| `E2E_CJ_STAFF_DRAFTER_*` | ContraClaim staff with an expert allocation for the Engineer project (reads the pre-filled Letter Bench; finding JG-2) |
 | `E2E_CJ_LEGAL_REVIEWER_*`, `E2E_CJ_QUANTUM_REVIEWER_*` | Two people with `dms.arbitration.approve` in the Contractor project |
 | `E2E_CJ_FOREIGN_*` | A user of another organisation |
 | Optional: `CONTRACLAIM_STAGING_E2E`, `E2E_CJ_RELEASE_SHA`, `E2E_RUN_ID`, `E2E_EVIDENCE_DIR`, `E2E_IGNORE_HTTPS_ERRORS` | Evidence switch and records |
@@ -66,7 +65,7 @@ The in-process test (CI) walks the same calls and asserts where each stops. The 
 | # | Finding | Severity | Effect on acceptance |
 |---|---|---|---|
 | JG-1 | No three-question start (`POST /claims/start`, 4B-20 not built); the journey starts with `POST /api/claims` | Plan gap | Step 1 differs from the plan |
-| JG-2 | A client drafter can open a Letter Bench pre-filled from a determination (`drafting.request.create`) but cannot read it: `GET /api/letters/{id}/bench` needs `drafting.request.view`, which a client user holds only through a staff expert allocation (403 `missing_expert_allocation`) | High (journey step 6 broken for the Engineer's own drafter) | RBAC decision needed (compare RU-1); not changed here |
+| JG-2 | A client drafter could open a Letter Bench pre-filled from a determination but got 403 `missing_expert_allocation` reading it. **Fixed 2026-11-18:** the person who opened a board may read it (board, skills, steps), read-only, while they still hold `drafting.request.create` in its organisation and project. `drafting.request.view` is not widened; no write is opened; nobody else gains a read | Was High; fixed | Step 6 reads the board as the Engineer's own drafter; no staff account needed |
 | JG-3 | Any claim-edit change on a locked board unlocked it silently, against D-22. **Fixed 2026-11-18:** every board change on a locked board is refused (409 `claim_board_locked`) until the audited unlock route reopens it with a reason | Was High; fixed | The journey test and the staging spec now expect the refusal, then the audited unlock |
 | JG-4 | A time head whose days rest on a linked hindrance escalates with no evidence, so the Statement of Claim reports "records supporting the amount or days pleaded" missing | Medium | Blocks a valid pleading for time heads |
 | JG-5 | An approved Statement of Claim cannot be reached without the model and a governed workflow: hand-written versions never pass validation; case readiness has seven open checks, two needing the jurisdiction agent; approval needs a run at `draft_approval_gate` with plan and legal-review receipts, and `ARBITRATION_ENGINE_ROLLOUT_MODE` is off | Blocks criterion 10 | Criterion 10 needs a staging run with the arbitration engine enabled for the canary tenant: an owner decision, outside Phase 4b's non-goals as written ("changing the arbitration engine, rollout mode") |

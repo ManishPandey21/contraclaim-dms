@@ -26,7 +26,7 @@ import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 
 from bson import ObjectId
 from fastapi import HTTPException
@@ -231,6 +231,40 @@ class LetterBenchService:
                 detail="This letter is no longer in drafting, so its positions and reply cannot be changed.",
             )
         return letter
+
+    async def _authorize_read(self, letter_id: str, current_user: Any) -> Tuple[Letter, bool]:
+        """Authorise a read. Returns the letter and whether it was read as its opener.
+
+        The rule is ``_authorize``'s. One addition (JG-2): the person who opened the
+        board may read it, read-only, while they can still request drafting in the
+        letter's organisation and project. A client drafter who opens a Letter Bench
+        from a determination would otherwise be refused the board they just made
+        (``drafting.request.view`` comes only with a staff expert allocation, and is
+        not widened). Nobody else gains a read, and no write changes.
+        """
+        try:
+            return await self._authorize(letter_id, current_user), False
+        except HTTPException as refused:
+            if refused.status_code != 403:
+                raise
+            user_id = _user_id(current_user)
+            board = await self.boards.find_one({"letter_id": str(letter_id)}, {"created_by": 1})
+            if not user_id or not board or str(board.get("created_by") or "") != user_id:
+                raise
+        letter = await self.drafts.letter_service.get_letter(letter_id)
+        if not letter:
+            raise HTTPException(status_code=404, detail="Letter not found")
+        await self.drafts.policy_service.authorize(
+            current_user,
+            "drafting.request.create",
+            resource_type="letter",
+            resource_id=str(letter_id),
+            organization_id=str(getattr(letter, "organization_id", "") or ""),
+            project_id=str(getattr(letter, "project_id", "") or ""),
+            letter_id=str(letter_id),
+        )
+        self.ensure_enabled(str(getattr(letter, "organization_id", "") or ""))
+        return letter, True
 
     @staticmethod
     def _ensure_idle(board: PositionBoard) -> None:
@@ -584,7 +618,7 @@ class LetterBenchService:
 
     # -------------------------------------------------------------------- get
     async def get(self, letter_id: str, current_user: Any) -> BenchResponse:
-        letter = await self._authorize(letter_id, current_user)
+        letter, by_opener = await self._authorize_read(letter_id, current_user)
         board = await self._load_board(letter_id)
         steps = await self._expire_abandoned(letter_id, await self._steps(letter_id), board)
         board.deadline = logic.refresh_deadline(board.deadline)
@@ -597,7 +631,8 @@ class LetterBenchService:
             steps=[SkillStepSummary(**step.model_dump()) for step in steps],
             gate=logic.compute_gate(board, steps),
             rollout_mode=self.availability(board.organization_id).rollout_mode,
-            read_only=status.lower() in READ_ONLY_STATUSES,
+            # The opener reads without drafting rights (JG-2): the board is shown read-only.
+            read_only=by_opener or status.lower() in READ_ONLY_STATUSES,
         )
 
     async def list_skills(self, letter_id: str, current_user: Any) -> List[Any]:
@@ -607,12 +642,12 @@ class LetterBenchService:
         who can see the chain on a letter can see which skills could be added
         to it. Names, versions and availability only; never skill text.
         """
-        await self._authorize(letter_id, current_user)
+        await self._authorize_read(letter_id, current_user)
         board = await self._load_board(letter_id)
         return await self.registry.list_effective(board.organization_id, board.project_id)
 
     async def get_step(self, letter_id: str, step_id: str, current_user: Any) -> SkillStep:
-        await self._authorize(letter_id, current_user)
+        await self._authorize_read(letter_id, current_user)
         doc = await self.steps.find_one({"letter_id": str(letter_id), "step_id": step_id})
         if not doc:
             raise HTTPException(status_code=404, detail="Skill step not found")

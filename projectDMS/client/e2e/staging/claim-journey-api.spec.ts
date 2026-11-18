@@ -27,9 +27,6 @@
  * 401, at several points.
  *
  * Known gaps the run measures rather than hides (reported in 4B-44):
- *   - a client drafter who opens the Letter Bench cannot read it (403
- *     `missing_expert_allocation`); the pre-filled board is read with a
- *     ContraClaim staff account holding an expert allocation;
  *   - a time head whose days rest on a linked hindrance escalates with no
  *     evidence, so the Statement of Claim reports it as missing records;
  *   - no endpoint exposes the backend RELEASE_SHA (see "build identifiers").
@@ -63,8 +60,6 @@
  *   E2E_CJ_ENG_AUTHOR_EMAIL / _PASSWORD   Engineer project: dms.claim.determine by name
  *   E2E_CJ_ENG_REVIEWER_EMAIL / _PASSWORD Engineer project: dms.claim.determine by name, another person
  *   E2E_CJ_ENG_DRAFTER_EMAIL / _PASSWORD  Engineer project: drafting.request.create (client user)
- *   E2E_CJ_STAFF_DRAFTER_EMAIL / _PASSWORD ContraClaim staff with an expert allocation (drafting.request.view)
- *                                         for the Engineer project
  *   E2E_CJ_LEGAL_REVIEWER_EMAIL / _PASSWORD   Contractor project: dms.arbitration.approve (granted legal_reviewer here)
  *   E2E_CJ_QUANTUM_REVIEWER_EMAIL / _PASSWORD Contractor project: dms.arbitration.approve (granted quantum_reviewer here)
  *   E2E_CJ_FOREIGN_EMAIL / _PASSWORD      a user of another organisation
@@ -109,7 +104,6 @@ const PEOPLE = [
   "ENG_AUTHOR",
   "ENG_REVIEWER",
   "ENG_DRAFTER",
-  "STAFF_DRAFTER",
   "LEGAL_REVIEWER",
   "QUANTUM_REVIEWER",
   "FOREIGN",
@@ -578,17 +572,15 @@ test.describe("Claim journey - deployed certification", () => {
     const drafter = await as(playwright, "ENG_DRAFTER", engineer());
     const opened = await ok(await post(drafter, "/api/letters/bench/open", { trigger_type: "determination", trigger_id: det._id }), "open Letter Bench");
     expect(opened.created).toBe(true);
-    // Recorded gap: the client drafter who opened it cannot read it.
-    const ownRead = await drafter.request.get(`/api/letters/${opened.letter_id}/bench`);
-    expect(ownRead.status(), await detail(ownRead)).toBe(403);
-    const staff = await as(playwright, "STAFF_DRAFTER", engineer());
-    const letter = await ok(await staff.request.get(`/api/letters/${opened.letter_id}/bench`), "staff read of the Letter Bench");
+    // JG-2 (fixed): the client drafter who opened it reads it, read-only.
+    const letter = await ok(await drafter.request.get(`/api/letters/${opened.letter_id}/bench`), "opener's read of the Letter Bench");
+    expect(letter.read_only).toBe(true);
     const text = JSON.stringify(letter);
     expect(text).toContain("10 days extension of time");
     expect(text).toContain("INR 12,50,000.50");
     const foreign = await outsider(playwright);
     refusedAcrossTenant(await post(foreign, "/api/letters/bench/open", { trigger_type: "determination", trigger_id: det._id }), "foreign open");
-    suite.evidence.determination = { id: det._id, letter_id: opened.letter_id, drafter_read: ownRead.status() };
+    suite.evidence.determination = { id: det._id, letter_id: opened.letter_id, drafter_read: 200 };
   });
 
   test("7. submission (Contractor project): composed with provenance", async ({ playwright }) => {

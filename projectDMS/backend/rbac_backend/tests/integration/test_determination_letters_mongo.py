@@ -185,3 +185,51 @@ def test_letters_are_refused_without_the_claim_or_from_a_superseded_revision(mon
             assert await env.db.letter_position_boards.count_documents({}) == 0
 
     _run(scenario())
+
+
+def test_the_drafter_who_opened_a_board_reads_it_read_only_and_nobody_else_gains_a_read(monkeypatch) -> None:
+    """JG-2. A client drafter opens a Letter Bench from a determination (``drafting.request.create``)
+    but reading a board needs ``drafting.request.view``, which a client user holds only through a
+    staff expert allocation: they were refused the board they had just made. The opener now reads
+    it, read-only, while they can still request drafting in its scope. ``drafting.request.view`` is
+    not widened, no write is opened, and nobody else gains a read."""
+
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            det = await _prepared(env, monkeypatch)
+            await _add_actor(env.db, "second_drafter", "role-second-drafter", DRAFTER)
+            opened = await _ok(await _open(env, "drafter", "information_request", det["_id"]))
+            bench = f"/api/letters/{opened['letter_id']}/bench"
+
+            read = await _ok(await env.call("GET", "drafter", bench))
+            assert read["read_only"] is True, "the opener reads without drafting rights"
+            items = read["board"]["trigger"]["information_items"]
+            assert [entry["item"] for entry in items][0] == "The handover correspondence"
+            skills = await env.call("GET", "drafter", f"{bench}/skills")
+            assert skills.status_code == 200, skills.text[:300]
+
+            # Reading is all the opener gains: every write still needs drafting rights.
+            for method, path, body in (
+                ("POST", f"{bench}/dissect", None),
+                ("PUT", f"{bench}/settings", {"board_version": read["board"]["board_version"]}),
+            ):
+                write = await env.call(method, "drafter", path, json=body)
+                assert write.status_code == 403, (path, write.status_code, write.text[:300])
+
+            # Someone else who could open it (and is told its letter id) does not gain a read.
+            again = await _ok(await _open(env, "second_drafter", "information_request", det["_id"]))
+            assert again["letter_id"] == opened["letter_id"] and again["created"] is False
+            for persona in ("second_drafter", "blind"):
+                refused = await env.call("GET", persona, bench)
+                assert refused.status_code == 403, (persona, refused.status_code, refused.text[:300])
+            foreign = await env.call("GET", "foreign_org_admin", bench)
+            assert foreign.status_code in (403, 404), foreign.text[:300]
+            anonymous = await env.client.get(bench)
+            assert anonymous.status_code == 401
+
+            # The read lasts only while the opener may still request drafting there.
+            await env.db.roles.update_one({"_id": "role-drafter"}, {"$set": {"permissions": ["dms.claim.view"]}})
+            lapsed = await env.call("GET", "drafter", bench)
+            assert lapsed.status_code == 403, lapsed.text[:300]
+
+    _run(scenario())
