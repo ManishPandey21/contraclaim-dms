@@ -11,6 +11,7 @@ Static paths here have two segments after ``/claims`` (``/claims/bench/...``,
 
 from __future__ import annotations
 
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -20,7 +21,7 @@ from ..core.database import get_db
 from ..core.permissions import Permissions
 from ..core.security import CurrentUser, build_scope_query, get_current_user
 from ..core.tenant_context import ActiveScope, active_scope
-from ..models.claim import ClaimRead
+from ..models.claim import ClaimCreate, ClaimRead, ClaimStatus
 from ..models.claim_notice import (
     NoticeCandidatesResponse,
     NoticeRequirement,
@@ -59,6 +60,8 @@ from ..services.claim_signals import ClaimSignal, ClaimSignalService, PotentialC
 from ..services.policy_service import PolicyService
 from ..utils.error_handler import BaseDomainError, handle_exceptions
 from ..utils.rate_limiter import RateLimiter
+from ..services.claim_contracts import resolve_for_new_claim, valid_contracts
+from ..services.claim_service import ClaimService
 from .claims import _load_authorized, _present_claim, get_policy
 
 router = APIRouter()
@@ -396,6 +399,118 @@ async def _claim(
     claim = await _load_authorized(claim_id, permission, db, current_user, policy, selection)
     bench.ensure_enabled(str(claim.get("organization_id") or "") or None)
     return claim
+
+
+class ClaimStartRequest(BaseModel):
+    """The three questions a claim starts from (D-24, 4B-20). Everything else is
+    captured on the board, or on the full form ("More details")."""
+
+    model_config = {"extra": "forbid"}
+
+    organization_id: Optional[str] = None
+    project_id: str = Field(..., min_length=1)
+    #: What happened: the event, in the claimant's words.
+    what_happened: str = Field(..., min_length=10, max_length=4000)
+    #: When the claiming party became aware of it. Notice periods normally run from here.
+    aware_on: date
+    #: Which contract; required only when the project has more than one (D-23).
+    contract_id: Optional[str] = Field(default=None, max_length=120)
+
+
+class ClaimStartResponse(BaseModel):
+    claim: ClaimRead
+    head_id: str
+    board_version: int
+
+
+def _title_from(text: str) -> str:
+    """A working title from what happened: its first sentence, cut at a word under 120 characters."""
+    first = " ".join(text.split())
+    for stop in (". ", "? ", "! ", "; "):
+        if stop in first:
+            first = first.split(stop, 1)[0]
+            break
+    first = first.rstrip(" .;:")
+    if len(first) > 120:
+        first = first[:120].rsplit(" ", 1)[0].rstrip(" ,;:") + "..."
+    return first
+
+
+@router.post(
+    "/claims/start",
+    response_model=ClaimStartResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+@handle_exceptions
+async def start_claim(
+    payload: ClaimStartRequest,
+    db=Depends(get_db),
+    bench: ClaimBenchService = Depends(get_bench),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
+):
+    """Start a claim from three questions: the claim (a draft) and its board with the first head (D-24)."""
+    await selection.require_project(payload.project_id, payload.organization_id)
+    organization_id = payload.organization_id or getattr(
+        current_user, "organization_id", None
+    )
+    # Nothing is created where the board cannot be opened.
+    bench.ensure_enabled(str(organization_id or "") or None)
+    if payload.aware_on > date.today():
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "claim_start_awareness_future",
+                "user_message": "The date you became aware cannot be in the future.",
+                "detail": None,
+            },
+        )
+    for permission in (Permissions.CLAIM_CREATE, Permissions.CLAIM_EDIT):
+        await policy.authorize(
+            current_user,
+            permission,
+            resource_type="claim",
+            organization_id=organization_id,
+            project_id=payload.project_id,
+        )
+    contract_id = resolve_for_new_claim(
+        payload.contract_id,
+        await valid_contracts(
+            db,
+            policy,
+            current_user,
+            organization_id=organization_id,
+            project_id=payload.project_id,
+        ),
+    )
+    happened = payload.what_happened.strip()
+    claims = ClaimService(db)
+    created = await claims.create(
+        ClaimCreate(
+            title=_title_from(happened),
+            description=happened,
+            status=ClaimStatus.DRAFT,
+            awareness_date=datetime(
+                payload.aware_on.year, payload.aware_on.month, payload.aware_on.day
+            ),
+            organization_id=organization_id,
+            project_id=payload.project_id,
+            contract_id=contract_id,
+        ),
+        current_user,
+    )
+    try:
+        opened = await bench.open(created, _user_id(current_user))
+    except Exception:
+        # A claim without its board is not what was asked for: take it back out.
+        await claims.delete(str(created.get("_id") or ""), current_user, before=created)
+        raise
+    return ClaimStartResponse(
+        claim=await _present_claim(created, db, current_user),
+        head_id=opened.bench.heads[0].head_id,
+        board_version=opened.bench.board_version,
+    )
 
 
 @router.get("/claims/{claim_id}/bench", response_model=ClaimBenchResponse)

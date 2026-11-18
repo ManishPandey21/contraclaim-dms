@@ -99,6 +99,7 @@ import ClaimContractField from "@/components/claims/ClaimContractField";
 import ClaimStatusPill from "@/components/claims/ClaimStatusPill";
 import ClaimSignalsStrip from "@/components/claim-bench/ClaimSignalsStrip";
 import EscalateDialog from "@/components/claim-bench/EscalateDialog";
+import StartClaimDialog, { type StartAnswers } from "@/components/claim-bench/StartClaimDialog";
 
 /** Claims the register offers for escalation; the server re-checks every one. */
 const NOT_ESCALATED = new Set(["closed", "agreed", "potential"]);
@@ -172,6 +173,8 @@ const ClaimsRegisterPage: React.FC = () => {
   const [typeFilter, setTypeFilter] = useState<string>("all");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [dialogOpen, setDialogOpen] = useState(false);
+  // 4B-20 (D-24): a new claim starts from three questions where the Claim Bench is on.
+  const [starting, setStarting] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingClaim, setEditingClaim] = useState<ClaimDTO | null>(null);
   // A claim with a Claim Bench board takes its amount and days from the heads (D-14, 4B-17).
@@ -235,11 +238,23 @@ const ClaimsRegisterPage: React.FC = () => {
     };
   }, []);
 
-  const openCreate = () => {
+  const openFullForm = (answers?: StartAnswers) => {
     setEditingId(null);
     setEditingClaim(null);
-    setForm({ ...EMPTY_FORM, project_id: selectedProjectId });
+    setForm({
+      ...EMPTY_FORM,
+      project_id: selectedProjectId,
+      ...(answers
+        ? { description: answers.whatHappened, awareness_date: answers.awareOn, contract_id: answers.contractId }
+        : {}),
+    });
     setDialogOpen(true);
+  };
+
+  // Three questions where the Claim Bench is on and a project is selected; the full form otherwise.
+  const openCreate = () => {
+    if (benchOn && selectedProjectId) setStarting(true);
+    else openFullForm();
   };
 
   const openEdit = (c: ClaimDTO) => {
@@ -650,6 +665,23 @@ const ClaimsRegisterPage: React.FC = () => {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {benchOn && selectedProjectId && (
+        <StartClaimDialog
+          open={starting}
+          projectId={selectedProjectId}
+          onOpenChange={setStarting}
+          onStarted={(result) => {
+            setStarting(false);
+            toast.success("Claim started");
+            navigate(`/claims/${result.claim.id}`);
+          }}
+          onMoreDetails={(answers) => {
+            setStarting(false);
+            openFullForm(answers);
+          }}
+        />
+      )}
 
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">

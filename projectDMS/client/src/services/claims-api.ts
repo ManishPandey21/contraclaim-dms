@@ -151,6 +151,28 @@ export async function fetchClaimContractOptions(projectId: string): Promise<Clai
   return data;
 }
 
+/** The three questions a claim starts from (4B-20, D-24). */
+export interface ClaimStartPayload {
+  project_id: string;
+  organization_id?: string;
+  what_happened: string;
+  /** yyyy-mm-dd */
+  aware_on: string;
+  contract_id?: string;
+}
+
+export interface ClaimStartResult {
+  claim: ClaimDTO;
+  head_id: string;
+  board_version: number;
+}
+
+/** Start a claim: the claim (a draft) and its board with the first head. */
+export async function startClaim(payload: ClaimStartPayload): Promise<ClaimStartResult> {
+  const { data } = await api.post("/claims/start", payload);
+  return { claim: normalize(data.claim), head_id: data.head_id, board_version: data.board_version };
+}
+
 export async function createClaim(payload: ClaimPayload): Promise<ClaimDTO> {
   const { data } = await api.post("/claims", payload);
   return normalize(data);

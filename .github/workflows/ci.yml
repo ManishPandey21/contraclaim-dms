@@ -267,6 +267,7 @@ jobs:
             backend/rbac_backend/tests/integration/test_skill_eval_runs_mongo.py
             backend/rbac_backend/tests/integration/test_pleaded_heads_end_to_end_mongo.py
             backend/rbac_backend/tests/integration/test_claim_journey_http_mongo.py
+            backend/rbac_backend/tests/integration/test_claim_start_mongo.py
           )
           python -m pytest -q -rs --junitxml=real-mongo-relationships.xml "${suites[@]}" \
             | tee real-mongo-relationships.log

@@ -242,11 +242,18 @@ def test_the_claim_journey_from_start_to_the_pleading_gate_over_http(monkeypatch
             monkeypatch.setenv("RELEASE_SHA", "379e98f")
             assert _ok(await env.call("GET", "org_admin", "/api/build"))["release_sha"] == "379e98f"
 
-            # 1. Start. There is no /claims/start: 4B-20's three-question start is not built.
+            # 1. Start. Three questions (4B-20, D-24): the claim, a draft, opens on its board with one head.
             assert _ok(await env.call("GET", "org_admin", "/api/claims/bench/availability"))["enabled"] is True
-            from rbac_backend.main import app
-
-            assert "/api/claims/start" not in app.openapi()["paths"]
+            started = _ok(await env.call("POST", "org_admin", f"{CLAIMS}/start", json={
+                "project_id": CONTRACTOR, "organization_id": ORG_A,
+                "what_happened": "Right of way for chainage 18+500 to 21+000 was not handed over. Piling stopped.",
+                "aware_on": "2026-03-04",
+            }), 201)
+            assert started["claim"]["status"] == "draft" and started["head_id"] == "H1"
+            first_board = _ok(await env.call("GET", "org_admin", f"{CLAIMS}/{started['claim']['_id']}/bench"))
+            assert [h["head_id"] for h in first_board["bench"]["heads"]] == ["H1"]
+            assert (await _anonymous(env, "POST", f"{CLAIMS}/start", json={})).status_code == 401
+            # The full form ("More details") remains; the journey's claim records its notice and figures there.
             created = _ok(await env.call("POST", "org_admin", CLAIMS, json={
                 "title": "Delayed handover of Site", "type": "eot", "status": "notified",
                 "description": "Right of way for chainage 12+000 to 18+500 not handed over.",

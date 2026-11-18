@@ -507,6 +507,11 @@ async function mockApi(page: Page, server: Server) {
       });
     }
     if (path === "/claims" && method === "GET") return json(route, server.claims);
+    if (path === "/claims/start" && method === "POST") {
+      // 4B-20: the claim and its board with the first head. The mocked board of CLAIM_A answers for it.
+      const started = claimRow(CLAIM_A, { title: "Access to the depot land was given late", status: "draft" });
+      return json(route, { claim: started, head_id: "H1", board_version: 0 }, 201);
+    }
     if (path === "/claims" && method === "POST") {
       const created = claimRow("65f0c0ffee000000000c1d04", {
         ...body,
@@ -665,24 +670,61 @@ async function mockApi(page: Page, server: Server) {
 // --------------------------------------------------------------------------- the journey
 
 test.describe("claim journey (4B-43)", () => {
-  test("step 1, Start: a new claim is filed under the chosen contract and joins the register", async ({ page }) => {
-    // The plan's three-question dialog with "More details" is not built: "New Claim" opens the
-    // full form. This step asserts the form as it is.
+  test("step 1, Start: three questions start the claim and open its board", async ({ page }) => {
     const server = makeServer();
     await mockApi(page, server);
     await page.goto("/claims");
     await expect(page.getByRole("heading", { name: "Claim Register" })).toBeVisible();
+
+    await page.getByRole("button", { name: "New Claim" }).click();
+    const dialog = page.getByRole("dialog", { name: "Start a claim" });
+    await expect(dialog.getByText("Three questions.", { exact: false })).toBeVisible();
+    const start = dialog.getByRole("button", { name: "Start claim" });
+    await expect(start).toBeDisabled();
+    await dialog.getByLabel("What happened?").fill("Access to the depot land was given late. Piling could not start.");
+    await dialog.getByLabel("When did you become aware of it?").fill("2026-03-05");
+    // The project has two contracts: one must be chosen, and nothing is guessed.
+    await expect(dialog.getByText("To start the claim, choose the contract.")).toBeVisible();
+    await expect(start).toBeDisabled();
+    await dialog.getByLabel("Contract", { exact: true }).selectOption({ label: "Systems and signalling contract" });
+    await expectNoRawIds(page);
+
+    await start.click();
+    const posted = callsTo(server, "POST", "/claims/start");
+    await expect.poll(() => posted.length).toBe(1);
+    expect(posted[0].body).toEqual({
+      project_id: PROJECT._id,
+      what_happened: "Access to the depot land was given late. Piling could not start.",
+      aware_on: "2026-03-05",
+      contract_id: CONTRACT_2,
+    });
+    expect(callsTo(server, "POST", "/claims")).toHaveLength(0);
+    // The new claim opens on its board.
+    await expect(page).toHaveURL(new RegExp(`/claims/${CLAIM_A}$`));
+    await expect(page.getByRole("navigation", { name: "Heads of claim" })).toBeVisible();
+    await expectNoRawIds(page);
+  });
+
+  test("step 1, More details: the full form, with the answers carried over, files the claim in the register", async ({ page }) => {
+    const server = makeServer();
+    await mockApi(page, server);
+    await page.goto("/claims");
     await expect(page.getByRole("row", { name: /Delayed handover of Site/ })).toBeVisible();
 
     await page.getByRole("button", { name: "New Claim" }).click();
+    const questions = page.getByRole("dialog", { name: "Start a claim" });
+    await questions.getByLabel("What happened?").fill("Access to the depot land was given late.");
+    await questions.getByLabel("When did you become aware of it?").fill("2026-03-05");
+    await questions.getByRole("button", { name: "More details" }).click();
+    await expect(questions).toBeHidden();
+
     const dialog = page.getByRole("dialog", { name: "New Claim" });
+    await expect(dialog.getByLabel("Became aware on")).toHaveValue("2026-03-05");
     await dialog.getByPlaceholder("e.g. EOT — monsoon delay").fill("Late access to the depot land");
     await dialog.getByRole("combobox").first().click();
     await page.getByRole("option", { name: "Extension of Time" }).click();
     await dialog.getByLabel("Event date").fill("2026-03-02");
-    await dialog.getByLabel("Became aware on").fill("2026-03-05");
     await dialog.getByLabel("Contract clauses relied on").fill("8.4, 20.1");
-    // The project has two contracts: one must be chosen, and nothing is guessed.
     const contract = dialog.getByLabel("Contract", { exact: true });
     await expect(contract).toHaveValue("");
     await expect(dialog.getByText("This project has more than one contract.", { exact: false })).toBeVisible();
@@ -698,6 +740,7 @@ test.describe("claim journey (4B-43)", () => {
     expect(posted[0].body).toEqual({
       title: "Late access to the depot land",
       type: "eot",
+      description: "Access to the depot land was given late.",
       currency: "INR",
       event_date: "2026-03-02T00:00:00Z",
       awareness_date: "2026-03-05T00:00:00Z",

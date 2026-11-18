@@ -74,6 +74,8 @@ const renderPage = () =>
 async function openNew() {
   renderPage();
   await userEvent.click(await screen.findByRole("button", { name: /New Claim/ }));
+  // With the Claim Bench on, a new claim starts from three questions (4B-20); the full form is "More details".
+  await userEvent.click(await screen.findByRole("button", { name: "More details" }));
   await userEvent.type(screen.getByPlaceholderText("e.g. EOT — monsoon delay"), "Late access to the depot");
 }
 

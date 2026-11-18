@@ -26,6 +26,10 @@ Nothing else about the Bench depends on the skill.
 
 **The approvals a skill needs are set by the server, not by its import (Phase 4b, 4B-04).** An import can add reviews to a manifest but never remove one. The claims, EOT, pleadings and hearing packs always need the technical and legal reviews they are bundled with. Every other skill version, including the next version of a published letter pack and any new key imported, needs at least the independent legal sign-off (`senior_legal_approver`). An approval is bound to the text (`content_hash`), the manifest (`policy_hash`) and the evaluation result including who ran it. A change to any of them makes the approval stale. A draft that has approvals cannot be re-imported under the same version number. An evaluation report may not set its own threshold below 0.85 (`SKILL_EVAL_MIN_THRESHOLD` may raise it, never lower it).
 
+## Starting a claim (4B-20, D-24)
+
+Where the Claim Bench is on and a project is selected, **New Claim** asks three questions: what happened, when you became aware of it, and which contract (asked only when the project has more than one). `POST /api/claims/start` creates the claim as a draft, with a working title taken from the first sentence, the account as its description and the awareness date, and opens its board with the first head; the person lands on the board. It needs both creating claims (`dms.claim.create`) and editing them (`dms.claim.edit`, to open the board), creates nothing where the Claim Bench is off, refuses an awareness date in the future and any other field, and takes the claim back out if the board cannot be opened. **More details** opens the full form with the answers filled in. Where the Claim Bench is off, New Claim is the full form.
+
 ## Rules worth knowing
 
 - **Which party.** A head is tested from the position of the party the project acts for (`Project.contractual_capacity`). If that is not set, the test is refused and the Bench asks. Set it on the Bench, or with `PATCH /api/projects/{id}/contractual-capacity` (`projects:update`).

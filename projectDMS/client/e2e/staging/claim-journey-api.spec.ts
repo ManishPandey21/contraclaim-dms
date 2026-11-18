@@ -10,7 +10,8 @@
  * It makes the same calls, in the same order, as the in-process journey test
  * `backend/rbac_backend/tests/integration/test_claim_journey_http_mongo.py`:
  *
- *   1. start      POST /api/claims (there is no /claims/start: 4B-20 is not built)
+ *   1. start      POST /api/claims/start (three questions: a draft claim and its board with
+ *                 one head), then the journey's claim through the full form, POST /api/claims
  *   2. heads      open the bench, add a head, test both heads (real model:
  *                 `degraded` must be false), decide, lock
  *   3. notice     record the notice requirement; a DIFFERENT person verifies it
@@ -117,6 +118,7 @@ const suite: {
   userIds: Partial<Record<Person, string>>;
   claimId?: string;
   engineerClaimId?: string;
+  startedClaimId?: string;
   hindranceId?: string;
   determinationId?: string;
   caseId?: string;
@@ -260,6 +262,10 @@ test.afterAll(async ({ playwright }) => {
       const removed = await admin.request.delete(`/api/arbitration/drafts/${suite.draftId}`, { headers: admin.headers() });
       if (!removed.ok()) failures.push(`draft ${suite.draftId}: ${removed.status()}`);
     }
+    if (suite.startedClaimId) {
+      const removed = await admin.request.delete(`/api/claims/${suite.startedClaimId}`, { headers: admin.headers() });
+      if (!removed.ok()) failures.push(`started claim ${suite.startedClaimId}: ${removed.status()}`);
+    }
     if (suite.engineerClaimId) {
       const eng = await as(playwright, "ORGADMIN", engineer());
       const removed = await eng.request.delete(`/api/claims/${suite.engineerClaimId}`, { headers: eng.headers() });
@@ -328,6 +334,21 @@ test.describe("Claim journey - deployed certification", () => {
         );
       }
     }
+    // 4B-20 (D-24): three questions start a draft claim and open its board with one head.
+    const started = await ok(
+      await post(admin, "/api/claims/start", {
+        project_id: contractor(),
+        what_happened: `Certification ${RUN_TAG}: access to the depot land was given late.`,
+        aware_on: "2026-03-04",
+      }),
+      "start a claim",
+      201
+    );
+    expect(started.claim.status).toBe("draft");
+    expect(started.head_id).toBe("H1");
+    suite.startedClaimId = String(started.claim._id ?? started.claim.id);
+    suite.evidence.started_claim = suite.startedClaimId;
+    // The full form ("More details") records the journey's claim with its notice and figures.
     const created = await ok(
       await post(admin, "/api/claims", {
         title: `${RUN_TAG} Delayed handover of Site`,
