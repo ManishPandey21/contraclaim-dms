@@ -12,6 +12,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.database import get_db
 from ..core.permissions import Permissions
@@ -25,10 +26,12 @@ from ..models.claim import (
     ClaimRead,
     ClaimStatus,
     ClaimStatusUpdate,
+    ClaimType,
     ClaimUpdate,
     allowed_next_statuses,
 )
 from ..services.approval_service import ApprovalError, ApprovalService
+from ..services.claim_type import record_claim_type
 from ..services.audit_event_service import AuditEventService
 from ..services.claim_assessment_service import ClaimAssessmentService
 from ..services.claim_contracts import (
@@ -397,7 +400,10 @@ async def create_claim(
     )
     legacy_ids = list(payload.linked_document_ids)
     claim_service = ClaimService(db)
-    created = await claim_service.create(payload, current_user)
+    # The full form confirms the type a person chose; a defaulted "other" stays
+    # provisional until someone confirms it (owner decision 2026-11-18).
+    chosen_type = "type" in payload.model_fields_set and payload.type != ClaimType.OTHER
+    created = await claim_service.create(payload, current_user, type_confirmed=chosen_type)
     if legacy_ids:
         try:
             await DocumentRelationshipService(db).replace_legacy_document_ids(
@@ -485,14 +491,28 @@ async def update_claim(
         if changes["status"] != claim.get("status"):
             expected = {"status": claim.get("status")}
     legacy_ids = changes.pop("linked_document_ids", None)
+    # A type the edit CHANGES is a person's choice: recorded as one, with its history and
+    # the notice decisions it withdraws. The same type sent back by the form confirms nothing.
+    new_type = changes.pop("type", None)
+    if new_type is not None and str(getattr(new_type, "value", new_type)) == str(
+        getattr(claim.get("type"), "value", claim.get("type")) or "other"
+    ):
+        new_type = None
+    notice_before = (await _present_claim(claim, db, current_user)).notice_assessment if new_type else None
     claim_service = ClaimService(db)
     updated = await claim_service.update(
         claim_id, changes, current_user, before=claim, expected=expected, clear=clear
     )
     if updated is None and expected:
         raise _status_conflict()
-    if updated and any(
-        key in changes and changes[key] != claim.get(key) for key in BENCH_FACT_FIELDS
+    if updated and new_type is not None:
+        updated = await record_claim_type(
+            db, updated, new_type, getattr(current_user, "id", None), via="edit",
+            notice_before=notice_before.model_dump(mode="json") if notice_before else None,
+        )
+    if updated and (
+        new_type is not None
+        or any(key in changes and changes[key] != claim.get(key) for key in BENCH_FACT_FIELDS)
     ):
         # The heads were tested against the dates and type as they were.
         updated = await mark_bench_tests_stale(db, updated) or updated
@@ -507,6 +527,60 @@ async def update_claim(
         updated = await claim_service.get(claim_id)
     return await _present_claim(updated or claim, db, current_user)
 
+
+
+class ClaimTypeDecision(BaseModel):
+    """A person's choice of claim type: confirms it, or changes it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    claim_type: ClaimType
+    reason: Optional[str] = Field(default=None, max_length=500)
+
+
+@router.post("/claims/{claim_id}/type", response_model=ClaimRead)
+@handle_exceptions
+async def confirm_claim_type(
+    claim_id: str,
+    payload: ClaimTypeDecision,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
+):
+    """Confirm the claim's type, or change it (owner decision 2026-11-18).
+
+    Until a person has chosen the type, the notice period recorded for it is not
+    treated as the contract's period for this claim. A change withdraws the notice
+    decisions made under the old type (kept in history) and marks the heads' tests
+    stale, so the notice is assessed and decided again.
+    """
+    claim = await _load_authorized(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection)
+    if claim.get("evidence_frozen_at"):
+        raise _refuse(
+            status.HTTP_409_CONFLICT,
+            "claim_evidence_frozen",
+            "This claim's record is frozen (it has been escalated to arbitration), so it cannot be edited.",
+        )
+    before = (await _present_claim(claim, db, current_user)).notice_assessment
+    changed = payload.claim_type.value != str(getattr(claim.get("type"), "value", claim.get("type")) or "other")
+    updated = await record_claim_type(
+        db, claim, payload.claim_type, getattr(current_user, "id", None), via="confirm", reason=payload.reason,
+        notice_before=before.model_dump(mode="json") if before else None,
+    )
+    if changed:
+        updated = await mark_bench_tests_stale(db, updated) or updated
+    await AuditEventService(db).emit(
+        action="claim.type_changed" if changed else "claim.type_confirmed",
+        actor_id=getattr(current_user, "id", None),
+        resource_type="claim",
+        resource_id=str(claim_id),
+        organization_id=claim.get("organization_id"),
+        project_id=claim.get("project_id"),
+        before={"type": claim.get("type"), "type_confirmed": claim.get("type_confirmed")},
+        after={"type": updated.get("type"), "type_confirmed": True, "reason": payload.reason},
+    )
+    return await _present_claim(updated, db, current_user)
 
 @router.post("/claims/{claim_id}/status", response_model=ClaimRead)
 @handle_exceptions

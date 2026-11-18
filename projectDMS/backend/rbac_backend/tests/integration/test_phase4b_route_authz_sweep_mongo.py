@@ -74,6 +74,8 @@ PHASE_4B_ROUTES: Tuple[Tuple[str, str, str], ...] = (
     ("POST", "/api/claims/notice/requirements", "policy_service"),
     ("POST", "/api/claims/notice/requirements/{requirement_id}/verify", "policy_service"),
     ("POST", "/api/claims/start", "policy_service"),
+    # Added after the diff: claim-type confirmation (owner decision 2026-11-18).
+    ("POST", "/api/claims/{claim_id}/type", "policy_service"),
     ("POST", "/api/claims/{claim_id}/bench/heads", "auth_only"),
     ("POST", "/api/claims/{claim_id}/bench/heads/{head_id}/delay/links", "policy_service"),
     ("POST", "/api/claims/{claim_id}/bench/heads/{head_id}/delay/links/{link_id}/remove", "auth_only"),

@@ -57,10 +57,15 @@ def assess_notice(
     claim_type = str(getattr(claim.get("type"), "value", claim.get("type")) or "other")
     configured = (organisation_windows or {}).get(claim_type)
     source: Union[str, None]
+    # A provisional claim type (the three-question start, a defaulted "other") cannot
+    # make a requirement recorded for that type the contract's period for this claim.
+    type_confirmed = claim.get("type_confirmed") is not False
     if requirement is not None:
         period_days = int(requirement.period_days)
         source = (
-            "contract_verified" if requirement.verification == "verified" else "contract_unverified"
+            "contract_verified"
+            if requirement.verification == "verified" and type_confirmed
+            else "contract_unverified"
         )
     elif isinstance(configured, int) and configured > 0:
         period_days, source = configured, "organisation_rule"
@@ -75,6 +80,7 @@ def assess_notice(
         period_days=period_days,
         period_source=source,  # type: ignore[arg-type]
         period_verified=source == "contract_verified",
+        claim_type_confirmed=type_confirmed,
         clause_no=getattr(requirement, "clause_no", None),
         requirement_id=getattr(requirement, "id", None),
         due_date=_midnight(due_day),

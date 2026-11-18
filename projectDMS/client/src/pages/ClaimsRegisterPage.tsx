@@ -88,6 +88,7 @@ import { useRegisterProjectScope } from "@/hooks/useRegisterProjectScope";
 import { scopeRefusalMessage } from "@/services/active-scope";
 import {
   CLAIM_STATUS_LABEL,
+  CLAIM_TYPES,
   NOTICE_BADGE_VARIANT,
   apiErrorDetail,
   buildSlaStateMap,
@@ -107,15 +108,6 @@ const canEscalate = (claim: ClaimDTO) => !claim.evidence_frozen_at && !NOT_ESCAL
 import { useClaimBenchOn } from "@/hooks/useClaimBenchOn";
 import { formatCrore, formatDateIN, formatINR, fromDateInput, toDateInput } from "@/lib/format-in";
 
-const CLAIM_TYPES: { value: ClaimType; label: string }[] = [
-  { value: "eot", label: "Extension of Time" },
-  { value: "variation", label: "Variation" },
-  { value: "payment_ipc", label: "Payment / IPC" },
-  { value: "loss_expense", label: "Loss & Expense" },
-  { value: "acceleration", label: "Acceleration" },
-  { value: "defect", label: "Defect" },
-  { value: "other", label: "Other" },
-];
 
 const CLAIM_STATUSES: { value: ClaimStatus; label: string }[] = [
   { value: "potential", label: "Potential" },

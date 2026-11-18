@@ -11,14 +11,14 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { claimBenchKeys } from "@/hooks/useClaimBench";
 import { errorMessage } from "@/hooks/useLetterBench";
-import { NOTICE_BADGE_VARIANT, describeNotice } from "@/lib/claims-helpers";
+import { CLAIM_TYPES, NOTICE_BADGE_VARIANT, claimTypeLabel, describeNotice } from "@/lib/claims-helpers";
 import { formatDateIN } from "@/lib/format-in";
 import {
   fetchNoticeCandidates,
   setNoticeRequirement,
   verifyNoticeRequirement,
 } from "@/services/claim-bench-api";
-import type { NoticeAssessment } from "@/services/claims-api";
+import { confirmClaimType, type ClaimType, type NoticeAssessment } from "@/services/claims-api";
 import type { NoticePeriodCandidate, NoticeRequirement, NoticeRequirementInput } from "@/types/claimBench";
 
 interface Props {
@@ -45,6 +45,7 @@ const TONE_BORDER = {
 const NoticeClockCard: React.FC<Props> = ({ claimId, claimType, projectId, assessment, requirement, readOnly }) => {
   const [open, setOpen] = useState(false);
   const summary = describeNotice(assessment);
+  const provisional = assessment?.claim_type_confirmed === false;
   const requirementId = requirement?._id || requirement?.id;
 
   return (
@@ -75,6 +76,7 @@ const NoticeClockCard: React.FC<Props> = ({ claimId, claimType, projectId, asses
               Counted from {formatDateIN(assessment.basis_date)}; period ends {formatDateIN(assessment.due_date)}.
             </p>
           )}
+          {provisional && <ConfirmClaimType claimId={claimId} claimType={claimType} readOnly={readOnly} />}
           <p className="text-xs text-muted-foreground">
             {requirement ? (
               <>
@@ -337,6 +339,64 @@ const NoticePeriodDialog: React.FC<DialogProps> = ({
         </section>
       </DialogContent>
     </Dialog>
+  );
+};
+
+/**
+ * A provisional claim type (started from three questions, or a defaulted "Other"):
+ * the notice period recorded for a type is this claim's only once a person has
+ * chosen the type. Changing it withdraws the notice decisions made under the old
+ * type; they stay in the head's history.
+ */
+const ConfirmClaimType: React.FC<{ claimId: string; claimType: string; readOnly: boolean }> = ({
+  claimId,
+  claimType,
+  readOnly,
+}) => {
+  const queryClient = useQueryClient();
+  const [choice, setChoice] = useState<ClaimType>((claimType as ClaimType) || "other");
+  const confirm = useMutation({
+    mutationFn: () => confirmClaimType(claimId, choice),
+    onSuccess: () => {
+      toast.success(choice === claimType ? "Claim type confirmed" : "Claim type changed");
+      void queryClient.invalidateQueries({ queryKey: claimBenchKeys.bench(claimId) });
+    },
+    onError: (error) => toast.error(errorMessage(error)),
+  });
+  return (
+    <div className="mt-2 space-y-2 rounded-md border border-amber-600 bg-amber-50 p-3 text-sm dark:bg-amber-950/20">
+      <p>
+        The claim type, <strong>{claimTypeLabel(claimType)}</strong>, is provisional. The notice period for a type
+        counts as the contract's only once a person has chosen the type.
+      </p>
+      {!readOnly && (
+        <div className="flex flex-wrap items-end gap-2">
+          <div className="space-y-1">
+            <Label htmlFor="confirm-claim-type">Claim type</Label>
+            <select
+              id="confirm-claim-type"
+              className="h-9 rounded-md border bg-background px-2 text-sm"
+              value={choice}
+              onChange={(event) => setChoice(event.target.value as ClaimType)}
+            >
+              {CLAIM_TYPES.map((t) => (
+                <option key={t.value} value={t.value}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <Button size="sm" onClick={() => confirm.mutate()} disabled={confirm.isPending}>
+            {choice === claimType ? "Confirm claim type" : "Change and confirm"}
+          </Button>
+        </div>
+      )}
+      {!readOnly && choice !== claimType && (
+        <p className="text-xs text-muted-foreground">
+          Changing the type withdraws the notice decisions made on this claim's heads; they stay in each head's history.
+        </p>
+      )}
+    </div>
   );
 };
 

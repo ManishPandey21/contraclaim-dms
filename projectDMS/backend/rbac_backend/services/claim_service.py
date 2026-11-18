@@ -25,9 +25,13 @@ class ClaimService:
             return self.db
         return await get_database()
 
-    async def create(self, payload: ClaimCreate, current_user: Any) -> Dict[str, Any]:
+    async def create(
+        self, payload: ClaimCreate, current_user: Any, *, type_confirmed: bool = False
+    ) -> Dict[str, Any]:
+        """``type_confirmed``: whether a person chose the claim's type (False: provisional)."""
         db = await self._get_db()
         doc = Claim(**payload.model_dump()).model_dump(by_alias=True)
+        doc["type_confirmed"] = bool(type_confirmed)
         doc.pop("linked_document_ids", None)
         if not doc.get("organization_id"):
             doc["organization_id"] = getattr(current_user, "organization_id", None)

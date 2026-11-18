@@ -1,7 +1,20 @@
 import type { SlaItem, SlaState } from "@/services/sla-api";
-import type { ClaimDTO, ClaimStatus, NoticeAssessment } from "@/services/claims-api";
+import type { ClaimDTO, ClaimStatus, ClaimType, NoticeAssessment } from "@/services/claims-api";
 
 // Pure helpers shared by the claims register and claim detail views (Phase 2).
+
+export const CLAIM_TYPES: { value: ClaimType; label: string }[] = [
+  { value: "eot", label: "Extension of Time" },
+  { value: "variation", label: "Variation" },
+  { value: "payment_ipc", label: "Payment / IPC" },
+  { value: "loss_expense", label: "Loss & Expense" },
+  { value: "acceleration", label: "Acceleration" },
+  { value: "defect", label: "Defect" },
+  { value: "other", label: "Other" },
+];
+
+export const claimTypeLabel = (t: string | null | undefined): string =>
+  CLAIM_TYPES.find((x) => x.value === t)?.label || t || "Other";
 
 export interface ClaimSla {
   state: SlaState;
@@ -106,6 +119,9 @@ export function noticePeriodBasis(assessment: NoticeAssessment): string {
 /** What a reader should do before relying on the assessment. Empty once the period is verified. */
 export function noticeCaveat(assessment: NoticeAssessment): string {
   if (assessment.period_verified) return "";
+  // A provisional claim type: the period recorded for that type is not this claim's yet.
+  if (assessment.claim_type_confirmed === false)
+    return " The claim type is provisional: confirm it before relying on the contract's notice period.";
   return assessment.period_source === "contract_unverified"
     ? " Verify the period against the clause before relying on this."
     : " Check the notice clause in the contract before relying on this.";

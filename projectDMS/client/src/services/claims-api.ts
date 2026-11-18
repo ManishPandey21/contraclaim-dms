@@ -39,6 +39,8 @@ export interface NoticeAssessment {
   period_source: "contract_verified" | "contract_unverified" | "organisation_rule" | "assumed_default";
   /** True only for a contract period a person has verified against its clause. */
   period_verified: boolean;
+  /** False while the claim's type is provisional: no type's period is this claim's yet. */
+  claim_type_confirmed?: boolean;
   clause_no?: string | null;
   requirement_id?: string | null;
   due_date: string;
@@ -52,6 +54,8 @@ export interface ClaimDTO {
   id: string;
   claim_ref?: string | null;
   type: ClaimType;
+  /** Whether a person chose the type; false while provisional, null on an older claim. */
+  type_confirmed?: boolean | null;
   title: string;
   description?: string | null;
   status: ClaimStatus;
@@ -175,6 +179,12 @@ export async function startClaim(payload: ClaimStartPayload): Promise<ClaimStart
 
 export async function createClaim(payload: ClaimPayload): Promise<ClaimDTO> {
   const { data } = await api.post("/claims", payload);
+  return normalize(data);
+}
+
+/** Confirm the claim's type, or change it; a change withdraws notice decisions made under the old type. */
+export async function confirmClaimType(id: string, claimType: ClaimType, reason?: string): Promise<ClaimDTO> {
+  const { data } = await api.post(`/claims/${id}/type`, { claim_type: claimType, reason: reason || undefined });
   return normalize(data);
 }
 

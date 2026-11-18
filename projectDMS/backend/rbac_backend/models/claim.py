@@ -117,6 +117,9 @@ class HeadElement(BaseModel):
     note: Optional[str] = Field(default=None, max_length=2000)
     decided_by: Optional[str] = None
     decided_at: Optional[datetime] = None
+    # Earlier decisions withdrawn by the system, newest last (e.g. the notice call a
+    # person made under a claim type that has since changed). Never edited.
+    history: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 def _empty_elements() -> Dict[str, HeadElement]:
@@ -253,6 +256,15 @@ class ClaimStatusUpdate(BaseModel):
 
 
 class Claim(ClaimBase):
+    # Whether a person chose the claim type (4B-20 follow-up, owner decision 2026-11-18).
+    # False: provisional (the three-question start, or a defaulted "other"); a verified
+    # notice requirement is not the contract's period for this claim until it is True.
+    # None: a claim stored before this field existed; read as confirmed (production
+    # compatibility; owner decision pending a reading).
+    type_confirmed: Optional[bool] = None
+    # Every confirmation or change of type, oldest first: who, when, from, to, and the
+    # notice assessment as it stood. Never rewritten.
+    type_history: List[Dict[str, Any]] = Field(default_factory=list)
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), alias="_id")
     created_at: datetime = Field(default_factory=datetime.utcnow)
     created_by: Optional[str] = None
@@ -298,6 +310,9 @@ class NoticeAssessment(BaseModel):
     period_days: int
     period_source: NoticePeriodSource
     period_verified: bool = False
+    # False while the claim's type is provisional: a verified requirement for that type
+    # is then reported as ``contract_unverified`` until a person confirms the type.
+    claim_type_confirmed: bool = True
     # Where a contract-derived period was read from.
     clause_no: Optional[str] = None
     requirement_id: Optional[str] = None
