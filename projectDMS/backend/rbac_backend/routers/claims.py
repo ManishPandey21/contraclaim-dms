@@ -8,7 +8,7 @@ filtered with build_scope_query, so Org A can never see Org B's claims.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response
@@ -581,6 +581,62 @@ async def confirm_claim_type(
         after={"type": updated.get("type"), "type_confirmed": True, "reason": payload.reason},
     )
     return await _present_claim(updated, db, current_user)
+
+
+class EvidenceSnapshotReview(BaseModel):
+    """Re-pin a stale delay-evidence snapshot to the source as it now is, or withdraw it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["repin", "withdraw"]
+    reason: str = Field(..., min_length=5, max_length=1000)
+
+
+@router.get("/claims/{claim_id}/evidence-snapshots")
+@handle_exceptions
+async def list_claim_evidence_snapshots(
+    claim_id: str,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
+):
+    """What the claim's delay records rested on when it was escalated, and whether it still does.
+
+    Checked against the sources on every read; a document the caller may not read is a
+    restricted entry with no id, version or hash (D-25)."""
+    from ..services import claim_evidence_snapshots as snapshots
+
+    await _load_authorized(claim_id, Permissions.CLAIM_VIEW, db, current_user, policy, selection)
+    rows = await snapshots.refresh(db, claim_id=claim_id)
+    readable = await snapshots.readable_documents(db, current_user, rows)
+    return {"snapshots": snapshots.visible(rows, readable),
+            "stale": sum(1 for row in rows if row.get("status") == "stale")}
+
+
+@router.post("/claims/{claim_id}/evidence-snapshots/{snapshot_id}/review")
+@handle_exceptions
+async def review_claim_evidence_snapshot(
+    claim_id: str,
+    snapshot_id: str,
+    payload: EvidenceSnapshotReview,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
+):
+    """Review a stale snapshot: re-pin (a new snapshot of the current version supersedes it) or
+    withdraw. Needs claim management; the reason is recorded and audited."""
+    from ..services import claim_evidence_snapshots as snapshots
+
+    claim = await _load_authorized(claim_id, Permissions.CLAIM_MANAGE, db, current_user, policy, selection)
+    stored = await db[snapshots.COLLECTION].find_one({"_id": snapshot_id, "claim_id": str(claim_id)})
+    if stored and stored.get("document_id") not in await snapshots.readable_documents(db, current_user, [stored]):
+        # Reviewing a document means reading it: a restricted one is reviewed by someone who may.
+        raise _refuse(status.HTTP_403_FORBIDDEN, "evidence_restricted",
+                      "You cannot review this evidence because you do not have access to the document.")
+    reviewed = await snapshots.review(db, claim, snapshot_id, payload.action, payload.reason, getattr(current_user, "id", None))
+    return snapshots.visible([reviewed], {reviewed.get("document_id")})[0]
 
 @router.post("/claims/{claim_id}/status", response_model=ClaimRead)
 @handle_exceptions

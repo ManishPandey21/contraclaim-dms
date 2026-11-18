@@ -902,6 +902,12 @@ class ArbitrationDraftingService:
         # The case's scoped reviewer assignments count, as at every other gate (JG-5).
         resolve_gate_role("draft", current_user, roles=await self._case_reviewer_roles(draft, current_user))
         await self.case_workspace.assert_case_ready_for_draft(draft)
+        if draft.get("case_id"):
+            # Delay evidence the case's claims were escalated on has not moved on since
+            # (owner decision 2026-11-18); a stale snapshot is reviewed before a new approval.
+            from ..claim_evidence_snapshots import assert_current_for_case
+
+            await assert_current_for_case(self.db, str(draft["case_id"]))
         if draft.get("current_version", 0) < 1:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Generate or save a version before approval")
         latest = await self.repo.latest_version(draft_id)

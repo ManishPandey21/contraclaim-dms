@@ -64,6 +64,12 @@ export const ERROR_CODE_MESSAGES = {
   head_amount_from_lines: "This head's amount is the total of its quantum lines. Change the lines instead.",
   determination_own_findings: "A determination cannot be approved or returned by a person who made its findings.",
   claim_start_awareness_future: "The date you became aware cannot be in the future.",
+  delay_evidence_stale:
+    "Documents behind this case's delay records have changed since the claim was escalated. Someone who can manage the claim must review them before a pleading is approved.",
+  evidence_snapshot_not_stale: "Only evidence whose source has changed needs a review.",
+  evidence_snapshot_unavailable:
+    "This document no longer supports the delay record, so it cannot be re-pinned. Withdraw it instead.",
+  evidence_snapshot_reviewed: "Someone else has just reviewed this evidence. Refresh to see what they decided.",
   claim_board_locked: "This board is locked. Someone who can manage the claim must reopen it, with a reason, before it can be changed.",
   bench_not_locked: "The board is not locked.",
   bench_unlock_reason: "Say why the board is being reopened.",

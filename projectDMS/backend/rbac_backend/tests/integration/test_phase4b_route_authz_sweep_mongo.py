@@ -76,6 +76,9 @@ PHASE_4B_ROUTES: Tuple[Tuple[str, str, str], ...] = (
     ("POST", "/api/claims/start", "policy_service"),
     # Added after the diff: claim-type confirmation (owner decision 2026-11-18).
     ("POST", "/api/claims/{claim_id}/type", "policy_service"),
+    # Added after the diff: delay-evidence snapshots (owner decision 2026-11-18).
+    ("GET", "/api/claims/{claim_id}/evidence-snapshots", "policy_service"),
+    ("POST", "/api/claims/{claim_id}/evidence-snapshots/{snapshot_id}/review", "policy_service"),
     ("POST", "/api/claims/{claim_id}/bench/heads", "auth_only"),
     ("POST", "/api/claims/{claim_id}/bench/heads/{head_id}/delay/links", "policy_service"),
     ("POST", "/api/claims/{claim_id}/bench/heads/{head_id}/delay/links/{link_id}/remove", "auth_only"),
@@ -121,7 +124,7 @@ PARAMS = {
     "overlap_id": "ov-x", "event_id": "ev-x", "step_id": "step-x", "element_key": "event",
     "section_key": "introduction", "skill_key": "indian-infra-claims", "version": "1.0.0",
     "approval_id": "appr-x", "assignment_id": "asg-x", "confirmation_id": "conf-x", "requirement_id": "req-x",
-    "project_id": PROJ_A1, "organization_id": ORG_A, "draft_id": "draft-x",
+    "project_id": PROJ_A1, "organization_id": ORG_A, "draft_id": "draft-x", "snapshot_id": "snap-x",
 }
 
 
@@ -134,7 +137,7 @@ NAMED_VALUES: Dict[str, Any] = {
     "project_id": PROJ_A1, "organization_id": ORG_A, "claim_id": CLAIM, "claim_ids": [CLAIM],
     "board_version": 1, "version": 1, "head_id": "H1", "reason": "Authorisation sweep.",
     "claim_type": "eot", "role_key": "legal_reviewer", "reviewer_role": "legal_reviewer",
-    "permission": "dms.claim.view",
+    "permission": "dms.claim.view", "action": "withdraw",
 }
 
 #: Bodies a route's schema alone cannot describe (cross-field rules).

@@ -36,6 +36,7 @@ reads ``RELATIONSHIP_CL2_MONGODB_URI``'s seed). Run in CI's real-Mongo step.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 import json
 import os
 from typing import Any, Dict, List
@@ -796,6 +797,27 @@ def test_the_claim_journey_from_start_to_the_pleading_gate_over_http(monkeypatch
             assert (state["next_action"], state["validation_status"], state["validation_blockers"]) == (
                 "legal_review", "passed", []), state["validation_blockers"]
             state = await _approve_gate(env, case_id, run_id, *WORKFLOW_GATES[3])
+            # Delay evidence snapshots (owner decision 2026-11-18): escalation recorded the site
+            # diary behind H1's hindrance for this claim and case, without locking the shared record.
+            snaps = _ok(await env.call("GET", "org_admin", f"{CLAIMS}/{claim_id}/evidence-snapshots"))["snapshots"]
+            diary = [row for row in snaps if row.get("document_id") == SITE_DIARY_ID]
+            assert len(diary) == 1 and diary[0]["status"] == "current" and diary[0]["head_id"] == "H1", snaps
+            assert diary[0]["source_record"]["type"] == "hindrance" and diary[0]["case_id"] == case_id
+            # (A new version of the diary is caught already: the case's readiness approval is bound
+            # to the evidence versions.) The diary is unlinked from the hindrance after escalation,
+            # which readiness does not see: a new approval waits until the snapshot is reviewed.
+            unlinked = await env.db.entity_document_links.update_one(
+                {"target_type": "delay_event", "target_id": hindrance_id, "document_id": SITE_DIARY_ID, "removed_at": None},
+                {"$set": {"removed_at": datetime.utcnow(), "removed_by": "user-org_admin"}},
+            )
+            assert unlinked.modified_count == 1
+            blocked = await _approve_gate(env, case_id, run_id, *WORKFLOW_GATES[4], ok=False)
+            assert blocked.status_code == 409 and "delay_evidence_stale" in blocked.text, blocked.text[:400]
+            not_repinned = await env.call("POST", "org_admin", f"{CLAIMS}/{claim_id}/evidence-snapshots/{diary[0]['_id']}/review",
+                                          json={"action": "repin", "reason": "Try to keep relying on it."})
+            assert not_repinned.status_code == 409, not_repinned.text[:300]
+            _ok(await env.call("POST", "org_admin", f"{CLAIMS}/{claim_id}/evidence-snapshots/{diary[0]['_id']}/review",
+                               json={"action": "withdraw", "reason": "The diary was unlinked from the hindrance."}))
             state = await _approve_gate(env, case_id, run_id, *WORKFLOW_GATES[4])
             approved_draft = _ok(await env.call("GET", "org_admin", f"{DRAFTS}/{draft_id}"))
             assert approved_draft["status"] == "approved" and approved_draft["is_locked"] is True, approved_draft["status"]

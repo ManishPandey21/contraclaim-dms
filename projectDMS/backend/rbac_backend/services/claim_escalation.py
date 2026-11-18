@@ -59,6 +59,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, Field
 from pymongo.errors import DuplicateKeyError
 
+from . import claim_evidence_snapshots as evidence_snapshots
 from . import claim_contract_scope as contract_scope
 from .claim_delay_lab import ClaimDelayLab
 from ..models.arbitration_drafting import ArbitrationCaseCreate, ArbitrationMatrixRowCreate
@@ -730,6 +731,11 @@ class ClaimEscalation:
                     {"_id": claim["_id"], "escalation.case_id": case_id},
                     {"$set": {"escalation.frozen_at": frozen.get("evidence_frozen_at")}},
                 )
+        # 4a. The documents behind each head's delay records are shared (hindrances, EOT
+        # records): they are not frozen. What this claim relies on is snapshotted for this
+        # case instead, so a later change is detected, not absorbed (owner decision 2026-11-18).
+        for claim in claims:
+            await evidence_snapshots.capture(self.db, claim, case_id, getattr(current_user, "id", None))
 
         # 5. Seed the rows; a row already carried is refused by the unique index (M-05).
         created_rows: Dict[str, int] = {}
@@ -993,6 +999,11 @@ class ClaimEscalation:
                 reason=f"Escalation undone: {reason}",
             )
             freeze_lifted = True
+        # 2a. Its delay-evidence snapshots stop counting; they are kept for the record.
+        await evidence_snapshots.withdraw_for_case(
+            self.db, str(claim["_id"]), str(record.get("case_id") or ""), f"Escalation undone: {reason}",
+            getattr(current_user, "id", None),
+        )
         # 3. The rows it seeded are archived with the reason; their origin is released so
         # a later escalation can carry the claim again (M-05 indexes live rows only by origin).
         archived = 0
