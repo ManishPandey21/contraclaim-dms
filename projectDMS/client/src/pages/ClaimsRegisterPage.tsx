@@ -186,7 +186,9 @@ const ClaimsRegisterPage: React.FC = () => {
   const benchOn = useClaimBenchOn();
   // 4B-40: several claims of one project escalated together, from the register.
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [escalating, setEscalating] = useState(false);
+  // What the escalation dialog was opened for. Held apart from the selection so that the
+  // dialog, and the "Case created" result it shows, survive the selection being cleared.
+  const [escalating, setEscalating] = useState<{ ids: string[]; title: string; projectId: string | null } | null>(null);
   const [taskClaim, setTaskClaim] = useState<ClaimDTO | null>(null);
   const [slaMap, setSlaMap] = useState<Record<string, ClaimSla>>({});
   const [exportingId, setExportingId] = useState<string | null>(null);
@@ -375,27 +377,43 @@ const ClaimsRegisterPage: React.FC = () => {
             <span>
               {chosen.length} claim{chosen.length === 1 ? "" : "s"} selected
             </span>
-            <Button size="sm" onClick={() => setEscalating(true)} disabled={!oneProject}>
+            <Button
+              size="sm"
+              onClick={() =>
+                setEscalating({
+                  ids: chosen.map((c) => c.id),
+                  title: chosen.length === 1 ? chosen[0].title : `${chosen[0]?.title ?? "Claims"} and others`,
+                  projectId: oneProject ? chosen[0].project_id : null,
+                })
+              }
+              disabled={!oneProject}
+            >
               Escalate selected to arbitration
             </Button>
             {!oneProject && <span className="text-muted-foreground">Claims escalated together must belong to one project.</span>}
             <Button size="sm" variant="ghost" onClick={() => setSelected(new Set())}>
               Clear selection
             </Button>
-            <EscalateDialog
-              claimIds={chosen.map((c) => c.id)}
-              claimTitle={chosen.length === 1 ? chosen[0].title : `${chosen[0]?.title ?? "Claims"} and others`}
-              projectId={oneProject ? chosen[0].project_id : null}
-              open={escalating}
-              onOpenChange={setEscalating}
-              onEscalated={() => {
-                setSelected(new Set());
-                void load();
-              }}
-            />
           </div>
         );
       })()}
+
+      {benchOn && escalating && (
+        <EscalateDialog
+          claimIds={escalating.ids}
+          claimTitle={escalating.title}
+          projectId={escalating.projectId}
+          open
+          onOpenChange={(open) => {
+            if (!open) setEscalating(null);
+          }}
+          onEscalated={() => {
+            // The dialog stays open on its result ("Case created", "Open the case").
+            setSelected(new Set());
+            void load();
+          }}
+        />
+      )}
 
       <Card>
         <CardHeader>

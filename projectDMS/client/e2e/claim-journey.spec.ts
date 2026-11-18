@@ -968,10 +968,13 @@ test.describe("claim journey (4B-43)", () => {
       idempotency_key: expect.stringMatching(/^esc-/),
       acknowledged_weak: [CLAIM_A],
     });
-    // What the register does with the reply today: the selection clears, which unmounts the
-    // dialog with its "Case created" result, and the register reloads (reported as a finding).
-    await expect(dialog).toBeHidden();
+    // The selection clears and the register reloads, while the dialog stays open on its result
+    // (found by this suite: it used to unmount with the selection, so no confirmation was seen).
     await expect(selected).toBeHidden();
+    await expect(dialog).toContainText("Case created");
+    await expect(dialog.getByRole("link", { name: "Open the case" })).toHaveAttribute("href", `/arbitration/cases/${CASE_ID}`);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
     await expect(page.getByRole("row", { name: /CLM-001/ })).toContainText("Disputed");
     await expect(page.getByRole("checkbox", { name: "Select CLM-001 for escalation" })).toHaveCount(0);
 

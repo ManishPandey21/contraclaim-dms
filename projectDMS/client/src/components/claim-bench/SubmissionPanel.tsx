@@ -107,7 +107,7 @@ const Section: React.FC<{
         <ul className="mt-1 list-disc pl-5 text-xs text-muted-foreground" aria-label="Where this paragraph comes from">
           {paragraph.sources.map((source, sourceIndex) => (
             <li key={sourceIndex}>
-              {SOURCE_LABEL[source.kind]}: {source.label || source.ref}
+              {SOURCE_LABEL[source.kind]}: {source.label || "untitled source"}
             </li>
           ))}
         </ul>

@@ -335,7 +335,7 @@ const DeterminationsPanel: React.FC<Props> = ({ claimId, readOnly }) => {
     create.isPending || setFinding.isPending || act.isPending || submit.isPending || reassign.isPending || revise.isPending;
   const open = data.items.find((item) => item.determination.origin === "authored" && item.determination.status !== "approved");
   const otherSides = (["engineer", "employer"] as const).filter((party) => party !== data.perspective);
-  const nameOf = (id?: string | null) => people.data?.find((person) => person.id === id)?.name || id || "";
+  const nameOf = (id?: string | null) => people.data?.find((person) => person.id === id)?.name || (id ? "another person" : "");
 
   const card = (view: DeterminationView) => {
     const item = view.determination;
