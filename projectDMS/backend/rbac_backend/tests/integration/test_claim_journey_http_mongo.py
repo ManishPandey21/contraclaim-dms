@@ -430,8 +430,9 @@ def test_the_claim_journey_from_start_to_the_pleading_gate_over_http(monkeypatch
             assert det["status"] == "in_review" and det["reviewer_id"] == "user-eng_reviewer"
             own = await env.call("POST", "eng_author", f"{base}/{det['_id']}/approve", project=ENGINEER,
                                  json={"version": det["version"]})
-            # The author's own approval: refused with a plain reason (a bare string, no code).
-            assert own.status_code == 403 and "made its findings" in own.text, own.text[:300]
+            # The author's own approval: refused with a code and a plain reason (JG-7).
+            assert own.status_code == 403 and _code(own) == "determination_own_findings", own.text[:300]
+            assert "made its findings" in own.json()["detail"]["user_message"]
             _refused(await env.call("POST", "foreign_org_admin", f"{base}/{det['_id']}/approve", project=PROJ_B1,
                                     json={"version": det["version"]}))
             approved = _ok(await env.call("POST", "eng_reviewer", f"{base}/{det['_id']}/approve", project=ENGINEER,

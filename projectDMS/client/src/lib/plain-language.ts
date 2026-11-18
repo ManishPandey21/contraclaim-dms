@@ -62,6 +62,7 @@ export const ERROR_CODE_MESSAGES = {
   claim_evidence_frozen: "This claim has been escalated to arbitration, so its record can no longer be edited.",
   claim_amount_from_board: "This claim's amount and days come from its heads on the Claim Bench. Change them there.",
   head_amount_from_lines: "This head's amount is the total of its quantum lines. Change the lines instead.",
+  determination_own_findings: "A determination cannot be approved or returned by a person who made its findings.",
   claim_board_locked: "This board is locked. Someone who can manage the claim must reopen it, with a reason, before it can be changed.",
   bench_not_locked: "The board is not locked.",
   bench_unlock_reason: "Say why the board is being reopened.",

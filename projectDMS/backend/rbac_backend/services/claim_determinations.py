@@ -684,7 +684,10 @@ class ClaimDeterminations:
             raise HTTPException(status_code=409, detail="This determination changed since you loaded it.")
         authors = {determination.created_by, determination.submitted_by} | {f.decided_by for f in determination.heads}
         if user_id is None or user_id in authors:
-            raise HTTPException(status_code=403, detail="A determination cannot be approved or returned by a person who made its findings.")
+            raise _refusal(
+                403, "determination_own_findings",
+                "A determination cannot be approved or returned by a person who made its findings.",
+            )
         if user_id != determination.reviewer_id:
             raise _refusal(
                 403, "determination_not_the_reviewer",

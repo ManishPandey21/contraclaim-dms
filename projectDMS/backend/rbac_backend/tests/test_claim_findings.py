@@ -271,6 +271,7 @@ async def test_approval_is_by_a_second_person_and_then_the_determination_does_no
     with pytest.raises(HTTPException) as own:
         await determinations.approve(await _claim(db), det_id, DeterminationVersionRequest(version=view.determination.version), USER)
     _refused(own, 403, "made its findings")
+    assert own.value.detail["code"] == "determination_own_findings"  # JG-7: a code, not a bare string
     view = await determinations.approve(
         await _claim(db), det_id, DeterminationVersionRequest(version=view.determination.version), REVIEWER
     )
