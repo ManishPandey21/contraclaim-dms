@@ -122,11 +122,54 @@ The model baseline needs:
 
 The run then appears under the version's evaluation runs, with its per-matter results and cost.
 
-## What remains to build a real set
+## Building a real set: the reviewer workflow
 
-1. The reviewing experts write or select the matters. Anonymised real matters need the owner's consent.
-2. Two experts label each matter independently.
-3. The legal approver adjudicates disagreements.
-4. The set is placed in the evaluation store, and `scripts/skill_golden_set.py check` passes on it.
-5. Its hash is recorded in this document.
-6. A run is made on the server, and its report is reviewed matter by matter.
+Built (2026-11-18): `services/skills/golden_set_workflow.py` and the workflow commands of `scripts/skill_golden_set.py`; tests in `tests/test_golden_set_workflow.py`. **No real set exists yet.** Nothing in the repository supplies an expert label, and the workflow cannot produce one: every label comes from a named expert's sheet or the legal approver's adjudication.
+
+### Who does what
+
+| Role | Who | Writes | May not |
+|---|---|---|---|
+| Matter author | A reviewing expert (may also label) | The matter book: matters, record, composition tags, provenance | Put labels in the book (the book has no labels field) |
+| Expert A, Expert B | Two reviewing experts, different people | One label sheet each, from the same book hash, with the independence attestation | See or discuss the other's sheet before both are handed in |
+| Legal approver | The `senior_legal_approver`, neither expert | The adjudication sheet: a value and a reason for each disputed label | Change a label both experts agreed on; adjudicate their own labels |
+| Owner | The data owner | The consent reference for each anonymised real matter | — |
+| Assembler | Anyone with store access | Runs `assemble`; never edits the output | Edit the assembled set (any change makes it stale) |
+
+### Steps
+
+Every path below is in the restricted evaluation store; the script refuses to write inside the repository.
+
+1. **Book.** `book-template <skill_key> <store>/book.json` writes 15 slots carrying the composition tags that meet the rules above, every field `TO BE WRITTEN`. The author fills in each matter: `role`, `payload` (the prompt inputs), `record` (clauses, notice periods, privileged passages), and `provenance` (`expert_written` or `anonymised_real`, `prepared_by`; for an anonymised real matter also `consent_reference` and `anonymised_by`). `synthetic` is refused.
+2. **Anonymisation and composition.** `check-book <store>/book.json --names <store>/names.txt` must report nothing. The scan finds email addresses, Indian phone numbers, PAN, GSTIN, Aadhaar and IFSC patterns, and every name in `names.txt` (parties, people, places, project names: one per line, kept in the store). A hit is reported, never redacted automatically; the author rewrites the matter. The book's hash is then fixed: any later edit invalidates every sheet made from it.
+3. **Independent labels.** For each expert, `sheet-template <store>/book.json "<expert name>" <store>/labels-<expert>.json`. The expert fills in every element state and the classification from the pack's vocabulary (claims: `supported`, `weak`, `missing`, `not_applicable` for event, notice, contractual basis, causation and quantum, and `excusable`, `compensable`, `contractor_risk` or `undetermined`; EOT: `critical`, `not_critical` or `unproven`, and risk owner `employer`, `contractor`, `neutral` or `undetermined`), lists any information required, dates the sheet and copies the attestation verbatim: *"I labelled every matter in this sheet myself, from the matter book named by its hash, without seeing or discussing the other expert's labels."* `check-sheet` must report nothing.
+4. **Disagreements.** `disagreements book.json labels-A.json labels-B.json <store>/adjudication.json` writes the legal approver's worksheet (one entry per disputed label, nothing decided) and `adjudication.json.positions.json` (what each expert said).
+5. **Adjudication.** The legal approver fills in their name, the date, and a value and a reason (at least 10 characters) for every disputed label, and nothing else.
+6. **Assembly.** `assemble book.json labels-A.json labels-B.json adjudication.json <store>/<skill_key>.json --names <store>/names.txt` refuses with every reason, or writes the set and `<skill_key>.json.manifest.json` (the set's hash, the book hash, each sheet's hash and author, the adjudication hash, and the count of disputed labels). Each matter's provenance records both experts, the adjudicator and its disputed labels. `check` then reports nothing.
+7. **Record.** The set's hash goes in this document (a "Real sets" table: pack, hash, book hash, date, experts and adjudicator by role). `verify <set> <manifest>` proves later that the stored set is still that one.
+8. **Run.** Someone who will not approve the pack makes a run on the server (4B-41). The run records the set's hash; the report is reviewed matter by matter. Only then can a model baseline be recorded here.
+
+### What the workflow refuses
+
+- a synthetic matter, a matter with labels in the book, a placeholder left anywhere;
+- an anonymised real matter without a consent reference or without who anonymised it, or with an identifier the scan finds;
+- a book that misses the composition rules or the 15 matters;
+- a sheet made from another version of the book, missing a matter, outside the vocabulary, or without the attestation;
+- two sheets by the same expert; an adjudicator who is one of the experts;
+- an adjudication made for another book or other sheets, one that leaves a dispute open, or one that changes an agreed label;
+- writing any of these files inside the repository.
+
+### What it cannot check
+
+That the two experts really worked apart, that the consent exists, and that the anonymisation is complete beyond the patterns and names given. Those rest on the people named in the manifest. The store's access control and encryption (AQ-10) are an operations matter and are not provided by this repository.
+
+### Status (2026-11-18)
+
+| | Claims | EOT |
+|---|---|---|
+| Templates and workflow | Built, tested | Built, tested |
+| Matter book | Not written | Not written |
+| Expert label sheets | None | None |
+| Adjudication | None | None |
+| Assembled real set and hash | None | None |
+| Model baseline | Not run | Not run |
