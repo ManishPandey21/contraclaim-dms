@@ -130,7 +130,7 @@ def test_the_suite_store(tmp_path: Path) -> None:
 
     (tmp_path / "indian-infra-claims.json").write_text(json.dumps(synthetic_suite("indian-infra-claims")))
     suite = load_suite("indian-infra-claims", tmp_path)
-    assert len(suite.matters) == 2 and len(suite_hash(suite)) == 64
+    assert len(suite.matters) == 15 and len(suite_hash(suite)) == 64
     changed = synthetic_suite("indian-infra-claims")
     changed["matters"][0]["labels"]["elements"]["notice"] = "weak"
     assert suite_hash(load_suite("indian-infra-claims", tmp_path)) != suite_hash(type(suite).model_validate(changed))

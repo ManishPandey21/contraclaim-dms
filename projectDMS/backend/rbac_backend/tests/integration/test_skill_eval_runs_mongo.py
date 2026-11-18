@@ -35,7 +35,13 @@ from rbac_backend.services.skills.system_skills import CLAIMS_SKILL_KEY
 from rbac_backend.tests.integration.test_claim_routes_real_deps_mongo import _env
 from rbac_backend.tests.integration.test_skill_publication_transactions_mongo import _draft
 from rbac_backend.tests.reviewer_assignment_helpers import hold_platform
-from rbac_backend.tests.skill_eval_support import ELEMENTS, synthetic_matter, synthetic_suite, use_suite_store
+from rbac_backend.tests.skill_eval_support import (
+    ELEMENTS,
+    ready_matters,
+    synthetic_matter,
+    synthetic_suite,
+    use_suite_store,
+)
 from rbac_backend.utils.rate_limiter import RateLimiter
 
 pytestmark = pytest.mark.integration
@@ -105,9 +111,10 @@ def test_a_run_is_made_on_the_server_and_records_the_session_user(monkeypatch) -
             run = made.json()
             assert run["recorded_by"] == "user-superadmin"
             assert run["threshold"] == 0.85 and run["configuration"]["threshold"] == 0.85
-            assert run["passed"] is True and run["case_count"] == 2 and calls == ["Late access to Site"] * 2
+            assert run["passed"] is True and run["case_count"] == 15 and calls == ["Late access to Site"] * 15
+            assert run["suite_ready"] is True and run["suite_problems"] == []
             assert run["prompt_version"] == 3 and len(run["suite_hash"]) == 64
-            assert run["cost"]["model_calls"] == 2
+            assert run["cost"]["model_calls"] == 15
 
             stored = await env.db[SKILL_EVAL_RUNS].find_one({"_id": run["_id"]})
             assert stored["recorded_by"] == "user-superadmin" and stored["content_hash"] == run["content_hash"]
@@ -246,7 +253,7 @@ def test_a_stale_failing_or_foreign_run_is_refused(monkeypatch) -> None:
             passing = (await env.call("POST", EVALUATOR, f"{PATH}/eval-runs", json={})).json()
             assert passing["passed"] is True
             use_suite_store(monkeypatch, CLAIMS_SKILL_KEY, synthetic_suite(
-                CLAIMS_SKILL_KEY, [synthetic_matter("S01"), synthetic_matter("S02"), synthetic_matter("S03")]))
+                CLAIMS_SKILL_KEY, [*ready_matters(), synthetic_matter("S16")]))
             stale = await env.call("POST", "project_user", f"{PATH}/approvals",
                                    json={"kind": "legal", "reviewer_role": LEGAL, "eval_run_id": passing["_id"]})
             assert stale.status_code == 409 and _code(stale) == "eval_run_stale", stale.text[:300]
@@ -292,5 +299,37 @@ def test_the_model_budget_stops_a_run_before_any_call(monkeypatch) -> None:
             monkeypatch.setattr(settings, "SKILL_EVAL_SUITE_DIR", "")
             unset = await env.call("POST", EVALUATOR, f"{PATH}/eval-runs", json={})
             assert unset.status_code == 409 and _code(unset) == "eval_suite_store_not_configured"
+
+    _run(scenario())
+
+
+def test_a_run_on_the_synthetic_golden_set_runs_and_supports_no_approval(monkeypatch) -> None:
+    """4B-42: the committed synthetic set loads, hashes and runs on the server; it is marked
+    synthetic, so the run records why it cannot support an approval and approval is refused."""
+
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            from pathlib import Path
+
+            from rbac_backend.core.config import settings
+
+            calls = await _ready(env, monkeypatch)
+            store = Path(__file__).resolve().parents[2] / "skill_eval" / "synthetic"
+            monkeypatch.setattr(settings, "SKILL_EVAL_SUITE_DIR", str(store))
+            made = await env.call("POST", EVALUATOR, f"{PATH}/eval-runs", json={})
+            assert made.status_code == 201, made.text[:300]
+            run = made.json()
+            assert run["case_count"] == 15 and len(calls) == 15
+            assert run["suite_key"] == f"{CLAIMS_SKILL_KEY}-synthetic"
+            assert run["suite_ready"] is False
+            assert run["suite_problems"] == ["15 matter(s) are synthetic: a synthetic golden set supports no approval"]
+
+            await hold_platform(env.db, SimpleNamespace(id="user-project_user", roles=[LEGAL]))
+            refused = await env.call("POST", "project_user", f"{PATH}/approvals",
+                                     json={"kind": "legal", "reviewer_role": LEGAL, "eval_run_id": run["_id"]})
+            assert refused.status_code == 409 and _code(refused) == "eval_suite_not_ready", refused.text[:300]
+            published = await env.call("POST", EVALUATOR, f"{PATH}/publish", json={"eval_run_id": run["_id"]})
+            assert published.status_code == 409 and _code(published) == "eval_suite_not_ready", published.text[:300]
+            assert await env.db.skill_approvals.count_documents({}) == 0
 
     _run(scenario())

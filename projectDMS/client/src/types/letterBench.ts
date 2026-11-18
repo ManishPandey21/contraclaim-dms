@@ -295,6 +295,9 @@ export interface SkillEvalRun {
   }[];
   cost: { model_calls: number; prompt_characters: number; output_characters: number };
   note?: string | null;
+  /** Whether the golden set could support an approval (4B-42): not synthetic, composition and provenance met. */
+  suite_ready?: boolean;
+  suite_problems?: string[];
   started_at: string;
   completed_at?: string | null;
 }

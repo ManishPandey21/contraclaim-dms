@@ -40,6 +40,8 @@ const run = (over: Partial<SkillEvalRun> = {}): SkillEvalRun => ({
   matters: [],
   cost: { model_calls: 12, prompt_characters: 0, output_characters: 0 },
   started_at: "2026-11-18T00:00:00Z",
+  suite_ready: true,
+  suite_problems: [],
   ...over,
 });
 
@@ -82,6 +84,17 @@ describe("SkillPublishPanel (4B-41)", () => {
     expect(await screen.findByText("Passed")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Publish" }));
     await waitFor(() => expect(api.publishSkillVersion).toHaveBeenCalledWith("indian-infra-variations", "1.2.0", "run-1"));
+  });
+
+  it("will not publish on a passing run whose golden set is synthetic (4B-42)", async () => {
+    api.fetchSkillEvalRuns.mockResolvedValue([
+      run({ suite_ready: false, suite_problems: ["15 matter(s) are synthetic: a synthetic golden set supports no approval"] }),
+    ]);
+    mount();
+    expect(await screen.findByText("Passed")).toBeInTheDocument();
+    expect(screen.getByText(/15 matter\(s\) are synthetic/)).toBeInTheDocument();
+    expect(screen.getByText(/cannot support an approval \(synthetic or incomplete\)/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Publish" })).toBeDisabled();
   });
 
   it("will not publish on a run that did not pass, and shows why", async () => {

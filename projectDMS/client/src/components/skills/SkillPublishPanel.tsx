@@ -95,7 +95,8 @@ const SkillPublishPanel: React.FC<Props> = ({ version, onClose, onPublished, rev
   const run: SkillEvalRun | null =
     runs.data?.find((item) => item._id === chosenRunId) ?? runs.data?.[0] ?? null;
   const report = run ? runReport(run) : null;
-  const passing = Boolean(run?.passed);
+  // A run counts only on a golden set that can support an approval (4B-42); the server refuses the rest.
+  const passing = Boolean(run?.passed && run?.suite_ready);
 
   const statuses = requirementStatuses(
     approvals.data?.required ?? version.required_approvals ?? [],
@@ -105,7 +106,10 @@ const SkillPublishPanel: React.FC<Props> = ({ version, onClose, onPublished, rev
     approvals.data?.policy_hash ?? null
   );
   const blockers = needsApprovals && !reviewOnly ? publishBlockers(statuses, report, myId) : [];
-  if (run && !passing) blockers.unshift("The chosen evaluation run did not pass.");
+  if (run && !run.passed) blockers.unshift("The chosen evaluation run did not pass.");
+  else if (run && !run.suite_ready) {
+    blockers.unshift("The chosen run used a golden set that cannot support an approval (synthetic or incomplete).");
+  }
 
   const refreshApprovals = () => client.invalidateQueries({ queryKey: approvalsKey });
   const approve = useMutation({
@@ -225,6 +229,11 @@ const SkillPublishPanel: React.FC<Props> = ({ version, onClose, onPublished, rev
                     </span>
                   </span>
                 </label>
+                {!item.suite_ready && (
+                  <p className="pl-6 text-xs text-amber-800">
+                    Golden set cannot support an approval: {(item.suite_problems ?? []).join("; ") || "not checked"}
+                  </p>
+                )}
                 {item.failures.length > 0 && (
                   <ul className="list-disc pl-10 text-xs text-amber-800">
                     {item.failures.slice(0, 8).map((failure) => (

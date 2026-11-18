@@ -29,7 +29,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple
 
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -88,6 +88,27 @@ class EvalLabels(BaseModel):
     information_required: List[str] = Field(default_factory=list)
 
 
+MatterSource = Literal["synthetic", "anonymised_real", "expert_written"]
+
+
+class EvalProvenance(BaseModel):
+    """Where a matter and its labels come from (plan section 7, 4B-42).
+
+    A real or expert-written matter is labelled by two independent experts, and every
+    disagreement is adjudicated by the legal approver. An anonymised real matter names the
+    owner's consent. A synthetic matter exercises the runner and supports no approval.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: MatterSource = "synthetic"
+    labelled_by: List[str] = Field(default_factory=list)
+    adjudicated_by: Optional[str] = None
+    #: Labels the two experts disagreed on; each was settled by the adjudicator.
+    disagreements: List[str] = Field(default_factory=list)
+    consent_reference: Optional[str] = Field(default=None, max_length=200)
+
+
 class EvalMatter(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -97,6 +118,7 @@ class EvalMatter(BaseModel):
     record: EvalMatterRecord = Field(default_factory=EvalMatterRecord)
     labels: EvalLabels
     composition: List[str] = Field(default_factory=list)
+    provenance: EvalProvenance = Field(default_factory=EvalProvenance)
 
 
 class EvalSuite(BaseModel):
@@ -106,6 +128,78 @@ class EvalSuite(BaseModel):
     skill_key: str
     prompt_key: str
     matters: List[EvalMatter] = Field(..., min_length=1)
+
+
+@dataclass(frozen=True)
+class CompositionRule:
+    tag: str
+    minimum: int
+    meaning: str
+
+
+#: Plan section 7. Matters per pack and the composition each golden set must have.
+#: ``perspective`` counts matters whose role is the Engineer or the Employer.
+GOLDEN_SET_REQUIREMENTS: Dict[str, Dict[str, Any]] = {
+    "indian-infra-claims": {
+        "matters": 15,
+        "rules": [
+            CompositionRule("perspective", 4, "Engineer or Employer perspective"),
+            CompositionRule("late_notice", 3, "late notice"),
+            CompositionRule("late_notice_with_prejudice", 1, "late notice with prejudice evidence"),
+            CompositionRule("late_notice_without_prejudice", 1, "late notice without prejudice evidence"),
+            CompositionRule("global_claim", 2, "global claim"),
+            CompositionRule("missing_records", 2, "missing records"),
+            CompositionRule("variation_derived", 2, "variation-derived"),
+            CompositionRule("straightforward", 2, "straightforward"),
+        ],
+    },
+    "indian-infra-eot-claims": {
+        "matters": 15,
+        "rules": [
+            CompositionRule("true_concurrency", 4, "true concurrency"),
+            CompositionRule("neutral_event", 2, "neutral event"),
+            CompositionRule("superseded_determination", 2, "superseded determination"),
+            CompositionRule("no_critical_path_proof", 2, "no critical-path proof"),
+            CompositionRule("windows_method", 2, "windows method"),
+        ],
+    },
+}
+
+
+def suite_problems(suite: EvalSuite) -> List[str]:
+    """Why a golden set cannot support an approval; empty when it can (4B-42).
+
+    A pack without stated requirements has none beyond its matters' provenance.
+    """
+    problems: List[str] = []
+    synthetic = [matter.matter_id for matter in suite.matters if matter.provenance.source == "synthetic"]
+    if synthetic:
+        problems.append(f"{len(synthetic)} matter(s) are synthetic: a synthetic golden set supports no approval")
+    requirement = GOLDEN_SET_REQUIREMENTS.get(suite.skill_key)
+    if requirement:
+        if len(suite.matters) < requirement["matters"]:
+            problems.append(f"{len(suite.matters)} matters; the pack needs {requirement['matters']}")
+        for rule in requirement["rules"]:
+            if rule.tag == "perspective":
+                count = sum(matter.role in {"engineer", "employer"} for matter in suite.matters)
+            else:
+                count = sum(rule.tag in matter.composition for matter in suite.matters)
+            if count < rule.minimum:
+                problems.append(f"{count} {rule.meaning} matter(s); at least {rule.minimum} needed")
+    for matter in suite.matters:
+        origin = matter.provenance
+        if origin.source == "synthetic":
+            continue
+        experts = {name.strip() for name in origin.labelled_by if name.strip()}
+        if len(experts) < 2:
+            problems.append(f"{matter.matter_id}: labelled by {len(experts)} expert(s); two independent experts needed")
+        if not origin.adjudicated_by:
+            problems.append(f"{matter.matter_id}: no adjudicator (the legal approver)")
+        elif origin.adjudicated_by in experts:
+            problems.append(f"{matter.matter_id}: the adjudicator is one of the labellers")
+        if origin.source == "anonymised_real" and not origin.consent_reference:
+            problems.append(f"{matter.matter_id}: an anonymised real matter needs the owner's consent reference")
+    return problems
 
 
 def suite_hash(suite: EvalSuite) -> str:
@@ -314,6 +408,10 @@ class SkillEvalRun(BaseModel):
     matters: List[MatterResult] = Field(default_factory=list)
     cost: EvalRunCost = Field(default_factory=EvalRunCost)
     note: Optional[str] = None
+    #: Whether the golden set could support an approval when the run was made (4B-42).
+    #: Absent on runs stored before 4B-42, which therefore support none.
+    suite_ready: bool = False
+    suite_problems: List[str] = Field(default_factory=list)
     started_at: datetime = Field(default_factory=now_utc)
     completed_at: Optional[datetime] = None
 
@@ -397,6 +495,7 @@ class SkillEvalRunService:
                 "Running it needs the budget raised with approval (AQ-10).",
             )
         execute = self._execute or self._default_execute
+        problems = suite_problems(suite)
         threshold = minimum_eval_threshold()
         results: List[MatterResult] = []
         cost = EvalRunCost()
@@ -435,6 +534,8 @@ class SkillEvalRunService:
             matters=results,
             cost=cost,
             note=request.note,
+            suite_ready=not problems,
+            suite_problems=problems,
         )
         run.completed_at = now_utc()
         # Written once, complete. Nothing updates a run.
@@ -460,6 +561,13 @@ class SkillEvalRunService:
         run = await self.get(run_id)
         if run is None or run.skill_key != version.skill_key or run.version != version.version:
             raise _refusal(404, "eval_run_not_found", "No such evaluation run for this version.")
+        if not run.suite_ready:
+            raise _refusal(
+                409, "eval_suite_not_ready",
+                "This run used a golden set that cannot support an approval: "
+                + ("; ".join(run.suite_problems) or "it was made before golden sets were checked")
+                + ".",
+            )
         stale: List[str] = []
         if run.content_hash != version.content_hash:
             stale.append("the pack's text")
@@ -487,8 +595,48 @@ __all__ = [
     "SKILL_EVAL_RUNS",
     "SkillEvalRun",
     "SkillEvalRunService",
+    "GOLDEN_SET_REQUIREMENTS",
     "aggregate",
     "load_suite",
+    "suite_problems",
     "score_matter",
     "suite_hash",
 ]
+
+
+def fallback_baseline(suite: EvalSuite, schema_key: str) -> Dict[str, Any]:
+    """The records-only baseline for a golden set (4B-42): every matter scored on the pack's
+    deterministic fallback, the output a step gives when no model answers.
+
+    Not a model run and not a basis for any approval. It shows the floor a model must beat
+    and that the gates refuse a pack which never ran a model (every step degraded).
+    """
+    from .executor import ExecutionResult
+    from .schemas import get_schema
+
+    schema = get_schema(schema_key)
+    if schema is None:
+        raise ValueError(f"unknown output schema {schema_key}")
+    results = [
+        score_matter(
+            matter,
+            ExecutionResult(
+                output=schema().model_dump(mode="json"), degraded=True, error="baseline: no model",
+                model=None, compiled=None, prompt_version=0,  # type: ignore[arg-type]
+            ),
+        )
+        for matter in suite.matters
+    ]
+    threshold = minimum_eval_threshold()
+    scores, failures, passed = aggregate(results, threshold)
+    return {
+        "suite_key": suite.suite_key,
+        "skill_key": suite.skill_key,
+        "suite_hash": suite_hash(suite),
+        "matters": len(suite.matters),
+        "suite_problems": suite_problems(suite),
+        "threshold": threshold,
+        "passed": passed,
+        "scores": scores.model_dump(),
+        "failures": failures,
+    }

@@ -79,6 +79,7 @@ beforeEach(() => {
       case_count: 15, passed: true, failures: [],
       scores: { element_agreement: 0.92, element_agreement_by_type: {}, classification_agreement: 0.9, degraded_rate: 0, schema_validity: 1 },
       matters: [], cost: { model_calls: 15, prompt_characters: 0, output_characters: 0 }, started_at: "2026-11-18T00:00:00Z",
+      suite_ready: true, suite_problems: [],
     },
   ]);
 });
