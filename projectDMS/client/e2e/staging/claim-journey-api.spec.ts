@@ -27,8 +27,6 @@
  * 401, at several points.
  *
  * Known gaps the run measures rather than hides (reported in 4B-44):
- *   - a time head whose days rest on a linked hindrance escalates with no
- *     evidence, so the Statement of Claim reports it as missing records;
  *   - no endpoint exposes the backend RELEASE_SHA (see "build identifiers").
  *
  * SETUP
@@ -50,7 +48,8 @@
  *   E2E_CJ_CONTRACTOR_PROJECT_ID          project acting for the Contractor
  *   E2E_CJ_ENGINEER_PROJECT_ID            project acting for the Engineer
  *   E2E_CJ_NOTICE_DOCUMENT_ID             incoming letter in the Contractor project: the claim's notice
- *   E2E_CJ_RECORD_DOCUMENT_ID             outgoing letter/record in the Contractor project: the quantum record
+ *   E2E_CJ_RECORD_DOCUMENT_ID             outgoing letter/record in the Contractor project: the quantum record,
+ *                                         also linked to the run's hindrance as the record behind H1's days
  *   E2E_CJ_NOTICE_CLAUSE_NO               notice clause number in the clause index (e.g. 20.1)
  *   E2E_CJ_NOTICE_QUOTE                   wording quoted from that clause, containing the period
  *   E2E_CJ_NOTICE_PERIOD_DAYS             the period in that wording (e.g. 28)
@@ -433,6 +432,15 @@ test.describe("Claim journey - deployed certification", () => {
       201
     );
     suite.hindranceId = String(hindrance.id ?? hindrance._id);
+    // JG-4: the record behind the hindrance, linked on the register's own entry; escalation
+    // carries it as the evidence for H1's days.
+    await ok(
+      await post(admin, `/api/entities/delay_event/${suite.hindranceId}/document-links:batch`, {
+        links: [{ document_id: suite.env.E2E_CJ_RECORD_DOCUMENT_ID, relationship_role: "supporting_document" }],
+      }),
+      "link the record to the hindrance",
+      201
+    );
     const link = { target_type: "hindrance", target_id: suite.hindranceId };
     // D-22 (JG-3, fixed): the board is locked, so the link is refused until someone who may
     // manage the claim reopens it with a reason, which is audited.
@@ -675,6 +683,8 @@ test.describe("Claim journey - deployed certification", () => {
     const latest = versions.reduce((a: any, b: any) => (a.version > b.version ? a : b));
     const blockers: string[] = latest.structured_output?.approval_blockers ?? [];
     expect(blockers.some((b) => b.includes("awaiting approval") || b.includes("none is approved"))).toBe(false);
+    // JG-4 (fixed): every pleaded head carries what it needs, including the record behind H1's days.
+    expect(latest.structured_output?.pleaded_head_gaps ?? []).toEqual([]);
     const after = (await ok(await approver.request.get(`${drafts}/citations`), "gates after review")).action_gates;
     expect(after.approve.allowed, "a hand-written version without citations cannot pass validation").toBe(false);
     expect(after.approve.checked_on_action).toEqual(["Case readiness approval", "Plan approval", "Legal review approval"]);

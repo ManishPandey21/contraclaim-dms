@@ -546,3 +546,93 @@ async def test_a_notice_letter_the_caller_cannot_see_is_not_carried() -> None:
     await _escalation(db, service).escalate([await _claim(db)], DOCS, NEW, ACTOR, None, {CLAIM_ID: {"doc-1", "doc-secret"}})
     (row,) = _rows(db, "arbitration_claim_matrix")
     assert row["notice_ids"] == ["doc-1"]
+
+
+# --------------------------------------------------------------------------- #
+# JG-4: the records behind a head's days travel with it
+# --------------------------------------------------------------------------- #
+SITE_DIARY = "doc-site-diary"
+
+
+async def _settled_delay(db, service, *, diary: bool = True) -> None:
+    """H1's days come from a settled delay assessment over E1 and C1; E1 carries a site diary."""
+    from rbac_backend.services.claim_delay_lab import DelaySettingsRequest, OverlapDecisionRequest
+    from rbac_backend.tests.test_claim_delay_quantum import OVERLAP
+
+    if diary:
+        db.documents.docs.append({"_id": SITE_DIARY, "subject": "Site diary, March 2026",
+                                  "organization_id": ORG, "project_id": PROJECT})
+        db.entity_document_links.docs.append({
+            "_id": "edl-diary", "organization_id": ORG, "project_id": PROJECT, "target_type": "delay_event",
+            "target_id": "E1", "document_id": SITE_DIARY, "relationship_role": "supporting_document", "removed_at": None,
+        })
+    await _with_overlap(db, service)
+    lab = ClaimDelayLab(db, service)
+    await lab.set_settings(await _claim(db), "H1", DelaySettingsRequest(board_version=await _version(db), method="windows"), USER)
+    await lab.decide_overlap(
+        await _claim(db), "H1", OVERLAP,
+        OverlapDecisionRequest(board_version=await _version(db), treatment="eot_granted_no_cost",
+                               basis="Sub-Clause 8.4, time without cost."),
+        USER,
+    )
+
+
+async def test_a_head_whose_days_rest_on_a_hindrance_carries_its_records() -> None:
+    db, service = await _worked_claim()
+    await _settled_delay(db, service)
+    visible = {CLAIM_ID: DOCS[CLAIM_ID] | {SITE_DIARY}}
+    preview = await _escalation(db, service).preview([await _claim(db)], visible)
+    assert preview.can_escalate and preview.blockers == []
+    await _escalation(db, service).escalate([await _claim(db)], visible, NEW, ACTOR)
+    (row,) = _rows(db, "arbitration_claim_matrix")
+    assert row["eot_days"] and SITE_DIARY in row["evidence_ids"], row
+    assert "doc-1" in row["evidence_ids"], "the quantum line's record is still carried"
+    gaps = pleaded_head_gaps({"claims": [{"citation": "C/H1", "metadata": row}]})
+    assert not any("records supporting the amount or days" in item for gap in gaps for item in gap["missing"]), gaps
+
+
+async def test_a_record_behind_the_days_that_the_caller_cannot_see_blocks_escalation() -> None:
+    db, service = await _worked_claim()
+    await _settled_delay(db, service)
+    preview = await _escalation(db, service).preview([await _claim(db)], DOCS)  # the diary is not visible
+    assert not preview.can_escalate
+    assert any("1 item of its evidence is restricted for you" in item for item in preview.blockers), preview.blockers
+    with pytest.raises(HTTPException) as refused:
+        await _escalation(db, service).escalate([await _claim(db)], DOCS, NEW, ACTOR)
+    assert refused.value.status_code == 403 and refused.value.detail["code"] == "evidence_restricted"
+    assert _rows(db, "arbitration_cases") == []
+
+
+async def test_days_not_taken_from_an_assessment_carry_no_hindrance_records() -> None:
+    db, service = await _worked_claim()
+    db.documents.docs.append({"_id": SITE_DIARY, "subject": "Site diary", "organization_id": ORG, "project_id": PROJECT})
+    db.entity_document_links.docs.append({
+        "_id": "edl-diary", "organization_id": ORG, "project_id": PROJECT, "target_type": "delay_event",
+        "target_id": "E1", "document_id": SITE_DIARY, "relationship_role": "supporting_document", "removed_at": None,
+    })
+    await _with_overlap(db, service)  # the overlap is undecided: the assessment is not settled
+    visible = {CLAIM_ID: DOCS[CLAIM_ID] | {SITE_DIARY}}
+    await _escalation(db, service).escalate([await _claim(db)], visible, NEW, ACTOR)
+    (row,) = _rows(db, "arbitration_claim_matrix")
+    assert SITE_DIARY not in row["evidence_ids"], row
+
+
+async def test_the_router_adds_only_the_records_the_caller_may_read() -> None:
+    from rbac_backend.services.claim_escalation import readable_delay_documents
+
+    db, service = await _worked_claim()
+    await _settled_delay(db, service)
+
+    class Relationships:
+        def __init__(self, allowed: bool) -> None:
+            self.allowed = allowed
+
+        async def authorized_document_ids(self, actor, target_type, target_id, *, legacy_document_ids=()):
+            if not self.allowed:
+                raise HTTPException(status_code=403, detail="Not authorized")
+            assert target_type == "delay_event"
+            return [SITE_DIARY] if target_id == "E1" else []
+
+    claim = await _claim(db)
+    assert await readable_delay_documents(db, claim, ACTOR, Relationships(True)) == {SITE_DIARY}
+    assert await readable_delay_documents(db, claim, ACTOR, Relationships(False)) == set()

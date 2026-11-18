@@ -39,6 +39,7 @@ from typing import Any, Dict, List
 
 import httpx
 import pytest
+from bson import ObjectId
 
 from rbac_backend.tests.integration.test_claim_privileged_rbac_mongo import _add_actor
 from rbac_backend.tests.integration.test_claim_routes_real_deps_mongo import MONGODB_URI_ENV, _env
@@ -49,6 +50,7 @@ from rbac_backend.tests.integration.test_variation_relationships_cl2_mongo impor
     PROJ_A1,
     PROJ_A2,
     PROJ_B1,
+    _document,
 )
 
 pytestmark = [
@@ -56,6 +58,9 @@ pytestmark = [
     pytest.mark.skipif(not os.getenv(MONGODB_URI_ENV), reason=f"set {MONGODB_URI_ENV} to a disposable MongoDB replica set"),
 ]
 
+#: A site diary linked to the hindrance only (not to the claim): the record behind H1's days (JG-4).
+SITE_DIARY = ObjectId()
+SITE_DIARY_ID = str(SITE_DIARY)
 CLAIMS = "/api/claims"
 NOTICE = "/api/claims/notice/requirements"
 CASES = "/api/arbitration/cases"
@@ -311,6 +316,13 @@ def test_the_claim_journey_from_start_to_the_pleading_gate_over_http(monkeypatch
                 "responsibility": "employer", "critical_path_impact": True,
             }), 201)
             hindrance_id = str(hindrance.get("id") or hindrance.get("_id"))
+            # The site diary behind the hindrance, linked on the register's own entry and not to the claim.
+            await env.db.documents.insert_one(_document(
+                SITE_DIARY, organization_id=ORG_A, project_id=CONTRACTOR, upload_type="incoming",
+                subject="Site diary, March 2026", letter_no="SD/03", sender="Site engineer"))
+            _ok(await env.call("POST", "org_admin", f"/api/entities/delay_event/{hindrance_id}/document-links:batch", json={
+                "links": [{"document_id": SITE_DIARY_ID, "relationship_role": "supporting_document"}],
+            }), 201)
             candidates = _ok(await env.call("GET", "org_admin", f"{CLAIMS}/{claim_id}/bench/delay/candidates"))
             assert any(c["target_id"] == hindrance_id and c["target_type"] == "hindrance" for c in candidates)
             link = {"target_type": "hindrance", "target_id": hindrance_id}
@@ -478,6 +490,8 @@ def test_the_claim_journey_from_start_to_the_pleading_gate_over_http(monkeypatch
             assert len(matrix) == 2, matrix
             row = next(r for r in matrix if r.get("claim_head", "").startswith("Delayed handover"))
             assert row["notice_ids"] == [DOC_IN_ID] and row["clause_ids"] and row["facts"], row
+            # JG-4 (fixed): the time head carries the record behind its days, from the linked hindrance.
+            assert row["eot_days"] and row["evidence_ids"] == [SITE_DIARY_ID], row
             _refused(await env.call("GET", "foreign_org_admin", f"{CASES}/{case_id}/claim-matrix", project=PROJ_B1))
 
             # The pleading path: a Statement of Claim in the case, refused approval and export while gates are open.
@@ -521,11 +535,9 @@ def test_the_claim_journey_from_start_to_the_pleading_gate_over_http(monkeypatch
             assert second["version"] == 2
             assert not any("awaiting approval" in b or "none is approved" in b for b in second["blockers"]), second["blockers"]
             # Where the HTTP path stops (each reported in 4B-44):
-            # (a) GAP: the time head H1 escalated with no record behind its 60 days. Its days rest on a
-            #     linked hindrance and a delay assessment, neither of which escalation carries as evidence.
-            assert second["head_gaps"] == [
-                {"claim": f"{claim_id}/H1", "missing": ["records supporting the amount or days pleaded"]}
-            ], second["head_gaps"]
+            # (a) JG-4 (fixed): every approved head carries what a pleaded head needs, including the
+            #     record behind H1's days.
+            assert second["head_gaps"] == [], second["head_gaps"]
             # (b) pleading text written by hand has no ledger citations; a cited, validated version is
             #     what generation produces, and generation is a model call.
             assert any("without a same-sentence source citation" in b for b in second["blockers"]), second["blockers"]

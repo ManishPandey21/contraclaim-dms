@@ -29,6 +29,7 @@ from ..services.claim_escalation import (
     EscalationResult,
     UndoRequest,
     UndoResult,
+    readable_delay_documents,
 )
 from ..services.document_relationship_service import DocumentRelationshipService
 from ..services.policy_service import PolicyService
@@ -65,6 +66,8 @@ async def _gather(
         claim = await _claim(claim_id, Permissions.CLAIM_MANAGE, db, current_user, policy, selection, bench)
         claims.append(claim)
         documents[str(claim["_id"])] = await _claim_documents(claim, db, current_user)
+        # The records behind each head's days are carried with it (JG-4).
+        documents[str(claim["_id"])] |= await readable_delay_documents(db, claim, current_user)
         notices[str(claim["_id"])] = await _claim_notice_documents(claim, db, current_user)
     case: Optional[dict] = None
     if payload.case_id:

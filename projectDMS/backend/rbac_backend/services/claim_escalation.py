@@ -72,7 +72,9 @@ from .claim_submission import (
     EVIDENCE_RESTRICTED,
     ClaimSubmissions,
     SubmissionRecord,
+    DELAY_LINK_ENTITY,
     claim_evidence_ids,
+    delay_record_evidence,
     format_paise,
     head_amount,
     head_days,
@@ -203,12 +205,18 @@ def build_carry(
     record: SubmissionRecord,
     bench: Optional[ClaimBench],
     notice_ids: Iterable[str] = (),
+    delay_evidence: Optional[Dict[str, Iterable[str]]] = None,
 ) -> tuple[ClaimCarry, List[tuple[str, Dict[str, Any]]]]:
     """The rows a claim adds to a case, with what is weak and what is left behind.
 
     ``notice_ids`` are the documents linked to the claim with the role "notice"
     that the caller may see (4B-34). The notice is given for the claim, so every
     head carries them; a reviewer still approves each row before it is pleaded.
+
+    ``delay_evidence`` (JG-4) is, per head, the documents behind the hindrances and
+    key-date EOT records its delay assessment links, already limited to what the caller
+    may see. When a head's days come from that assessment, those documents are the
+    records supporting the days pleaded, and are carried as its evidence.
     """
     claim_id = str(claim["_id"])
     notices = sorted({str(item) for item in notice_ids if item})
@@ -240,6 +248,8 @@ def build_carry(
         evidence_ids = sorted(
             {proof.document_id for item in (view.lines if view else []) if not item.locked for proof in item.line.records}
         )
+        if days is not None and assessed:
+            evidence_ids = sorted(set(evidence_ids) | {str(item) for item in (delay_evidence or {}).get(head.head_id, ())})
         if days is not None and not assessed:
             weak.append(f"{head.head_id}: the days are the figure entered on the head, with no delay assessment behind them")
         if amount is not None and not built:
@@ -435,6 +445,29 @@ def build_carry(
 # --------------------------------------------------------------------------- #
 # Service
 # --------------------------------------------------------------------------- #
+async def readable_delay_documents(db: Any, claim: Dict[str, Any], actor: Any, relationships: Any = None) -> Set[str]:
+    """The documents behind the claim's delay links that ``actor`` may read (JG-4).
+
+    A record whose register the actor cannot read contributes nothing; the restricted
+    check then counts its documents and refuses the escalation, as for claim evidence."""
+    service = relationships or DocumentRelationshipService(db)
+    lab = ClaimDelayLab(db, None)
+    readable: Set[str] = set()
+    for link in await lab.links_for_claim(str(claim["_id"])):
+        entity = DELAY_LINK_ENTITY.get(link.target_type)
+        if entity is None:
+            continue
+        record = await lab.load_target(link.target_type, link.target_id)
+        try:
+            ids = await service.authorized_document_ids(
+                actor, entity, str(link.target_id), legacy_document_ids=(record or {}).get("linked_document_ids") or []
+            )
+        except (DocumentRelationshipError, HTTPException):
+            continue
+        readable.update(str(item) for item in ids)
+    return readable
+
+
 class ClaimEscalation:
     def __init__(self, db: Any, bench: Any, relationships: Any = None) -> None:
         self.db = db
@@ -446,8 +479,14 @@ class ClaimEscalation:
         bench = self.bench._bench_of(claim)
         working = bench or ClaimBench(heads=[initial_head(claim)])
         record = await ClaimSubmissions(self.db, self.bench).gather(claim, working, document_ids)
-        # A notice letter is carried only if it is also among the documents the caller may see.
-        return build_carry(claim, record, bench, [item for item in notice_ids if item in document_ids])
+        # A notice letter, or a record behind a head's days, is carried only if it is also
+        # among the documents the caller may see.
+        behind_days = {
+            head_id: sorted(ids & document_ids) for head_id, ids in (await delay_record_evidence(self.db, claim)).items()
+        }
+        return build_carry(
+            claim, record, bench, [item for item in notice_ids if item in document_ids], delay_evidence=behind_days
+        )
 
     async def _foreign_evidence(self, claim: Dict[str, Any], document_ids: Set[str]) -> List[str]:
         links = await ClaimDelayLab(self.db, self.bench).links_for_claim(str(claim["_id"]))
@@ -507,7 +546,11 @@ class ClaimEscalation:
         about a restricted item is returned."""
         result: Dict[str, int] = {}
         for claim in claims:
-            missing = await claim_evidence_ids(self.db, claim) - documents.get(str(claim["_id"]), set())
+            # The records behind a head's days are carried too (JG-4), so they count here.
+            full = await claim_evidence_ids(self.db, claim)
+            for ids in (await delay_record_evidence(self.db, claim)).values():
+                full |= ids
+            missing = full - documents.get(str(claim["_id"]), set())
             if missing:
                 result[str(claim["_id"])] = len(missing)
         return result

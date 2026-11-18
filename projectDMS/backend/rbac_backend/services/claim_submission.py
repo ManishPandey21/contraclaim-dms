@@ -170,6 +170,14 @@ async def claim_evidence_ids(db: Any, claim: Dict[str, Any]) -> Set[str]:
     ):
         candidates.append(str(row.get("document_id") or ""))
     candidates.extend(str(item or "") for item in claim.get("linked_document_ids") or [])
+    return await _scoped_documents(db, claim, candidates)
+
+
+async def _scoped_documents(db: Any, claim: Dict[str, Any], candidates: List[str]) -> Set[str]:
+    """Each candidate resolved to its canonical document, kept only if consumable and in
+    the claim's organisation and project."""
+    organization_id = str(claim.get("organization_id") or "")
+    project_id = str(claim.get("project_id") or "")
     found: Set[str] = set()
     for candidate in candidates:
         if not candidate:
@@ -183,6 +191,44 @@ async def claim_evidence_ids(db: Any, claim: Dict[str, Any]) -> Set[str]:
             continue
         found.add(str(document.get("_id")))
     return found
+
+
+#: The record types a head's delay assessment links, and the entity type their documents
+#: are linked under (entity_adapter_registry: hindrances are ``delay_event``).
+DELAY_LINK_ENTITY: Dict[str, str] = {
+    "hindrance": "delay_event",
+    "eot_submission": "eot_submission",
+    "eot_determination": "eot_determination",
+}
+
+
+async def delay_record_evidence(db: Any, claim: Dict[str, Any]) -> Dict[str, Set[str]]:
+    """Per head, the documents behind the records its delay assessment links (JG-4).
+
+    A head's days come from the hindrances and key-date EOT records linked to it. Those
+    records carry their own supporting documents (active links, and the legacy
+    ``linked_document_ids`` the register held before links). These are the records
+    behind the days pleaded. Like ``claim_evidence_ids`` this is the full set, the same
+    for every viewer: whether a caller may carry it is decided by the caller of this."""
+    organization_id = str(claim.get("organization_id") or "")
+    project_id = str(claim.get("project_id") or "")
+    lab = ClaimDelayLab(db, None)
+    by_head: Dict[str, Set[str]] = {}
+    for link in await lab.links_for_claim(str(claim["_id"])):
+        entity = DELAY_LINK_ENTITY.get(link.target_type)
+        if entity is None:
+            continue
+        candidates: List[str] = []
+        async for row in db.entity_document_links.find(
+            {"organization_id": organization_id, "project_id": project_id, "target_type": entity,
+             "target_id": str(link.target_id), "removed_at": None},
+            {"document_id": 1},
+        ):
+            candidates.append(str(row.get("document_id") or ""))
+        record = await lab.load_target(link.target_type, link.target_id)
+        candidates.extend(str(item or "") for item in (record or {}).get("linked_document_ids") or [])
+        by_head.setdefault(link.head_id, set()).update(await _scoped_documents(db, claim, candidates))
+    return by_head
 
 
 def _restricted_paragraph(paragraph: SubmissionParagraph, accessible: Set[str]) -> SubmissionParagraph:
