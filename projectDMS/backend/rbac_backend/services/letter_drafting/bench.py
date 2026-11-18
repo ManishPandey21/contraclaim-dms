@@ -26,7 +26,7 @@ import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence
 
 from bson import ObjectId
 from fastapi import HTTPException
@@ -185,9 +185,15 @@ class LetterBenchService:
         registry: Optional[SkillRegistry] = None,
         executor: Optional[SkillExecutor] = None,
         config: Any = settings,
+        determination_source: Optional[Callable[[str, str, Any], Awaitable[Any]]] = None,
     ) -> None:
+        """``determination_source`` loads a determination letter's content (4B-31): given the
+        determination id, the purpose and the caller, it authorises the caller on the claim and
+        returns its ``DeterminationLetterSource``. The router supplies it, so this module does
+        not import the claim services."""
         from .service import DraftRunService  # local import: service imports this module
 
+        self.determination_source = determination_source
         self.db = db
         self.config = config
         self.drafts = draft_service or DraftRunService(db)
@@ -550,26 +556,10 @@ class LetterBenchService:
         )
 
     async def _determination_trigger(self, determination_id: str, purpose: str, current_user: Any) -> Any:
-        """Origin of a determination letter or a request for information (4B-31).
-
-        The determination's claim must be readable by the caller; the letter carries
-        the determination's findings and information items, with their deadlines,
-        and nothing else (``claim_determinations.letter_source``).
-        """
-        from ..claim_service import ClaimService
-        from ..claim_bench import ClaimBenchService
-        from ..claim_determinations import DETERMINATIONS, load_letter_source
-
-        row = await self.db[DETERMINATIONS].find_one({"_id": determination_id})
-        if not row:
-            raise HTTPException(status_code=404, detail="Determination not found")
-        record = await ClaimService(self.db).get(str(row.get("claim_id")))
-        if not record:
-            raise HTTPException(status_code=404, detail="Determination not found")
-        await self.drafts.policy_service.authorize_document(
-            current_user, "dms.claim.view", record, resource_type="claim"
-        )
-        return await load_letter_source(self.db, ClaimBenchService(self.db), record, determination_id, purpose)  # type: ignore[arg-type]
+        """Origin of a determination letter or a request for information (4B-31)."""
+        if self.determination_source is None:
+            raise HTTPException(status_code=503, detail="Letters from a determination are not available here")
+        return await self.determination_source(determination_id, purpose, current_user)
 
     async def _letter_exists(self, letter_id: str) -> bool:
         try:

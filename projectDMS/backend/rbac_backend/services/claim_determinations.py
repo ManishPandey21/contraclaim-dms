@@ -835,7 +835,7 @@ def _day(value: Optional[datetime]) -> Optional[str]:
     return value.date().isoformat() if value else None
 
 
-def _amount(value: Optional[float]) -> str:
+def _amount(value: float) -> str:
     from .claim_submission import format_paise
 
     return format_paise(int(round(float(value) * 100)))
@@ -887,7 +887,7 @@ def letter_source(
                 "No information is asked for in this determination. Add the items, with their deadlines, first.",
             )
     reference = claim.get("claim_ref") or claim.get("title") or str(claim.get("_id"))
-    heads = [
+    heads: List[Dict[str, Any]] = [
         {
             "head_id": head.head_id,
             "head_title": head.head_title,
