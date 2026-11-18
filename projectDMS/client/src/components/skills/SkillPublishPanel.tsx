@@ -88,8 +88,15 @@ const SkillPublishPanel: React.FC<Props> = ({ version, onClose, onPublished, rev
     for (const user of people.data ?? []) map.set(String(user.id || user._id || ""), personName(user));
     return map;
   }, [people.data]);
-  const nameOf = (id?: string | null) => (id ? names.get(id) || id : "");
   const myId = me.data?.id ? String(me.data.id) : null;
+  // Never a raw id on screen (plan 4.3): someone this user cannot look up is "another person".
+  const nameOf = (id?: string | null) => (id ? names.get(id) || (id === myId ? "you" : "another person") : "");
+  // An approval names its run; show the run by date, never by its id.
+  const runOf = (suite: string, runId?: string | null) => {
+    const id = runId || suite.split("#run:")[1] || "";
+    const found = runs.data?.find((item) => item._id === id);
+    return found ? `the evaluation run of ${formatDateIN(found.started_at)}` : "an earlier evaluation run";
+  };
 
   // The run under review: the one chosen, else the newest. Runs are made on the server (4B-41).
   const run: SkillEvalRun | null =
@@ -274,7 +281,7 @@ const SkillPublishPanel: React.FC<Props> = ({ version, onClose, onPublished, rev
                       {approval && (
                         <p className="text-xs text-muted-foreground">
                           {nameOf(approval.reviewer_user_id)} on {formatDateIN(approval.decided_at)}, against{" "}
-                          {approval.eval_suite}
+                          {runOf(approval.eval_suite, approval.eval_run_id)}
                           {approval.eval_score != null && approval.eval_threshold != null
                             ? ` (${approval.eval_score.toFixed(2)} of ${approval.eval_threshold.toFixed(2)} needed, ${approval.eval_case_count} cases)`
                             : ""}

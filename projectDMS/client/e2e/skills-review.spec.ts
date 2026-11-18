@@ -497,7 +497,7 @@ test.describe("skill-pack review and publication (4B-43)", () => {
     await expectNoRawIds(page);
   });
 
-  test("no raw id or hash is visible once reviews are given (run UUID shown today: see finding)", async ({ page }) => {
+  test("no raw id or hash is visible once reviews are given", async ({ page }) => {
     await mockApi(page, {
       as: "publisher",
       runs: [RUN_A],
@@ -512,14 +512,13 @@ test.describe("skill-pack review and publication (4B-43)", () => {
     const text = await visibleText(page);
     expect(text).not.toMatch(OBJECT_ID);
     expect(text).not.toMatch(CONTENT_HASH_TEXT);
-    // FINDING (4B-43): each given review prints its `eval_suite` verbatim, i.e.
-    // "against claims-golden@e5e5e5e5e5e5e5e5#run:<run uuid>", so the raw run UUID is
-    // visible. Left out rather than weakened; restore when the panel names the run by
-    // date and evaluator instead:
-    // expect(text).not.toMatch(UUID);
+    // Found by this suite (4B-43) and fixed: a given review printed its `eval_suite`
+    // ("...#run:<run uuid>") verbatim; it now names the run by its date.
+    expect(text).not.toMatch(UUID);
+    await expect(page.getByText(/against the evaluation run of \d{2}-\d{2}-\d{4}/).first()).toBeVisible();
   });
 
-  test("no raw id or hash is visible to a reviewer (evaluator ObjectId shown today: see finding)", async ({ page }) => {
+  test("no raw id or hash is visible to a reviewer", async ({ page }) => {
     // A pure reviewer may not list users, so the panel cannot turn the evaluator's id into a name.
     await mockApi(page, { as: "reviewer", runs: [RUN_A], usersVisible: false });
     await page.goto("/skill-reviews");
@@ -528,9 +527,9 @@ test.describe("skill-pack review and publication (4B-43)", () => {
     const text = await visibleText(page);
     expect(text).not.toMatch(UUID);
     expect(text).not.toMatch(CONTENT_HASH_TEXT);
-    // FINDING (4B-43): with the user directory refused, `nameOf` falls back to the id, so the
-    // run reads "Passed · 16-11-2026 by 65f0c0ffee0000000000c003". Left out rather than
-    // weakened; restore when the run carries the evaluator's display name:
-    // expect(text).not.toMatch(OBJECT_ID);
+    // Found by this suite (4B-43) and fixed: with the user directory refused, the run read
+    // "by 65f0c0ffee0000000000c003"; someone the reviewer cannot look up is now "another person".
+    expect(text).not.toMatch(OBJECT_ID);
+    await expect(page.getByText(/by another person/).first()).toBeVisible();
   });
 });
