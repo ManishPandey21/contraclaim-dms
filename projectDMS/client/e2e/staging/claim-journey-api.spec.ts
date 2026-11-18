@@ -27,7 +27,6 @@
  * 401, at several points.
  *
  * Known gaps the run measures rather than hides (reported in 4B-44):
- *   - no endpoint exposes the backend RELEASE_SHA (see "build identifiers").
  *
  * SETUP
  *   Backend: CLAIM_BENCH_ROLLOUT_MODE=canary with E2E_STAGING_ORG_ID in
@@ -63,7 +62,7 @@
  *   E2E_CJ_QUANTUM_REVIEWER_EMAIL / _PASSWORD Contractor project: dms.arbitration.approve (granted quantum_reviewer here)
  *   E2E_CJ_FOREIGN_EMAIL / _PASSWORD      a user of another organisation
  *   E2E_CJ_FOREIGN_PROJECT_ID             that user's own project (its navbar selection)
- *   E2E_CJ_RELEASE_SHA                    optional: the deployed backend image's revision label, recorded
+ *   E2E_CJ_RELEASE_SHA                    optional: the commit expected on staging; if set, GET /api/build must match it
  *   E2E_RUN_ID, E2E_EVIDENCE_DIR, E2E_IGNORE_HTTPS_ERRORS   optional, as in fixtures.ts
  *
  * COST. Two head-test model calls, one determination proposal, one submission
@@ -279,15 +278,17 @@ test.describe("Claim journey - deployed certification", () => {
     environment();
     const request = await anonymous(playwright);
     const ids: Record<string, unknown> = { run: RUN_ID, release_sha_supplied: process.env.E2E_CJ_RELEASE_SHA?.trim() || null };
-    // No endpoint exposes RELEASE_SHA (Dockerfile ENV + image label only): recorded as such, a 4B-44 gap.
-    for (const path of ["/health/live", "/api/health/live"]) {
-      const response = await request.get(path);
-      if (response.ok()) {
-        const body = await response.json().catch(() => ({}));
-        ids.health_path = path;
-        ids.backend_release_sha = body.release_sha ?? body.release ?? body.version ?? "not exposed by the backend";
-        break;
-      }
+    // JG-6 (fixed): GET /api/build reports the commit the backend image was built from;
+    // it needs a signed-in user.
+    expect((await request.get("/api/build")).status(), "anonymous build read").toBe(401);
+    const admin = await as(playwright, "ORGADMIN", contractor());
+    const build = await ok(await admin.request.get("/api/build"), "backend build");
+    expect(build.service).toBe("backend");
+    expect(build.release_sha, "the backend image records no commit (RELEASE_SHA)").toMatch(/^[0-9a-f]{7,40}$/);
+    ids.backend_release_sha = build.release_sha;
+    const expected = process.env.E2E_CJ_RELEASE_SHA?.trim().toLowerCase();
+    if (expected) {
+      expect(build.release_sha.startsWith(expected) || expected.startsWith(build.release_sha), "the deployed backend is not the expected commit").toBe(true);
     }
     const index = await request.get("/");
     expect(index.status(), "GET / (the client shell)").toBe(200);

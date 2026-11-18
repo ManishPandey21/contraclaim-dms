@@ -74,6 +74,7 @@ from .routers import (
     search,
     security_terms,
     health,
+    build_info,
     smtp_settings,
     sso,
     storage_sync,
@@ -330,6 +331,7 @@ app.include_router(smtp_settings.router, prefix="/api", tags=["smtp-settings"])
 app.include_router(retrieval_engine.router, prefix="/api", tags=["retrieval-engine"])
 app.include_router(dashboard.router, prefix="/api", tags=["dashboard"])
 app.include_router(performance.router, prefix="/api", tags=["performance"])
+app.include_router(build_info.router, prefix="/api", tags=["build"])
 app.include_router(ws_router)
 app.include_router(health.router)
 

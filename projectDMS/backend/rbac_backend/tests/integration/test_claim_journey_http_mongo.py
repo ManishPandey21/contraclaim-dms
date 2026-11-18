@@ -235,6 +235,13 @@ def test_the_claim_journey_from_start_to_the_pleading_gate_over_http(monkeypatch
             model = await _preconditions(env, monkeypatch)
             evidence: Dict[str, Any] = {}
 
+            # JG-6: which backend build is answering; signed-in callers only.
+            build = _ok(await env.call("GET", "org_admin", "/api/build"))
+            assert build["service"] == "backend" and build["release_sha"]
+            assert (await _anonymous(env, "GET", "/api/build")).status_code == 401
+            monkeypatch.setenv("RELEASE_SHA", "379e98f")
+            assert _ok(await env.call("GET", "org_admin", "/api/build"))["release_sha"] == "379e98f"
+
             # 1. Start. There is no /claims/start: 4B-20's three-question start is not built.
             assert _ok(await env.call("GET", "org_admin", "/api/claims/bench/availability"))["enabled"] is True
             from rbac_backend.main import app
