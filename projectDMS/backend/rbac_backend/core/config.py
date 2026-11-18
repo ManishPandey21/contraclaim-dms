@@ -324,6 +324,9 @@ class Settings(BaseSettings):
     DRAFT_ENGINE_PRODUCTION_ACCEPTED: bool = Field(default=False, validation_alias="DRAFT_ENGINE_PRODUCTION_ACCEPTED")
     DRAFT_ENGINE_MAX_CHECKPOINT_BYTES: int = Field(default=262144, ge=4096, validation_alias="DRAFT_ENGINE_MAX_CHECKPOINT_BYTES")
     DRAFT_ENGINE_CHECKPOINT_RETENTION_DAYS: int = Field(default=30, ge=1, validation_alias="DRAFT_ENGINE_CHECKPOINT_RETENTION_DAYS")
+    # Which Word writer arbitration exports use (D-19, AQ-7). "minimal" is the writer production
+    # uses today; "python_docx" only after the owner has reviewed docs/DOCX_WRITER_COMPARISON.md.
+    DOCX_WRITER: str = Field(default="minimal", validation_alias="DOCX_WRITER")
     ARBITRATION_ENGINE_DEFAULT: str = Field(default="arbitration_v2", validation_alias="ARBITRATION_ENGINE_DEFAULT")
     ARBITRATION_ENGINE_ROLLOUT_MODE: str = Field(default="off", validation_alias="ARBITRATION_ENGINE_ROLLOUT_MODE")
     ARBITRATION_ENGINE_CANARY_PERCENT: int = Field(default=0, ge=0, le=100, validation_alias="ARBITRATION_ENGINE_CANARY_PERCENT")
@@ -763,6 +766,9 @@ class Settings(BaseSettings):
             raise ValueError("DRAFT_ENGINE_DEFAULT must be v2 or langgraph_v3")
         if draft_rollout not in {"off", "shadow", "canary", "primary", "forced_v2"}:
             raise ValueError("DRAFT_ENGINE_ROLLOUT_MODE must be off, shadow, canary, primary, or forced_v2")
+        docx_writer = str(getattr(self, "DOCX_WRITER", "minimal") or "minimal").strip().lower()
+        if docx_writer not in {"minimal", "python_docx"}:
+            raise ValueError("DOCX_WRITER must be minimal or python_docx")
         arbitration_engine_default = str(
             getattr(self, "ARBITRATION_ENGINE_DEFAULT", "arbitration_v2") or "arbitration_v2"
         ).lower()

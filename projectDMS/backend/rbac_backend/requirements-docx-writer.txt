@@ -1,0 +1,8 @@
+# AQ-7 / 4B-30 (D-19): python-docx for the arbitration Word writer, CI ONLY.
+# Not in requirements.txt (the production image) on purpose: installing it in
+# production would also change four other code paths that pick python-docx up when
+# it is present (Letter Bench Word export, contract DOCX ingestion, appraisal and
+# chronology Word exports). It moves into requirements.txt only with the owner's
+# approval of the switch (docs/DOCX_WRITER_COMPARISON.md). Its own dependencies
+# (lxml, typing_extensions) are already pinned in requirements.txt.
+python-docx==1.2.0

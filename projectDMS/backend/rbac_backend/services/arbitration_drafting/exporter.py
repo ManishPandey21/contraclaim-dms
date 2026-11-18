@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 from typing import Any, Dict, List, Optional, Tuple
 
+from ...core.config import settings
 from ..docx_xml import clean_text, w_paragraph, w_table
 
 
@@ -105,11 +106,27 @@ class ArbitrationDraftExporter:
         return buffer.getvalue()
 
     @staticmethod
-    def build_docx(version: Dict[str, Any]) -> bytes:
+    def build_docx(version: Dict[str, Any], *, writer: Optional[str] = None) -> bytes:
+        """The Word file for ``version``, by the configured writer (D-19, AQ-7).
+
+        ``minimal`` (the default, what production uses) whatever is installed: having
+        python-docx installed must not change production output unreviewed.
+        ``python_docx`` only when chosen, and then python-docx must be installed: a
+        configured writer that is missing is an error, never a silent fallback.
+        """
+        chosen = str(writer or getattr(settings, "DOCX_WRITER", "minimal") or "minimal").strip().lower()
+        if chosen == "minimal":
+            return ArbitrationDraftExporter._build_minimal_docx(version.get("full_markdown") or "")
+        if chosen != "python_docx":
+            raise ValueError(f"Unknown DOCX_WRITER: {chosen}")
+        return ArbitrationDraftExporter._build_python_docx(version)
+
+    @staticmethod
+    def _build_python_docx(version: Dict[str, Any]) -> bytes:
         try:
             import docx
-        except ModuleNotFoundError:
-            return ArbitrationDraftExporter._build_minimal_docx(version.get("full_markdown") or "")
+        except ModuleNotFoundError as exc:
+            raise RuntimeError("DOCX_WRITER=python_docx but python-docx is not installed") from exc
 
         # 4B-29: python-docx refuses XML-forbidden characters; remove them first.
         blocks = _parse_blocks(clean_text(version.get("full_markdown") or ""))
