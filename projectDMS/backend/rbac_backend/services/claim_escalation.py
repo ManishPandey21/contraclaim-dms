@@ -68,7 +68,15 @@ from .arbitration_drafting.case_workspace import ArbitrationCaseWorkspaceService
 from .arbitration_drafting.matrix_registry import MATRIX_COLLECTIONS
 from .audit_event_service import AuditEventService
 from .claim_bench import initial_head
-from .claim_submission import ClaimSubmissions, SubmissionRecord, format_paise, head_amount, head_days
+from .claim_submission import (
+    EVIDENCE_RESTRICTED,
+    ClaimSubmissions,
+    SubmissionRecord,
+    claim_evidence_ids,
+    format_paise,
+    head_amount,
+    head_days,
+)
 from .quantum_formulas import rupees
 from .document_relationship_service import DocumentRelationshipError, DocumentRelationshipService
 
@@ -490,6 +498,28 @@ class ClaimEscalation:
             blockers.append(f"The case is {case.get('status')}; claims cannot be added to it.")
         return blockers
 
+    async def _restricted(self, claims: List[Dict[str, Any]], documents: Dict[str, Set[str]]) -> Dict[str, int]:
+        """Per claim, how many items of its full evidence set the caller cannot read (D-25, 4B-46).
+
+        Escalation carries a claim's evidence into a case. Carrying only what the caller
+        happens to read would put a partial record before the tribunal without saying so,
+        so a caller for whom any item is restricted cannot escalate. Counts only: nothing
+        about a restricted item is returned."""
+        result: Dict[str, int] = {}
+        for claim in claims:
+            missing = await claim_evidence_ids(self.db, claim) - documents.get(str(claim["_id"]), set())
+            if missing:
+                result[str(claim["_id"])] = len(missing)
+        return result
+
+    @staticmethod
+    def _restricted_blocker(claim: Dict[str, Any], count: int) -> str:
+        return (
+            f"{claim.get('claim_ref') or claim['_id']}: {count} item{'s' if count != 1 else ''} of its evidence "
+            f"{'are' if count != 1 else 'is'} restricted for you. The claim's owner, or a person with access to all "
+            "of its evidence, can escalate it."
+        )
+
     async def preview(
         self,
         claims: List[Dict[str, Any]],
@@ -508,7 +538,12 @@ class ClaimEscalation:
                 totals[slug] = totals.get(slug, 0) + count
         unconfirmed: List[Dict[str, Any]] = []
         contract_blockers, notes = await self._contract_review(claims, documents, unconfirmed)
-        blockers = self._blockers(claims, case) + contract_blockers
+        restricted = await self._restricted(claims, documents)
+        blockers = self._blockers(claims, case) + contract_blockers + [
+            self._restricted_blocker(claim, restricted[str(claim["_id"])])
+            for claim in claims
+            if str(claim["_id"]) in restricted
+        ]
         return EscalationPreview(
             project_id=str(claims[0].get("project_id") or "") or None,
             claims=carries,
@@ -532,6 +567,32 @@ class ClaimEscalation:
         blockers = self._blockers(claims, case)
         if blockers:
             raise HTTPException(status_code=409, detail="; ".join(blockers))
+        # D-25 (4B-46): nothing is escalated by a caller for whom any evidence is restricted.
+        restricted = await self._restricted(claims, documents)
+        if restricted:
+            total = sum(restricted.values())
+            for claim in claims:
+                if str(claim["_id"]) in restricted:
+                    await AuditEventService(self.db).emit(
+                        action="claim.escalation_refused",
+                        actor_id=str(getattr(current_user, "id", "") or "") or None,
+                        resource_type="claim",
+                        resource_id=str(claim["_id"]),
+                        organization_id=claim.get("organization_id"),
+                        project_id=claim.get("project_id"),
+                        result="denied",
+                        reason=EVIDENCE_RESTRICTED,
+                        after={"restricted_items": restricted[str(claim["_id"])]},
+                    )
+            message = "; ".join(
+                self._restricted_blocker(claim, restricted[str(claim["_id"])])
+                for claim in claims
+                if str(claim["_id"]) in restricted
+            )
+            raise HTTPException(
+                status_code=403,
+                detail={"code": EVIDENCE_RESTRICTED, "user_message": message, "detail": None, "restricted_items": total},
+            )
         # 4B-23 (D-23): nothing of another contract is carried into a case; OD-1: nothing
         # whose contract a person has not confirmed.
         lab = ClaimDelayLab(self.db, self.bench)

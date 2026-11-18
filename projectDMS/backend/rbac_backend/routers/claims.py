@@ -642,6 +642,33 @@ async def export_evidence_bundle(
     except DocumentRelationshipError:
         raise
     document_ids = [source["document_id"] for source in document_sources]
+    # D-25 (4B-46): the bundle is an export of the claim's evidence. If any item of the
+    # claim's full evidence set is restricted for the caller, it is refused and audited,
+    # naming no item, rather than exported with the restricted items silently left out.
+    from ..services.claim_submission import EVIDENCE_RESTRICTED, claim_evidence_ids
+
+    restricted = len(await claim_evidence_ids(db, claim) - {str(item) for item in document_ids})
+    if restricted:
+        await audit.emit(
+            action="claim.evidence_export_refused",
+            actor_id=getattr(current_user, "id", None),
+            resource_type="claim",
+            resource_id=str(claim_id),
+            organization_id=claim.get("organization_id"),
+            project_id=claim.get("project_id"),
+            result="denied",
+            reason=EVIDENCE_RESTRICTED,
+            after={"restricted_items": restricted},
+        )
+        message = (
+            f"{restricted} item{'s' if restricted != 1 else ''} of this claim's evidence "
+            f"{'are' if restricted != 1 else 'is'} restricted for you, so you cannot export its evidence bundle. "
+            "The claim's owner, or a person with access to all of its evidence, can export it."
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={"code": EVIDENCE_RESTRICTED, "user_message": message, "detail": None, "restricted_items": restricted},
+        )
     export_claim = {**claim, "linked_document_ids": document_ids}
     content = await EvidenceBundleService(db).build(
         export_claim,

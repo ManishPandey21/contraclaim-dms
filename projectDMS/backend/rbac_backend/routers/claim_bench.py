@@ -11,7 +11,7 @@ Static paths here have two segments after ``/claims`` (``/claims/bench/...``,
 
 from __future__ import annotations
 
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -409,7 +409,7 @@ async def get_claim_bench(
     selection: ActiveScope = Depends(active_scope),
 ):
     claim = await _claim(claim_id, Permissions.CLAIM_VIEW, db, current_user, policy, selection, bench)
-    return await bench.get(claim)
+    return await _for_viewer(await bench.get(claim), claim, db, current_user, policy)
 
 
 @router.post("/claims/{claim_id}/bench/open", response_model=ClaimBenchResponse)
@@ -424,7 +424,7 @@ async def open_claim_bench(
 ):
     """Create the board, with one head carried over from the register. Idempotent."""
     claim = await _claim(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection, bench)
-    return await bench.open(claim, _user_id(current_user))
+    return await _for_viewer(await bench.open(claim, _user_id(current_user)), claim, db, current_user, policy)
 
 
 @router.post("/claims/{claim_id}/bench/heads", response_model=ClaimBenchResponse)
@@ -439,7 +439,7 @@ async def add_claim_head(
     selection: ActiveScope = Depends(active_scope),
 ):
     claim = await _claim(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection, bench)
-    return await bench.add_head(claim, payload, _user_id(current_user))
+    return await _for_viewer(await bench.add_head(claim, payload, _user_id(current_user)), claim, db, current_user, policy)
 
 
 @router.patch("/claims/{claim_id}/bench/heads/{head_id}", response_model=ClaimBenchResponse)
@@ -455,7 +455,9 @@ async def patch_claim_head(
     selection: ActiveScope = Depends(active_scope),
 ):
     claim = await _claim(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection, bench)
-    return await bench.patch_head(claim, head_id, payload, _user_id(current_user))
+    return await _for_viewer(
+        await bench.patch_head(claim, head_id, payload, _user_id(current_user)), claim, db, current_user, policy
+    )
 
 
 @router.post("/claims/{claim_id}/bench/heads/{head_id}/remove", response_model=ClaimBenchResponse)
@@ -471,7 +473,9 @@ async def remove_claim_head(
     selection: ActiveScope = Depends(active_scope),
 ):
     claim = await _claim(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection, bench)
-    return await bench.remove_head(claim, head_id, payload, _user_id(current_user))
+    return await _for_viewer(
+        await bench.remove_head(claim, head_id, payload, _user_id(current_user)), claim, db, current_user, policy
+    )
 
 
 @router.put(
@@ -491,7 +495,10 @@ async def decide_claim_head_element(
 ):
     """Record a person's call on one element of one head."""
     claim = await _claim(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection, bench)
-    return await bench.decide_element(claim, head_id, element_key, payload, _user_id(current_user))
+    return await _for_viewer(
+        await bench.decide_element(claim, head_id, element_key, payload, _user_id(current_user)),
+        claim, db, current_user, policy,
+    )
 
 
 @router.post("/claims/{claim_id}/bench/heads/{head_id}/test", response_model=ClaimBenchResponse)
@@ -509,7 +516,9 @@ async def test_claim_head(
     """Test a head on its five elements. Proposes; decides nothing."""
     claim = await _claim(claim_id, Permissions.CLAIM_ASSESS, db, current_user, policy, selection, bench)
     await head_test_limiter.check_user_limit(_user_id(current_user) or "")
-    return await bench.test_head(claim, head_id, payload, _user_id(current_user))
+    return await _for_viewer(
+        await bench.test_head(claim, head_id, payload, _user_id(current_user)), claim, db, current_user, policy
+    )
 
 
 @router.post("/claims/{claim_id}/bench/lock", response_model=ClaimBenchResponse)
@@ -524,7 +533,7 @@ async def lock_claim_bench(
     selection: ActiveScope = Depends(active_scope),
 ):
     claim = await _claim(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection, bench)
-    return await bench.lock(claim, payload, _user_id(current_user))
+    return await _for_viewer(await bench.lock(claim, payload, _user_id(current_user)), claim, db, current_user, policy)
 
 
 @router.post("/claims/{claim_id}/bench/unlock", response_model=ClaimBenchResponse)
@@ -540,7 +549,7 @@ async def unlock_claim_bench(
 ):
     """Reopen a locked board: claim-manage rights and a reason, kept in the audit trail (D-22)."""
     claim = await _claim(claim_id, Permissions.CLAIM_MANAGE, db, current_user, policy, selection, bench)
-    return await bench.unlock(claim, payload, _user_id(current_user))
+    return await _for_viewer(await bench.unlock(claim, payload, _user_id(current_user)), claim, db, current_user, policy)
 
 
 @router.get("/claims/{claim_id}/bench/steps/{step_id}", response_model=SkillRunStep)
@@ -814,6 +823,64 @@ async def _claim_documents(claim: dict, db, current_user: CurrentUser) -> set:
     )
     return {str(item) for item in ids}
 
+async def _for_viewer(result: Any, claim: dict, db, current_user: CurrentUser, policy: PolicyService) -> Any:
+    """D-25, D-27 (4B-46): no document id the caller may not read leaves a bench or quantum response.
+
+    Quantum lines cite records by document id. For a caller who cannot read a cited
+    document, its id is blanked in the response (the stored line is unchanged); the
+    caller sees that a line has a record, not which. Ids outside the claim's linked set
+    are checked against the caller's document access one by one.
+    """
+    cited: Dict[str, List[Any]] = {}
+
+    def walk(value: Any) -> None:
+        if isinstance(value, BaseModel):
+            document_id = getattr(value, "document_id", None)
+            if isinstance(document_id, str) and document_id:
+                cited.setdefault(document_id, []).append(value)
+            for name in type(value).model_fields:
+                walk(getattr(value, name, None))
+        elif isinstance(value, dict):
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                walk(item)
+
+    walk(result)
+    if not cited:
+        return result
+    readable = await _claim_documents(claim, db, current_user)
+    for document_id, holders in cited.items():
+        if document_id in readable:
+            continue
+        if await _may_read_document(document_id, db, current_user, policy):
+            continue
+        for holder in holders:
+            holder.document_id = RESTRICTED_DOCUMENT_ID
+    return result
+
+
+#: What a document id the caller may not read is replaced with (4B-46).
+RESTRICTED_DOCUMENT_ID = ""
+
+
+async def _may_read_document(document_id: str, db, current_user: CurrentUser, policy: PolicyService) -> bool:
+    from bson import ObjectId
+
+    candidates: List[Any] = [document_id]
+    if ObjectId.is_valid(document_id):
+        candidates.append(ObjectId(document_id))
+    document = await db.documents.find_one({"_id": {"$in": candidates}})
+    if not document:
+        return False
+    try:
+        await policy.authorize_document(current_user, Permissions.DOCUMENT_VIEW, document)
+    except HTTPException:
+        return False
+    return True
+
+
 
 @router.get("/claims/{claim_id}/bench/heads/{head_id}/quantum", response_model=QuantumView)
 @handle_exceptions
@@ -827,7 +894,7 @@ async def get_head_quantum(
     selection: ActiveScope = Depends(active_scope),
 ):
     claim = await _claim(claim_id, Permissions.CLAIM_VIEW, db, current_user, policy, selection, bench)
-    return await ClaimQuantum(db, bench).view(claim, head_id)
+    return await _for_viewer(await ClaimQuantum(db, bench).view(claim, head_id), claim, db, current_user, policy)
 
 
 @router.post("/claims/{claim_id}/bench/heads/{head_id}/quantum/lines", response_model=QuantumView)
@@ -843,8 +910,11 @@ async def add_head_quantum_line(
     selection: ActiveScope = Depends(active_scope),
 ):
     claim = await _claim(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection, bench)
-    return await ClaimQuantum(db, bench).add_line(
-        claim, head_id, payload, await _claim_documents(claim, db, current_user), _user_id(current_user)
+    return await _for_viewer(
+        await ClaimQuantum(db, bench).add_line(
+            claim, head_id, payload, await _claim_documents(claim, db, current_user), _user_id(current_user)
+        ),
+        claim, db, current_user, policy,
     )
 
 
@@ -862,8 +932,11 @@ async def update_head_quantum_line(
     selection: ActiveScope = Depends(active_scope),
 ):
     claim = await _claim(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection, bench)
-    return await ClaimQuantum(db, bench).update_line(
-        claim, head_id, line_id, payload, await _claim_documents(claim, db, current_user), _user_id(current_user)
+    return await _for_viewer(
+        await ClaimQuantum(db, bench).update_line(
+            claim, head_id, line_id, payload, await _claim_documents(claim, db, current_user), _user_id(current_user)
+        ),
+        claim, db, current_user, policy,
     )
 
 
@@ -883,8 +956,9 @@ async def remove_head_quantum_line(
     selection: ActiveScope = Depends(active_scope),
 ):
     claim = await _claim(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy, selection, bench)
-    return await ClaimQuantum(db, bench).remove_line(
-        claim, head_id, line_id, payload.board_version, _user_id(current_user)
+    return await _for_viewer(
+        await ClaimQuantum(db, bench).remove_line(claim, head_id, line_id, payload.board_version, _user_id(current_user)),
+        claim, db, current_user, policy,
     )
 
 
