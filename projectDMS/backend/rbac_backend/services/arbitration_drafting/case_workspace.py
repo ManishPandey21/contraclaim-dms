@@ -226,6 +226,23 @@ def _strip_row_ownership(body: Dict[str, Any], owner: Dict[str, Any]) -> None:
         )
 
 
+def _filing_projection(version: Dict[str, Any]) -> Dict[str, Any]:
+    """The approved version as it goes into a filing bundle (JG-5(f) control 6).
+
+    Its integrity is checked on the stored record first; the bundle then carries a
+    source schedule of evidence only. Case analysis and register rows are context:
+    an approved version cannot cite one (that blocks approval), and none is filed.
+    """
+    from .citation_states import context_policy_stamp, ledger_context_class
+
+    ledger = list(version.get("source_ledger") or [])
+    return {
+        **version,
+        "source_ledger": [row for row in ledger if not ledger_context_class(row)],
+        "source_schedule": {"scope": "evidence_only", "context_policy": context_policy_stamp()},
+    }
+
+
 def _matrix_review_defaults(matrix_slug: str) -> Dict[str, Any]:
     defaults: Dict[str, Any] = {
         "approval_status": "needs_review",
@@ -2510,7 +2527,8 @@ class ArbitrationCaseWorkspaceService:
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Filing bundle contains a validation-defective approved version")
             case = await self.get_case(case_id)
             await self.require_readiness_approval(case, draft)
-            out.append({**draft, "latest_version": approved, "approved_version": approved})
+            filed = _filing_projection(approved)
+            out.append({**draft, "latest_version": filed, "approved_version": filed})
         return out
 
     def _filing_bundle_markdown(self, payload: Dict[str, Any]) -> str:

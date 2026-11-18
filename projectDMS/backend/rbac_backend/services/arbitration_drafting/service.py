@@ -653,6 +653,8 @@ class ArbitrationDraftingService:
                 "retrieval_queries": retrieval_queries,
                 "validation_warnings": warnings,
                 "approval_blockers": safety_report["approval_blockers"],
+                "context_policy": safety_report.get("context_policy"),
+                "context_rows_exempted": safety_report.get("context_rows_exempted") or [],
                 "citations": safety_report["citations"]["counts"],
                 "pleaded_head_gaps": safety_report["pleaded_head_gaps"],
                 "legal_review_required": bool(warnings or generated["missing_evidence"]),
@@ -714,7 +716,12 @@ class ArbitrationDraftingService:
                     "updated_by": _actor_id(current_user),
                 },
             )
-            await self._emit("generated", draft, current_user, after={"version": version_no, "warnings": warnings})
+            await self._emit("generated", draft, current_user, after={
+                "version": version_no,
+                "warnings": warnings,
+                "context_policy": safety_report.get("context_policy"),
+                "context_rows_exempted": safety_report.get("context_rows_exempted") or [],
+            })
             detail = await self.detail(draft_id)
             if deterministic_run_id:
                 detail["_workflow_generation_run_id"] = deterministic_run_id
@@ -748,6 +755,8 @@ class ArbitrationDraftingService:
                 "input_hash": input_hash,
                 "validation_warnings": warnings,
                 "approval_blockers": safety_report["approval_blockers"],
+                "context_policy": safety_report.get("context_policy"),
+                "context_rows_exempted": safety_report.get("context_rows_exempted") or [],
                 "citations": safety_report["citations"]["counts"],
                 "pleaded_head_gaps": safety_report["pleaded_head_gaps"],
                 "legal_review_required": bool(warnings or context["missing_evidence"]),
@@ -764,7 +773,11 @@ class ArbitrationDraftingService:
         version["version_hash"] = immutable_version_hash(version)
         await self.repo.create_version(version)
         await self.repo.update_draft(draft_id, {"current_version": version_no, "updated_at": datetime.utcnow(), "updated_by": _actor_id(current_user)})
-        await self._emit("version_saved", draft, current_user, after={"version": version_no})
+        await self._emit("version_saved", draft, current_user, after={
+            "version": version_no,
+            "context_policy": safety_report.get("context_policy"),
+            "context_rows_exempted": safety_report.get("context_rows_exempted") or [],
+        })
         return version
 
     async def list_versions(self, draft_id: str) -> List[Dict[str, Any]]:

@@ -806,6 +806,50 @@ def test_the_claim_journey_from_start_to_the_pleading_gate_over_http(monkeypatch
             filed = await env.call("GET", "export_person", f"{DRAFTS}/{draft_id}/export/docx")
             assert filed.status_code == 200 and filed.content[:2] == b"PK", (filed.status_code, filed.text[:300])
             _refused(await env.call("GET", "foreign_org_admin", f"{DRAFTS}/{draft_id}/export/docx", project=PROJ_B1))
+            # JG-5(f): the version records the context policy it was validated under and the rows it
+            # treated as uncited context (case analysis and project registers here).
+            stamp = (revised.get("structured_output") or {}).get("context_policy") or {}
+            exempted = set((revised.get("structured_output") or {}).get("context_rows_exempted") or [])
+            context_keys = {row["source_key"] for row in revised["source_ledger"] if row.get("ledger_context")}
+            assert stamp.get("version") == 1 and len(stamp.get("hash") or "") == 64, stamp
+            assert exempted and exempted == context_keys, (exempted, context_keys)
+            # Every export path: the pleading as PDF, and the filing bundle's summary and source schedule.
+            # File storage is the one thing not run here: the three exhibits' stored files read back
+            # as fixed bytes under the keys upload wrote.
+            from rbac_backend.services.s3_service import S3Service
+
+            stored = {f"documents/{key}.pdf" for key in (DOC_IN_ID, DOC_OUT_ID, SITE_DIARY_ID)}
+
+            async def _stored_file(self: Any, key: str, *args: Any, **kwargs: Any) -> bytes:
+                assert key in stored, key
+                return b"%PDF-1.4 exhibit " + key.encode()
+
+            monkeypatch.setattr(S3Service, "download_bytes", _stored_file)
+            pdf = await env.call("GET", "export_person", f"{DRAFTS}/{draft_id}/export/pdf")
+            assert pdf.status_code == 200 and pdf.content[:4] == b"%PDF", (pdf.status_code, pdf.text[:300])
+            for fmt, magic in (("docx", b"PK"), ("pdf", b"%PDF")):
+                bundle = await env.call("GET", "export_person", f"{CASES}/{case_id}/filing-bundle/{fmt}")
+                assert bundle.status_code == 200 and bundle.content[:len(magic)] == magic, (fmt, bundle.status_code, bundle.text[:300])
+            manifest = _ok(await env.call("GET", "export_person", f"{CASES}/{case_id}/filing-bundle/manifest"))
+            in_bundle = [d for d in manifest.get("drafts") or [] if str(d.get("_id") or d.get("id")) == draft_id]
+            assert in_bundle, "the approved pleading is in the filing bundle"
+            schedule = in_bundle[0]["approved_version"]["source_ledger"]
+            assert schedule and not [row["source_key"] for row in schedule if row.get("ledger_context")], schedule
+            assert in_bundle[0]["approved_version"]["source_schedule"]["context_policy"]["hash"] == stamp["hash"]
+            zipped = await env.call("GET", "export_person", f"{CASES}/{case_id}/filing-bundle/zip")
+            assert zipped.status_code == 200 and zipped.content[:2] == b"PK", (zipped.status_code, zipped.text[:300])
+            import io
+            import zipfile
+
+            with zipfile.ZipFile(io.BytesIO(zipped.content)) as archive:
+                filed_versions = [json.loads(archive.read(name)) for name in archive.namelist()
+                                  if name.endswith("/latest-version.json")]
+                bundle_manifest = json.loads(archive.read("manifest.json"))
+            assert filed_versions, "the bundle carries the approved pleading"
+            for version in [*filed_versions, *(d["approved_version"] for d in bundle_manifest["drafts"])]:
+                assert not [row["source_key"] for row in version["source_ledger"] if row.get("ledger_context")]
+            evidence["pleading_filed"] = {"bundle_bytes": len(zipped.content), "schedule_rows": len(schedule),
+                                          "context_rows_exempted": sorted(exempted), "policy": stamp}
             evidence["pleading_approved"] = {"engine": accepted["engine"], "rollout_mode": accepted["rollout_mode"],
                                              "approved_version": approved_draft["approved_version"],
                                              "workflow": state["status"], "export_bytes": len(filed.content)}

@@ -7,7 +7,9 @@ from .citation_refs import has_citation, source_refs
 from .citation_states import (
     claim_head_set_blockers,
     classify_citations,
-    is_uncited_context_row,
+    context_policy_stamp,
+    exempt_context_keys,
+    ledger_context_class,
     is_unverified_source,
     pleaded_head_blockers,
     pleaded_head_gaps,
@@ -76,7 +78,12 @@ class ArbitrationDraftValidator:
             warnings.append(message)
             approval_blockers.append(message)
 
-        source_text = _flatten_text(source_ledger)
+        draft = context.get("draft") or {}
+        scope = {"case_id": draft.get("case_id"), "project_id": draft.get("project_id")}
+        exempted_keys = set(exempt_context_keys(source_ledger, markdown, scope))
+        # JG-5(f) control 5: context rows (case analysis, registers) never support an
+        # amount, date, clause or name in the pleading; only evidence does.
+        source_text = _flatten_text([row for row in source_ledger if not ledger_context_class(row)])
         draft_text = _flatten_text(context.get("draft") or {})
         supported_text = f"{source_text} {draft_text}"
         unsupported_amounts = sorted({item.group(0) for item in _AMOUNT_RE.finditer(markdown) if item.group(0) not in supported_text})
@@ -142,7 +149,7 @@ class ArbitrationDraftValidator:
             approval_blockers.append(message)
 
         unverified_selected = [
-            row for row in source_ledger if is_unverified_source(row) and not is_uncited_context_row(row, cited_keys)
+            row for row in source_ledger if is_unverified_source(row) and str(row.get("source_key")) not in exempted_keys
         ]
         if unverified_selected:
             message = "Draft source ledger contains user-supplied or unverified selected evidence that is not admissible for filing."
@@ -226,6 +233,10 @@ class ArbitrationDraftValidator:
             "source_count": len(source_ledger),
             "citations": citations,
             "pleaded_head_gaps": head_gaps,
+            # Audit trail (JG-5(f) control 8): the policy this verdict was reached under,
+            # and the ledger rows it treated as uncited context.
+            "context_policy": context_policy_stamp(),
+            "context_rows_exempted": sorted(exempted_keys),
         }
 
     def _duplication_warnings(self, matrix_context: Dict[str, Any], warnings: List[str]) -> None:

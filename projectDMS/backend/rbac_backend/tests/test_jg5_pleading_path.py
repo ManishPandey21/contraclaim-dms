@@ -26,8 +26,12 @@ from typing import Any, Dict, List
 import pytest
 
 from rbac_backend.services.arbitration_drafting.citation_states import (
+    CONTEXT_EXEMPTION_POLICY_HASH,
+    classify_citations,
+    exempt_context_keys,
     is_case_analysis,
-    is_uncited_context_row,
+    is_exempt_context_row,
+    ledger_context_class,
 )
 from rbac_backend.services.arbitration_drafting.validator import ArbitrationDraftValidator
 from rbac_backend.services.publication_policy import resolve_derived_authority, safe_matrix_rows
@@ -208,47 +212,162 @@ def test_a_draft_linked_read_includes_the_case_rows_but_not_another_drafts() -> 
 
 
 # --------------------------------------------------------------------------- #
-# 5. context rows in the ledger
+# 5. context rows in the ledger (JG-5(f), owner's conditional approval)
 # --------------------------------------------------------------------------- #
 
-ISSUE = {"source_key": "S1", "source_type": "issue_matrix", "verification_status": "approved", "is_user_supplied": True,
-         "quality_flags": ["user_supplied"], "citation": "I-1", "label": "Whether the handover was late"}
-REGISTER = {"source_key": "S2", "source_type": "claim", "source_origin": "claim_register", "verification_status": "submitted",
-            "is_user_supplied": False, "citation": "CLM-9", "label": "Another claim"}
+SCOPE = {"case_id": "case-1", "project_id": "project-1"}
+ISSUE = {"source_key": "S1", "source_type": "issue_matrix", "source_origin": "case_issue_matrix",
+         "ledger_context": "case_analysis", "context_scope": {"case_id": "case-1"},
+         "verification_status": "approved", "is_user_supplied": True, "quality_flags": ["user_supplied"],
+         "citation": "ISS-1", "label": "Whether the handover was late", "snippet": "Limitation runs from 14/03/2026."}
+REGISTER = {"source_key": "S2", "source_type": "claim", "source_origin": "claim_register",
+            "ledger_context": "project_register", "context_scope": {"project_id": "project-1"},
+            "verification_status": "submitted", "is_user_supplied": False, "quality_flags": [],
+            "citation": "CLM-009", "label": "Another claim", "snippet": "Amount claimed INR 9,99,999.00"}
 EVIDENCE = {"source_key": "S3", "source_type": "document", "verification_status": "verified", "is_user_supplied": False,
-            "citation": "C-1", "label": "Site diary"}
+            "citation": "C-1", "label": "Site diary", "snippet": "Handover on 20 March 2026."}
 MANUAL = {"source_key": "S4", "source_type": "manual_fact", "verification_status": "verified", "is_user_supplied": True,
           "quality_flags": ["user_supplied"], "citation": "Note", "label": "A note"}
-
-
-def _report(ledger: List[Dict[str, Any]], markdown: str) -> Dict[str, Any]:
-    context = {"source_ledger": ledger, "draft": {"case_id": "case-1", "draft_type": "statement_of_defence"}}
-    return ArbitrationDraftValidator().validation_report(context, markdown)
-
-
+PLEADING = "1. The handover was late [S3: C-1].\n"
 INADMISSIBLE = "Draft source ledger contains user-supplied or unverified selected evidence that is not admissible for filing."
 
 
-def test_uncited_analysis_and_register_rows_do_not_block_a_draft() -> None:
-    report = _report([ISSUE, REGISTER, EVIDENCE], "1. The handover was late [S3: C-1].\n")
+def _report(ledger: List[Dict[str, Any]], markdown: str, **draft: Any) -> Dict[str, Any]:
+    context = {"source_ledger": ledger, "draft": {"case_id": "case-1", "project_id": "project-1",
+                                                  "draft_type": "statement_of_defence", **draft}}
+    return ArbitrationDraftValidator().validation_report(context, markdown)
+
+
+def test_uncited_server_classified_context_does_not_block_and_is_recorded() -> None:
+    report = _report([ISSUE, REGISTER, EVIDENCE], PLEADING)
     assert INADMISSIBLE not in report["approval_blockers"], report["approval_blockers"]
-    assert not any("not yet verified" in item for item in report["approval_blockers"])
+    assert report["context_rows_exempted"] == ["S1", "S2"]
+    assert report["context_policy"]["hash"] == CONTEXT_EXEMPTION_POLICY_HASH and report["context_policy"]["version"] == 1
 
 
-@pytest.mark.parametrize("cited", [ISSUE, REGISTER])
-def test_a_cited_analysis_or_register_row_is_an_unverified_citation(cited: Dict[str, Any]) -> None:
-    report = _report([ISSUE, REGISTER, EVIDENCE], f"1. The handover was late [S3: C-1] [{cited['source_key']}: {cited['citation']}].\n")
-    assert any("not yet verified" in item and cited["source_key"] in item for item in report["approval_blockers"]), report
+@pytest.mark.parametrize(
+    "forged",
+    [
+        # Control 1: only the server's classification counts - a type, an origin, or the flag alone does not.
+        {**REGISTER, "ledger_context": None},
+        {**REGISTER, "source_origin": "selected_reference"},
+        {**ISSUE, "source_type": "document"},
+        {**REGISTER, "ledger_context": "case_analysis"},
+        {**REGISTER, "ledger_context": "made_up"},
+    ],
+)
+def test_a_row_the_server_did_not_classify_as_context_still_blocks(forged: Dict[str, Any]) -> None:
+    assert INADMISSIBLE in _report([forged, EVIDENCE], PLEADING)["approval_blockers"]
+
+
+def test_a_selected_reference_cannot_become_context() -> None:
+    from rbac_backend.services.arbitration_drafting.context import ArbitrationContextBuilder
+
+    builder = ArbitrationContextBuilder.__new__(ArbitrationContextBuilder)
+    row = builder._ledger_row(
+        {"source_type": "claim", "source_id": "c9", "ledger_context": "project_register",
+         "context_scope": {"project_id": "project-1"},
+         "metadata": {"source_origin": "claim_register", "verification_status": "submitted"}},
+        1,
+    )
+    assert row["ledger_context"] is None and ledger_context_class(row) is None
+    assert not is_exempt_context_row(row, PLEADING, SCOPE)
+
+
+@pytest.mark.parametrize(
+    "markdown",
+    [
+        "1. The handover was late [S3: C-1] [S2].\n",  # cited by key alone
+        "1. The handover was late [S3: C-1] [S2: CLM-009].\n",  # cited by key and reference
+        "1. The handover was late [S3: C-1], as in claim CLM-009.\n",  # named by its reference
+    ],
+)
+def test_a_relied_upon_context_row_is_checked_as_a_citation(markdown: str) -> None:
+    report = _report([ISSUE, REGISTER, EVIDENCE], markdown)
+    assert "S2" not in report["context_rows_exempted"]
+    assert INADMISSIBLE in report["approval_blockers"] or any("not yet verified" in b for b in report["approval_blockers"])
+
+
+def test_cited_case_analysis_is_refused_as_a_source_of_fact() -> None:
+    report = _report([ISSUE, REGISTER, EVIDENCE], "1. The handover was late [S3: C-1] [S1: ISS-1].\n")
+    assert any("not yet verified" in item and "S1" in item for item in report["approval_blockers"])
+    item = next(i for i in classify_citations("[S1: ISS-1]", [ISSUE])["items"] if i["source_key"] == "S1")
+    assert item["state"] == "unverified" and "not evidence" in item["reason"]
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {**REGISTER, "verification_status": "withdrawn"},
+        {**REGISTER, "verification_status": "stale"},
+        {**ISSUE, "verification_status": "revoked"},
+        {**ISSUE, "verification_status": "needs_review"},
+        {**REGISTER, "authority_denied": True},
+        {**REGISTER, "quality_flags": ["authority_denied"]},
+        {**REGISTER, "quality_flags": ["unverified_ai_suggestion"]},
+        {**REGISTER, "is_user_supplied": True},
+        {**REGISTER, "current_revision_id": "r2", "source_revision_id": "r1"},
+        {**REGISTER, "current_sha256": "b" * 64, "sha256": "a" * 64},
+        {**ISSUE, "context_scope": {"case_id": "case-2"}},
+        {**REGISTER, "context_scope": {"project_id": "project-2"}},
+        {**REGISTER, "context_scope": {}},
+    ],
+)
+def test_missing_stale_altered_unauthorised_or_cross_case_context_is_never_exempt(changed: Dict[str, Any]) -> None:
+    # Control 3.
+    assert not is_exempt_context_row(changed, PLEADING, SCOPE)
+    assert INADMISSIBLE in _report([changed, EVIDENCE], PLEADING)["approval_blockers"]
+
+
+def test_context_rows_never_support_an_amount_date_or_clause() -> None:
+    # Control 5: the figure and the date are only in context rows, so the pleading's use of them is unsupported.
+    report = _report([ISSUE, REGISTER, EVIDENCE], "1. The Claimant claims INR 9,99,999.00 from 14/03/2026 [S3: C-1].\n")
+    blockers = " ".join(report["approval_blockers"])
+    assert "monetary amounts not present" in blockers and "dates not present" in blockers
 
 
 def test_a_manual_fact_still_blocks_whether_cited_or_not() -> None:
-    report = _report([EVIDENCE, MANUAL], "1. The handover was late [S3: C-1].\n")
-    assert INADMISSIBLE in report["approval_blockers"]
+    assert INADMISSIBLE in _report([EVIDENCE, MANUAL], PLEADING)["approval_blockers"]
 
 
-def test_only_an_approved_analysis_row_is_context() -> None:
+def test_only_an_approved_server_classified_analysis_row_is_case_analysis() -> None:
+    # Control 4.
     assert is_case_analysis(ISSUE)
     assert not is_case_analysis({**ISSUE, "verification_status": "needs_review"})
+    assert not is_case_analysis({**ISSUE, "ledger_context": None})
     assert not is_case_analysis(MANUAL)
-    assert is_uncited_context_row(REGISTER, set()) and not is_uncited_context_row(REGISTER, {"S2"})
-    assert not is_uncited_context_row(EVIDENCE, set())
+    assert exempt_context_keys([ISSUE, REGISTER, EVIDENCE], PLEADING, SCOPE) == ["S1", "S2"]
+
+
+def test_the_generated_annexure_list_names_no_context_row() -> None:
+    from rbac_backend.services.arbitration_drafting.generator import ArbitrationDraftGenerator
+
+    text = ArbitrationDraftGenerator.__new__(ArbitrationDraftGenerator)._annexure_text([ISSUE, REGISTER, EVIDENCE])
+    assert "Site diary" in text and "CLM-009" not in text and "ISS-1" not in text
+
+
+def test_the_filed_source_schedule_carries_evidence_only() -> None:
+    from rbac_backend.services.arbitration_drafting.case_workspace import _filing_projection
+
+    filed = _filing_projection({"_id": "v1", "source_ledger": [ISSUE, REGISTER, EVIDENCE], "full_markdown": PLEADING})
+    assert [row["source_key"] for row in filed["source_ledger"]] == ["S3"]
+    assert filed["source_schedule"]["context_policy"]["hash"] == CONTEXT_EXEMPTION_POLICY_HASH
+
+
+def test_the_workflow_honours_only_exemptions_recorded_under_the_current_policy() -> None:
+    from rbac_backend.services.arbitration_drafting.workflow_validation import ArbitrationValidationOrchestrator
+
+    def version(policy_hash: str) -> Dict[str, Any]:
+        return {"_id": "v1", "draft_id": "d1", "version": 1, "full_markdown": PLEADING, "version_hash": "h" * 64,
+                "source_ledger": [REGISTER, EVIDENCE],
+                "structured_output": {"approval_blockers": [], "context_rows_exempted": ["S2"],
+                                      "context_policy": {"hash": policy_hash}}}
+
+    def drift(report: Dict[str, Any]) -> List[str]:
+        return [i["message"] for i in report["blockers"] if i.get("code") == "source_not_authoritative"]
+
+    validation = ArbitrationValidationOrchestrator()
+    current = _run(validation.evaluate(version(CONTEXT_EXEMPTION_POLICY_HASH), branches=("source_drift",)))
+    assert drift(current) == [], drift(current)
+    stale_policy = _run(validation.evaluate(version("0" * 64), branches=("source_drift",)))
+    assert any("S2" in message for message in drift(stale_policy))

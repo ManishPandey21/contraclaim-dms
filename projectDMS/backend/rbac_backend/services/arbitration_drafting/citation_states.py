@@ -26,6 +26,8 @@ Neither check reads anything but its arguments. Neither calls a model.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from typing import Any, Dict, List, Optional
 
@@ -56,40 +58,151 @@ def is_unverified_source(row: Dict[str, Any]) -> bool:
     return bool(row.get("is_user_supplied")) or not is_verified_status(row.get("verification_status"))
 
 
-#: Rows the ledger builder adds to every pleading's ledger as CONTEXT, not as
-#: evidence the drafter selected (JG-5). Only the version's ``full_markdown`` is
-#: filed (the exporter renders nothing else), so an uncited context row is never
-#: relied on in the filing:
+#: JG-5(f): rows the ledger builders add to every pleading's ledger as CONTEXT, not
+#: as evidence the drafter selected. Owner decision (conditional approval,
+#: 2026-11-18): an uncited context row must not block approval merely because its
+#: status is a workflow status rather than an evidence verification - under these
+#: controls, all enforced here so the validator, the workflow's source-drift
+#: branch and the filing bundle apply one rule:
 #:
-#: - counsel's analysis, once approved: the issues for the tribunal and the
-#:   limitation, pre-arbitration and scope checks. Marked user-supplied - they
-#:   are not evidence and must never be cited as a source of fact - and required
-#:   by readiness, so counting their presence as inadmissible evidence blocked
-#:   every Statement of Claim that had passed readiness;
-#: - the project registers (claims, variations, payment certificates, bank
-#:   guarantees), included by default, whose status is the register's workflow
-#:   status ("submitted", "notified"), never a verification - so their presence
-#:   alone blocked every pleading in a project with an open claim or bill.
+#: 1. only rows the SERVER classified: ``ledger_context`` is written by the case
+#:    analysis and register builders alone (``context.py``; a selected reference's
+#:    projection clears it), and must agree with the row's type and origin;
+#: 2. a context row the pleading cites by key, or names by its reference number,
+#:    is relied upon and is checked as a citation (unverified: it blocks);
+#: 3. a negative status (stale, revoked, withdrawn, authority_denied), a blocking
+#:    quality flag, revision or content drift, or a scope other than this case's
+#:    or project's is never exempt;
+#: 4. approved analysis (issues, jurisdiction checks) stays user-supplied in the
+#:    ledger: never evidence, never a source of fact;
+#: 5. context rows never support an amount, date, clause or name in the text
+#:    (``ArbitrationDraftValidator``), and never enter the filed source schedule
+#:    (``case_workspace._filing_bundle_drafts``) or the generated annexure list.
 #:
-#: Cited, either is an ordinary citation and is checked as one (an unverified
-#: citation still blocks).
-CASE_ANALYSIS_SOURCE_TYPES = frozenset({"issue_matrix", "jurisdiction_check"})
-REGISTER_SOURCE_ORIGINS = frozenset(
-    {"claim_register", "variation_register", "ipc_register", "bank_guarantee_register"}
-)
+#: The policy is versioned and hashed; every version records the policy it was
+#: validated under and the rows it exempted. Not final legal sign-off: the
+#: authorised legal reviewer approves this filing-validation policy before release.
+LEDGER_CONTEXT_CLASSES: Dict[str, Dict[str, Any]] = {
+    "case_analysis": {
+        "source_types": frozenset({"issue_matrix", "jurisdiction_check"}),
+        "source_origins": frozenset({"case_issue_matrix", "case_jurisdiction_matrix"}),
+        "scope_key": "case_id",
+    },
+    "project_register": {
+        "source_types": frozenset({"claim", "variation", "payment_event", "bank_guarantee"}),
+        "source_origins": frozenset(
+            {"claim_register", "variation_register", "ipc_register", "bank_guarantee_register"}
+        ),
+        "scope_key": "project_id",
+    },
+}
+CASE_ANALYSIS_SOURCE_TYPES = LEDGER_CONTEXT_CLASSES["case_analysis"]["source_types"]
+REGISTER_SOURCE_ORIGINS = LEDGER_CONTEXT_CLASSES["project_register"]["source_origins"]
+#: Never exempt, whatever the class.
+CONTEXT_NEGATIVE_STATUSES = frozenset({"stale", "authority_denied", "revoked", "withdrawn"})
+CONTEXT_NON_EXEMPT_FLAGS = frozenset({"authority_denied", "not_verified_for_filing", "unverified_ai_suggestion"})
+_REFERENCE_LIKE = re.compile(r"\d")
+
+CONTEXT_EXEMPTION_POLICY: Dict[str, Any] = {
+    "name": "pleading-ledger-context-exemption",
+    "version": 1,
+    "classes": {
+        name: {
+            "source_types": sorted(spec["source_types"]),
+            "source_origins": sorted(spec["source_origins"]),
+            "scope_key": spec["scope_key"],
+        }
+        for name, spec in sorted(LEDGER_CONTEXT_CLASSES.items())
+    },
+    "never_exempt": {
+        "statuses": sorted(CONTEXT_NEGATIVE_STATUSES),
+        "quality_flags": sorted(CONTEXT_NON_EXEMPT_FLAGS),
+        "drift": ["revision", "content"],
+        "scope": "another case or project",
+        "relied_upon": "source key cited, or reference number named in the text",
+        "user_supplied": "except approved case analysis",
+    },
+    "case_analysis_requires_status": sorted(CITATION_VERIFIED_STATUSES),
+    "context_supports_text": False,
+    "context_in_filed_source_schedule": False,
+}
+CONTEXT_EXEMPTION_POLICY_HASH = hashlib.sha256(
+    json.dumps(CONTEXT_EXEMPTION_POLICY, sort_keys=True, separators=(",", ":")).encode("utf-8")
+).hexdigest()
+
+
+def context_policy_stamp() -> Dict[str, Any]:
+    return {
+        "name": CONTEXT_EXEMPTION_POLICY["name"],
+        "version": CONTEXT_EXEMPTION_POLICY["version"],
+        "hash": CONTEXT_EXEMPTION_POLICY_HASH,
+    }
+
+
+def ledger_context_class(row: Dict[str, Any]) -> Optional[str]:
+    """The server's classification of a ledger row as context, or None.
+
+    Requires the server-written ``ledger_context`` AND agreement with the row's
+    type and origin, so neither a reference's claimed type nor its origin alone
+    can make a row context."""
+    name = str(row.get("ledger_context") or "")
+    spec = LEDGER_CONTEXT_CLASSES.get(name)
+    if not spec:
+        return None
+    if str(row.get("source_type") or "") not in spec["source_types"]:
+        return None
+    if str(row.get("source_origin") or "") not in spec["source_origins"]:
+        return None
+    return name
 
 
 def is_case_analysis(row: Dict[str, Any]) -> bool:
-    """An approved analysis row (issue or jurisdiction check): context, not evidence."""
-    return str(row.get("source_type") or "") in CASE_ANALYSIS_SOURCE_TYPES and is_verified_status(
-        row.get("verification_status")
-    )
+    """Approved, server-classified analysis (issue or jurisdiction check): context, not evidence."""
+    return ledger_context_class(row) == "case_analysis" and is_verified_status(row.get("verification_status"))
 
 
-def is_uncited_context_row(row: Dict[str, Any], cited_keys: Any) -> bool:
-    if str(row.get("source_key") or "") in {str(key) for key in cited_keys or ()}:
+def _named_in_text(row: Dict[str, Any], text_lower: str) -> bool:
+    citation = str(row.get("citation") or "").strip()
+    return len(citation) >= 3 and bool(_REFERENCE_LIKE.search(citation)) and citation.lower() in text_lower
+
+
+def is_exempt_context_row(row: Dict[str, Any], markdown: str, scope: Optional[Dict[str, Any]]) -> bool:
+    """Whether an uncited, untouched, in-scope context row may sit in the ledger without blocking."""
+    name = ledger_context_class(row)
+    if not name:
         return False
-    return is_case_analysis(row) or str(row.get("source_origin") or "") in REGISTER_SOURCE_ORIGINS
+    status_value = str(row.get("verification_status") or "").strip().lower()
+    if status_value in CONTEXT_NEGATIVE_STATUSES or row.get("authority_denied"):
+        return False
+    flags = {str(flag).lower() for flag in row.get("quality_flags") or []}
+    if flags & CONTEXT_NON_EXEMPT_FLAGS:
+        return False
+    if name == "case_analysis":
+        if not is_verified_status(status_value):
+            return False
+    elif row.get("is_user_supplied") or "user_supplied" in flags:
+        return False
+    for current, recorded in (("current_revision_id", "source_revision_id"), ("current_sha256", "sha256")):
+        if row.get(current) and row.get(recorded) and str(row.get(current)) != str(row.get(recorded)):
+            return False
+    scope_key = LEDGER_CONTEXT_CLASSES[name]["scope_key"]
+    expected = str((scope or {}).get(scope_key) or "")
+    actual = str((row.get("context_scope") or {}).get(scope_key) or "")
+    if not expected or actual != expected:
+        return False
+    if str(row.get("source_key") or "") in set(source_refs(markdown or "")):
+        return False
+    if _named_in_text(row, (markdown or "").lower()):
+        return False
+    return True
+
+
+def exempt_context_keys(ledger: Any, markdown: str, scope: Optional[Dict[str, Any]]) -> List[str]:
+    return sorted(
+        str(row.get("source_key"))
+        for row in ledger or []
+        if row.get("source_key") and is_exempt_context_row(row, markdown, scope)
+    )
 
 
 def _row_exhibit_id(row: Dict[str, Any]) -> Optional[str]:
@@ -101,6 +214,9 @@ def _row_exhibit_id(row: Dict[str, Any]) -> Optional[str]:
 def _state_of(row: Optional[Dict[str, Any]], missing: str) -> tuple:
     if row is None:
         return "unresolved", missing
+    if ledger_context_class(row) == "case_analysis":
+        # Control 4: counsel's analysis is never a source of fact.
+        return "unverified", "Case analysis (issues, jurisdiction checks) is not evidence and cannot be cited as a source."
     if row.get("is_user_supplied"):
         return "unverified", "User-supplied evidence that has not been verified."
     if not is_verified_status(row.get("verification_status")):

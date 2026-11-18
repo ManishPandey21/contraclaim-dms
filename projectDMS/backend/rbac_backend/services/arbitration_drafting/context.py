@@ -815,6 +815,9 @@ class ArbitrationContextBuilder:
             "verification_status": ref.get("metadata", {}).get("verification_status") or ref.get("verification_status") or "selected",
             "is_user_supplied": ref.get("source_type") == "manual_fact",
             "source_origin": ref.get("metadata", {}).get("source_origin") or "selected_reference",
+            # Never context (JG-5(f), control 1): only the server's own case-analysis and
+            # register builders classify a row as context, whatever a reference claims.
+            "ledger_context": None,
             "quality_flags": [],
             "metadata": ref.get("metadata") or {},
             "source_hash": "",
@@ -942,6 +945,8 @@ class ArbitrationContextBuilder:
                 "verification_status": ledger_verification_status(row, "approval_status"),
                 "is_user_supplied": True,
                 "source_origin": "case_jurisdiction_matrix",
+                "ledger_context": "case_analysis",
+                "context_scope": {"case_id": str(case_id)},
                 "matrix_row_id": row.get("_id"),
                 "quality_flags": [],
                 "metadata": {
@@ -1376,6 +1381,8 @@ class ArbitrationContextBuilder:
                 "verification_status": ledger_verification_status(row, "approval_status", "status"),
                 "is_user_supplied": True,
                 "source_origin": "case_issue_matrix",
+                "ledger_context": "case_analysis",
+                "context_scope": {"case_id": str(case_id)},
                 "matrix_row_id": row.get("_id"),
                 "quality_flags": [],
                 "metadata": {"case_id": case_id, "matrix": "issue-matrix", "matrix_row_id": row.get("_id"), "issue_type": row.get("issue_type")},
@@ -1669,6 +1676,8 @@ class ArbitrationContextBuilder:
                 "verification_status": row.get("status") or "register",
                 "is_user_supplied": False,
                 "source_origin": "claim_register",
+                "ledger_context": "project_register",
+                "context_scope": {"project_id": str(draft.get("project_id") or "")},
                 "quality_flags": [],
                 "metadata": {
                     "claim_type": row.get("type"),
@@ -1722,6 +1731,8 @@ class ArbitrationContextBuilder:
                 "verification_status": row.get("status") or "register",
                 "is_user_supplied": False,
                 "source_origin": "variation_register",
+                "ledger_context": "project_register",
+                "context_scope": {"project_id": str(draft.get("project_id") or "")},
                 "quality_flags": [],
                 "metadata": {"variation_type": row.get("variation_type"), "linked_document_ids": row.get("linked_document_ids") or []},
                 "source_hash": "",
@@ -1785,6 +1796,8 @@ class ArbitrationContextBuilder:
                 "verification_status": row.get("status") or "register",
                 "is_user_supplied": False,
                 "source_origin": "ipc_register",
+                "ledger_context": "project_register",
+                "context_scope": {"project_id": str(draft.get("project_id") or "")},
                 "quality_flags": [],
                 "metadata": {
                     "ipc_date": row.get("ipc_date"),
@@ -1853,6 +1866,8 @@ class ArbitrationContextBuilder:
                 "verification_status": row.get("bg_status") or "register",
                 "is_user_supplied": False,
                 "source_origin": "bank_guarantee_register",
+                "ledger_context": "project_register",
+                "context_scope": {"project_id": str(draft.get("project_id") or "")},
                 "quality_flags": [],
                 "metadata": {
                     "bg_type": row.get("bg_type"),
