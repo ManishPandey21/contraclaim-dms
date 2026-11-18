@@ -31,6 +31,7 @@ from rbac_backend.services.claim_bench import (
     HeadCreateRequest,
     HeadPatchRequest,
     HeadTestRequest,
+    UnlockRequest,
     apply_fact_guards,
     claim_bench_rollout,
     compute_gate,
@@ -414,14 +415,37 @@ async def test_a_person_may_decide_against_the_proposal_and_record_why() -> None
     assert cleared.bench.heads[0].elements["notice"].state is None
 
 
-async def test_editing_a_tested_head_marks_the_test_stale_and_reopens_a_locked_board() -> None:
+async def test_a_locked_board_refuses_edits_until_it_is_reopened_with_a_reason() -> None:
+    """D-22 (JG-3): an edit never reopens a locked board on the way past."""
     db, service, _ = _setup(llm=StubLLM(reply=_all_supported()), published=True)
     await _opened(service, db)
     await _tested(service, db)
     decided = await _decide_all(service, db)
     locked = await service.lock(await _claim(db), BoardVersionRequest(board_version=decided.bench.board_version), USER)
+    version = locked.bench.board_version
+    for attempt in (
+        lambda: service.patch_head(_c, "H1", HeadPatchRequest(board_version=version, clause_refs=["8.4"]), USER),
+        lambda: service.patch_head(_c, "H1", HeadPatchRequest(board_version=version, classification="compensable"), USER),
+        lambda: service.add_head(_c, HeadCreateRequest(board_version=version, title="Prolongation", kind="cost"), USER),
+        lambda: service.remove_head(_c, "H1", BoardVersionRequest(board_version=version), USER),
+        lambda: service.decide_element(_c, "H1", "event", ElementDecisionRequest(board_version=version, state="missing"), USER),
+        lambda: service.test_head(_c, "H1", HeadTestRequest(board_version=version, force=True), USER),
+    ):
+        _c = await _claim(db)
+        with pytest.raises(HTTPException) as exc:
+            await attempt()
+        _refused(exc, 409, "claim_board_locked", "reopen it first")
+    board = (await service.get(await _claim(db))).bench
+    assert board.stage == "locked" and board.board_version == version and len(board.heads) == 1
+    assert board.heads[0].clause_refs == locked.bench.heads[0].clause_refs and not board.heads[0].test_stale
+    assert await db.audit_events.count_documents({"action": "claim.bench.unlocked"}) == 0
+
+    reopened = await service.unlock(
+        await _claim(db), UnlockRequest(board_version=version, reason="Clause 8.4 applies as well"), USER
+    )
+    assert await db.audit_events.count_documents({"action": "claim.bench.unlocked"}) == 1
     edited = await service.patch_head(
-        await _claim(db), "H1", HeadPatchRequest(board_version=locked.bench.board_version, clause_refs=["8.4"]), USER
+        await _claim(db), "H1", HeadPatchRequest(board_version=reopened.bench.board_version, clause_refs=["8.4"]), USER
     )
     head = edited.bench.heads[0]
     assert edited.bench.stage == "heads" and head.test_stale and edited.gate.stale_tests == 1

@@ -33,7 +33,7 @@ Nothing else about the Bench depends on the skill.
 - **A requirement must quote its clause.** The quoted wording has to state the number of days recorded. A new requirement supersedes the current one, which is kept as history.
 - **Signals write nothing.** Listing signals reads the hindrance register and the Letter Bench boards. A potential claim is created only when a person raises it, once per source.
 - **Amount follows the heads; days do not.** The register's amount is the sum of head amounts. Days are never summed, because heads can overlap in time.
-- **Edits after a test.** Changing a head, or the claim's dates or type, marks the affected tests stale and reopens a locked board. People's decisions are kept.
+- **Edits after a test.** Changing a head marks its test stale; people's decisions are kept. A locked board refuses every edit (409 `claim_board_locked`) until someone who can manage the claim reopens it with a reason, which is audited (D-22). Changing the claim's dates or type marks the affected tests stale, and because a stale test blocks the lock, a locked board returns to the heads stage.
 - **Frozen evidence** makes the board read-only.
 
 ## Flags

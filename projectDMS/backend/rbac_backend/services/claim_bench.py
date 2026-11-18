@@ -243,6 +243,14 @@ def claim_bench_rollout(tenant_id: Optional[str], config: Any = settings) -> Cla
 # --------------------------------------------------------------------------- #
 _VALID_STATES = {"supported", "weak", "missing", "not_applicable"}
 _VALID_KINDS = {"time", "cost", "time_and_cost"}
+#: The refusal for any change to a locked board (D-22, JG-3).
+BOARD_LOCKED: Dict[str, Any] = {
+    "code": "claim_board_locked",
+    "user_message": (
+        "This board is locked. To change it, someone who can manage the claim must reopen it first and say why."
+    ),
+    "detail": None,
+}
 _VALID_CLASSIFICATIONS = {"excusable", "compensable", "contractor_risk", "undetermined"}
 
 
@@ -624,7 +632,9 @@ class ClaimBenchService:
             )
         return None
 
-    def _ensure_writable(self, claim: Dict[str, Any], bench: ClaimBench, client_version: int) -> None:
+    def _ensure_writable(
+        self, claim: Dict[str, Any], bench: ClaimBench, client_version: int, *, allow_locked: bool = False
+    ) -> None:
         reason = self._read_only_reason(claim)
         if reason:
             raise HTTPException(status_code=409, detail=reason)
@@ -633,6 +643,11 @@ class ClaimBenchService:
                 status_code=409,
                 detail="The Bench changed since you loaded it. Your view has been refreshed; repeat the action.",
             )
+        if bench.stage == "locked" and not allow_locked:
+            # D-22 (JG-3): a locked board changes only after an unlock by someone who may
+            # manage the claim, with a reason, written to the audit trail. An edit never
+            # reopens it on the way past.
+            raise HTTPException(status_code=409, detail=BOARD_LOCKED)
 
     async def _save(
         self, claim: Dict[str, Any], bench: ClaimBench, expected_version: Optional[int], user_id: Optional[str]
@@ -830,15 +845,18 @@ class ClaimBenchService:
         client_version: int,
         user_id: Optional[str],
         change: Callable[[ClaimBench], None],
+        *,
+        allow_locked: bool = False,
     ) -> ClaimBenchResponse:
         bench = self._require_bench(claim)
-        self._ensure_writable(claim, bench, client_version)
+        self._ensure_writable(claim, bench, client_version, allow_locked=allow_locked)
         change(bench)
         claim = await self._save(claim, bench, client_version, user_id)
         return await self._response(claim, bench)
 
     @staticmethod
     def _unlock(bench: ClaimBench) -> None:
+        """Only the audited unlock route calls this (D-22)."""
         if bench.stage == "locked":
             bench.stage = "heads"
             bench.locked_at = None
@@ -862,7 +880,6 @@ class ClaimBenchService:
                     eot_days_claimed=request.eot_days_claimed,
                 )
             )
-            self._unlock(bench)
 
         return await self._change(claim, request.board_version, user_id, _apply)
 
@@ -924,18 +941,14 @@ class ClaimBenchService:
                 head.eot_days_claimed = None
             elif request.eot_days_claimed is not None and request.eot_days_claimed != head.eot_days_claimed:
                 head.eot_days_claimed, facts_changed = request.eot_days_claimed, True
-            decision_changed = False
             if request.clear_classification:
-                decision_changed = head.classification is not None
                 head.classification = None
             elif request.classification is not None and request.classification != head.classification:
-                head.classification, decision_changed = request.classification, True  # type: ignore[assignment]
+                head.classification = request.classification  # type: ignore[assignment]
             if facts_changed and head.step_id:
                 # The proposals describe the head as it was. Keep them visible, marked stale.
                 head.test_stale = True
                 stale_steps.append(head.step_id)
-            if facts_changed or decision_changed:
-                self._unlock(bench)
 
         response = await self._change(claim, request.board_version, user_id, _apply)
         await self.runner.mark_stale(stale_steps)
@@ -951,7 +964,6 @@ class ClaimBenchService:
             if head.step_id:
                 removed.append(head.step_id)
             bench.heads = [item for item in bench.heads if item.head_id != head_id]
-            self._unlock(bench)
 
         response = await self._change(claim, request.board_version, user_id, _apply)
         await self.runner.mark_stale(removed)
@@ -982,7 +994,6 @@ class ClaimBenchService:
             if request.note is not None:
                 element.note = request.note.strip() or None
             head.elements[element_key] = element
-            self._unlock(bench)
 
         return await self._change(claim, request.board_version, user_id, _apply)
 
@@ -1020,13 +1031,13 @@ class ClaimBenchService:
                 },
             )
         bench = self._require_bench(claim)
-        self._ensure_writable(claim, bench, request.board_version)  # frozen and version first
+        self._ensure_writable(claim, bench, request.board_version, allow_locked=True)  # frozen and version first
         if bench.stage != "locked":
             raise HTTPException(
                 status_code=409,
                 detail={"code": "bench_not_locked", "user_message": "The board is not locked.", "detail": None},
             )
-        response = await self._change(claim, request.board_version, user_id, self._unlock)
+        response = await self._change(claim, request.board_version, user_id, self._unlock, allow_locked=True)
         await self._audit(
             claim,
             "claim.bench.unlocked",

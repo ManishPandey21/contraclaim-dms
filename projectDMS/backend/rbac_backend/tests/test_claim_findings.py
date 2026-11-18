@@ -49,6 +49,7 @@ from rbac_backend.services.claim_bench import (
     ClaimBenchService,
     ElementDecisionRequest,
     HeadPatchRequest,
+    UnlockRequest,
 )
 from rbac_backend.services.claim_determinations import (
     DETERMINATIONS,
@@ -680,7 +681,8 @@ async def test_only_sections_whose_record_changed_go_stale_and_only_they_are_rec
     submissions = ClaimSubmissions(db, service)
     first = await submissions.compose(await _claim(db), ComposeRequest(), set(), USER)
     stamps = {item.section.key: item.section.composed_at for item in first.sections}
-    # The head's days change: the board unlocks, and is locked again.
+    # The head's days change: the board is reopened with a reason (D-22), edited, and locked again.
+    await service.unlock(await _claim(db), UnlockRequest(board_version=await _version(db), reason="The days claimed were revised"), USER)
     await service.patch_head(await _claim(db), "H1", HeadPatchRequest(board_version=await _version(db), eot_days_claimed=120), USER)
     unlocked = await submissions.view(await _claim(db), set())
     assert not unlocked.can_compose and not unlocked.can_export

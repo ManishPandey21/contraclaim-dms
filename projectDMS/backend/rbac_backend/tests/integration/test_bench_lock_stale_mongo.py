@@ -181,3 +181,43 @@ def test_unlock_needs_claim_manage_and_a_reason_and_is_audited(monkeypatch) -> N
             assert unlocked["before"]["locked_by"] == f"user-{EDITOR}"
 
     _run(scenario())
+
+
+def test_a_locked_board_refuses_every_edit_and_is_reopened_only_with_a_reason(monkeypatch) -> None:
+    """D-22 (JG-3). Before this, any edit (heads, elements, delay, quantum) unlocked a
+    locked board silently: no claim-manage, no reason, no audit event."""
+
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            await _add_actor(env.db, EDITOR, EDITOR, ["dms.claim.view", "dms.claim.edit"])
+            version = await _ready(env, stale=False, locked=True)
+            before = await _board(env)
+            attempts = [
+                ("POST", f"{BENCH}/heads", {"board_version": version, "title": "Prolongation", "kind": "cost"}),
+                ("PATCH", f"{BENCH}/heads/H1", {"board_version": version, "title": "Renamed"}),
+                ("PATCH", f"{BENCH}/heads/H1", {"board_version": version, "classification": "excusable"}),
+                ("PUT", f"{BENCH}/heads/H1/elements/event", {"board_version": version, "state": "missing"}),
+                ("POST", f"{BENCH}/heads/H1/remove", {"board_version": version}),
+                ("POST", f"{BENCH}/heads/H1/test", {"board_version": version, "force": True}),
+                ("PUT", f"{BENCH}/heads/H1/delay/settings", {"board_version": version, "method": "windows"}),
+            ]
+            for persona in (EDITOR, "org_admin"):
+                for method, path, body in attempts:
+                    if persona == EDITOR and path.endswith("/test"):
+                        continue  # running a test needs more than claim-edit; refused earlier, by permission
+                    refused = await env.call(method, persona, path, json=body)
+                    assert refused.status_code == 409, (persona, method, path, refused.status_code, refused.text[:300])
+                    detail = refused.json()["detail"]
+                    assert detail["code"] == "claim_board_locked", (persona, path, detail)
+                    assert "reopen it first" in detail["user_message"]
+            assert await _board(env) == before, "a refused edit changed the locked board"
+            assert await env.db.audit_events.count_documents({"resource_id": CLAIM, "action": "claim.bench.unlocked"}) == 0
+
+            reopened = await env.call("POST", "org_admin", f"{BENCH}/unlock", json={"board_version": version, "reason": REASON})
+            assert reopened.status_code == 200, reopened.text[:300]
+            assert await env.db.audit_events.count_documents({"resource_id": CLAIM, "action": "claim.bench.unlocked"}) == 1
+            edited = await env.call("PATCH", EDITOR, f"{BENCH}/heads/H1", json={"board_version": version + 1, "title": "Renamed"})
+            assert edited.status_code == 200, edited.text[:300]
+            assert (await _board(env))["stage"] == "heads"
+
+    _run(scenario())

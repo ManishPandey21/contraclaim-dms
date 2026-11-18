@@ -713,7 +713,6 @@ class ClaimDelayLab:
             head = _head(fresh, head_id)
             if request.target_type == "hindrance" and request.target_id not in head.delay.event_decisions:
                 head.delay.event_decisions[request.target_id] = register_proposal(snapshot)
-            self.bench._unlock(fresh)
 
         try:
             await self.bench._change(claim, request.board_version, user_id, _apply)
@@ -766,7 +765,6 @@ class ClaimDelayLab:
                             "proposed_by": "register",
                         }
                     )
-            self.bench._unlock(fresh)
 
         # Board first: if someone else changed it, nothing about the link is touched.
         await self.bench._change(claim, request.board_version, user_id, _apply)
@@ -826,7 +824,6 @@ class ClaimDelayLab:
                 delay.include_neutral = request.include_neutral
             if request.neutral_basis is not None:
                 delay.neutral_basis = request.neutral_basis.strip() or None
-            self.bench._unlock(fresh)
 
         await self.bench._change(claim, request.board_version, user_id, _apply)
         fresh_claim = await self._reload(claim)
@@ -871,7 +868,6 @@ class ClaimDelayLab:
                 decision.decided_by, decision.decided_at = user_id, now_utc()
             if request.note is not None:
                 decision.note = request.note.strip() or None
-            self.bench._unlock(fresh)
 
         await self.bench._change(claim, request.board_version, user_id, _apply)
         fresh_claim = await self._reload(claim)
@@ -921,7 +917,6 @@ class ClaimDelayLab:
                 delay.findings.pop(overlap_id, None)
             else:
                 delay.findings[overlap_id] = finding
-            self.bench._unlock(fresh)
 
         await self.bench._change(claim, request.board_version, user_id, _apply)
         return await self.view(await self._reload(claim), head_id)
@@ -981,7 +976,6 @@ class ClaimDelayLab:
             if finding is None:
                 raise HTTPException(status_code=409, detail="The overlap's treatment changed; reload and retry")
             finding.cost_basis = cost
-            self.bench._unlock(fresh)
 
         await self.bench._change(claim, request.board_version, user_id, _apply)
         return await self.view(await self._reload(claim), head_id)
@@ -1005,7 +999,6 @@ class ClaimDelayLab:
                 raise HTTPException(status_code=409, detail="The cost basis changed; reload and review it again")
             target.cost_basis.reviewed_by = user_id
             target.cost_basis.reviewed_at = now_utc()
-            self.bench._unlock(fresh)
 
         await self.bench._change(claim, request.board_version, user_id, _apply)
         return await self.view(await self._reload(claim), head_id)

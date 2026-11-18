@@ -488,7 +488,7 @@ async def test_removing_a_head_removes_its_links() -> None:
 # The board's lock gate
 # --------------------------------------------------------------------------- #
 async def test_a_started_delay_assessment_must_be_finished_before_the_board_locks() -> None:
-    db, bench, lab, _ = _setup()
+    db, bench, lab, quantum = _setup()
     await _two_events(db, bench, lab)
     response = await bench.get(await _claim(db))
     for key in ("event", "notice", "contractual_basis", "causation", "quantum"):
@@ -515,9 +515,24 @@ async def test_a_started_delay_assessment_must_be_finished_before_the_board_lock
     assert ready.gate.blockers == [] and ready.gate.can_lock
     locked = await bench.lock(await _claim(db), BoardVersionRequest(board_version=ready.bench.board_version), USER)
     assert locked.bench.stage == "locked"
-    # A delay decision reopens a locked board.
-    await _decide(db, lab, "C1", "contractor", "unproven")
-    assert (await bench.get(await _claim(db))).bench.stage == "heads"
+    # D-22 (JG-3): no delay change reaches a locked board, and none reopens it.
+    before = (await bench.get(await _claim(db))).bench
+    for attempt in (
+        lambda: _decide(db, lab, "C1", "contractor", "unproven"),
+        lambda: _link(db, lab, "OPEN"),
+        lambda: lab.set_settings(_c, "H1", DelaySettingsRequest(board_version=before.board_version, method="windows", include_neutral=True), USER),
+        lambda: lab.decide_overlap(_c, "H1", OVERLAP, OverlapDecisionRequest(
+            board_version=before.board_version, treatment="eot_granted_no_cost", basis="A different basis."), USER),
+        lambda: quantum.add_line(_c, "H1", _line(board_version=before.board_version), DOCS, USER),
+    ):
+        _c = await _claim(db)
+        with pytest.raises(HTTPException) as exc:
+            await attempt()
+        _refused(exc, 409, "claim_board_locked")
+    after = (await bench.get(await _claim(db))).bench
+    assert after.stage == "locked" and after.board_version == before.board_version
+    assert after.model_dump() == before.model_dump()
+    assert await db.claim_head_links.count_documents({"target_id": "OPEN"}) == 0
 
 
 async def test_a_head_with_no_linked_events_owes_no_delay_assessment() -> None:

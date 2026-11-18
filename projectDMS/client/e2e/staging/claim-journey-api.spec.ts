@@ -30,7 +30,6 @@
  *   - a client drafter who opens the Letter Bench cannot read it (403
  *     `missing_expert_allocation`); the pre-filled board is read with a
  *     ContraClaim staff account holding an expert allocation;
- *   - any claim-edit change unlocks a locked board without a reason or audit;
  *   - a time head whose days rest on a linked hindrance escalates with no
  *     evidence, so the Statement of Claim reports it as missing records;
  *   - no endpoint exposes the backend RELEASE_SHA (see "build identifiers").
@@ -440,15 +439,30 @@ test.describe("Claim journey - deployed certification", () => {
       201
     );
     suite.hindranceId = String(hindrance.id ?? hindrance._id);
+    const link = { target_type: "hindrance", target_id: suite.hindranceId };
+    // D-22 (JG-3, fixed): the board is locked, so the link is refused until someone who may
+    // manage the claim reopens it with a reason, which is audited.
+    const refused = await post(admin, `/api/claims/${claimId}/bench/heads/H1/delay/links`, {
+      board_version: await boardVersion(admin, claimId),
+      ...link,
+    });
+    expect(refused.status(), `link on a locked board: ${await detail(refused)}`).toBe(409);
+    expect((await refused.json()).detail?.code).toBe("claim_board_locked");
+    expect((await bench(admin, claimId)).bench.stage).toBe("locked");
+    await ok(
+      await post(admin, `/api/claims/${claimId}/bench/unlock`, {
+        board_version: await boardVersion(admin, claimId),
+        reason: `${RUN_TAG} the hindrance register now records the access delay`,
+      }),
+      "reopen the board with a reason"
+    );
     let delay = await ok(
       await post(admin, `/api/claims/${claimId}/bench/heads/H1/delay/links`, {
         board_version: await boardVersion(admin, claimId),
-        target_type: "hindrance",
-        target_id: suite.hindranceId,
+        ...link,
       }),
       "link hindrance"
     );
-    // Recorded gap: the claim-edit change above unlocked the locked board.
     suite.evidence.stage_after_link = (await bench(admin, claimId)).bench.stage;
     delay = await ok(
       await admin.request.put(`/api/claims/${claimId}/bench/heads/H1/delay/settings`, {

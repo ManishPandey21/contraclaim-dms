@@ -313,14 +313,23 @@ def test_the_claim_journey_from_start_to_the_pleading_gate_over_http(monkeypatch
             hindrance_id = str(hindrance.get("id") or hindrance.get("_id"))
             candidates = _ok(await env.call("GET", "org_admin", f"{CLAIMS}/{claim_id}/bench/delay/candidates"))
             assert any(c["target_id"] == hindrance_id and c["target_type"] == "hindrance" for c in candidates)
+            link = {"target_type": "hindrance", "target_id": hindrance_id}
+            # D-22 (JG-3, fixed): the board is locked, so the link is refused until someone who
+            # may manage the claim reopens it with a reason, which is audited.
+            refused = await env.call("POST", "org_admin", f"{CLAIMS}/{claim_id}/bench/heads/H1/delay/links", json={
+                "board_version": await _version(env, claim_id), **link,
+            })
+            assert refused.status_code == 409 and _code(refused) == "claim_board_locked", refused.text[:300]
+            assert (await _bench(env, claim_id))["bench"]["stage"] == "locked"
+            _ok(await env.call("POST", "org_admin", f"{CLAIMS}/{claim_id}/bench/unlock", json={
+                "board_version": await _version(env, claim_id), "reason": "The hindrance register now records the access delay",
+            }))
+            assert await env.db.audit_events.count_documents({"action": "claim.bench.unlocked", "resource_id": claim_id}) == 1
             delay = _ok(await env.call("POST", "org_admin", f"{CLAIMS}/{claim_id}/bench/heads/H1/delay/links", json={
-                "board_version": await _version(env, claim_id), "target_type": "hindrance", "target_id": hindrance_id,
+                "board_version": await _version(env, claim_id), **link,
             }))
             (event,) = delay["events"]
-            # GAP (reported): any claim-edit change unlocks a locked board, with no reason and no
-            # audit event, where the unlock route itself needs claim-manage and a reason (D-22).
             assert (await _bench(env, claim_id))["bench"]["stage"] == "heads"
-            assert await env.db.audit_events.count_documents({"action": "claim.bench.unlocked", "resource_id": claim_id}) == 0
             assert "H1: choose the delay analysis method" in delay["blockers"]
             delay = _ok(await env.call("PUT", "org_admin", f"{CLAIMS}/{claim_id}/bench/heads/H1/delay/settings", json={
                 "board_version": await _version(env, claim_id), "method": "as_planned_vs_as_built",

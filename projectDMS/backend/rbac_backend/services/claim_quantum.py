@@ -373,7 +373,6 @@ class ClaimQuantum:
                 raise HTTPException(status_code=422, detail=f"A head can hold at most {MAX_LINES} quantum lines")
             head.quantum_lines.append(self._build(_next_line_id(head), request, allowed_documents))
             self._roll_up(head)
-            self.bench._unlock(fresh)
 
         await self.bench._change(claim, request.board_version, user_id, _apply)
         return await self.view(await self.delay._reload(claim), head_id)
@@ -398,7 +397,6 @@ class ClaimQuantum:
             else:
                 raise HTTPException(status_code=404, detail="Quantum line not found")
             self._roll_up(head)
-            self.bench._unlock(fresh)
 
         await self.bench._change(claim, request.board_version, user_id, _apply)
         return await self.view(await self.delay._reload(claim), head_id)
@@ -412,7 +410,6 @@ class ClaimQuantum:
                 raise HTTPException(status_code=404, detail="Quantum line not found")
             head.quantum_lines = [line for line in head.quantum_lines if line.line_id != line_id]
             self._roll_up(head)
-            self.bench._unlock(fresh)
 
         await self.bench._change(claim, board_version, user_id, _apply)
         return await self.view(await self.delay._reload(claim), head_id)
