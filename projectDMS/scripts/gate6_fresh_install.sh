@@ -11,8 +11,8 @@
 #      settings resolve to that disposable server and to no other
 #   4. migrate_database --list, a --fail-on-warning dry run, then
 #      --apply --fail-on-warning, all inside the backend container
-#   5. checks the skill and claim migrations (20261114_0001 to _0003,
-#      20261115_0001, 20261116_0001 and 20261117_0001) by reading the server: collections, indexes with their uniqueness and
+#   5. checks the skill and claim migrations (20261114_0001 to 20261123_0001)
+#      by reading the server: collections, indexes with their uniqueness and
 #      partial filters, the three published letter skills at 1.0.0, the four
 #      claim and arbitration packs stored as unpublished drafts, and the
 #      unique indexes refusing a real duplicate
@@ -38,7 +38,7 @@
 #   GATE6_BACKEND_IMAGE        use this image instead of building one. Its
 #                              org.opencontainers.image.revision label must
 #                              equal the checked-out commit.
-#   GATE6_EXPECTED_MIGRATIONS  catalogue size this run must find (default 31)
+#   GATE6_EXPECTED_MIGRATIONS  catalogue size this run must find (default 32)
 #   GATE6_MONGO_IMAGE          default mongo:8.0, the image CI uses
 #   GATE6_OUT_DIR              where step logs go (default: a new temp dir)
 #   GATE6_KEEP=1               leave the containers and network up afterwards
@@ -48,7 +48,7 @@
 set -Eeuo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-EXPECTED=${GATE6_EXPECTED_MIGRATIONS:-31}
+EXPECTED=${GATE6_EXPECTED_MIGRATIONS:-32}
 MONGO_IMAGE=${GATE6_MONGO_IMAGE:-mongo:8.0}
 # Lower case throughout: the name is also the server's hostname, and URL parsers
 # fold hostnames to lower case.
@@ -362,6 +362,11 @@ const expectedIndexes = [
   // 20261120_0001 (M-05): one matrix row per case and escalation origin, in every matrix collection.
   ...["arbitration_chronology_matrix", "arbitration_claim_matrix", "arbitration_clause_matrix", "arbitration_counterclaim_matrix", "arbitration_defence_matrix", "arbitration_document_index", "arbitration_expert_alignment", "arbitration_issue_matrix", "arbitration_jurisdiction_matrix", "arbitration_notice_compliance", "arbitration_quantum_annexures", "arbitration_rejoinder_matrix"].map((name) =>
     [name, "matrix_case_origin_unique", { case_id: 1, origin_key: 1 }, true, { origin_key: { $type: "string" } }]),
+  // 20261122_0001 (M-04): claims by contract.
+  ["claims", "claim_scope_contract", { organization_id: 1, project_id: 1, contract_id: 1 }, false, null],
+  // 20261123_0001 (M-01 part): evaluation runs by version and time; approvals by the run they name.
+  ["skill_eval_runs", "skill_eval_run_version_time", { skill_key: 1, version: 1, started_at: -1 }, false, null],
+  ["skill_approvals", "skill_approval_eval_run", { eval_run_id: 1 }, false, { eval_run_id: { $type: "string" } }],
 ];
 for (const [collection, name, key, unique, partial] of expectedIndexes) {
   const found = db.getCollection(collection).getIndexes().find((i) => i.name === name);
@@ -375,8 +380,8 @@ for (const [collection, name, key, unique, partial] of expectedIndexes) {
   );
 }
 const partials = expectedIndexes.filter((e) => e[4] !== null).length;
-// 7 before 20261120_0001, which adds one per matrix collection (12).
-check("partial indexes expected", partials === 19, partials + " declared");
+// 7 before 20261120_0001, which adds one per matrix collection (12); 20261123_0001 adds one.
+check("partial indexes expected", partials === 20, partials + " declared");
 
 const expectedSkills = ["indian-infra-contract-letters", "indian-infra-letter-analysis", "indian-infra-variations"];
 // Stored by 20261115_0001 as DRAFTS: unreviewed method text that must not be
@@ -410,9 +415,12 @@ for (const s of skills) {
 }
 check("no skill approval exists on a fresh install", db.skill_approvals.countDocuments({}) === 0,
   db.skill_approvals.countDocuments({}) + " rows");
+check("no evaluation run exists on a fresh install", db.skill_eval_runs.countDocuments({}) === 0,
+  db.skill_eval_runs.countDocuments({}) + " rows");
 
 const ledger = db.schema_migrations.find({}).toArray().map((r) => r.version).sort();
-for (const version of ["20261114_0001", "20261114_0002", "20261114_0003", "20261115_0001", "20261116_0001", "20261117_0001"]) {
+for (const version of ["20261114_0001", "20261114_0002", "20261114_0003", "20261115_0001", "20261116_0001", "20261117_0001",
+  "20261118_0001", "20261119_0001", "20261120_0001", "20261121_0001", "20261121_0002", "20261122_0001", "20261123_0001"]) {
   check("ledger records " + version, ledger.includes(version));
 }
 print("ledger_rows=" + ledger.length);
@@ -546,6 +554,18 @@ check("rows added by hand are unconstrained",
 check("the same origin in another case is accepted",
   attempt(matrix, { _id: "m5", ...mrow, case_id: "gate6-case-2" }) === "inserted");
 
+// 20261123_0001. The approvals index is not unique: two reviewers' approvals may name the same run.
+check("two approvals naming the same evaluation run are both accepted",
+  attempt("skill_approvals", { _id: "a1", organization_id: org, skill_key: "gate6-probe", eval_run_id: "run-1" }) === "inserted" &&
+  attempt("skill_approvals", { _id: "a2", organization_id: org, skill_key: "gate6-probe", eval_run_id: "run-1" }) === "inserted");
+check("two runs of the same version are both kept",
+  attempt("skill_eval_runs", { _id: "r1", skill_key: "gate6-probe", version: "1.0.0", started_at: new Date() }) === "inserted" &&
+  attempt("skill_eval_runs", { _id: "r2", skill_key: "gate6-probe", version: "1.0.0", started_at: new Date() }) === "inserted");
+r = attempt("skill_eval_runs", { _id: "r1", skill_key: "gate6-probe", version: "1.0.0" });
+check("a run id is stored once", r === "E11000 _id_", r);
+db.skill_approvals.deleteMany({ skill_key: "gate6-probe" });
+db.skill_eval_runs.deleteMany({ skill_key: "gate6-probe" });
+
 for (const name of [dets, priv, subs, matrix]) db.getCollection(name).deleteMany({ organization_id: org });
 db.getCollection(boards).deleteMany({ organization_id: org });
 db.skill_versions.deleteMany({ owner_scope: "gate6-probe" });
@@ -557,7 +577,7 @@ const left = db.getCollection(boards).countDocuments({}) + db.skill_versions.cou
   db.getCollection(notice).countDocuments({}) + db.claims.countDocuments({}) + db.skill_steps.countDocuments({}) +
   db.getCollection(links).countDocuments({}) + db.getCollection(dets).countDocuments({}) +
   db.getCollection(priv).countDocuments({}) + db.getCollection(subs).countDocuments({}) +
-  db.getCollection(matrix).countDocuments({});
+  db.getCollection(matrix).countDocuments({}) + db.skill_approvals.countDocuments({}) + db.skill_eval_runs.countDocuments({});
 check("probe rows removed", left === 0, left + " left");
 if (failed) { print("PROBE FAILED=" + failed); quit(1); }
 print("PROBE=PASS");
@@ -648,7 +668,7 @@ RUN="docker run --rm --network <private> -e DATABASE_URL=mongodb://<disposable>:
   echo "  5. ${MIGRATE} --list"
   echo "       exit ${LIST_AFTER_RC}   ${LIST_AFTER_COUNTS}"
   echo
-  echo "Skill and claim migrations 20261114_0001 to 20261120_0001, read with mongosh: ${BENCH_PASSES} passed, 0 failed"
+  echo "Skill and claim migrations 20261114_0001 to 20261123_0001, read with mongosh: ${BENCH_PASSES} passed, 0 failed"
   grep -E '^(PASS|FAIL)' "$OUT_DIR/07-bench.stdout" | sed 's/^/  /'
   echo "Seeded skills (key, version, content hash) - equal to the files bundled in the image: YES"
   echo "$SEEDED" | sed 's/^SEED  /  /'

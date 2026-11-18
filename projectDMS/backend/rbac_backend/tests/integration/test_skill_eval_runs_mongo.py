@@ -27,6 +27,7 @@ import pytest
 
 from rbac_backend.migrations.v20261121_0001_reviewer_role_identities import upgrade as seed_identities
 from rbac_backend.migrations.v20261121_0002_reviewer_role_assignment_indexes import upgrade as apply_indexes
+from rbac_backend.migrations.v20261123_0001_skill_eval_runs_indexes import upgrade as apply_eval_run_indexes
 from rbac_backend.models.skill import SkillApprovalRequest
 from rbac_backend.services.skills.approvals import SkillApprovalService
 from rbac_backend.services.skills.evaluation import SKILL_EVAL_RUNS, SkillEvalRunService
@@ -331,5 +332,42 @@ def test_a_run_on_the_synthetic_golden_set_runs_and_supports_no_approval(monkeyp
             published = await env.call("POST", EVALUATOR, f"{PATH}/publish", json={"eval_run_id": run["_id"]})
             assert published.status_code == 409 and _code(published) == "eval_suite_not_ready", published.text[:300]
             assert await env.db.skill_approvals.count_documents({}) == 0
+
+    _run(scenario())
+
+
+def test_the_index_migration_changes_no_run_or_approval_and_serves_the_listing(monkeypatch) -> None:
+    """M-01 part (20261123_0001): index only, repeatable, and the listing reads through it."""
+
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            await _ready(env, monkeypatch)
+            made = await env.call("POST", EVALUATOR, f"{PATH}/eval-runs", json={"note": "before the index"})
+            assert made.status_code == 201, made.text[:400]
+            await env.db.skill_approvals.insert_one({"_id": "gate-approval", "skill_key": CLAIMS_SKILL_KEY, "version": VERSION})
+            runs_before = await env.db[SKILL_EVAL_RUNS].find({}).to_list(length=None)
+            approvals_before = await env.db.skill_approvals.find({}).to_list(length=None)
+
+            dry = await apply_eval_run_indexes(env.db, True)
+            assert [op["name"] for op in dry.operations] == ["skill_eval_run_version_time", "skill_approval_eval_run"]
+            assert "skill_eval_run_version_time" not in await env.db[SKILL_EVAL_RUNS].index_information()
+
+            applied = await apply_eval_run_indexes(env.db, False)
+            assert not applied.warnings and applied.notices
+            runs_index = (await env.db[SKILL_EVAL_RUNS].index_information())["skill_eval_run_version_time"]
+            assert runs_index["key"] == [("skill_key", 1), ("version", 1), ("started_at", -1)]
+            approval_index = (await env.db.skill_approvals.index_information())["skill_approval_eval_run"]
+            assert approval_index["key"] == [("eval_run_id", 1)]
+            assert approval_index["partialFilterExpression"] == {"eval_run_id": {"$type": "string"}}
+            assert not approval_index.get("unique"), "several approvals may name the same run"
+            await apply_eval_run_indexes(env.db, False)  # repeatable
+
+            assert await env.db[SKILL_EVAL_RUNS].find({}).to_list(length=None) == runs_before
+            assert await env.db.skill_approvals.find({}).to_list(length=None) == approvals_before
+
+            plan = await env.db[SKILL_EVAL_RUNS].find({"skill_key": CLAIMS_SKILL_KEY, "version": VERSION}).explain()
+            assert "skill_eval_run_version_time" in json.dumps(plan["queryPlanner"]["winningPlan"], default=str)
+            listed = await env.call("GET", EVALUATOR, f"{PATH}/eval-runs")
+            assert [item["_id"] for item in listed.json()] == [made.json()["_id"]]
 
     _run(scenario())

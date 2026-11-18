@@ -151,6 +151,10 @@ from .v20261122_0001_claim_contract_index import DESCRIPTION as CLAIM_CONTRACT_D
 from .v20261122_0001_claim_contract_index import NAME as CLAIM_CONTRACT_NAME
 from .v20261122_0001_claim_contract_index import VERSION as CLAIM_CONTRACT_VERSION
 from .v20261122_0001_claim_contract_index import upgrade as upgrade_claim_contract
+from .v20261123_0001_skill_eval_runs_indexes import DESCRIPTION as SKILL_EVAL_RUNS_DESCRIPTION
+from .v20261123_0001_skill_eval_runs_indexes import NAME as SKILL_EVAL_RUNS_NAME
+from .v20261123_0001_skill_eval_runs_indexes import VERSION as SKILL_EVAL_RUNS_VERSION
+from .v20261123_0001_skill_eval_runs_indexes import upgrade as upgrade_skill_eval_runs
 
 
 MIGRATIONS = [
@@ -339,5 +343,11 @@ MIGRATIONS = [
         name=CLAIM_CONTRACT_NAME,
         description=CLAIM_CONTRACT_DESCRIPTION,
         upgrade=upgrade_claim_contract,
+    ),
+    Migration(
+        version=SKILL_EVAL_RUNS_VERSION,
+        name=SKILL_EVAL_RUNS_NAME,
+        description=SKILL_EVAL_RUNS_DESCRIPTION,
+        upgrade=upgrade_skill_eval_runs,
     ),
 ]
