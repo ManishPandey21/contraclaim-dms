@@ -1,4 +1,11 @@
-import type { DeterminationStatus, FindingResult, HeadFigures, HeadFindingInput } from "@/types/claimFindings";
+import { fromDateInput, toDateInput } from "@/lib/format-in";
+import type {
+  DeterminationStatus,
+  FindingResult,
+  HeadFigures,
+  HeadFindingInput,
+  InformationRequest,
+} from "@/types/claimFindings";
 
 export const RESULT_LABEL: Record<FindingResult, string> = {
   full: "Made out in full",
@@ -52,4 +59,48 @@ export function linesOf(text: string): string[] {
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
+}
+
+/** One row of the "information required" editor: what, by when, and what follows if not supplied. */
+export interface InformationRow {
+  item: string;
+  deadline: string; // yyyy-mm-dd, or "" when no date is set
+  consequence: string;
+}
+
+/** Rows as the server takes them: empty rows dropped, dates as ISO, blank consequences as null. */
+export function informationInput(rows: InformationRow[]): InformationRequest[] {
+  return rows
+    .filter((row) => row.item.trim())
+    .map((row) => ({
+      item: row.item.trim(),
+      deadline: fromDateInput(row.deadline) ?? null,
+      consequence: row.consequence.trim() || null,
+    }));
+}
+
+/** "overdue", "due" (within `soonDays`), or null, for an information item's deadline. */
+export function deadlineState(deadline: string | null | undefined, today: string, soonDays = 7): "overdue" | "due" | null {
+  const day = toDateInput(deadline);
+  if (!day) return null;
+  const diff = (Date.parse(`${day}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86_400_000;
+  if (diff < 0) return "overdue";
+  return diff <= soonDays ? "due" : null;
+}
+
+/**
+ * Which letters a determination can start (4B-31). The server enforces the same rules;
+ * this only decides which buttons to offer.
+ */
+export function letterOptions(
+  determination: { _id: string; origin: string; status: DeterminationStatus; heads: { information_required: unknown[] }[] },
+  all: { supersedes_id?: string | null }[]
+): { determination: boolean; informationRequest: boolean } {
+  const latest = !all.some((other) => other.supersedes_id === determination._id);
+  const authored = determination.origin === "authored" && latest;
+  const asks = determination.heads.some((head) => head.information_required.length > 0);
+  return {
+    determination: authored && determination.status === "approved",
+    informationRequest: authored && asks && ["draft", "returned", "in_review", "approved"].includes(determination.status),
+  };
 }

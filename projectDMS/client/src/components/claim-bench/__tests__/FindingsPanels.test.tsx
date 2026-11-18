@@ -7,7 +7,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import DeterminationsPanel from "@/components/claim-bench/DeterminationsPanel";
 import InternalAnalysisPanel from "@/components/claim-bench/InternalAnalysisPanel";
 import SubmissionPanel from "@/components/claim-bench/SubmissionPanel";
-import { daysOnRecord, findingProblem, linesOf } from "@/lib/claim-findings-logic";
+import { DeterminationContext } from "@/components/letter-bench/DeterminationContext";
+import {
+  daysOnRecord,
+  deadlineState,
+  findingProblem,
+  informationInput,
+  letterOptions,
+  linesOf,
+} from "@/lib/claim-findings-logic";
 import type {
   DeterminationView,
   DeterminationsResponse,
@@ -234,7 +242,7 @@ describe("Determinations", () => {
         amount: null,
         findings: "No finding is proposed.",
         residual_risks: [],
-        information_required: [{ item: "Notice: no notice is recorded as served", consequence: null }],
+        information_required: [{ item: "Notice: no notice is recorded as served", deadline: null, consequence: null }],
       })
     );
   });
@@ -342,6 +350,108 @@ describe("Determinations", () => {
     expect(screen.queryByRole("button", { name: "Save finding" })).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Start a new revision" }));
     await waitFor(() => expect(api.reviseDetermination).toHaveBeenCalledWith("c1", "det-1"));
+  });
+});
+
+describe("Determination and RFI letters (4B-31)", () => {
+  const asked = [
+    { item: "Daily site records", deadline: "2026-12-20T00:00:00Z", consequence: "Decided on the records supplied" },
+  ];
+  const withItems = (over: Partial<DeterminationView["determination"]> = {}, view: Partial<DeterminationView> = {}) =>
+    determination(
+      {
+        heads: [
+          { head_id: "H1", head_title: "Delayed handover", result: "partial", days: 10, findings: "Ten days.", residual_risks: [], information_required: asked },
+        ],
+        ...over,
+      },
+      { blockers: [], ...view }
+    );
+
+  it("works out which letters a determination can start", () => {
+    const base = { _id: "d1", origin: "authored", status: "approved" as const, heads: [{ information_required: [1] }] };
+    expect(letterOptions(base, [])).toEqual({ determination: true, informationRequest: true });
+    expect(letterOptions({ ...base, status: "draft" }, [])).toEqual({ determination: false, informationRequest: true });
+    expect(letterOptions({ ...base, heads: [{ information_required: [] }] }, [])).toEqual({ determination: true, informationRequest: false });
+    expect(letterOptions(base, [{ supersedes_id: "d1" }])).toEqual({ determination: false, informationRequest: false });
+    expect(letterOptions({ ...base, origin: "received", status: "recorded" }, [])).toEqual({ determination: false, informationRequest: false });
+    expect(deadlineState("2026-12-01T00:00:00Z", "2026-12-02")).toBe("overdue");
+    expect(deadlineState("2026-12-05", "2026-12-01")).toBe("due");
+    expect(deadlineState("2026-12-30", "2026-12-01")).toBeNull();
+    expect(deadlineState(null, "2026-12-01")).toBeNull();
+    expect(
+      informationInput([
+        { item: " Records ", deadline: "2026-12-20", consequence: " " },
+        { item: "  ", deadline: "2026-12-21", consequence: "dropped" },
+      ])
+    ).toEqual([{ item: "Records", deadline: "2026-12-20T00:00:00Z", consequence: null }]);
+  });
+
+  it("edits each item's deadline and saves it, and offers a pre-filled request for information", async () => {
+    api.fetchDeterminations.mockResolvedValue(determinations({ items: [withItems()] }));
+    api.setHeadFinding.mockResolvedValue(withItems());
+    mount(<DeterminationsPanel claimId="c1" readOnly={false} />);
+    const deadline = await screen.findByLabelText("Deadline");
+    expect(deadline).toHaveValue("2026-12-20");
+    await userEvent.clear(deadline);
+    await userEvent.type(deadline, "2026-12-15");
+    await userEvent.click(screen.getByRole("button", { name: "Add an information item" }));
+    await userEvent.type(screen.getByLabelText("Item 2"), "Revised programme");
+    await userEvent.click(screen.getByRole("button", { name: "Save finding" }));
+    await waitFor(() =>
+      expect(api.setHeadFinding).toHaveBeenCalledWith("c1", "det-1", "H1", 2, expect.objectContaining({
+        information_required: [
+          { item: "Daily site records", deadline: "2026-12-15T00:00:00Z", consequence: "Decided on the records supplied" },
+          { item: "Revised programme", deadline: null, consequence: null },
+        ],
+      }))
+    );
+    expect(screen.getByRole("link", { name: /Request information/ })).toHaveAttribute(
+      "href",
+      "/letters/bench/new?determinationId=det-1&purpose=information_request"
+    );
+    expect(screen.queryByRole("link", { name: /Issue determination letter/ })).not.toBeInTheDocument();
+  });
+
+  it("offers the determination letter once approved, shows deadlines, and nothing from a superseded revision", async () => {
+    const approved = withItems({ status: "approved" }, { editable: false });
+    api.fetchDeterminations.mockResolvedValue(determinations({ items: [approved] }));
+    const { unmount } = mount(<DeterminationsPanel claimId="c1" readOnly={false} />);
+    expect(await screen.findByRole("link", { name: /Issue determination letter/ })).toHaveAttribute(
+      "href",
+      "/letters/bench/new?determinationId=det-1&purpose=determination"
+    );
+    expect(screen.getByText(/by 20-12-2026/)).toBeInTheDocument();
+    unmount();
+
+    const v2 = withItems({ _id: "det-2", revision: 2, supersedes_id: "det-1" });
+    api.fetchDeterminations.mockResolvedValue(determinations({ items: [v2, approved] }));
+    mount(<DeterminationsPanel claimId="c1" readOnly={false} />);
+    const old = await screen.findByRole("article", { name: "Determination revision 1" });
+    expect(within(old).queryByRole("link", { name: /Issue determination letter|Request information/ })).not.toBeInTheDocument();
+  });
+
+  it("shows on the Bench the findings and each item's deadline the letter was started from", () => {
+    render(
+      <DeterminationContext
+        today="2026-12-10"
+        trigger={{
+          type: "information_request",
+          id: "det-1",
+          label: "Information requested on claim CLM-1 (revision 1)",
+          information_items: [
+            { head_id: "H1", head_title: "Delayed handover", item: "Handover letters", deadline: "2026-12-05", consequence: null },
+            { head_id: "H1", head_title: "Delayed handover", item: "Site records", deadline: "2026-12-12", consequence: "Decided without them" },
+          ],
+        }}
+      />
+    );
+    expect(screen.getByRole("region", { name: "From the determination" })).toBeInTheDocument();
+    expect(screen.getByText("(passed)")).toBeInTheDocument();
+    expect(screen.getByText("(within a week)")).toBeInTheDocument();
+    expect(screen.getByText("Decided without them")).toBeInTheDocument();
+    const { container } = render(<DeterminationContext trigger={{ type: "claim", id: "c", label: "Claim" }} />);
+    expect(container).toBeEmptyDOMElement();
   });
 });
 

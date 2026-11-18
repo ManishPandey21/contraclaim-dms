@@ -113,6 +113,13 @@ export const ERROR_CODE_MESSAGES = {
   determination_capacity_changed:
     "The party this project acts for has changed since this determination was started, so it cannot be changed or decided here.",
   determination_superseded: "This revision has already been revised. Only the latest revision can be revised.",
+  determination_letter_not_authored: "A letter can be issued only from a determination made in this workspace.",
+  determination_letter_not_approved: "The determination letter can be issued once the determination has been approved.",
+  determination_letter_not_open: "This determination can no longer ask for information.",
+  determination_no_information_items:
+    "No information is asked for in this determination. Add the items, with their deadlines, first.",
+  determination_letter_superseded:
+    "A later revision of this determination exists. Issue the letter from the latest revision.",
   determination_reviewer_no_longer_authorised:
     "You no longer hold determination authority on this project, so you cannot approve or return this determination. The person who sent it can send it to another approver.",
   determination_reassign_not_sender:

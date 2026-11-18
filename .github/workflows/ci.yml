@@ -253,6 +253,7 @@ jobs:
             backend/rbac_backend/tests/integration/test_claim_contract_scope_mongo.py
             backend/rbac_backend/tests/integration/test_quantum_paise_formulas_mongo.py
             backend/rbac_backend/tests/integration/test_determination_four_eyes_mongo.py
+            backend/rbac_backend/tests/integration/test_determination_letters_mongo.py
             backend/rbac_backend/tests/integration/test_net_eot_table_mongo.py
             backend/rbac_backend/tests/integration/test_submission_evidence_restricted_mongo.py
             backend/rbac_backend/tests/integration/test_key_date_recalc_preview_mongo.py

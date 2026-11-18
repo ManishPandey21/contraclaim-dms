@@ -16,10 +16,14 @@ import {
   RESULT_LABEL,
   STATUS_LABEL,
   daysOnRecord,
+  deadlineState,
   findingProblem,
+  informationInput,
+  letterOptions,
   linesOf,
+  type InformationRow,
 } from "@/lib/claim-findings-logic";
-import { formatDateIN, formatINR, fromDateInput } from "@/lib/format-in";
+import { formatDateIN, formatINR, fromDateInput, toDateInput } from "@/lib/format-in";
 import { listEntityDocumentLinks } from "@/services/document-relationships-api";
 import { enhancedApi } from "@/services/enhanced-api";
 import type {
@@ -51,9 +55,12 @@ interface FindingDraft {
   amount: string;
   findings: string;
   risks: string;
-  information: string;
-  consequence: string;
+  information: InformationRow[];
 }
+
+const EMPTY_ROW: InformationRow = { item: "", deadline: "", consequence: "" };
+
+const today = () => new Date().toISOString().slice(0, 10);
 
 const toDraft = (finding: HeadFinding): FindingDraft => ({
   result: finding.result ?? "",
@@ -61,8 +68,11 @@ const toDraft = (finding: HeadFinding): FindingDraft => ({
   amount: finding.amount != null ? String(finding.amount) : "",
   findings: finding.findings,
   risks: finding.residual_risks.join("\n"),
-  information: finding.information_required.map((item) => item.item).join("\n"),
-  consequence: finding.information_required[0]?.consequence ?? "",
+  information: finding.information_required.map((item) => ({
+    item: item.item,
+    deadline: toDateInput(item.deadline),
+    consequence: item.consequence ?? "",
+  })),
 });
 
 const toInput = (draft: FindingDraft): HeadFindingInput | null => {
@@ -76,10 +86,7 @@ const toInput = (draft: FindingDraft): HeadFindingInput | null => {
     amount: amount as number | null,
     findings: draft.findings.trim(),
     residual_risks: linesOf(draft.risks),
-    information_required: linesOf(draft.information).map((item) => ({
-      item,
-      consequence: draft.consequence.trim() || null,
-    })),
+    information_required: informationInput(draft.information),
   };
 };
 
@@ -146,7 +153,7 @@ const FindingEditor: React.FC<{
                 result: proposal.result,
                 findings: proposal.findings,
                 risks: proposal.residual_risks.join("\n"),
-                information: proposal.information_required.join("\n"),
+                information: proposal.information_required.map((item) => ({ ...EMPTY_ROW, item })),
               }))
             }
           >
@@ -186,16 +193,60 @@ const FindingEditor: React.FC<{
             <Label htmlFor={`${id}-reasons`}>Reasons</Label>
             <Textarea id={`${id}-reasons`} rows={3} value={draft.findings} onChange={(e) => set("findings", e.target.value)} />
           </div>
-          <div className="space-y-1 sm:col-span-3">
-            <Label htmlFor={`${id}-information`}>Information required, one item per line</Label>
-            <Textarea id={`${id}-information`} rows={2} value={draft.information} onChange={(e) => set("information", e.target.value)} />
-          </div>
-          {draft.information.trim() && (
-            <div className="space-y-1 sm:col-span-3">
-              <Label htmlFor={`${id}-consequence`}>What follows under the contract if it is not supplied</Label>
-              <Input id={`${id}-consequence`} value={draft.consequence} onChange={(e) => set("consequence", e.target.value)} />
-            </div>
-          )}
+          <fieldset className="space-y-2 sm:col-span-3">
+            <legend className="text-sm font-medium">Information required</legend>
+            {draft.information.map((row, index) => {
+              const setRow = (patch: Partial<InformationRow>) =>
+                set(
+                  "information",
+                  draft.information.map((entry, at) => (at === index ? { ...entry, ...patch } : entry))
+                );
+              const rowId = `${id}-info-${index}`;
+              return (
+                <div key={index} className="grid gap-2 rounded-md border p-2 sm:grid-cols-[2fr_1fr_2fr_auto]">
+                  <div className="space-y-1">
+                    <Label htmlFor={`${rowId}-item`}>Item {index + 1}</Label>
+                    <Input id={`${rowId}-item`} value={row.item} onChange={(e) => setRow({ item: e.target.value })} />
+                  </div>
+                  <div className="space-y-1">
+                    <Label htmlFor={`${rowId}-deadline`}>Deadline</Label>
+                    <Input
+                      id={`${rowId}-deadline`}
+                      type="date"
+                      value={row.deadline}
+                      onChange={(e) => setRow({ deadline: e.target.value })}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label htmlFor={`${rowId}-consequence`}>If not supplied</Label>
+                    <Input
+                      id={`${rowId}-consequence`}
+                      value={row.consequence}
+                      onChange={(e) => setRow({ consequence: e.target.value })}
+                    />
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="self-end"
+                    aria-label={`Remove item ${index + 1}`}
+                    onClick={() => set("information", draft.information.filter((_, at) => at !== index))}
+                  >
+                    Remove
+                  </Button>
+                </div>
+              );
+            })}
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => set("information", [...draft.information, { ...EMPTY_ROW }])}
+            >
+              Add an information item
+            </Button>
+          </fieldset>
           <div className="space-y-1 sm:col-span-3">
             <Label htmlFor={`${id}-risks`}>Residual risks, one per line</Label>
             <Textarea id={`${id}-risks`} rows={2} value={draft.risks} onChange={(e) => set("risks", e.target.value)} />
@@ -221,12 +272,18 @@ const FindingEditor: React.FC<{
             <div>
               <p className="text-xs font-medium">Information required</p>
               <ul className="list-disc pl-5 text-xs">
-                {finding.information_required.map((item) => (
-                  <li key={item.item}>
-                    {item.item}
-                    {item.consequence && <span className="text-muted-foreground"> — {item.consequence}</span>}
-                  </li>
-                ))}
+                {finding.information_required.map((item) => {
+                  const state = deadlineState(item.deadline, today());
+                  return (
+                    <li key={item.item}>
+                      {item.item}
+                      {item.deadline ? ` — by ${formatDateIN(item.deadline)}` : " — no date set"}
+                      {state === "overdue" && <span className="ml-1 font-medium text-red-700">(overdue)</span>}
+                      {state === "due" && <span className="ml-1 font-medium text-amber-700">(due soon)</span>}
+                      {item.consequence && <span className="text-muted-foreground"> — if not supplied: {item.consequence}</span>}
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           )}
@@ -283,6 +340,7 @@ const DeterminationsPanel: React.FC<Props> = ({ claimId, readOnly }) => {
   const card = (view: DeterminationView) => {
     const item = view.determination;
     const figures = (headId: string) => view.figures.find((entry) => entry.head_id === headId);
+    const letters = letterOptions(item, data.items.map((entry) => entry.determination));
     return (
       <article key={item._id} aria-label={`Determination revision ${item.revision}`} className="space-y-3 rounded-lg border p-4">
         <header className="flex flex-wrap items-center justify-between gap-2">
@@ -328,6 +386,31 @@ const DeterminationsPanel: React.FC<Props> = ({ claimId, readOnly }) => {
           ))}
         </ul>
 
+        {(letters.determination || letters.informationRequest) && !readOnly && (
+          <div className="flex flex-wrap gap-2" aria-label="Letters from this determination">
+            {letters.determination && (
+              <Button asChild variant="outline" size="sm">
+                <Link to={`/letters/bench/new?determinationId=${encodeURIComponent(item._id)}&purpose=determination`}>
+                  <Mail className="mr-2 h-4 w-4" aria-hidden="true" />
+                  Issue determination letter
+                </Link>
+              </Button>
+            )}
+            {letters.informationRequest && (
+              <Button asChild variant="outline" size="sm">
+                <Link to={`/letters/bench/new?determinationId=${encodeURIComponent(item._id)}&purpose=information_request`}>
+                  <Mail className="mr-2 h-4 w-4" aria-hidden="true" />
+                  Request information
+                </Link>
+              </Button>
+            )}
+            <p className="w-full text-xs text-muted-foreground">
+              Opens the Letter Bench with the findings{letters.informationRequest ? ", the items asked for and their deadlines" : ""}.
+              Save any change to the findings first: the letter takes them as they are now.
+            </p>
+          </div>
+        )}
+
         {view.editable && !readOnly && (
           <footer className="space-y-3 border-t pt-3">
             {view.blockers.length > 0 && (
@@ -347,12 +430,6 @@ const DeterminationsPanel: React.FC<Props> = ({ claimId, readOnly }) => {
                 >
                   <Sparkles className="mr-2 h-4 w-4" aria-hidden="true" />
                   Propose findings
-                </Button>
-                <Button asChild variant="outline" size="sm">
-                  <Link to={`/letters/bench/new?claimId=${encodeURIComponent(claimId)}`}>
-                    <Mail className="mr-2 h-4 w-4" aria-hidden="true" />
-                    Draft a request for information
-                  </Link>
                 </Button>
                 <div className="ml-auto flex items-end gap-2">
                   <div className="min-w-56 space-y-1">

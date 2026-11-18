@@ -28,7 +28,7 @@ export async function fetchBenchAvailability(): Promise<BenchAvailability> {
 
 export async function openBench(payload: {
   incoming_document_id?: string;
-  trigger_type?: "variation" | "claim";
+  trigger_type?: "variation" | "claim" | "determination" | "information_request";
   trigger_id?: string;
   role?: DraftRole;
 }): Promise<BenchOpenResponse> {

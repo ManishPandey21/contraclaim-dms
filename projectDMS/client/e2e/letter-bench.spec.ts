@@ -57,6 +57,7 @@ function makeState(enabled = true) {
     enabled,
     exists: true,
     composeCalls: [] as string[][],
+    openPayloads: [] as Json[],
     patchVersions: [] as number[],
     forceConflictOnce: false,
     letterStatus: "Draft",
@@ -160,6 +161,7 @@ async function mockApi(page: Page, state: State) {
     if (path === "/projects") return json(route, [project]);
     if (path === "/letters/bench/availability") return json(route, { enabled: state.enabled, rollout_mode: state.enabled ? "primary" : "off" });
     if (path === "/letters/bench/open" && method === "POST") {
+      state.openPayloads.push(body());
       return json(route, { letter_id: LETTER_ID, created: false, board_version: state.board.board_version });
     }
     if (path === `/letters/${LETTER_ID}/bench/skills`) {
@@ -261,6 +263,37 @@ async function mockApi(page: Page, state: State) {
 const SHOTS = process.env.BENCH_SHOTS;
 
 test.describe("Letter Bench", () => {
+  test("claim journey step 6: a request for information opens pre-filled from the determination (4B-31)", async ({ page }) => {
+    const state = makeState();
+    state.board.role = "engineer";
+    (state.board as Json).trigger = {
+      type: "information_request",
+      id: "det-1",
+      label: "Information requested on claim CLM-001 (revision 1)",
+      status: "approved",
+      information_items: [
+        { head_id: "H1", head_title: "Delayed handover", item: "Handover correspondence", deadline: "2026-12-05", consequence: null },
+        { head_id: "H1", head_title: "Delayed handover", item: "Daily site records", deadline: "2026-12-20", consequence: "Determined on the records supplied" },
+      ],
+    };
+    await mockApi(page, state);
+    await page.goto("/letters/bench/new?determinationId=det-1&purpose=information_request");
+
+    await expect(page).toHaveURL(new RegExp(`/letters/${LETTER_ID}/bench$`));
+    // Opening is idempotent on the server; the dev build may send it twice.
+    expect(state.openPayloads.length).toBeGreaterThan(0);
+    for (const payload of state.openPayloads) {
+      expect(payload).toEqual({ trigger_type: "information_request", trigger_id: "det-1" });
+    }
+    const context = page.getByRole("region", { name: "From the determination" });
+    await expect(context).toContainText("Information requested");
+    await expect(context).toContainText("Handover correspondence");
+    await expect(context).toContainText("05-12-2026");
+    await expect(context).toContainText("Daily site records");
+    await expect(context).toContainText("20-12-2026");
+    await expect(context).toContainText("Determined on the records supplied");
+  });
+
   test("reply flow: decide each point, lock, compose, submit", async ({ page }) => {
     const state = makeState();
     await mockApi(page, state);

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional
 
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
@@ -798,3 +798,173 @@ __all__ = [
     "submit_blockers",
     "validate_finding",
 ]
+
+
+# --------------------------------------------------------------------------- #
+# Letters from a determination (4B-31)
+# --------------------------------------------------------------------------- #
+LetterPurpose = Literal["determination", "information_request"]
+_LETTER_RESULT = {
+    "full": "Entitlement established in full",
+    "partial": "Entitlement established in part",
+    "none": "No entitlement established",
+    "insufficient_information": "Not determined: further information is required",
+}
+_RFI_STATUSES = {"draft", "returned", "in_review", "approved"}
+
+
+class DeterminationLetterSource(BaseModel):
+    """What a letter started from a determination carries onto the Letter Bench.
+
+    Only the determination's own content: its findings and the information it
+    asks for, each item with its deadline and what follows if it is not
+    supplied. Nothing from a simulation or the strategy note (both privileged)
+    and no figure the determination does not hold.
+    """
+
+    organization_id: str
+    project_id: Optional[str] = None
+    role: str
+    title: str
+    subject: str
+    trigger: Dict[str, Any]
+    text: str
+
+
+def _day(value: Optional[datetime]) -> Optional[str]:
+    return value.date().isoformat() if value else None
+
+
+def _amount(value: Optional[float]) -> str:
+    from .claim_submission import format_paise
+
+    return format_paise(int(round(float(value) * 100)))
+
+
+def information_items(determination: ClaimDetermination) -> List[Dict[str, Any]]:
+    """Every information item of the determination, head by head, earliest deadline first."""
+    items = [
+        {
+            "head_id": head.head_id,
+            "head_title": head.head_title,
+            "item": request.item,
+            "deadline": _day(request.deadline),
+            "consequence": request.consequence,
+        }
+        for head in determination.heads
+        for request in head.information_required
+    ]
+    items.sort(key=lambda entry: (entry["deadline"] is None, entry["deadline"] or ""))
+    return items
+
+
+def letter_source(
+    claim: Dict[str, Any], determination: ClaimDetermination, purpose: LetterPurpose
+) -> DeterminationLetterSource:
+    """Pure: the title, subject, structured context and text of the letter.
+
+    Refuses what must not be issued: a determination letter only from an approved,
+    authored determination; a request for information only from an authored one
+    still open or approved that asks for something.
+    """
+    if determination.origin != "authored":
+        raise _refusal(
+            409, "determination_letter_not_authored",
+            "A letter can be issued only from a determination made in this workspace.",
+        )
+    items = information_items(determination)
+    if purpose == "determination" and determination.status != "approved":
+        raise _refusal(
+            409, "determination_letter_not_approved",
+            "The determination letter can be issued once the determination has been approved.",
+        )
+    if purpose == "information_request":
+        if determination.status not in _RFI_STATUSES:
+            raise _refusal(409, "determination_letter_not_open", "This determination cannot ask for information.")
+        if not items:
+            raise _refusal(
+                409, "determination_no_information_items",
+                "No information is asked for in this determination. Add the items, with their deadlines, first.",
+            )
+    reference = claim.get("claim_ref") or claim.get("title") or str(claim.get("_id"))
+    heads = [
+        {
+            "head_id": head.head_id,
+            "head_title": head.head_title,
+            "result": head.result,
+            "days": head.days,
+            "amount": head.amount,
+            "findings": head.findings,
+        }
+        for head in determination.heads
+    ]
+    trigger: Dict[str, Any] = {
+        "type": purpose,
+        "id": determination.id,
+        "label": (
+            f"Determination on claim {reference} (revision {determination.revision})"
+            if purpose == "determination"
+            else f"Information requested on claim {reference} (revision {determination.revision})"
+        ),
+        "status": determination.status,
+        "claim_id": str(claim.get("_id")),
+        "determination_revision": determination.revision,
+        "issued_by": determination.issued_by,
+        "information_items": items,
+    }
+    lines: List[str] = [f"Claim {reference}: {claim.get('title') or ''}".strip()]
+    if purpose == "determination":
+        trigger["heads"] = heads
+        for head in heads:
+            figures = []
+            if head["days"] is not None:
+                figures.append(f"{head['days']} days extension of time")
+            if head["amount"] is not None:
+                figures.append(_amount(head["amount"]))
+            lines.append(
+                f"Head of claim {head['head_id']}: {head['head_title']}. "
+                f"Finding: {_LETTER_RESULT.get(str(head['result']), 'No finding recorded')}."
+                + (f" Determined: {'; '.join(figures)}." if figures else "")
+                + (f" Reasons: {head['findings']}" if head["findings"] else "")
+            )
+    if items:
+        lines.append("Information required:")
+        for entry in items:
+            lines.append(
+                f"- {entry['item']} (head {entry['head_id']})"
+                + (f", by {entry['deadline']}" if entry["deadline"] else ", no date set")
+                + (f". If not supplied: {entry['consequence']}" if entry["consequence"] else "")
+            )
+    title = (
+        f"Determination of claim {reference}" if purpose == "determination"
+        else f"Request for information on claim {reference}"
+    )
+    subject = (
+        f"Determination: {claim.get('title') or reference}" if purpose == "determination"
+        else f"Request for information: {claim.get('title') or reference}"
+    )
+    return DeterminationLetterSource(
+        organization_id=str(claim.get("organization_id") or ""),
+        project_id=str(claim.get("project_id") or "") or None,
+        role=determination.issued_by,
+        title=title,
+        subject=subject,
+        trigger=trigger,
+        text="\n\n".join(line for line in lines if line),
+    )
+
+
+async def load_letter_source(
+    db: Any, bench: Any, claim: Dict[str, Any], determination_id: str, purpose: LetterPurpose
+) -> DeterminationLetterSource:
+    """The determination, checked as current and still in the project's capacity."""
+    service = ClaimDeterminations(db, bench)
+    determination = await service._load(claim, determination_id)
+    if await service._collection.find_one({"supersedes_id": determination.id}):
+        raise _refusal(
+            409, "determination_letter_superseded",
+            "A later revision of this determination exists. Issue the letter from the latest revision.",
+        )
+    source = letter_source(claim, determination, purpose)
+    await service._require_capacity(claim, determination)
+    return source

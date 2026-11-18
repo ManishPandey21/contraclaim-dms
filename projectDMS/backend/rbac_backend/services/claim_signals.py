@@ -75,9 +75,14 @@ def _hindrance_eligible(row: Dict[str, Any]) -> bool:
     )
 
 
+#: Boards opened from this side's own records: a claim's notice, a determination letter
+#: or a request for information (4B-31). Each drafts an outgoing letter, never a new claim.
+OWN_LETTER_TRIGGERS = ("claim", "determination", "information_request")
+
+
 def _claim_triggered(board: Dict[str, Any]) -> bool:
-    """A board opened from a claim drafts that claim's own letter; it is not a new claim."""
-    return str((board.get("trigger") or {}).get("type") or "") == "claim"
+    """A board opened from this side's own record drafts its letter; it is not a new claim."""
+    return str((board.get("trigger") or {}).get("type") or "") in OWN_LETTER_TRIGGERS
 
 
 def _not_eligible(message: str) -> HTTPException:
@@ -212,7 +217,8 @@ class ClaimSignalService:
                 {
                     **board_query,
                     "chain.skill_key": {"$in": [CLAIMS_SKILL_KEY, EOT_SKILL_KEY]},
-                    "trigger.type": {"$ne": "claim"},
+                    # Letters this side writes from its own records are not incoming signals.
+                    "trigger.type": {"$nin": list(OWN_LETTER_TRIGGERS)},
                 }
             ).to_list(length=MAX_SIGNALS)
             raised = await self._raised(organization_id, "letter_bench", [str(b.get("letter_id")) for b in boards])

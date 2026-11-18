@@ -364,6 +364,7 @@ class LetterBenchService:
         """Create the letter and its board from a document or a record. Idempotent."""
         trigger: Optional[Dict[str, Any]] = None
         incoming_text = ""
+        determination_role: Optional[str] = None
         if request.incoming_document_id:
             document = await self._document(request.incoming_document_id)
             if not document:
@@ -381,6 +382,16 @@ class LetterBenchService:
                 await self._claim_trigger(str(request.trigger_id), current_user)
             )
             origin_key = {"trigger.type": "claim", "trigger.id": str(request.trigger_id)}
+        elif request.trigger_type in ("determination", "information_request"):
+            source = await self._determination_trigger(
+                str(request.trigger_id), request.trigger_type, current_user
+            )
+            organization_id, project_id = source.organization_id, source.project_id
+            title, subject, recipient = source.title, source.subject, "[CONFIRM: addressee]"
+            trigger, incoming_text = source.trigger, clean_incoming_text(source.text)
+            # The letter is written as the party that made the determination.
+            determination_role = source.role
+            origin_key = {"trigger.type": request.trigger_type, "trigger.id": str(request.trigger_id)}
         else:
             from ..variation_service import VariationService
 
@@ -439,7 +450,7 @@ class LetterBenchService:
                 letter_id=existing["letter_id"], created=False, board_version=existing.get("board_version", 0)
             )
 
-        role = request.role or await self._default_role(organization_id, project_id)
+        role = determination_role or request.role or await self._default_role(organization_id, project_id)
         user_id = _user_id(current_user) or "system"
         letter = await self.drafts.letter_service.create_letter(
             Letter(
@@ -537,6 +548,28 @@ class LetterBenchService:
             trigger,
             clean_incoming_text("\n\n".join(part for part in parts if part)),
         )
+
+    async def _determination_trigger(self, determination_id: str, purpose: str, current_user: Any) -> Any:
+        """Origin of a determination letter or a request for information (4B-31).
+
+        The determination's claim must be readable by the caller; the letter carries
+        the determination's findings and information items, with their deadlines,
+        and nothing else (``claim_determinations.letter_source``).
+        """
+        from ..claim_service import ClaimService
+        from ..claim_bench import ClaimBenchService
+        from ..claim_determinations import DETERMINATIONS, load_letter_source
+
+        row = await self.db[DETERMINATIONS].find_one({"_id": determination_id})
+        if not row:
+            raise HTTPException(status_code=404, detail="Determination not found")
+        record = await ClaimService(self.db).get(str(row.get("claim_id")))
+        if not record:
+            raise HTTPException(status_code=404, detail="Determination not found")
+        await self.drafts.policy_service.authorize_document(
+            current_user, "dms.claim.view", record, resource_type="claim"
+        )
+        return await load_letter_source(self.db, ClaimBenchService(self.db), record, determination_id, purpose)  # type: ignore[arg-type]
 
     async def _letter_exists(self, letter_id: str) -> bool:
         try:

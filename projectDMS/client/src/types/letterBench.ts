@@ -114,7 +114,7 @@ export interface PositionBoard {
   stage: BoardStage;
   role: DraftRole;
   incoming_document_id?: string | null;
-  trigger?: { type: string; id: string; label: string; status?: string } | null;
+  trigger?: BoardTrigger | null;
   incoming_text: string;
   incoming_meta: {
     letter_no?: string | null;
@@ -361,3 +361,26 @@ export const VERDICT_DESCRIPTIONS: Record<Verdict, string> = {
 };
 
 export const VERDICT_ORDER: Verdict[] = ["entitlement", "partial", "none", "need_information"];
+
+/** Where a board came from. Determination letters (4B-31) also carry findings and information items. */
+export interface BoardTrigger {
+  type: string;
+  id: string;
+  label: string;
+  status?: string;
+  heads?: {
+    head_id: string;
+    head_title: string;
+    result?: string | null;
+    days?: number | null;
+    amount?: number | null;
+    findings?: string;
+  }[];
+  information_items?: {
+    head_id: string;
+    head_title: string;
+    item: string;
+    deadline?: string | null;
+    consequence?: string | null;
+  }[];
+}
