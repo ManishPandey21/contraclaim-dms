@@ -38,6 +38,7 @@ from ..models.skill import (
 from ..services.ai_guardrails import AIOutputGuardrailService
 from ..services.policy_service import PolicyService
 from ..services.skills.approvals import SkillApprovalService, manifest_policy_hash, required_reviews
+from ..services.skills.evaluation import EvalRunRequest, SkillEvalRun, SkillEvalRunService
 from ..services.skills.loader import MAX_BUNDLE_BYTES, SkillBundleError, load_skill_zip
 from ..services.skills.registry import SkillRegistry
 from ..services.upload_streaming import read_upload_within_limit
@@ -46,6 +47,8 @@ from ..utils.rate_limiter import RateLimiter
 
 router = APIRouter(prefix="/skills", tags=["skills"])
 skill_admin_limiter = RateLimiter(max_requests=20, window_seconds=60, scope="skill_registry_admin")
+# A run calls the model once per matter of the golden set: few an hour.
+skill_eval_limiter = RateLimiter(max_requests=6, window_seconds=3600, scope="skill_eval_runs")
 
 
 async def get_skill_registry() -> SkillRegistry:
@@ -58,6 +61,10 @@ async def get_policy_service() -> PolicyService:
 
 async def get_approval_service() -> SkillApprovalService:
     return SkillApprovalService(await get_database())
+
+
+async def get_eval_run_service() -> SkillEvalRunService:
+    return SkillEvalRunService(await get_database())
 
 
 async def _is_named_reviewer(record: SkillVersion, current_user: CurrentUser, db) -> bool:
@@ -256,15 +263,64 @@ async def publish_skill_version(
     version: str,
     payload: SkillPublishRequest,
     registry: SkillRegistry = Depends(get_skill_registry),
+    runs: SkillEvalRunService = Depends(get_eval_run_service),
     policy: PolicyService = Depends(get_policy_service),
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    """Publish a draft once its evaluation report passes. Published versions are immutable."""
+    """Publish a draft on a passing server-side evaluation run. Published versions are immutable."""
     await policy.authorize(
         current_user, "drafting.skill.publish", resource_type="skill", resource_id=skill_key
     )
     await skill_admin_limiter.check_user_limit(_user_id(current_user))
-    return await registry.publish(skill_key, version, payload.eval_report, _user_id(current_user))
+    record = await registry.get_version(skill_key, version)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Skill version not found")
+    run, report = await runs.report_for(record, payload.eval_run_id)
+    return await registry.publish(skill_key, version, report, _user_id(current_user), eval_run_id=run.id)
+
+
+@router.post("/{skill_key}/versions/{version}/eval-runs", response_model=SkillEvalRun, status_code=201)
+@handle_exceptions
+async def run_skill_evaluation(
+    skill_key: str,
+    version: str,
+    payload: EvalRunRequest,
+    registry: SkillRegistry = Depends(get_skill_registry),
+    runs: SkillEvalRunService = Depends(get_eval_run_service),
+    policy: PolicyService = Depends(get_policy_service),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Run the version's golden set on the server (4B-41, D-21).
+
+    The run records the session user as its evaluator, the suite, pack, policy and
+    model it ran against, and the configured threshold; none can be supplied.
+    """
+    await policy.authorize(
+        current_user, "drafting.skill.publish", resource_type="skill", resource_id=skill_key
+    )
+    await skill_eval_limiter.check_user_limit(_user_id(current_user))
+    record = await registry.get_version(skill_key, version)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Skill version not found")
+    return await runs.run(record, payload, _user_id(current_user))
+
+
+@router.get("/{skill_key}/versions/{version}/eval-runs", response_model=List[SkillEvalRun])
+@handle_exceptions
+async def list_skill_evaluations(
+    skill_key: str,
+    version: str,
+    registry: SkillRegistry = Depends(get_skill_registry),
+    runs: SkillEvalRunService = Depends(get_eval_run_service),
+    policy: PolicyService = Depends(get_policy_service),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Every run of this version, newest first, with its per-matter results. Runs are kept."""
+    record = await registry.get_version(skill_key, version)
+    await _authorize_reader_or_reviewer(record, current_user, policy, runs.db)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Skill version not found")
+    return await runs.list(skill_key, version)
 
 
 @router.get(
@@ -304,6 +360,7 @@ async def record_skill_approval(
     payload: SkillApprovalRequest,
     registry: SkillRegistry = Depends(get_skill_registry),
     approvals: SkillApprovalService = Depends(get_approval_service),
+    runs: SkillEvalRunService = Depends(get_eval_run_service),
     policy: PolicyService = Depends(get_policy_service),
     current_user: CurrentUser = Depends(get_current_user),
 ):
@@ -317,7 +374,8 @@ async def record_skill_approval(
     await skill_admin_limiter.check_user_limit(_user_id(current_user))
     if record is None:
         raise HTTPException(status_code=404, detail="Skill version not found")
-    return await approvals.record(record, payload, current_user)
+    run, report = await runs.report_for(record, payload.eval_run_id)
+    return await approvals.record(record, payload, current_user, report, eval_run_id=run.id)
 
 
 @router.post("/approvals/{approval_id}/revoke", response_model=SkillApproval)

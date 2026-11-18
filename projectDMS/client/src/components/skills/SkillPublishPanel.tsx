@@ -4,7 +4,6 @@ import { CheckCircle2, CircleAlert, CircleDashed } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { errorMessage } from "@/hooks/useLetterBench";
 import { formatDateIN } from "@/lib/format-in";
 import {
@@ -12,17 +11,20 @@ import {
   publishBlockers,
   requirementStatuses,
   reviewerRoleLabel,
+  runReport,
 } from "@/lib/skill-approvals";
 import { enhancedApi } from "@/services/enhanced-api";
 import {
   fetchSkillApprovals,
+  fetchSkillEvalRuns,
   fetchSkillVersionText,
   publishSkillVersion,
   recordSkillApproval,
   revokeSkillApproval,
+  runSkillEvaluation,
 } from "@/services/letter-bench-api";
 import { getCurrentUserProfile } from "@/services/session-api";
-import type { SkillEvalReport, SkillVersionSummary } from "@/types/letterBench";
+import type { SkillEvalRun, SkillVersionSummary } from "@/types/letterBench";
 
 interface Props {
   version: Pick<SkillVersionSummary, "skill_key" | "version" | "name" | "content_hash" | "required_approvals">;
@@ -37,12 +39,7 @@ interface Props {
   myRoles?: string[];
 }
 
-const FIELDS = [
-  ["suite", "Evaluation suite", "text"],
-  ["case_count", "Cases run", "number"],
-  ["score", "Score (0 to 1)", "number"],
-  ["threshold", "Threshold (0 to 1)", "number"],
-] as const;
+const percent = (value?: number | null) => (value == null ? "—" : `${Math.round(value * 100)} %`);
 
 const personName = (u: { first_name?: string; last_name?: string; username?: string; email?: string }) =>
   [u.first_name, u.last_name].filter(Boolean).join(" ").trim() || u.username || u.email || "Unnamed user";
@@ -59,8 +56,14 @@ const SkillPublishPanel: React.FC<Props> = ({ version, onClose, onPublished, rev
   const client = useQueryClient();
   const approvalsKey = ["skills", "approvals", version.skill_key, version.version] as const;
   const needsApprovals = (version.required_approvals?.length ?? 0) > 0;
-  const [form, setForm] = useState({ suite: "", score: "", threshold: "0.85", case_count: "", recorded_by: "" });
+  const runsKey = ["skills", "eval-runs", version.skill_key, version.version] as const;
+  const [chosenRunId, setChosenRunId] = useState<string | null>(null);
 
+  const runs = useQuery({
+    queryKey: runsKey,
+    queryFn: () => fetchSkillEvalRuns(version.skill_key, version.version),
+    retry: false,
+  });
   const approvals = useQuery({
     queryKey: approvalsKey,
     queryFn: () => fetchSkillApprovals(version.skill_key, version.version),
@@ -88,17 +91,11 @@ const SkillPublishPanel: React.FC<Props> = ({ version, onClose, onPublished, rev
   const nameOf = (id?: string | null) => (id ? names.get(id) || id : "");
   const myId = me.data?.id ? String(me.data.id) : null;
 
-  const complete = form.suite.trim() !== "" && form.score !== "" && form.case_count !== "" && form.threshold !== "";
-  const report: SkillEvalReport | null = complete
-    ? {
-        suite: form.suite.trim(),
-        score: Number(form.score),
-        threshold: Number(form.threshold),
-        case_count: Number(form.case_count),
-        recorded_by: form.recorded_by.trim() || null,
-      }
-    : null;
-  const passing = report !== null && report.case_count > 0 && report.score >= report.threshold;
+  // The run under review: the one chosen, else the newest. Runs are made on the server (4B-41).
+  const run: SkillEvalRun | null =
+    runs.data?.find((item) => item._id === chosenRunId) ?? runs.data?.[0] ?? null;
+  const report = run ? runReport(run) : null;
+  const passing = Boolean(run?.passed);
 
   const statuses = requirementStatuses(
     approvals.data?.required ?? version.required_approvals ?? [],
@@ -108,12 +105,12 @@ const SkillPublishPanel: React.FC<Props> = ({ version, onClose, onPublished, rev
     approvals.data?.policy_hash ?? null
   );
   const blockers = needsApprovals && !reviewOnly ? publishBlockers(statuses, report, myId) : [];
-  if (report && !passing) blockers.unshift("The evaluation is below its threshold, or no cases were run.");
+  if (run && !passing) blockers.unshift("The chosen evaluation run did not pass.");
 
   const refreshApprovals = () => client.invalidateQueries({ queryKey: approvalsKey });
   const approve = useMutation({
     mutationFn: (requirement: { kind: "technical" | "legal"; reviewer_role: string }) =>
-      recordSkillApproval(version.skill_key, version.version, { ...requirement, eval_report: report! }),
+      recordSkillApproval(version.skill_key, version.version, { ...requirement, eval_run_id: run!._id }),
     onSuccess: () => {
       toast.success("Approval recorded");
       void refreshApprovals();
@@ -128,8 +125,17 @@ const SkillPublishPanel: React.FC<Props> = ({ version, onClose, onPublished, rev
     },
     onError: (failure) => toast.error(errorMessage(failure, "The approval could not be revoked")),
   });
+  const evaluate = useMutation({
+    mutationFn: () => runSkillEvaluation(version.skill_key, version.version),
+    onSuccess: (made) => {
+      toast.success(made.passed ? "Evaluation passed" : "Evaluation run: it did not pass");
+      setChosenRunId(made._id);
+      void client.invalidateQueries({ queryKey: runsKey });
+    },
+    onError: (failure) => toast.error(errorMessage(failure, "The evaluation could not be run")),
+  });
   const publish = useMutation({
-    mutationFn: () => publishSkillVersion(version.skill_key, version.version, report!),
+    mutationFn: () => publishSkillVersion(version.skill_key, version.version, run!._id),
     onSuccess: () => {
       toast.success("Published");
       onPublished();
@@ -145,10 +151,10 @@ const SkillPublishPanel: React.FC<Props> = ({ version, onClose, onPublished, rev
         </h2>
         <p className="text-sm text-muted-foreground">
           {reviewOnly
-            ? "Read the text below, then record your review against the evaluation result you were given. Your review covers this exact text and that result only. Publishing is done by someone else."
+            ? "Read the text below and the evaluation run, then record your review against that run. Your review covers this exact text and that run only. Publishing is done by someone else."
             : needsApprovals
             ? "This skill shapes contractual and legal output. It is published only when each review below has been given against this exact text and evaluation result, by people other than the one who publishes it."
-            : "Record the result of the golden-set evaluation. A version below its threshold cannot be published."}
+            : "Run the golden-set evaluation on the server. A version whose run did not pass cannot be published."}
         </p>
       </div>
 
@@ -173,55 +179,62 @@ const SkillPublishPanel: React.FC<Props> = ({ version, onClose, onPublished, rev
         </div>
       )}
 
-      <div className="grid gap-3 sm:grid-cols-2">
-        {FIELDS.map(([key, label, type]) => (
-          <div key={key} className="space-y-1">
-            <label htmlFor={`eval-${key}`} className="text-xs font-medium">
-              {label}
-            </label>
-            <Input
-              id={`eval-${key}`}
-              type={type}
-              step={type === "number" ? "0.01" : undefined}
-              value={form[key]}
-              onChange={(event) => setForm((current) => ({ ...current, [key]: event.target.value }))}
-            />
-          </div>
-        ))}
-        {needsApprovals && (
-          <div className="space-y-1 sm:col-span-2">
-            <label htmlFor="eval-recorded-by" className="text-xs font-medium">
-              Evaluation run by
-            </label>
-            {(people.data?.length ?? 0) > 0 ? (
-              <select
-                id="eval-recorded-by"
-                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
-                value={form.recorded_by}
-                onChange={(event) => setForm((current) => ({ ...current, recorded_by: event.target.value }))}
-              >
-                <option value="">Choose who ran it</option>
-                {[...names.entries()]
-                  .filter(([id]) => id)
-                  .sort((a, b) => a[1].localeCompare(b[1]))
-                  .map(([id, name]) => (
-                    <option key={id} value={id}>
-                      {name}
-                    </option>
-                  ))}
-              </select>
-            ) : (
-              <Input
-                id="eval-recorded-by"
-                value={form.recorded_by}
-                placeholder="User id of the person who ran the evaluation"
-                onChange={(event) => setForm((current) => ({ ...current, recorded_by: event.target.value }))}
-              />
-            )}
-            <p className="text-xs text-muted-foreground">
-              The evaluator cannot approve or publish the version they evaluated.
-            </p>
-          </div>
+      <div className="space-y-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-xs font-semibold uppercase text-muted-foreground">Evaluation runs</h3>
+          {!reviewOnly && (
+            <Button size="sm" variant="outline" disabled={evaluate.isPending} onClick={() => evaluate.mutate()}>
+              {evaluate.isPending ? "Running…" : "Run evaluation"}
+            </Button>
+          )}
+        </div>
+        {runs.isError && (
+          <p role="alert" className="text-sm text-destructive">
+            {errorMessage(runs.error, "Evaluation runs could not be loaded.")}
+          </p>
+        )}
+        {runs.data?.length === 0 && (
+          <p className="text-sm text-muted-foreground">
+            No evaluation has been run on this version. The run is made on the server against the golden set; whoever
+            runs it cannot approve or publish this version.
+          </p>
+        )}
+        {(runs.data?.length ?? 0) > 0 && (
+          <ul className="divide-y rounded-md border" aria-label="Evaluation runs">
+            {runs.data!.map((item) => (
+              <li key={item._id} className="space-y-1 p-3 text-sm">
+                <label className="flex items-start gap-2">
+                  <input
+                    type="radio"
+                    name={`eval-run-${version.skill_key}-${version.version}`}
+                    className="mt-1"
+                    checked={run?._id === item._id}
+                    onChange={() => setChosenRunId(item._id)}
+                    aria-label={`Run of ${formatDateIN(item.started_at)} by ${nameOf(item.recorded_by)}`}
+                  />
+                  <span>
+                    <span className={item.passed ? "font-medium text-green-700" : "font-medium text-amber-700"}>
+                      {item.passed ? "Passed" : "Did not pass"}
+                    </span>{" "}
+                    · {formatDateIN(item.started_at)} by {nameOf(item.recorded_by)} · {item.case_count} matters ·
+                    elements {percent(item.scores.element_agreement)} (needs {percent(item.threshold)}) · classification{" "}
+                    {percent(item.scores.classification_agreement)} · degraded {percent(item.scores.degraded_rate)}
+                    <span className="block text-xs text-muted-foreground">
+                      Golden set {item.suite_key} ({item.suite_hash.slice(0, 12)}), model {item.model}, text{" "}
+                      {item.content_hash.slice(0, 12)}, {item.cost.model_calls} model calls
+                    </span>
+                  </span>
+                </label>
+                {item.failures.length > 0 && (
+                  <ul className="list-disc pl-10 text-xs text-amber-800">
+                    {item.failures.slice(0, 8).map((failure) => (
+                      <li key={failure}>{failure}</li>
+                    ))}
+                  </ul>
+                )}
+              </li>
+            ))}
+          </ul>
         )}
       </div>
 
@@ -272,10 +285,10 @@ const SkillPublishPanel: React.FC<Props> = ({ version, onClose, onPublished, rev
                       <Button
                         size="sm"
                         variant="outline"
-                        disabled={!passing || !report?.recorded_by || approve.isPending}
+                        disabled={!passing || approve.isPending}
                         title={
-                          !passing || !report?.recorded_by
-                            ? "Enter a passing evaluation and who ran it first"
+                          !passing
+                            ? "Choose a passing evaluation run first"
                             : `Recorded in your name. You must hold the ${reviewerRoleLabel(requirement.reviewer_role)} role.`
                         }
                         onClick={() => approve.mutate(requirement)}

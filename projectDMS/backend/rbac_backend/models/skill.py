@@ -108,6 +108,8 @@ class SkillVersion(BaseModel):
     status: SkillVersionStatus = "draft"
     bundle_file_id: Optional[str] = None
     eval_report: Optional[SkillEvalReport] = None
+    # The server-side evaluation run publication relied on (4B-41).
+    eval_run_id: Optional[str] = None
     # Serialisation point for publication decisions (plan D-05a, 4B-05): every
     # approval recorded or revoked, and every publish, increments or checks it
     # inside one transaction. Absent on versions stored before 4B-05 (reads as 0).
@@ -221,7 +223,11 @@ class SkillBindingRequest(BaseModel):
 
 
 class SkillPublishRequest(BaseModel):
-    eval_report: SkillEvalReport
+    """Publication names a server-side evaluation run (4B-41, D-21); a report cannot be supplied."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    eval_run_id: str = Field(..., min_length=1, max_length=64)
 
 
 class SkillApproval(BaseModel):
@@ -250,6 +256,8 @@ class SkillApproval(BaseModel):
     eval_threshold: Optional[float] = None
     eval_case_count: Optional[int] = None
     eval_recorded_by: Optional[str] = None
+    # The server-side run (4B-41). Absent on approvals recorded before it.
+    eval_run_id: Optional[str] = None
     kind: SkillApprovalKind
     reviewer_role: str = Field(..., pattern=APPROVER_ROLE_PATTERN)
     reviewer_user_id: str = Field(..., min_length=1)
@@ -266,9 +274,13 @@ class SkillApproval(BaseModel):
 
 
 class SkillApprovalRequest(BaseModel):
+    """An approval names the server-side evaluation run it was given against (4B-41)."""
+
+    model_config = ConfigDict(extra="forbid")
+
     kind: SkillApprovalKind
     reviewer_role: str = Field(..., pattern=APPROVER_ROLE_PATTERN)
-    eval_report: SkillEvalReport
+    eval_run_id: str = Field(..., min_length=1, max_length=64)
     comment: Optional[str] = Field(default=None, max_length=2000)
 
 

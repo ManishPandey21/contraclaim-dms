@@ -2,7 +2,23 @@ import type {
   SkillApproval,
   SkillApprovalRequirement,
   SkillEvalReport,
+  SkillEvalRun,
 } from "@/types/letterBench";
+
+/**
+ * The evaluation result an approval binds to, derived from a run exactly as the
+ * server derives it (`SkillEvalRun.report`): the suite names the run, so an
+ * approval given against one run does not count for another.
+ */
+export function runReport(run: SkillEvalRun): SkillEvalReport {
+  return {
+    suite: `${run.suite_key}@${run.suite_hash.slice(0, 16)}#run:${run._id}`,
+    score: run.passed ? run.scores.element_agreement : 0,
+    threshold: run.threshold,
+    case_count: run.case_count,
+    recorded_by: run.recorded_by,
+  };
+}
 
 // Mirrors the server's publication gate so the screen can say, before anyone
 // presses Publish, which review is missing and why. The server decides; this
@@ -106,7 +122,7 @@ export function publishBlockers(
   if (statuses.length === 0) return [];
   const blockers: string[] = [];
   if (!report) {
-    blockers.push("Enter the evaluation result the reviewers approved.");
+    blockers.push("Choose the evaluation run the reviewers approved.");
     return blockers;
   }
   if (!report.recorded_by) blockers.push("Name the person who ran the evaluation.");

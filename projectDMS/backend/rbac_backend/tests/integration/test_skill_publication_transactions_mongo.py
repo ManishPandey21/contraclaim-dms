@@ -97,7 +97,7 @@ async def _approve(db: Any, record: SkillVersion, kind: str, role: str, actor: A
     # A reviewer role is held through a platform assignment (4B-07).
     await hold_platform(db, actor)
     return await SkillApprovalService(db).record(
-        record, SkillApprovalRequest(kind=kind, reviewer_role=role, eval_report=REPORT), actor
+        record, SkillApprovalRequest(kind=kind, reviewer_role=role, eval_run_id="run-test"), actor, REPORT
     )
 
 
@@ -434,8 +434,8 @@ def test_revoking_an_approval_the_version_did_not_rely_on_does_not_deprecate_it(
             second_counsel = SimpleNamespace(id="counsel-2", roles=[LEGAL])
             await hold_platform(db, second_counsel)
             stale = await SkillApprovalService(db).record(
-                record, SkillApprovalRequest(kind="legal", reviewer_role=LEGAL, eval_report=other),
-                second_counsel,
+                record, SkillApprovalRequest(kind="legal", reviewer_role=LEGAL, eval_run_id="run-test"),
+                second_counsel, other,
             )
             await SkillRegistry(db).publish(CLAIMS_SKILL_KEY, "1.9.0", REPORT, PUBLISHER)
             await SkillApprovalService(db).revoke(stale.id, "superseded evaluation", COUNSEL)

@@ -8,11 +8,11 @@ import type {
   DraftRole,
   EffectiveSkill,
   SkillAdminList,
-  SkillBinding,
   SkillApproval,
   SkillApprovalKind,
   SkillApprovalList,
-  SkillEvalReport,
+  SkillBinding,
+  SkillEvalRun,
   SkillReviewQueue,
   SkillStep,
   SkillVersionSummary,
@@ -181,15 +181,27 @@ export async function importSkillBundle(input: {
   return data;
 }
 
+/** Publish on a passing server-side evaluation run (4B-41). */
 export async function publishSkillVersion(
   skillKey: string,
   version: string,
-  evalReport: SkillEvalReport
+  evalRunId: string
 ): Promise<SkillVersionSummary> {
   const { data } = await api.post<SkillVersionSummary>(
     `/skills/${encodeURIComponent(skillKey)}/versions/${encodeURIComponent(version)}/publish`,
-    { eval_report: evalReport }
+    { eval_run_id: evalRunId }
   );
+  return data;
+}
+
+/** Run the version's golden set on the server. The run records the signed-in user as its evaluator. */
+export async function runSkillEvaluation(skillKey: string, version: string, note?: string): Promise<SkillEvalRun> {
+  const { data } = await api.post<SkillEvalRun>(`${versionPath(skillKey, version)}/eval-runs`, note ? { note } : {});
+  return data;
+}
+
+export async function fetchSkillEvalRuns(skillKey: string, version: string): Promise<SkillEvalRun[]> {
+  const { data } = await api.get<SkillEvalRun[]>(`${versionPath(skillKey, version)}/eval-runs`);
   return data;
 }
 
@@ -217,7 +229,7 @@ export async function fetchSkillApprovals(skillKey: string, version: string): Pr
 export async function recordSkillApproval(
   skillKey: string,
   version: string,
-  input: { kind: SkillApprovalKind; reviewer_role: string; eval_report: SkillEvalReport; comment?: string }
+  input: { kind: SkillApprovalKind; reviewer_role: string; eval_run_id: string; comment?: string }
 ): Promise<SkillApproval> {
   const { data } = await api.post<SkillApproval>(`${versionPath(skillKey, version)}/approvals`, input);
   return data;

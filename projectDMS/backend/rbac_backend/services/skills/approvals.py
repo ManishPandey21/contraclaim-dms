@@ -178,8 +178,14 @@ class SkillApprovalService:
         return sorted((SkillApproval(**doc) for doc in docs), key=lambda item: item.decided_at)
 
     async def record(
-        self, version: SkillVersion, request: SkillApprovalRequest, actor: Any
+        self,
+        version: SkillVersion,
+        request: SkillApprovalRequest,
+        actor: Any,
+        report: SkillEvalReport,
+        eval_run_id: Optional[str] = None,
     ) -> SkillApproval:
+        """``report`` is the result of the run the request names, read by the server (4B-41)."""
         actor_id = _actor_id(actor)
         if not actor_id:
             raise HTTPException(status_code=403, detail="An approval needs an identified reviewer")
@@ -206,7 +212,6 @@ class SkillApprovalService:
                 status_code=403,
                 detail=f"Only a user holding the {request.reviewer_role} role can give this approval",
             )
-        report = request.eval_report
         require_acceptable_report(report)
         if not report.passed:
             raise HTTPException(
@@ -276,6 +281,7 @@ class SkillApprovalService:
                 eval_threshold=report.threshold,
                 eval_case_count=report.case_count,
                 eval_recorded_by=str(report.recorded_by),
+                eval_run_id=eval_run_id,
                 kind=request.kind,
                 reviewer_role=request.reviewer_role,
                 reviewer_user_id=actor_id,

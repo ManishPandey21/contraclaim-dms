@@ -39,6 +39,7 @@ from rbac_backend.services.reviewer_assignments import (
 from rbac_backend.services.skills.approvals import SkillApprovalService
 from rbac_backend.tests.integration.test_claim_routes_real_deps_mongo import _env
 from rbac_backend.tests.integration.test_skill_publication_transactions_mongo import REPORT, _draft
+from rbac_backend.tests.skill_eval_support import stored_run, use_suite_store
 from rbac_backend.tests.integration.test_variation_relationships_cl2_mongo import ORG_A, ORG_B, PROJ_A1, PROJ_A2
 from rbac_backend.tests.reviewer_assignment_helpers import assignment_document
 from rbac_backend.utils.rate_limiter import RateLimiter
@@ -331,7 +332,7 @@ def test_platform_authority_for_a_skill_pack_comes_only_from_a_live_platform_ass
         async with _env(monkeypatch) as env:
             await _ready(env)
             record = await _draft(env.db, "4.7.0")
-            request = SkillApprovalRequest(kind="legal", reviewer_role=LEGAL, eval_report=REPORT)
+            request = SkillApprovalRequest(kind="legal", reviewer_role=LEGAL, eval_run_id="run-test")
 
             named = _user("project_user", roles=["projectuser", LEGAL])  # the role on their list
             await env.db.users.update_one({"_id": named.id}, {"$set": {"roles": named.roles}})
@@ -346,14 +347,14 @@ def test_platform_authority_for_a_skill_pack_comes_only_from_a_live_platform_ass
             for actor in (named, org_held, project_held, super_admin):
                 assert await platform_reviewer_roles(env.db, actor) == set(), actor.id
                 with pytest.raises(HTTPException) as refused:
-                    await SkillApprovalService(env.db).record(record, request, actor)
+                    await SkillApprovalService(env.db).record(record, request, actor, REPORT)
                 assert refused.value.status_code == 403, actor.id
             assert await env.db.skill_approvals.count_documents({}) == 0
 
             counsel = _user("other_project_admin", roles=["projectadmin"])
             granted = await env.call("POST", "superadmin", BASE, json=_platform(counsel.id))
             assert granted.status_code == 201
-            approval = await SkillApprovalService(env.db).record(record, request, counsel)
+            approval = await SkillApprovalService(env.db).record(record, request, counsel, REPORT)
             assert approval.reviewer_user_id == counsel.id and approval.reviewer_role == LEGAL
 
     _run(scenario())
@@ -377,7 +378,7 @@ def test_a_revocation_takes_effect_on_the_next_request(monkeypatch) -> None:
             record = await _draft(env.db, "4.7.1")
             with pytest.raises(HTTPException) as refused:
                 await SkillApprovalService(env.db).record(
-                    record, SkillApprovalRequest(kind="legal", reviewer_role=LEGAL, eval_report=REPORT), _user("org_user")
+                    record, SkillApprovalRequest(kind="legal", reviewer_role=LEGAL, eval_run_id="run-test"), _user("org_user"), REPORT
                 )
             assert refused.value.status_code == 403
             # Revoking twice changes nothing and writes no second audit row.
@@ -548,8 +549,15 @@ def test_an_unauthenticated_caller_is_refused(monkeypatch) -> None:
 # ----------------------------------------- 4B-09: the reviewer's own journey
 
 
-def _review_request() -> dict:
-    return {"kind": "legal", "reviewer_role": LEGAL, "eval_report": REPORT.model_dump(mode="json")}
+def _review_request(run_id: str) -> dict:
+    return {"kind": "legal", "reviewer_role": LEGAL, "eval_run_id": run_id}
+
+
+async def _draft_with_run(env: Any, monkeypatch: Any, version: str) -> str:
+    """A draft and a passing server-side run of it (4B-41); returns the run id."""
+    use_suite_store(monkeypatch, "indian-infra-claims")
+    record = await _draft(env.db, version)
+    return (await stored_run(env.db, record)).id
 
 
 def test_a_pure_reviewer_sees_the_queue_reads_the_draft_and_records_an_approval_over_http(monkeypatch) -> None:
@@ -558,7 +566,7 @@ def test_a_pure_reviewer_sees_the_queue_reads_the_draft_and_records_an_approval_
     async def scenario() -> None:
         async with _env(monkeypatch) as env:
             await _ready(env)
-            await _draft(env.db, "4.9.0")
+            run_id = await _draft_with_run(env, monkeypatch, "4.9.0")
             version = "/api/skills/indian-infra-claims/versions/4.9.0"
 
             # Before any assignment: an empty queue, and the draft does not exist for them.
@@ -566,7 +574,7 @@ def test_a_pure_reviewer_sees_the_queue_reads_the_draft_and_records_an_approval_
             assert empty.status_code == 200 and empty.json() == {"my_roles": [], "items": []}
             hidden = await env.call("GET", "project_user", version)
             assert hidden.status_code in (403, 404), hidden.status_code
-            refused = await env.call("POST", "project_user", f"{version}/approvals", json=_review_request())
+            refused = await env.call("POST", "project_user", f"{version}/approvals", json=_review_request(run_id))
             assert refused.status_code == 403, refused.text[:200]
 
             granted = await env.call("POST", "superadmin", BASE, json=_platform("user-project_user"))
@@ -586,7 +594,7 @@ def test_a_pure_reviewer_sees_the_queue_reads_the_draft_and_records_an_approval_
             listed = await env.call("GET", "project_user", f"{version}/approvals")
             assert listed.status_code == 200
 
-            recorded = await env.call("POST", "project_user", f"{version}/approvals", json=_review_request())
+            recorded = await env.call("POST", "project_user", f"{version}/approvals", json=_review_request(run_id))
             assert recorded.status_code == 201, recorded.text[:300]
             assert recorded.json()["reviewer_user_id"] == "user-project_user"
 
@@ -596,7 +604,7 @@ def test_a_pure_reviewer_sees_the_queue_reads_the_draft_and_records_an_approval_
             assert [review["given_by_me"] for review in item["reviews"] if review["mine"]] == [True]
 
             # The role the reviewer does not hold stays someone else's to give.
-            other = {**_review_request(), "kind": "technical", "reviewer_role": "chief_contract_expert"}
+            other = {**_review_request(run_id), "kind": "technical", "reviewer_role": "chief_contract_expert"}
             assert (await env.call("POST", "project_user", f"{version}/approvals", json=other)).status_code == 403
 
     _run(scenario())
@@ -609,7 +617,7 @@ def test_a_reviewer_is_offered_nothing_a_publisher_does(monkeypatch) -> None:
             await _draft(env.db, "4.9.1")
             await env.call("POST", "superadmin", BASE, json=_platform("user-project_user"))
             version = "/api/skills/indian-infra-claims/versions/4.9.1"
-            report = {"eval_report": REPORT.model_dump(mode="json")}
+            report = {"eval_run_id": "any-run"}
             attempts = [
                 ("GET", "/api/skills/admin", None),
                 ("POST", f"{version}/publish", report),
@@ -635,13 +643,13 @@ def test_an_organisation_reviewer_gets_no_queue_and_no_draft(monkeypatch) -> Non
     async def scenario() -> None:
         async with _env(monkeypatch) as env:
             await _ready(env)
-            await _draft(env.db, "4.9.2")
+            run_id = await _draft_with_run(env, monkeypatch, "4.9.2")
             assert (await env.call("POST", "org_admin", BASE, json=_organisation("user-project_user"))).status_code == 201
             queue = await env.call("GET", "project_user", "/api/skills/review-queue")
             assert queue.json() == {"my_roles": [], "items": []}
             version = "/api/skills/indian-infra-claims/versions/4.9.2"
             assert (await env.call("GET", "project_user", version)).status_code in (403, 404)
-            refused = await env.call("POST", "project_user", f"{version}/approvals", json=_review_request())
+            refused = await env.call("POST", "project_user", f"{version}/approvals", json=_review_request(run_id))
             assert refused.status_code == 403
 
     _run(scenario())
@@ -651,10 +659,10 @@ def test_a_reviewer_withdraws_their_own_approval_and_a_stranger_cannot(monkeypat
     async def scenario() -> None:
         async with _env(monkeypatch) as env:
             await _ready(env)
-            await _draft(env.db, "4.9.3")
+            run_id = await _draft_with_run(env, monkeypatch, "4.9.3")
             await env.call("POST", "superadmin", BASE, json=_platform("user-project_user"))
             version = "/api/skills/indian-infra-claims/versions/4.9.3"
-            approval = (await env.call("POST", "project_user", f"{version}/approvals", json=_review_request())).json()
+            approval = (await env.call("POST", "project_user", f"{version}/approvals", json=_review_request(run_id))).json()
             approval_id = approval.get("_id") or approval.get("id")
             path = f"/api/skills/approvals/{approval_id}/revoke"
 

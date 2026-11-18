@@ -333,6 +333,7 @@ class SkillRegistry:
         version: str,
         eval_report: SkillEvalReport,
         published_by: Optional[str],
+        eval_run_id: Optional[str] = None,
     ) -> SkillVersion:
         """Publish a draft, in one transaction with the approval check (plan D-05a).
 
@@ -392,6 +393,7 @@ class SkillRegistry:
                     "$set": {
                         "status": "published",
                         "eval_report": eval_report.model_dump(),
+                        "eval_run_id": eval_run_id,
                         "published_by": publisher,
                         "published_at": now_utc(),
                     },

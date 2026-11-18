@@ -314,6 +314,11 @@ class Settings(BaseSettings):
     # Lowest threshold an evaluation report may set for itself before a skill
     # version can be approved or published. May be raised, never lowered below 0.85.
     SKILL_EVAL_MIN_THRESHOLD: float = Field(default=0.85, validation_alias="SKILL_EVAL_MIN_THRESHOLD")
+    # The restricted evaluation store (AQ-10): a directory outside the repository
+    # holding one golden set per pack, <skill_key>.json. Empty: no run can be made.
+    SKILL_EVAL_SUITE_DIR: str = Field(default="", validation_alias="SKILL_EVAL_SUITE_DIR")
+    # Model calls one evaluation run may make. A larger golden set needs this raised, with approval.
+    SKILL_EVAL_MAX_MODEL_CALLS: int = Field(default=60, ge=1, validation_alias="SKILL_EVAL_MAX_MODEL_CALLS")
     DRAFT_ENGINE_GRAPH_VERSION: str = Field(default="v3", validation_alias="DRAFT_ENGINE_GRAPH_VERSION")
     DRAFT_ENGINE_STATE_SCHEMA_VERSION: int = Field(default=1, ge=1, validation_alias="DRAFT_ENGINE_STATE_SCHEMA_VERSION")
     DRAFT_ENGINE_PRODUCTION_ACCEPTED: bool = Field(default=False, validation_alias="DRAFT_ENGINE_PRODUCTION_ACCEPTED")

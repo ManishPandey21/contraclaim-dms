@@ -72,7 +72,7 @@ async def _approve(db: FakeDB, record, kind: str, role: str, actor, report: Skil
     # no reviewer role on its list gets none, and is refused as before.
     await hold_platform(db, actor)
     return await SkillApprovalService(db).record(
-        record, SkillApprovalRequest(kind=kind, reviewer_role=role, eval_report=report or _report()), actor
+        record, SkillApprovalRequest(kind=kind, reviewer_role=role, eval_run_id="run-test"), actor, report or _report()
     )
 
 

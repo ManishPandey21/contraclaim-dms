@@ -18,6 +18,8 @@ const api = vi.hoisted(() => ({
   recordSkillApproval: vi.fn(),
   revokeSkillApproval: vi.fn(),
   publishSkillVersion: vi.fn(),
+  fetchSkillEvalRuns: vi.fn(),
+  runSkillEvaluation: vi.fn(),
   importSkillBundle: vi.fn(),
   deprecateSkillVersion: vi.fn(),
 }));
@@ -69,6 +71,16 @@ beforeEach(() => {
     approvals: [],
   });
   api.recordSkillApproval.mockResolvedValue({});
+  api.fetchSkillEvalRuns.mockResolvedValue([
+    {
+      _id: "run-7", skill_key: "indian-infra-claims", version: "1.1.0", content_hash: "c".repeat(64),
+      policy_hash: "p".repeat(64), suite_key: "claims-golden", suite_hash: "s".repeat(64), model: "gpt-4o",
+      prompt_key: "claims.v1.head_test", prompt_version: 1, recorded_by: "evaluator-7", threshold: 0.85,
+      case_count: 15, passed: true, failures: [],
+      scores: { element_agreement: 0.92, element_agreement_by_type: {}, classification_agreement: 0.9, degraded_rate: 0, schema_validity: 1 },
+      matters: [], cost: { model_calls: 15, prompt_characters: 0, output_characters: 0 }, started_at: "2026-11-18T00:00:00Z",
+    },
+  ]);
 });
 
 describe("SkillAdminPage for a reviewer", () => {
@@ -97,17 +109,17 @@ describe("SkillAdminPage for a reviewer", () => {
     expect(await screen.findAllByRole("button", { name: "Record my approval" })).toHaveLength(1);
     expect(screen.getByText("For another reviewer")).toBeInTheDocument();
 
-    await user.type(screen.getByLabelText("Evaluation suite"), "claims-golden-v1");
-    await user.type(screen.getByLabelText("Cases run"), "15");
-    await user.type(screen.getByLabelText("Score (0 to 1)"), "0.92");
-    await user.type(screen.getByLabelText("Evaluation run by"), "evaluator-7");
+    // The run is the server's; a reviewer cannot start one or type a result in (4B-41).
+    expect(await screen.findByText(/Passed/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Run evaluation" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Score (0 to 1)")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Record my approval" }));
 
     await waitFor(() => expect(api.recordSkillApproval).toHaveBeenCalledTimes(1));
     const [key, version, body] = api.recordSkillApproval.mock.calls[0];
     expect([key, version]).toEqual(["indian-infra-claims", "1.1.0"]);
     expect(body).toMatchObject({ kind: "legal", reviewer_role: "senior_legal_approver" });
-    expect(body.eval_report).toMatchObject({ suite: "claims-golden-v1", score: 0.92, case_count: 15, recorded_by: "evaluator-7" });
+    expect(body).toEqual({ kind: "legal", reviewer_role: "senior_legal_approver", eval_run_id: "run-7" });
     expect(api.publishSkillVersion).not.toHaveBeenCalled();
   });
 

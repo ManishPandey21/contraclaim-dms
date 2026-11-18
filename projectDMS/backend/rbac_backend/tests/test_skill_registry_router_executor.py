@@ -70,8 +70,8 @@ async def _publish_approved(registry: SkillRegistry, key: str = VARIATIONS_SKILL
     record = await registry.get_version(key, version)
     await hold_platform(registry.db, LEGAL_APPROVER)
     await SkillApprovalService(registry.db).record(
-        record, SkillApprovalRequest(kind="legal", reviewer_role="senior_legal_approver", eval_report=PASSING),
-        LEGAL_APPROVER,
+        record, SkillApprovalRequest(kind="legal", reviewer_role="senior_legal_approver", eval_run_id="run-test"),
+        LEGAL_APPROVER, PASSING,
     )
     return await registry.publish(key, version, PASSING, "admin")
 

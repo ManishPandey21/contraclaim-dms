@@ -134,7 +134,7 @@ describe("publishBlockers", () => {
     expect(publishBlockers(ready, { ...REPORT, recorded_by: null }, "publisher")).toContain(
       "Name the person who ran the evaluation.",
     );
-    expect(publishBlockers(ready, null, "publisher")).toEqual(["Enter the evaluation result the reviewers approved."]);
+    expect(publishBlockers(ready, null, "publisher")).toEqual(["Choose the evaluation run the reviewers approved."]);
   });
 
   it("has nothing to say for a pack that needs no approvals", () => {

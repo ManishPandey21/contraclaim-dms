@@ -261,6 +261,44 @@ export interface SkillApprovalRequirement {
 }
 
 /** A reviewer's decision, bound to the text and the evaluation result they saw. */
+/** A server-side evaluation run (4B-41). Made by the server, never typed in; kept unchanged. */
+export interface SkillEvalRun {
+  _id: string;
+  skill_key: string;
+  version: string;
+  content_hash: string;
+  policy_hash: string;
+  suite_key: string;
+  suite_hash: string;
+  model: string;
+  prompt_key: string;
+  prompt_version?: number | null;
+  recorded_by: string;
+  threshold: number;
+  case_count: number;
+  passed: boolean;
+  failures: string[];
+  scores: {
+    element_agreement: number;
+    element_agreement_by_type: Record<string, number>;
+    classification_agreement?: number | null;
+    degraded_rate: number;
+    schema_validity: number;
+  };
+  matters: {
+    matter_id: string;
+    degraded: boolean;
+    schema_valid: boolean;
+    hard_failures: string[];
+    elements: Record<string, [string | null, string | null]>;
+    classification?: [string | null, string | null] | null;
+  }[];
+  cost: { model_calls: number; prompt_characters: number; output_characters: number };
+  note?: string | null;
+  started_at: string;
+  completed_at?: string | null;
+}
+
 export interface SkillApproval {
   _id?: string;
   id?: string;
@@ -275,6 +313,8 @@ export interface SkillApproval {
   eval_threshold?: number | null;
   eval_case_count?: number | null;
   eval_recorded_by?: string | null;
+  /** The server-side run the approval was given against (4B-41). */
+  eval_run_id?: string | null;
   kind: SkillApprovalKind;
   reviewer_role: string;
   reviewer_user_id: string;
