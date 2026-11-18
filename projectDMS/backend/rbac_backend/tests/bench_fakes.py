@@ -42,7 +42,7 @@ def _equals(actual: Any, expected: Any) -> bool:
     return actual == expected
 
 
-_OPERATORS = {"$in", "$ne", "$exists", "$gt", "$gte", "$lt", "$lte"}
+_OPERATORS = {"$in", "$nin", "$ne", "$exists", "$gt", "$gte", "$lt", "$lte"}
 
 
 def _match(doc: Dict[str, Any], query: Dict[str, Any]) -> bool:
@@ -55,6 +55,8 @@ def _match(doc: Dict[str, Any], query: Dict[str, Any]) -> bool:
                 # match in MongoDB; refuse instead, so a test cannot pass on that.
                 raise NotImplementedError(f"FakeDB does not implement {sorted(unknown)}")
             if "$in" in expected and not any(_equals(actual, option) for option in expected["$in"]):
+                return False
+            if "$nin" in expected and any(_equals(actual, option) for option in expected["$nin"]):
                 return False
             if "$ne" in expected and _equals(actual, expected["$ne"]):
                 return False
