@@ -34,6 +34,7 @@ const MOCKED_SUITES = [
   "**/arbitration-pleading-gates.spec.ts",
   "**/letter-bench.spec.ts",
   "**/skills-review.spec.ts",
+  "**/claim-journey.spec.ts",
 ];
 
 export default defineConfig({
