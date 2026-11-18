@@ -2,9 +2,9 @@
 
 **Bullet, verbatim:** "Fresh install path is tested against real MongoDB."
 
-**Catalogue coverage: 31 of 31 migrations**, as of the second run of 2026-11-17
-recorded in "The 31-migration catalogue" below; the earlier runs for 30, 28, 27,
-26, 25, 24, 23 and 22 are kept after it. The mapping that follows is the original
+**Catalogue coverage: 32 of 32 migrations**, as of the run of 2026-11-18
+recorded in "The 32-migration catalogue" below; the earlier runs for 31, 30, 28,
+27, 26, 25, 24, 23 and 22 are kept after it. The mapping that follows is the original
 19-migration staging run and is kept as measured.
 
 **Disposition: SATISFIED by the R-A8Q Stage B staging run, 2026-09-08.** No new
@@ -61,6 +61,219 @@ never been applied to an empty database.
 `backend/rbac_backend/tests/test_gate6_fresh_install_evidence.py` fails when the
 migration count moves away from the number recorded here, which forces the tick
 to be re-earned rather than inherited.
+
+## The 32-migration catalogue: run of 2026-11-18
+
+**Disposition: migration path measured for 32 of 32; acceptance as gate
+evidence is the release owner's to confirm**, on the same footing as the runs
+below. One migration was added: `20261123_0001 skill_eval_runs_indexes` (plan
+4B-41, the evaluation-run part of M-01, D-21). It adds two indexes:
+`skill_eval_runs` on (`skill_key`, `version`, `started_at` descending), the
+listing of a version's runs; and `skill_approvals` on `eval_run_id`, partial
+(only approvals that name a run) and **not** unique, since every reviewer's
+approval names the run it relied on. It reads, changes and backfills no run,
+approval or skill version.
+
+**What the script now also checks.** The new indexes with their key, uniqueness
+and partial filter, and the `20261122_0001` claims index that the 31-migration
+run did not check (the script's partial-index count moves from 19 to 20); that a
+fresh install holds no evaluation run; ledger rows for every migration from
+`20261114_0001` to `20261123_0001`; and three probes: two approvals naming the
+same run are both accepted, two runs of one version are both kept, and a run id
+is stored once (`_id_`).
+
+**What this run does not show.** The database is empty, so nothing is shown
+about existing runs or approvals. That the migration leaves existing runs and
+approvals unchanged, repeats, and serves the listing query (read from the query
+plan) is proven on a real replica set by
+`tests/integration/test_skill_eval_runs_mongo.py::test_the_index_migration_changes_no_run_or_approval_and_serves_the_listing`.
+**Production:** not run against any copy of production data, and not applied to
+production.
+
+**Backend image.** Built by `docker build` from `backend/Dockerfile` at the
+commit in the block, with the proxy CA mounted as a build secret for the `apt`
+and `pip` steps only, as for the 28-migration run (`backend/Dockerfile` is
+unchanged since that run's commit `c468402`). The built image was checked to
+hold neither the CA file nor the apt CA setting, and its Debian sources are back
+on their original URLs. No source file differs from the commit. Reproduce with
+`GATE6_BACKEND_IMAGE=<image> bash scripts/gate6_fresh_install.sh`, or without
+the variable where the registries are reachable directly.
+
+### Evidence block
+
+```text
+GATE 6 BULLET 2 - FRESH INSTALL RUN  gate6-20261118t082257z-1668
+Result            PASS - 32/32 migrations applied to an empty MongoDB
+Date (UTC)        2026-11-18T08:23:49Z
+Host              Linux 6.18.44-fc-v595 x86_64; docker 29.9.2
+Commit            79b35d7b8cfda07fcee7785a0ae54f0fcdad4254 (claude/zen-ptolemy-695liz); uncommitted backend changes: 0
+Backend image     contraclaim-gate6-backend:79b35d7b8cfd-sandboxca sha256:c21fbd9b4550c8cdec3acec59b83234ea6b9ccc024207857109ef689362008a7
+                  supplied (GATE6_BACKEND_IMAGE)
+MongoDB           mongo:8.0 sha256:d97fea17ccb8d004cd137be8dab54d70d0df11be69c9f422aefe4484c8414ab7
+                  server version 8.0.38; replica set read back from rs.status().set: gate6rs
+                  disposable container on a private network: no published port, no host bind mount
+
+Empty before anything ran
+  databases=["admin","config","local"]
+  user_databases=0
+  target_database=gate6_fresh_install
+  target_collections=0
+  ledger_rows=0
+  EMPTY=YES
+Target read back from inside the backend container
+  configured_host=gate6-20261118t082257z-1668-mongo
+  database=gate6_fresh_install
+  server_me=gate6-20261118t082257z-1668-mongo:27017
+  server_set=gate6rs
+
+Commands (each in a new backend container: docker run --rm --network <private> -e DATABASE_URL=mongodb://<disposable>:27017/gate6_fresh_install?replicaSet=gate6rs -e MONGODB_DATABASE=gate6_fresh_install -e MONGODB_REPLICA_SET=gate6rs -e ENVIRONMENT=development contraclaim-gate6-backend:79b35d7b8cfd-sandboxca)
+  1. python -m rbac_backend.scripts.migrate_database --list
+       exit 0   total=32 applied=0 pending=32 applied_not_in_catalogue=0
+  2. python -m rbac_backend.scripts.migrate_database --fail-on-warning
+       exit 0   total=32 applied=0 dry_run=32 skipped=0 warnings=0 notices=16; database still empty afterwards
+  3. python -m rbac_backend.scripts.migrate_database --apply --fail-on-warning
+       exit 0   total=32 applied=32 dry_run=0 skipped=0 warnings=0 notices=16
+  4. python -m rbac_backend.scripts.migrate_database --apply --fail-on-warning   (second apply)
+       exit 0   total=32 applied=0 dry_run=0 skipped=32 warnings=0 notices=0
+       collections=162 indexes=564 documents=52, identical before and after
+  5. python -m rbac_backend.scripts.migrate_database --list
+       exit 0   total=32 applied=32 pending=0 applied_not_in_catalogue=0
+
+Skill and claim migrations 20261114_0001 to 20261123_0001, read with mongosh: 83 passed, 0 failed
+  PASS  collection skills exists
+  PASS  collection skill_versions exists
+  PASS  collection skill_bindings exists
+  PASS  collection skill_approvals exists
+  PASS  collection letter_position_boards exists
+  PASS  collection letter_skill_steps exists
+  PASS  collection skill_steps exists
+  PASS  collection claim_notice_requirements exists
+  PASS  collection claim_head_links exists
+  PASS  collection claim_determinations exists
+  PASS  collection claim_privileged exists
+  PASS  collection claim_submissions exists
+  PASS  index skills.skill_owner_key_unique  -  key={"owner_scope":1,"skill_key":1} unique=true partialFilterExpression=null
+  PASS  index skill_versions.skill_version_unique  -  key={"skill_key":1,"version":1} unique=true partialFilterExpression=null
+  PASS  index skill_versions.skill_version_status  -  key={"skill_key":1,"status":1} unique=false partialFilterExpression=null
+  PASS  index skill_bindings.skill_binding_scope_unique  -  key={"organization_id":1,"project_id":1,"skill_key":1} unique=true partialFilterExpression=null
+  PASS  index skill_approvals.skill_approvals_by_version  -  key={"skill_key":1,"version":1,"decided_at":1} unique=false partialFilterExpression=null
+  PASS  index letter_position_boards.bench_board_letter_unique  -  key={"letter_id":1} unique=true partialFilterExpression=null
+  PASS  index letter_position_boards.bench_board_scope_time  -  key={"organization_id":1,"project_id":1,"updated_at":-1} unique=false partialFilterExpression=null
+  PASS  index letter_position_boards.bench_board_document_unique  -  key={"organization_id":1,"incoming_document_id":1} unique=true partialFilterExpression={"incoming_document_id":{"$type":"string"}}
+  PASS  index letter_position_boards.bench_board_trigger_unique  -  key={"organization_id":1,"trigger.type":1,"trigger.id":1} unique=true partialFilterExpression={"trigger.id":{"$type":"string"}}
+  PASS  index letter_skill_steps.bench_step_letter_time  -  key={"letter_id":1,"created_at":1} unique=false partialFilterExpression=null
+  PASS  index letter_skill_steps.bench_step_idempotency_unique  -  key={"letter_id":1,"skill_key":1,"skill_hash":1,"input_hash":1} unique=true partialFilterExpression=null
+  PASS  index letter_skill_steps.bench_step_id_unique  -  key={"step_id":1} unique=true partialFilterExpression=null
+  PASS  index skill_steps.skill_step_idempotency_unique  -  key={"subject_type":1,"subject_id":1,"skill_key":1,"skill_hash":1,"input_hash":1} unique=true partialFilterExpression=null
+  PASS  index skill_steps.skill_step_id_unique  -  key={"step_id":1} unique=true partialFilterExpression=null
+  PASS  index skill_steps.skill_step_parent_time  -  key={"parent_id":1,"created_at":1} unique=false partialFilterExpression=null
+  PASS  index claim_notice_requirements.notice_requirement_current_unique  -  key={"organization_id":1,"project_id":1,"claim_type":1} unique=true partialFilterExpression={"status":"current"}
+  PASS  index claim_notice_requirements.notice_requirement_history  -  key={"organization_id":1,"project_id":1,"claim_type":1,"created_at":-1} unique=false partialFilterExpression=null
+  PASS  index claims.claim_origin_unique  -  key={"organization_id":1,"origin.type":1,"origin.id":1} unique=true partialFilterExpression={"origin.id":{"$type":"string"}}
+  PASS  index claim_head_links.claim_head_link_active_unique  -  key={"claim_id":1,"head_id":1,"target_type":1,"target_id":1} unique=true partialFilterExpression={"status":"active"}
+  PASS  index claim_head_links.claim_head_link_claim_time  -  key={"claim_id":1,"status":1,"created_at":1} unique=false partialFilterExpression=null
+  PASS  index claim_head_links.claim_head_link_target  -  key={"organization_id":1,"target_type":1,"target_id":1,"status":1} unique=false partialFilterExpression=null
+  PASS  index claim_determinations.claim_determination_revision_unique  -  key={"claim_id":1,"origin":1,"revision":1} unique=true partialFilterExpression=null
+  PASS  index claim_determinations.claim_determination_scope_status  -  key={"organization_id":1,"project_id":1,"status":1} unique=false partialFilterExpression=null
+  PASS  index claim_privileged.claim_privileged_claim_kind_time  -  key={"claim_id":1,"kind":1,"created_at":-1} unique=false partialFilterExpression=null
+  PASS  index claim_privileged.claim_privileged_one_strategy_note  -  key={"claim_id":1} unique=true partialFilterExpression={"kind":"strategy_note"}
+  PASS  index claim_submissions.claim_submission_claim_unique  -  key={"claim_id":1} unique=true partialFilterExpression=null
+  PASS  index claims.claim_arbitration_case  -  key={"organization_id":1,"arbitration_case_id":1} unique=false partialFilterExpression={"arbitration_case_id":{"$type":"string"}}
+  PASS  index arbitration_cases.arbitration_case_claim_ids  -  key={"organization_id":1,"claim_ids":1} unique=false partialFilterExpression=null
+  PASS  index arbitration_chronology_matrix.matrix_case_origin_unique  -  key={"case_id":1,"origin_key":1} unique=true partialFilterExpression={"origin_key":{"$type":"string"}}
+  PASS  index arbitration_claim_matrix.matrix_case_origin_unique  -  key={"case_id":1,"origin_key":1} unique=true partialFilterExpression={"origin_key":{"$type":"string"}}
+  PASS  index arbitration_clause_matrix.matrix_case_origin_unique  -  key={"case_id":1,"origin_key":1} unique=true partialFilterExpression={"origin_key":{"$type":"string"}}
+  PASS  index arbitration_counterclaim_matrix.matrix_case_origin_unique  -  key={"case_id":1,"origin_key":1} unique=true partialFilterExpression={"origin_key":{"$type":"string"}}
+  PASS  index arbitration_defence_matrix.matrix_case_origin_unique  -  key={"case_id":1,"origin_key":1} unique=true partialFilterExpression={"origin_key":{"$type":"string"}}
+  PASS  index arbitration_document_index.matrix_case_origin_unique  -  key={"case_id":1,"origin_key":1} unique=true partialFilterExpression={"origin_key":{"$type":"string"}}
+  PASS  index arbitration_expert_alignment.matrix_case_origin_unique  -  key={"case_id":1,"origin_key":1} unique=true partialFilterExpression={"origin_key":{"$type":"string"}}
+  PASS  index arbitration_issue_matrix.matrix_case_origin_unique  -  key={"case_id":1,"origin_key":1} unique=true partialFilterExpression={"origin_key":{"$type":"string"}}
+  PASS  index arbitration_jurisdiction_matrix.matrix_case_origin_unique  -  key={"case_id":1,"origin_key":1} unique=true partialFilterExpression={"origin_key":{"$type":"string"}}
+  PASS  index arbitration_notice_compliance.matrix_case_origin_unique  -  key={"case_id":1,"origin_key":1} unique=true partialFilterExpression={"origin_key":{"$type":"string"}}
+  PASS  index arbitration_quantum_annexures.matrix_case_origin_unique  -  key={"case_id":1,"origin_key":1} unique=true partialFilterExpression={"origin_key":{"$type":"string"}}
+  PASS  index arbitration_rejoinder_matrix.matrix_case_origin_unique  -  key={"case_id":1,"origin_key":1} unique=true partialFilterExpression={"origin_key":{"$type":"string"}}
+  PASS  index claims.claim_scope_contract  -  key={"organization_id":1,"project_id":1,"contract_id":1} unique=false partialFilterExpression=null
+  PASS  index skill_eval_runs.skill_eval_run_version_time  -  key={"skill_key":1,"version":1,"started_at":-1} unique=false partialFilterExpression=null
+  PASS  index skill_approvals.skill_approval_eval_run  -  key={"eval_run_id":1} unique=false partialFilterExpression={"eval_run_id":{"$type":"string"}}
+  PASS  partial indexes expected  -  20 declared
+  PASS  skill_versions holds exactly the three published skills and the four draft packs  -  7 rows
+  PASS  skill indian-infra-arbitration-hearing stored at 1.0.0 as an unpublished draft that names a legal approver  -  status=draft published_at=null required_approvals=["legal:senior_legal_approver","technical:arbitration_case_preparation_expert"]
+  PASS  skill indian-infra-arbitration-pleadings stored at 1.0.0 as an unpublished draft that names a legal approver  -  status=draft published_at=null required_approvals=["legal:senior_legal_approver","technical:chief_contract_expert"]
+  PASS  skill indian-infra-claims stored at 1.0.0 as an unpublished draft that names a legal approver  -  status=draft published_at=null required_approvals=["legal:senior_legal_approver","technical:chief_contract_expert"]
+  PASS  skill indian-infra-contract-letters seeded at 1.0.0, published, system-owned  -  version=1.0.0 status=published owner_scope=system
+  PASS  skill indian-infra-eot-claims stored at 1.0.0 as an unpublished draft that names a legal approver  -  status=draft published_at=null required_approvals=["legal:senior_legal_approver","technical:chief_contract_expert","technical:delay_planning_expert"]
+  PASS  skill indian-infra-letter-analysis seeded at 1.0.0, published, system-owned  -  version=1.0.0 status=published owner_scope=system
+  PASS  skill indian-infra-variations seeded at 1.0.0, published, system-owned  -  version=1.0.0 status=published owner_scope=system
+  PASS  skills holds exactly the three published skills (a draft gets no latest-published pointer)  -  3 rows
+  PASS  skill indian-infra-contract-letters active, latest published 1.0.0
+  PASS  skill indian-infra-letter-analysis active, latest published 1.0.0
+  PASS  skill indian-infra-variations active, latest published 1.0.0
+  PASS  no skill approval exists on a fresh install  -  0 rows
+  PASS  no evaluation run exists on a fresh install  -  0 rows
+  PASS  ledger records 20261114_0001
+  PASS  ledger records 20261114_0002
+  PASS  ledger records 20261114_0003
+  PASS  ledger records 20261115_0001
+  PASS  ledger records 20261116_0001
+  PASS  ledger records 20261117_0001
+  PASS  ledger records 20261118_0001
+  PASS  ledger records 20261119_0001
+  PASS  ledger records 20261120_0001
+  PASS  ledger records 20261121_0001
+  PASS  ledger records 20261121_0002
+  PASS  ledger records 20261122_0001
+  PASS  ledger records 20261123_0001
+Seeded skills (key, version, content hash) - equal to the files bundled in the image: YES
+  indian-infra-arbitration-hearing 1.0.0 c4f100f0ed20d848554aed28c414c0fd84aecb4de76e9f76880e1e8199aafeed
+  indian-infra-arbitration-pleadings 1.0.0 8af9e4d95a0a24da65d9e27b67e468518f068478fbf55c1cff52eebcee47a36c
+  indian-infra-claims 1.0.0 5f883bf0c2b1f5f6b7c38da6db506d86797e798fb8fcd2af44b54c52a149e1c6
+  indian-infra-contract-letters 1.0.0 818a6ad8f429feedbac0732bce835af5948992af029e2ddc6a507f9847151754
+  indian-infra-eot-claims 1.0.0 e37c1e84b7ef8250c81f4737247e313968f1edb3448b5d5b2057deb0b610c6b0
+  indian-infra-letter-analysis 1.0.0 4fb6f430b50aa8e166ebe044f500597a794aa36f26e9f6020947ae841fe9be53
+  indian-infra-variations 1.0.0 49bb0d50e9a05301004d567904ad00b4fd5a4fefe50cf30df20b41823e1f62ad
+Unique indexes probed with real inserts (probe rows removed afterwards): 39 passed, 0 failed
+  PASS  two boards without a document are both accepted
+  PASS  two boards with a null document are both accepted
+  PASS  first board for a document is accepted
+  PASS  second board for the same document is refused  -  E11000 bench_board_document_unique
+  PASS  first board for a trigger record is accepted
+  PASS  second board for the same trigger record is refused  -  E11000 bench_board_trigger_unique
+  PASS  second board for the same letter is refused  -  E11000 bench_board_letter_unique
+  PASS  a second 1.0.0 of a seeded skill is refused  -  E11000 skill_version_unique
+  PASS  a second 1.0.0 of a draft pack is refused  -  E11000 skill_version_unique
+  PASS  first current notice period is accepted
+  PASS  a second current notice period for the same project and claim type is refused  -  E11000 notice_requirement_current_unique
+  PASS  superseded notice periods are kept as history
+  PASS  another claim type on the project is accepted
+  PASS  two claims with no origin are both accepted
+  PASS  first claim raised from a hindrance is accepted
+  PASS  a second claim raised from the same hindrance is refused  -  E11000 claim_origin_unique
+  PASS  a claim raised from a letter with the same id is a different origin
+  PASS  first skill step is accepted
+  PASS  the same skill step replayed is refused  -  E11000 skill_step_idempotency_unique
+  PASS  first link from a head to a hindrance is accepted
+  PASS  a second active link from the same head to the same hindrance is refused  -  E11000 claim_head_link_active_unique
+  PASS  removed links to it are kept as history
+  PASS  the same hindrance can be linked to another head
+  PASS  first determination revision is accepted
+  PASS  the same revision of an authored determination is refused  -  E11000 claim_determination_revision_unique
+  PASS  a received determination may carry the same revision number
+  PASS  a strategy note is accepted
+  PASS  a second strategy note for the claim is refused  -  E11000 claim_privileged_one_strategy_note
+  PASS  simulations of the same claim are many
+  PASS  first submission for a claim is accepted
+  PASS  a second submission for the claim is refused  -  E11000 claim_submission_claim_unique
+  PASS  first escalated row is accepted
+  PASS  the same origin in the same case is refused  -  E11000 matrix_case_origin_unique
+  PASS  rows added by hand are unconstrained
+  PASS  the same origin in another case is accepted
+  PASS  two approvals naming the same evaluation run are both accepted
+  PASS  two runs of the same version are both kept
+  PASS  a run id is stored once  -  E11000 _id_
+  PASS  probe rows removed  -  0 left
+
+Step logs         /tmp/claude-0/gate6/run32
+```
 
 ## The 31-migration catalogue: second run of 2026-11-17
 
