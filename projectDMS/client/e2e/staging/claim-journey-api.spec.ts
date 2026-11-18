@@ -23,7 +23,14 @@
  *   8. escalation preview, run into a new case; the heads in the claim matrix;
  *                 a Statement of Claim whose Approve and Export are refused with
  *                 the plain reason; reviewer roles granted and the heads approved
- *                 over HTTP; where the path stops is asserted, not assumed.
+ *                 over HTTP.
+ *   9. the pleading (JG-5): counsel prepares the case (escalated rows reviewed; clause,
+ *                 issue, limitation, pre-arbitration and expert rows added and reviewed),
+ *                 the governed workflow runs on the default engine with the arbitration
+ *                 engine rollout untouched, the generated draft is revised with every
+ *                 sentence cited, and readiness, plan, legal review, draft approval and
+ *                 export authorisation are each approved by the person holding that role;
+ *                 the approved Statement of Claim is exported.
  * Boundaries: a user of another organisation gets 403/404, an anonymous caller
  * 401, at several points.
  *
@@ -61,6 +68,15 @@
  *   E2E_CJ_ENG_DRAFTER_EMAIL / _PASSWORD  Engineer project: drafting.request.create (client user)
  *   E2E_CJ_LEGAL_REVIEWER_EMAIL / _PASSWORD   Contractor project: dms.arbitration.approve (granted legal_reviewer here)
  *   E2E_CJ_QUANTUM_REVIEWER_EMAIL / _PASSWORD Contractor project: dms.arbitration.approve (granted quantum_reviewer here)
+ *   E2E_CJ_CONTRACTS_REVIEWER_EMAIL / _PASSWORD  Contractor project: dms.arbitration.approve (granted contract_reviewer here)
+ *   E2E_CJ_DELAY_REVIEWER_EMAIL / _PASSWORD      Contractor project: dms.arbitration.approve (granted delay_reviewer here)
+ *   E2E_CJ_SENIOR_A_EMAIL / _PASSWORD    Contractor project: dms.arbitration.approve + generate (granted
+ *                                         senior_legal_approver here): readiness and draft approval
+ *   E2E_CJ_SENIOR_B_EMAIL / _PASSWORD    the same grants, another person: plan approval (the plan's author,
+ *                                         who approved readiness, may not approve it)
+ *   E2E_CJ_EXPORTER_EMAIL / _PASSWORD    Contractor project: dms.arbitration.view + export (granted export_authorizer here)
+ *   E2E_CJ_CLAUSE_SOURCE_ID               the id of clause 8.4 in the Contractor project's clause index
+ *                                         (contract_clauses), for the clause-matrix row
  *   E2E_CJ_FOREIGN_EMAIL / _PASSWORD      a user of another organisation
  *   E2E_CJ_FOREIGN_PROJECT_ID             that user's own project (its navbar selection)
  *   E2E_CJ_RELEASE_SHA                    optional: the commit expected on staging; if set, GET /api/build must match it
@@ -96,6 +112,7 @@ const SCOPE = [
   "E2E_CJ_NOTICE_QUOTE",
   "E2E_CJ_NOTICE_PERIOD_DAYS",
   "E2E_CJ_FOREIGN_PROJECT_ID",
+  "E2E_CJ_CLAUSE_SOURCE_ID",
 ] as const;
 const PEOPLE = [
   "ORGADMIN",
@@ -105,6 +122,11 @@ const PEOPLE = [
   "ENG_DRAFTER",
   "LEGAL_REVIEWER",
   "QUANTUM_REVIEWER",
+  "CONTRACTS_REVIEWER",
+  "DELAY_REVIEWER",
+  "SENIOR_A",
+  "SENIOR_B",
+  "EXPORTER",
   "FOREIGN",
 ] as const;
 type Person = (typeof PEOPLE)[number];
@@ -123,6 +145,7 @@ const suite: {
   determinationId?: string;
   caseId?: string;
   draftId?: string;
+  runId?: string;
   matrix: any[];
   assignmentIds: string[];
   evidence: Record<string, unknown>;
@@ -272,7 +295,13 @@ test.afterAll(async ({ playwright }) => {
       if (!removed.ok()) failures.push(`engineer claim ${suite.engineerClaimId}: ${removed.status()}`);
     }
     residue.hindrances = await archiveRunOwned(admin, [contractor()]);
-    residue.left_for_manual_removal = { contractor_claim: suite.claimId, arbitration_case: suite.caseId };
+    // An approved pleading is locked: the delete above is refused for it and recorded in failures.
+    residue.left_for_manual_removal = {
+      contractor_claim: suite.claimId,
+      arbitration_case: suite.caseId,
+      approved_statement_of_claim: suite.draftId,
+      workflow_run: suite.runId,
+    };
     writeEvidence("claim-journey-residue", residue);
     writeEvidence("claim-journey", suite.evidence);
   }
@@ -716,6 +745,170 @@ test.describe("Claim journey - deployed certification", () => {
       blockers,
       head_gaps: latest.structured_output?.pleaded_head_gaps ?? [],
       readiness_open: readiness.blockers.map((b: any) => b.check_key),
+    };
+  });
+
+  test("9. the pleading (JG-5): case prepared, governed workflow, an approved Statement of Claim", async ({ playwright }) => {
+    environment();
+    expect(suite.caseId && suite.draftId, "step 8 must have escalated and opened the draft").toBeTruthy();
+    const admin = await as(playwright, "ORGADMIN", contractor());
+    const cases = `/api/arbitration/cases/${suite.caseId}`;
+    const drafts = `/api/arbitration/drafts/${suite.draftId}`;
+
+    // The case team, each holding one reviewer role by a project assignment.
+    const team = [
+      ["CONTRACTS_REVIEWER", "contract_reviewer"],
+      ["DELAY_REVIEWER", "delay_reviewer"],
+      ["SENIOR_A", "senior_legal_approver"],
+      ["SENIOR_B", "senior_legal_approver"],
+      ["EXPORTER", "export_authorizer"],
+    ] as const;
+    for (const [who, role] of team) {
+      await as(playwright, who, contractor());
+      const granted = await ok(
+        await post(admin, "/api/reviewer-assignments", {
+          user_id: suite.userIds[who],
+          role_key: role,
+          scope_type: "project",
+          organization_id: fixtureOrganizationId(),
+          project_id: contractor(),
+          reason: `Certification ${RUN_TAG}`,
+        }),
+        `grant ${role}`,
+        201
+      );
+      suite.assignmentIds.push(String(granted.id ?? granted._id));
+    }
+    const reviewerFor: Record<string, Person> = {
+      legal: "LEGAL_REVIEWER",
+      quantum: "QUANTUM_REVIEWER",
+      contracts: "CONTRACTS_REVIEWER",
+      delay: "DELAY_REVIEWER",
+      reviewer: "LEGAL_REVIEWER",
+    };
+    const defaultRoles: Record<string, string[]> = {
+      "document-index": ["contracts"],
+      "chronology-matrix": ["delay"],
+      "clause-matrix": ["legal", "contracts"],
+      "issue-matrix": ["legal"],
+      "quantum-annexures": ["quantum"],
+      "notice-compliance": ["legal", "contracts"],
+      "jurisdiction-matrix": ["legal"],
+      "expert-alignment": ["reviewer"],
+    };
+    const approveRow = async (slug: string, row: any) => {
+      for (const role of row.review_required_roles?.length ? row.review_required_roles : defaultRoles[slug]) {
+        const reviewer = await as(playwright, reviewerFor[role], contractor());
+        await ok(await post(reviewer, `${cases}/${slug}/${row._id ?? row.id}/review`, { action: "approve", reviewer_role: role }), `${slug} ${role} review`);
+      }
+    };
+    const addRow = async (slug: string, body: Record<string, unknown>) =>
+      approveRow(slug, await ok(await post(admin, `${cases}/${slug}`, body), `add ${slug}`, 201));
+
+    // The rows escalation carried, reviewed; counsel's rows added and reviewed.
+    for (const slug of ["document-index", "quantum-annexures", "notice-compliance", "chronology-matrix"]) {
+      for (const row of await ok(await admin.request.get(`${cases}/${slug}`), slug)) {
+        if (row.review_status !== "approved") await approveRow(slug, row);
+      }
+    }
+    await addRow("clause-matrix", {
+      clause_number: "8.4",
+      clause_title: "Extension of Time for Completion",
+      clause_text_excerpt: "The Contractor shall be entitled to an extension of the Time for Completion.",
+      clause_source_id: suite.env.E2E_CJ_CLAUSE_SOURCE_ID,
+    });
+    await addRow("issue-matrix", { issue: "Whether the Respondent's late handover of the Site entitles the Claimant to an extension of time and costs." });
+    await addRow("jurisdiction-matrix", { check_type: "limitation", limitation_status: "within_limitation", summary: "Within three years of the cause of action." });
+    await addRow("jurisdiction-matrix", { check_type: "pre_arbitration_step", required: true, compliance_status: "complete", summary: "Determination obtained; dispute notice served." });
+    for (const row of suite.matrix) {
+      await addRow("expert-alignment", { expert_type: "delay", claim_no: row.claim_no, concurrency_addressed: true, summary: "Delay analysis addresses concurrency." });
+      await addRow("expert-alignment", { expert_type: "quantum", claim_no: row.claim_no, calculation_match: true, summary: "Quantum calculation matches." });
+    }
+    const readiness = await ok(await admin.request.get(`${cases}/readiness`, { params: { draft_id: suite.draftId! } }), "readiness");
+    expect(readiness.blockers.map((b: any) => b.check_key)).toEqual([]);
+
+    // The governed workflow, on whatever engine the deployment selects (rollout untouched).
+    const accepted = await ok(
+      await post(admin, `${cases}/workflows`, {
+        draft_id: suite.draftId,
+        pleading_type: "statement_of_claim",
+        selected_document_ids: [suite.env.E2E_CJ_NOTICE_DOCUMENT_ID, suite.env.E2E_CJ_RECORD_DOCUMENT_ID],
+      }),
+      "workflow",
+      202
+    );
+    suite.runId = accepted.run_id;
+    const runPath = `${cases}/workflows/${accepted.run_id}`;
+    const state = async () => ok(await admin.request.get(`${runPath}/state`), "workflow state");
+    const artifact: Record<string, string> = {
+      matrix_review: "matrix_revision_hash",
+      readiness: "readiness_artifact_hash",
+      plan: "plan_hash",
+      legal_review: "draft_version_hash",
+      draft: "draft_version_hash",
+      export: "draft_version_hash",
+    };
+    const approveGate = async (gate: string, who: Person, role: string) => {
+      const current = await state();
+      const approver = await as(playwright, who, contractor());
+      return post(approver, `${runPath}/approvals/${gate}`, {
+        state_version: current.state_version,
+        artifact_hash: current[artifact[gate]],
+        reviewer_role: role,
+        decision: "approved",
+        comment: `Certification ${RUN_TAG}: ${gate}`,
+      });
+    };
+    expect((await state()).blockers).toEqual([]);
+    refusedAcrossTenant(await (await outsider(playwright)).request.get(`${runPath}/state`), "foreign workflow state");
+    await ok(await approveGate("matrix_review", "LEGAL_REVIEWER", "legal_reviewer"), "matrix review");
+    await ok(await approveGate("readiness", "SENIOR_A", "senior_legal_approver"), "readiness");
+    const ownPlan = await approveGate("plan", "SENIOR_A", "senior_legal_approver");
+    expect(ownPlan.status(), await detail(ownPlan)).toBe(409);
+    const planned = await ok(await approveGate("plan", "SENIOR_B", "senior_legal_approver"), "plan");
+    expect(planned.current_node).toBe("legal_review_gate");
+
+    // Counsel's revision: every sentence cited from the draft's own source ledger.
+    const probe = await ok(await post(admin, `${drafts}/versions`, { full_markdown: "# STATEMENT OF CLAIM\n" }), "probe version", 201);
+    const cite = (row: any) => `[${row.source_key}: ${row.citation}]`;
+    const line = (text: string, row: any) => `- ${String(text).replace(/\.$/, "")} ${cite(row)}.`;
+    const of = (type: string) => probe.source_ledger.filter((row: any) => row.source_type === type);
+    const pleading = [
+      "# STATEMENT OF CLAIM", "", "## Facts", "",
+      ...of("document").map((row: any) => line(`The record includes ${row.label} as exhibit ${row.citation}`, row)),
+      ...of("chronology_entry").map((row: any) => line(row.label, row)),
+      "", "## Claims", "",
+      ...of("claim_matrix").map((row: any) => line(row.label, row)),
+      ...of("quantum_annexure").map((row: any) => line("The quantum annexure supports the amount claimed", row)),
+      ...of("notice_compliance").map((row: any) => line("Notice of the claim was given", row)),
+      "", "## Experts", "",
+      ...of("expert_alignment").map((row: any) => line(row.label, row)),
+    ].join("\n") + "\n";
+    const revised = await ok(await post(admin, `${drafts}/versions`, { full_markdown: pleading }), "revision", 201);
+    expect(revised.validation_status, JSON.stringify(revised.structured_output?.approval_blockers ?? [])).toBe("passed");
+    const before = await state();
+    const refreshed = await ok(
+      await post(admin, `${runPath}/resume`, { state_version: before.state_version, gate: "legal_review", decision: "refresh_candidate" }),
+      "refresh candidate"
+    );
+    expect(refreshed.validation_status, JSON.stringify(refreshed.validation_blockers)).toBe("passed");
+    await ok(await approveGate("legal_review", "LEGAL_REVIEWER", "legal_reviewer"), "legal review");
+    await ok(await approveGate("draft", "SENIOR_A", "senior_legal_approver"), "draft approval");
+    const approvedDraft = await ok(await admin.request.get(drafts), "approved draft");
+    expect(approvedDraft.status).toBe("approved");
+    expect(approvedDraft.approved_version).toBe(revised.version);
+    const completed = await ok(await approveGate("export", "EXPORTER", "export_authorizer"), "export authorisation");
+    expect(completed.status).toBe("completed");
+    const exporter = await as(playwright, "EXPORTER", contractor());
+    const filed = await exporter.request.get(`${drafts}/export/docx`, { headers: exporter.headers() });
+    expect(filed.status(), await detail(filed)).toBe(200);
+    refusedAcrossTenant(await (await outsider(playwright)).request.get(`${drafts}/export/docx`), "foreign export");
+    suite.evidence.pleading_approved = {
+      engine: accepted.engine,
+      rollout_mode: accepted.rollout_mode,
+      run_id: accepted.run_id,
+      approved_version: approvedDraft.approved_version,
+      export_bytes: (await filed.body()).length,
     };
   });
 });

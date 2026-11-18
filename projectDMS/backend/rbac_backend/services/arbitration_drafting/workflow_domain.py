@@ -400,7 +400,7 @@ class ArbitrationWorkflowDomain:
     async def _analysis_context(self, run: Dict[str, Any]) -> Dict[str, Any]:
         case_id = str(run["case_id"])
         pleading_type = str(run.get("pleading_type") or "")
-        rows_by_matrix = {slug: await self.cases.list_matrix_rows(case_id, slug, draft_id=run.get("draft_id")) for slug in MATRIX_COLLECTIONS}
+        rows_by_matrix = {slug: await self.cases.list_matrix_rows(case_id, slug, draft_id=run.get("draft_id"), with_case_rows=True) for slug in MATRIX_COLLECTIONS}
         case = await self.cases.get_case(case_id)
         document_manifest = (
             await self.db.arbitration_workflow_snapshots.find_one(
@@ -774,7 +774,7 @@ class ArbitrationWorkflowDomain:
         # provenance map must not list a source whose authority was refused, so
         # the same authority-aware predicate the required-matrix gate uses
         # governs which rows enter the plan.
-        rows = {slug: [row for row in await self.cases.list_matrix_rows(case_id, slug, draft_id=run.get("draft_id")) if _row_satisfies_requirement(row)] for slug in MATRIX_COLLECTIONS}
+        rows = {slug: [row for row in await self.cases.list_matrix_rows(case_id, slug, draft_id=run.get("draft_id"), with_case_rows=True) if _row_satisfies_requirement(row)] for slug in MATRIX_COLLECTIONS}
         structure = {
             "statement_of_claim": ["introduction", "jurisdiction", "facts", "claims", "quantum", "relief"],
             "statement_of_defence": ["introduction", "preliminary_objections", "paragraph_responses", "defences", "quantum", "relief"],

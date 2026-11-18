@@ -7,6 +7,7 @@ from .citation_refs import has_citation, source_refs
 from .citation_states import (
     claim_head_set_blockers,
     classify_citations,
+    is_uncited_context_row,
     is_unverified_source,
     pleaded_head_blockers,
     pleaded_head_gaps,
@@ -140,7 +141,9 @@ class ArbitrationDraftValidator:
             warnings.append(message)
             approval_blockers.append(message)
 
-        unverified_selected = [row for row in source_ledger if is_unverified_source(row)]
+        unverified_selected = [
+            row for row in source_ledger if is_unverified_source(row) and not is_uncited_context_row(row, cited_keys)
+        ]
         if unverified_selected:
             message = "Draft source ledger contains user-supplied or unverified selected evidence that is not admissible for filing."
             warnings.append(message)

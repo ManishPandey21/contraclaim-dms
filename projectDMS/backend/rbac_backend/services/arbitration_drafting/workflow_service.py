@@ -24,6 +24,7 @@ from .workflow_validation import ArbitrationValidationOrchestrator
 from .workflow_hardening import build_rollout_health, build_shadow_comparison
 from .repository import _collect
 from ..observability import observability_registry
+from ..publication_policy import document_id_candidates
 from .acceptance import (
     acceptance_hash,
     resolve_server_backed_acceptance,
@@ -1224,7 +1225,12 @@ class ArbitrationWorkflowService:
             manifest = []
             for document_id in sorted(set(payload.selected_document_ids)):
                 record = await self.db.documents.find_one(
-                    {"_id": document_id, "organization_id": case.get("organization_id"), "project_id": case.get("project_id")}
+                    {
+                        # documents._id is ObjectId-keyed; the payload holds the string form.
+                        "_id": {"$in": document_id_candidates(document_id)},
+                        "organization_id": case.get("organization_id"),
+                        "project_id": case.get("project_id"),
+                    }
                 )
                 if not record:
                     raise HTTPException(status_code=400, detail=f"Selected document is outside case scope: {document_id}")

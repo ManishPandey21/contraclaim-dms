@@ -22,9 +22,12 @@ needs the document pipeline); two letters (built by upload and extraction); and 
 published copy of the bundled Claims skill (publication is the 4B-05 review
 workflow, outside the claim journey).
 
-Where the HTTP path toward an approved Statement of Claim stops, the test asserts
-the refusal and its stated reason, so a change to that boundary is a red test,
-not a silent green one.
+Before the case is prepared, the Statement of Claim's Approve and Export are refused
+with their stated reasons. Then (JG-5) counsel prepares the case over HTTP, the
+governed workflow runs on the default engine with the arbitration engine rollout
+off, the deterministic draft is revised with every sentence cited, and each gate is
+approved by the person holding its role, ending in an approved, exported Statement
+of Claim. No model call is made on the pleading path.
 
 Opt-in: ``CLAIM_BENCH_MONGODB_URI`` (a disposable replica set; the harness also
 reads ``RELATIONSHIP_CL2_MONGODB_URI``'s seed). Run in CI's real-Mongo step.
@@ -44,7 +47,9 @@ from bson import ObjectId
 from rbac_backend.tests.integration.test_claim_privileged_rbac_mongo import _add_actor
 from rbac_backend.tests.integration.test_claim_routes_real_deps_mongo import MONGODB_URI_ENV, _env
 from rbac_backend.tests.integration.test_variation_relationships_cl2_mongo import (
+    DOC_IN,
     DOC_IN_ID,
+    DOC_OUT,
     DOC_OUT_ID,
     ORG_A,
     PROJ_A1,
@@ -61,6 +66,8 @@ pytestmark = [
 #: A site diary linked to the hindrance only (not to the claim): the record behind H1's days (JG-4).
 SITE_DIARY = ObjectId()
 SITE_DIARY_ID = str(SITE_DIARY)
+#: The ingested conditions of contract behind each project's clause index.
+GCC_DOCUMENTS = {PROJ_A1: str(ObjectId()), PROJ_A2: str(ObjectId())}
 CLAIMS = "/api/claims"
 NOTICE = "/api/claims/notice/requirements"
 CASES = "/api/arbitration/cases"
@@ -154,20 +161,30 @@ async def _preconditions(env: Any, monkeypatch: pytest.MonkeyPatch) -> Dict[str,
     db = env.db
     # A plan that carries claims, arbitration and drafting.
     await db.subscriptions.update_many({"organization_id": ORG_A}, {"$set": {"plan_code": "claims_commercial_desk"}})
-    # The contract's clause index (contract ingestion), for both projects.
+    # The contract's clause index (contract ingestion), for both projects, with the
+    # ingested conditions of contract it was extracted from.
     for project in (CONTRACTOR, ENGINEER):
+        gcc_id = GCC_DOCUMENTS[project]
+        await db.documents.insert_one(_document(
+            ObjectId(gcc_id), organization_id=ORG_A, project_id=project, upload_type="Contract",
+            subject="General Conditions of Contract", letter_no=f"GCC-{project}", sender="Employer",
+        ))
         await db.contract_clauses.insert_many([
             {"_id": f"cl-20-1-{project}", "org_id": ORG_A, "project_id": project, "is_current": True,
              "is_authorised_for_ai": True, "clause_no": "20.1", "clause_uid": f"uid-20.1-{project}",
              "clause_title": "Contractor's Claims", "text": CLAUSE_TEXT, "cleaned_text": CLAUSE_TEXT,
-             "document_id": "doc-gcc", "document_type": "GCC"},
+             "document_id": gcc_id, "document_type": "GCC"},
             {"_id": f"cl-8-4-{project}", "org_id": ORG_A, "project_id": project, "is_current": True,
              "is_authorised_for_ai": True, "clause_no": "8.4", "clause_uid": f"uid-8.4-{project}",
              "clause_title": "Extension of Time for Completion",
              "text": "The Contractor shall be entitled subject to Sub-Clause 20.1 to an extension of the Time for Completion.",
              "cleaned_text": "The Contractor shall be entitled to an extension of the Time for Completion.",
-             "document_id": "doc-gcc", "document_type": "GCC"},
+             "document_id": gcc_id, "document_type": "GCC"},
         ])
+    # The two letters' stored files: upload writes each document's storage key, which the
+    # filing export checks (exhibits must resolve to a file). No bytes are read by this journey.
+    for letter in (DOC_IN, DOC_OUT):
+        await db.documents.update_one({"_id": letter}, {"$set": {"filepath_s3": f"documents/{letter}.pdf"}})
     # The Claims skill, published (the 4B-05 review workflow is not part of this journey).
     draft = system_skill_version(CLAIMS_SKILL_KEY)
     await db.skill_versions.insert_one({**draft.model_dump(by_alias=True, exclude={"id"}), "status": "published"})
@@ -224,6 +241,168 @@ async def _lock(env: Any, claim_id: str, project: str = CONTRACTOR) -> Dict[str,
                                json={"board_version": await _version(env, claim_id, project)}))
     assert board["bench"]["stage"] == "locked", board["gate"]
     return board
+
+
+# --------------------------------------------------------------------------- #
+# JG-5: the case prepared and the governed workflow walked to an approved pleading
+# --------------------------------------------------------------------------- #
+
+#: Case people in the Contractor project, each holding one reviewer role by assignment.
+#: Two senior legal approvers, because the plan's author (whoever approved readiness,
+#: which builds the plan) may not approve the plan, and the plan's approver (who
+#: generates the draft) may not approve the draft.
+CASE_PEOPLE = {
+    "contracts_reviewer_person": ("contract_reviewer", ARBITRATION_REVIEWER),
+    "delay_reviewer_person": ("delay_reviewer", ARBITRATION_REVIEWER),
+    "senior_a_person": ("senior_legal_approver", ARBITRATION_REVIEWER + ["dms.arbitration.generate"]),
+    "senior_b_person": ("senior_legal_approver", ARBITRATION_REVIEWER + ["dms.arbitration.generate"]),
+    "export_person": ("export_authorizer", ["dms.arbitration.view", "dms.arbitration.export"]),
+}
+
+#: Matrix reviewer role (row review) -> the person who holds it.
+ROW_REVIEWERS = {
+    "legal": "legal_reviewer_person",
+    "quantum": "quantum_reviewer_person",
+    "contracts": "contracts_reviewer_person",
+    "delay": "delay_reviewer_person",
+    "reviewer": "legal_reviewer_person",
+}
+
+#: Who reviews a row of each matrix when the row names no roles (the service's defaults).
+DEFAULT_ROW_ROLES = {
+    "document-index": ["contracts"], "chronology-matrix": ["delay"], "clause-matrix": ["legal", "contracts"],
+    "issue-matrix": ["legal"], "claim-matrix": ["legal", "quantum"], "quantum-annexures": ["quantum"],
+    "notice-compliance": ["legal", "contracts"], "jurisdiction-matrix": ["legal"], "expert-alignment": ["reviewer"],
+}
+
+
+async def _case_people(env: Any) -> None:
+    for persona, (role_key, permissions) in CASE_PEOPLE.items():
+        await _add_member(env.db, persona, permissions, CONTRACTOR)
+        await env.db.users.update_one({"_id": f"user-{persona}"}, {"$push": {"roles": "projectuser"}})
+        _ok(await env.call("POST", "org_admin", "/api/reviewer-assignments", json={
+            "user_id": f"user-{persona}", "role_key": role_key, "scope_type": "project",
+            "organization_id": ORG_A, "project_id": CONTRACTOR, "reason": "JG-5 journey case team",
+        }), 201)
+
+
+async def _approve_row(env: Any, case_id: str, slug: str, row: Dict[str, Any]) -> Dict[str, Any]:
+    """Every role the row requires approves it, each by the person who holds that role."""
+    row_id = row.get("_id") or row.get("id")
+    roles = [str(r) for r in row.get("review_required_roles") or []] or DEFAULT_ROW_ROLES[slug]
+    reviewed = row
+    for role in roles:
+        reviewed = _ok(await env.call("POST", ROW_REVIEWERS[role], f"{CASES}/{case_id}/{slug}/{row_id}/review",
+                                      json={"action": "approve", "reviewer_role": role}))
+    return reviewed
+
+
+async def _add_row(env: Any, case_id: str, slug: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    row = _ok(await env.call("POST", "org_admin", f"{CASES}/{case_id}/{slug}", json=body), 201)
+    return await _approve_row(env, case_id, slug, row)
+
+
+async def _prepare_case(env: Any, case_id: str, claim_rows: List[Dict[str, Any]]) -> None:
+    """What counsel does before a pleading can be planned: every readiness check met over HTTP."""
+    await _case_people(env)
+    # The rows escalation carried, reviewed.
+    for slug in ("document-index", "quantum-annexures", "notice-compliance", "chronology-matrix"):
+        for row in _ok(await env.call("GET", "org_admin", f"{CASES}/{case_id}/{slug}")):
+            if str(row.get("review_status") or "") != "approved":
+                await _approve_row(env, case_id, slug, row)
+    # The clause the claim rests on, and the issue for the tribunal.
+    await _add_row(env, case_id, "clause-matrix", {
+        "clause_number": "8.4", "clause_title": "Extension of Time for Completion",
+        "clause_text_excerpt": "The Contractor shall be entitled to an extension of the Time for Completion.",
+        # The clause escalation carried on the heads, from the contract's clause index.
+        # The clause in the contract's clause index (contract ingestion; see _preconditions).
+        "clause_source_id": f"cl-8-4-{CONTRACTOR}",
+    })
+    await _add_row(env, case_id, "issue-matrix", {
+        "issue": "Whether the Respondent's late handover of the Site entitles the Claimant to an extension of time and costs.",
+    })
+    # Limitation and pre-arbitration steps (the jurisdiction agent is optional; counsel can record them).
+    await _add_row(env, case_id, "jurisdiction-matrix", {
+        "check_type": "limitation", "limitation_status": "within_limitation",
+        "summary": "The cause of action arose in 2026; the claim is within three years.",
+    })
+    await _add_row(env, case_id, "jurisdiction-matrix", {
+        "check_type": "pre_arbitration_step", "required": True, "compliance_status": "complete",
+        "summary": "Engineer's determination obtained and dispute notice served.",
+    })
+    # Expert alignment for each pleaded head: delay (concurrency addressed) and quantum (calculation matches).
+    for row in claim_rows:
+        claim_no = str(row.get("claim_no"))
+        # Both heads arise from the late handover, so both rely on the delay analysis.
+        await _add_row(env, case_id, "expert-alignment", {
+            "expert_type": "delay", "claim_no": claim_no, "concurrency_addressed": True,
+            "summary": "Delay analysis addresses concurrency.",
+        })
+        await _add_row(env, case_id, "expert-alignment", {
+            "expert_type": "quantum", "claim_no": claim_no, "calculation_match": True,
+            "summary": "Quantum expert's calculation matches the pleaded amount.",
+        })
+
+
+#: The governed workflow's human gates after the matrices: who approves each, in which role.
+WORKFLOW_GATES = (
+    ("matrix_review", "legal_reviewer_person", "legal_reviewer"),
+    ("readiness", "senior_a_person", "senior_legal_approver"),
+    ("plan", "senior_b_person", "senior_legal_approver"),
+    ("legal_review", "legal_reviewer_person", "legal_reviewer"),
+    ("draft", "senior_a_person", "senior_legal_approver"),
+    ("export", "export_person", "export_authorizer"),
+)
+
+#: The workflow artifact each gate approves (the receipt binds to its hash).
+GATE_ARTIFACT = {
+    "matrix_review": "matrix_revision_hash", "readiness": "readiness_artifact_hash", "plan": "plan_hash",
+    "legal_review": "draft_version_hash", "draft": "draft_version_hash", "export": "draft_version_hash",
+}
+
+
+async def _workflow(env: Any, case_id: str, run_id: str) -> Dict[str, Any]:
+    return _ok(await env.call("GET", "org_admin", f"{CASES}/{case_id}/workflows/{run_id}/state"))
+
+
+async def _approve_gate(env: Any, case_id: str, run_id: str, gate: str, persona: str, role: str, *, ok: bool = True) -> Any:
+    """Approve the workflow's current gate as ``persona``; with ``ok=False``, return the raw response."""
+    state = await _workflow(env, case_id, run_id)
+    response = await env.call("POST", persona, f"{CASES}/{case_id}/workflows/{run_id}/approvals/{gate}", json={
+        "state_version": state["state_version"], "artifact_hash": state[GATE_ARTIFACT[gate]],
+        "reviewer_role": role, "decision": "approved", "comment": f"JG-5 journey: {gate} approved",
+    })
+    return _ok(response) if ok else response
+
+
+def _cite(row: Dict[str, Any]) -> str:
+    return f"[{row['source_key']}: {row['citation']}]"
+
+
+def _statement_of_claim(ledger: List[Dict[str, Any]]) -> str:
+    """Counsel's revision: every factual sentence carries a same-sentence citation from the ledger.
+
+    The issue and jurisdiction rows are counsel's analysis, not evidence: they shape the
+    pleading but are not cited as its sources.
+    """
+    by_type: Dict[str, List[Dict[str, Any]]] = {}
+    for row in ledger:
+        by_type.setdefault(str(row.get("source_type")), []).append(row)
+
+    def line(text: str, row: Dict[str, Any]) -> str:
+        return f"- {text.rstrip('.')} {_cite(row)}."
+
+    heads = by_type.get("claim_matrix", [])
+    lines = ["# STATEMENT OF CLAIM", "", "## Facts", ""]
+    lines += [line(f"The record includes {row['label']} as exhibit {row['citation']}", row) for row in by_type.get("document", [])]
+    lines += [line(row["label"], row) for row in by_type.get("chronology_entry", [])]
+    lines += ["", "## Claims", ""]
+    lines += [line(row["label"], row) for row in heads]
+    lines += [line("The quantum annexure supports the amount claimed", row) for row in by_type.get("quantum_annexure", [])]
+    lines += [line("Notice of the claim was given", row) for row in by_type.get("notice_compliance", [])]
+    lines += ["", "## Experts", ""]
+    lines += [line(row["label"], row) for row in by_type.get("expert_alignment", [])]
+    return "\n".join(lines) + "\n"
 
 
 # --------------------------------------------------------------------------- #
@@ -331,9 +510,10 @@ def test_the_claim_journey_from_start_to_the_pleading_gate_over_http(monkeypatch
             }), 201)
             hindrance_id = str(hindrance.get("id") or hindrance.get("_id"))
             # The site diary behind the hindrance, linked on the register's own entry and not to the claim.
-            await env.db.documents.insert_one(_document(
+            await env.db.documents.insert_one({**_document(
                 SITE_DIARY, organization_id=ORG_A, project_id=CONTRACTOR, upload_type="incoming",
-                subject="Site diary, March 2026", letter_no="SD/03", sender="Site engineer"))
+                subject="Site diary, March 2026", letter_no="SD/03", sender="Site engineer"),
+                "filepath_s3": f"documents/{SITE_DIARY_ID}.pdf"})
             _ok(await env.call("POST", "org_admin", f"/api/entities/delay_event/{hindrance_id}/document-links:batch", json={
                 "links": [{"document_id": SITE_DIARY_ID, "relationship_role": "supporting_document"}],
             }), 201)
@@ -568,7 +748,67 @@ def test_the_claim_journey_from_start_to_the_pleading_gate_over_http(monkeypatch
             open_checks = sorted(b["check_key"] for b in readiness["blockers"])
             assert {"document_index_verified", "issue_framing", "limitation_analysis",
                     "pre_arbitration_compliance"} <= set(open_checks), open_checks
-            evidence["pleading_stops_at"] = {"blockers": len(second["blockers"]), "readiness_open": open_checks}
+            evidence["pleading_before_preparation"] = {"blockers": len(second["blockers"]), "readiness_open": open_checks}
+
+            # JG-5: counsel prepares the case and the governed workflow is walked to an approved,
+            # exported Statement of Claim - over HTTP, with no model call (the draft generator is the
+            # deterministic, source-grounded one) and the arbitration engine rollout off (the
+            # default engine, arbitration_v2, runs the workflow).
+            await _prepare_case(env, case_id, matrix)
+            readiness = _ok(await env.call("GET", "org_admin", f"{CASES}/{case_id}/readiness", params={"draft_id": draft_id}))
+            assert readiness["status"] == "ready" and readiness["blockers"] == [], readiness["blockers"]
+            accepted = _ok(await env.call("POST", "org_admin", f"{CASES}/{case_id}/workflows", json={
+                "draft_id": draft_id, "pleading_type": "statement_of_claim",
+                # String ids, as a browser sends them; the documents are ObjectId-keyed.
+                "selected_document_ids": [DOC_IN_ID, DOC_OUT_ID, SITE_DIARY_ID],
+            }), 202)
+            assert (accepted["engine"], accepted["rollout_mode"]) == ("arbitration_v2", "off"), accepted
+            run_id = accepted["run_id"]
+            state = await _workflow(env, case_id, run_id)
+            # The case-level rows (escalated and counsel's) count for a draft-linked workflow.
+            assert state["current_node"] == "matrix_review_gate" and state["blockers"] == [], state["blockers"]
+            _refused(await env.call("GET", "foreign_org_admin", f"{CASES}/{case_id}/workflows/{run_id}/state", project=PROJ_B1))
+            state = await _approve_gate(env, case_id, run_id, *WORKFLOW_GATES[0])
+            state = await _approve_gate(env, case_id, run_id, *WORKFLOW_GATES[1])
+            assert state["current_node"] == "plan_approval_gate", state
+            # Whoever approved readiness built the plan, and may not approve it.
+            own_plan = await _approve_gate(env, case_id, run_id, "plan", "senior_a_person", "senior_legal_approver", ok=False)
+            assert own_plan.status_code == 409 and "separation" in own_plan.text, own_plan.text[:300]
+            state = await _approve_gate(env, case_id, run_id, *WORKFLOW_GATES[2])
+            # The generated draft is a starting point: its own validation sends it back to the drafter.
+            assert (state["current_node"], state["next_action"], state["validation_status"]) == (
+                "legal_review_gate", "revise_draft", "blocked"), state
+            blocked_review = await _approve_gate(env, case_id, run_id, *WORKFLOW_GATES[3], ok=False)
+            assert blocked_review.status_code == 409, blocked_review.text[:300]
+
+            # Counsel's revision, every sentence cited from the draft's own source ledger, then
+            # the workflow validates it as the candidate.
+            probe = _ok(await env.call("POST", "org_admin", f"{DRAFTS}/{draft_id}/versions",
+                                       json={"full_markdown": "# STATEMENT OF CLAIM\n"}), 201)
+            revised = _ok(await env.call("POST", "org_admin", f"{DRAFTS}/{draft_id}/versions",
+                                         json={"full_markdown": _statement_of_claim(probe["source_ledger"])}), 201)
+            assert revised["validation_status"] == "passed", (revised["validation_status"], revised.get("warnings"))
+            assert all(row["verification_status"] not in {"authority_denied"} for row in revised["source_ledger"]), \
+                [(row["source_key"], row["source_type"]) for row in revised["source_ledger"] if row["verification_status"] == "authority_denied"]
+            state = await _workflow(env, case_id, run_id)
+            state = _ok(await env.call("POST", "org_admin", f"{CASES}/{case_id}/workflows/{run_id}/resume", json={
+                "state_version": state["state_version"], "gate": "legal_review", "decision": "refresh_candidate"}))
+            assert (state["next_action"], state["validation_status"], state["validation_blockers"]) == (
+                "legal_review", "passed", []), state["validation_blockers"]
+            state = await _approve_gate(env, case_id, run_id, *WORKFLOW_GATES[3])
+            state = await _approve_gate(env, case_id, run_id, *WORKFLOW_GATES[4])
+            approved_draft = _ok(await env.call("GET", "org_admin", f"{DRAFTS}/{draft_id}"))
+            assert approved_draft["status"] == "approved" and approved_draft["is_locked"] is True, approved_draft["status"]
+            assert approved_draft["approved_by"] == "user-senior_a_person"
+            assert approved_draft["approved_version"] == revised["version"]
+            state = await _approve_gate(env, case_id, run_id, *WORKFLOW_GATES[5])
+            assert (state["status"], state["current_node"]) == ("completed", "complete"), state
+            filed = await env.call("GET", "export_person", f"{DRAFTS}/{draft_id}/export/docx")
+            assert filed.status_code == 200 and filed.content[:2] == b"PK", (filed.status_code, filed.text[:300])
+            _refused(await env.call("GET", "foreign_org_admin", f"{DRAFTS}/{draft_id}/export/docx", project=PROJ_B1))
+            evidence["pleading_approved"] = {"engine": accepted["engine"], "rollout_mode": accepted["rollout_mode"],
+                                             "approved_version": approved_draft["approved_version"],
+                                             "workflow": state["status"], "export_bytes": len(filed.content)}
             print("4B-44 journey evidence:", json.dumps(evidence, sort_keys=True))
 
     _run(scenario())

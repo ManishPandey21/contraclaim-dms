@@ -156,6 +156,7 @@ from ..contract_scope_resolver import (
 from ..publication_policy import (
     authoritative_fact_text,
     authoritative_summary,
+    document_id_candidates,
     is_consumable,
     resolve_document_authority,
 )
@@ -363,7 +364,8 @@ class ArbitrationDraftingService:
         if payload.source_pleading_document_id:
             source = await self.db.documents.find_one(
                 {
-                    "_id": payload.source_pleading_document_id,
+                    # documents._id is ObjectId-keyed; the payload holds the string form.
+                    "_id": {"$in": document_id_candidates(payload.source_pleading_document_id)},
                     "organization_id": draft.get("organization_id"),
                     "project_id": draft.get("project_id"),
                 }
@@ -884,7 +886,8 @@ class ArbitrationDraftingService:
         # B4 (4B-39): the same gate the screen shows, first, so a disabled Approve is
         # exactly a refused approval. The router has checked the permission.
         refuse_unless(approve_gate(draft, await self.repo.latest_version(draft_id), _actor_id(current_user), may_approve=True))
-        resolve_gate_role("draft", current_user)
+        # The case's scoped reviewer assignments count, as at every other gate (JG-5).
+        resolve_gate_role("draft", current_user, roles=await self._case_reviewer_roles(draft, current_user))
         await self.case_workspace.assert_case_ready_for_draft(draft)
         if draft.get("current_version", 0) < 1:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Generate or save a version before approval")
@@ -941,6 +944,14 @@ class ArbitrationDraftingService:
         await self._emit("approved", draft, current_user, after=updated)
         return await self.detail(draft_id)
 
+    async def _case_reviewer_roles(self, draft: Dict[str, Any], current_user: Any) -> Optional[set]:
+        """Reviewer roles ``current_user`` holds for the draft's case: role claims plus the case's
+        scoped assignments. None for a draft with no case (role claims alone then decide)."""
+        if not draft.get("case_id"):
+            return None
+        case = await self.case_workspace.get_case(str(draft.get("case_id")))
+        return await self.case_workspace.reviewer_roles(case, current_user)
+
     async def return_for_revision(self, draft_id: str, reason: str, current_user: Any) -> Dict[str, Any]:
         draft = await self._load(draft_id)
         updated = await self.repo.update_draft(
@@ -972,7 +983,7 @@ class ArbitrationDraftingService:
                 may_export=True,
             )
         )
-        resolve_gate_role("export", current_user)
+        resolve_gate_role("export", current_user, roles=await self._case_reviewer_roles(draft, current_user))
         if not draft.get("case_id"):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,

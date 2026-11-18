@@ -5,8 +5,8 @@ import re
 from typing import Any, Dict, Iterable, List, Optional
 
 from ...core.config import settings
-from .citation_refs import ADJACENT_DUPLICATE_SOURCE_REF_RE, SOURCE_REF_RE, is_verified_status
-from .citation_states import is_pleaded_head_blocker
+from .citation_refs import ADJACENT_DUPLICATE_SOURCE_REF_RE, SOURCE_REF_RE, is_verified_status, source_refs
+from .citation_states import is_pleaded_head_blocker, is_uncited_context_row
 from .context import PRODUCIBLE_QUALITY_FLAGS
 from .workflow_repository import artifact_hash
 
@@ -257,6 +257,8 @@ class ArbitrationValidationOrchestrator:
                         issues.append(_issue(branch, "exhibit_unavailable", item, severity=severity))
             elif branch == "source_drift":
                 for row in ledger:
+                    if is_uncited_context_row(row, source_refs(markdown)):
+                        continue  # context, not relied on in the filing (JG-5)
                     source_key = str(row.get("source_key") or row.get("source_id") or "unknown")
                     flags = {str(flag).lower() for flag in row.get("quality_flags") or []}
                     verification = str(row.get("verification_status") or "").lower()

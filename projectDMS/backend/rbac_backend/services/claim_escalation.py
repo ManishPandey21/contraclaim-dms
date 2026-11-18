@@ -746,9 +746,10 @@ class ClaimEscalation:
                     present += 1
                     continue
                 payload = {key: value for key, value in row.items() if value is not None}
+                provenance = {key: payload.pop(key) for key in ("origin", "origin_key") if key in payload}
                 try:
                     stored = await self.cases.create_matrix_row(
-                        case_id, slug, ArbitrationMatrixRowCreate(**payload), current_user
+                        case_id, slug, ArbitrationMatrixRowCreate(**payload), current_user, server_fields=provenance
                     )
                 except DuplicateKeyError:
                     present += 1  # a concurrent run carried it first

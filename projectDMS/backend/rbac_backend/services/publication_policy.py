@@ -673,6 +673,25 @@ DERIVED_SOURCE_COLLECTIONS: Mapping[str, Tuple[str, ...]] = {
     "programme_milestone": ("key_dates",),
     "issue_matrix": ("arbitration_issue_matrix",),
     "jurisdiction_check": ("arbitration_jurisdiction_matrix",),
+    # JG-5: the other case matrices the pleading ledger cites by their own row id.
+    # Like the two above they hold matrix-authored application content (facts,
+    # findings, heads, figures), not extracted text - `safe_matrix_rows` already
+    # returns them unredacted. Unregistered, each resolved as an unknown origin,
+    # so every claim, defence, counterclaim, rejoinder, quantum, notice and
+    # expert-alignment source of every pleading read `authority_denied` and no
+    # Statement of Claim citing its own heads could pass validation.
+    "claim_matrix": ("arbitration_claim_matrix",),
+    "defence_matrix": ("arbitration_defence_matrix",),
+    "counterclaim_matrix": ("arbitration_counterclaim_matrix",),
+    "rejoinder_matrix": ("arbitration_rejoinder_matrix",),
+    "quantum_annexure": ("arbitration_quantum_annexures",),
+    "notice_compliance": ("arbitration_notice_compliance",),
+    # An expert-alignment row with no expert report behind it (with one, the
+    # ledger cites the report as `expert_report`, which is document-governed).
+    "expert_alignment": ("arbitration_expert_alignment",),
+    # A chronology row the server carried from the claim register (claim
+    # escalation): dated from the claim, naming no chronology event.
+    "chronology_entry": ("arbitration_chronology_matrix",),
 }
 
 #: Identifiers the application MINTS for content it authored itself, which
@@ -720,6 +739,36 @@ MATRIX_DERIVATIVE_FIELDS: Mapping[str, Tuple[str, str, Tuple[str, ...]]] = {
 }
 
 
+def escalated_claim_id(row: Mapping[str, Any]) -> Optional[str]:
+    """The claim a server-carried matrix row came from, or None.
+
+    Claim escalation stamps ``origin`` = {"claim_id": ...} and an ``origin_key``
+    of ``claim:<claim_id>:...``; clients cannot write either. Both must agree.
+    """
+    origin = row.get("origin")
+    if not isinstance(origin, Mapping) or not origin.get("claim_id"):
+        return None
+    claim_id = str(origin.get("claim_id"))
+    if not str(row.get("origin_key") or "").startswith(f"claim:{claim_id}:"):
+        return None
+    return claim_id
+
+
+def _matrix_row_source(matrix_slug: str, row: Mapping[str, Any], source_type: str, id_field: str) -> Tuple[str, Any]:
+    """The record a matrix row's derived text came from.
+
+    A chronology row that claim escalation carried names no chronology event:
+    its date and wording were written from the claim register, so the claim is
+    its source (JG-5). The server alone writes ``origin``/``origin_key``. Any
+    other row without an id stays unresolved and is denied, as before.
+    """
+    source_id = row.get(id_field) or row.get("source_id")
+    claim_id = escalated_claim_id(row) if not source_id and matrix_slug == "chronology-matrix" else None
+    if claim_id:
+        return "claim", claim_id
+    return source_type, source_id
+
+
 async def safe_matrix_rows(db: Any, rows: Any, matrix_slug: str) -> list:
     """Withhold a matrix row's derived fields when its source is not publishable.
 
@@ -742,11 +791,11 @@ async def safe_matrix_rows(db: Any, rows: Any, matrix_slug: str) -> list:
     cache: Dict[str, bool] = {}
     for record in rows or []:
         row = dict(record)
-        source_id = row.get(id_field) or row.get("source_id")
-        key = f"{source_type}:{source_id}"
+        row_source_type, source_id = _matrix_row_source(matrix_slug, row, source_type, id_field)
+        key = f"{row_source_type}:{source_id}"
         if key not in cache:
             try:
-                cache[key] = (await resolve_derived_authority(db, source_type, source_id)).consumable
+                cache[key] = (await resolve_derived_authority(db, row_source_type, source_id)).consumable
             except Exception:
                 cache[key] = False
         if not cache[key]:
@@ -971,8 +1020,13 @@ async def resolve_derived_authority(
                 # Callers sometimes hold the parent document id rather than the
                 # chunk id; the reference resolver accepts both.
                 collection = _collection(db, name)
-                record = collection and await collection.find_one(
-                    {"document_id": source_id}
+                # `is not None`, never truthiness: a Motor/PyMongo collection
+                # raises on bool(), which turned every clause id that missed
+                # `document_vectors` into a resolution_error (JG-5).
+                record = (
+                    await collection.find_one({"document_id": source_id})
+                    if collection is not None
+                    else None
                 )
         except Exception:
             return AuthorityDecision(

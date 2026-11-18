@@ -56,6 +56,42 @@ def is_unverified_source(row: Dict[str, Any]) -> bool:
     return bool(row.get("is_user_supplied")) or not is_verified_status(row.get("verification_status"))
 
 
+#: Rows the ledger builder adds to every pleading's ledger as CONTEXT, not as
+#: evidence the drafter selected (JG-5). Only the version's ``full_markdown`` is
+#: filed (the exporter renders nothing else), so an uncited context row is never
+#: relied on in the filing:
+#:
+#: - counsel's analysis, once approved: the issues for the tribunal and the
+#:   limitation, pre-arbitration and scope checks. Marked user-supplied - they
+#:   are not evidence and must never be cited as a source of fact - and required
+#:   by readiness, so counting their presence as inadmissible evidence blocked
+#:   every Statement of Claim that had passed readiness;
+#: - the project registers (claims, variations, payment certificates, bank
+#:   guarantees), included by default, whose status is the register's workflow
+#:   status ("submitted", "notified"), never a verification - so their presence
+#:   alone blocked every pleading in a project with an open claim or bill.
+#:
+#: Cited, either is an ordinary citation and is checked as one (an unverified
+#: citation still blocks).
+CASE_ANALYSIS_SOURCE_TYPES = frozenset({"issue_matrix", "jurisdiction_check"})
+REGISTER_SOURCE_ORIGINS = frozenset(
+    {"claim_register", "variation_register", "ipc_register", "bank_guarantee_register"}
+)
+
+
+def is_case_analysis(row: Dict[str, Any]) -> bool:
+    """An approved analysis row (issue or jurisdiction check): context, not evidence."""
+    return str(row.get("source_type") or "") in CASE_ANALYSIS_SOURCE_TYPES and is_verified_status(
+        row.get("verification_status")
+    )
+
+
+def is_uncited_context_row(row: Dict[str, Any], cited_keys: Any) -> bool:
+    if str(row.get("source_key") or "") in {str(key) for key in cited_keys or ()}:
+        return False
+    return is_case_analysis(row) or str(row.get("source_origin") or "") in REGISTER_SOURCE_ORIGINS
+
+
 def _row_exhibit_id(row: Dict[str, Any]) -> Optional[str]:
     raw = row.get("exhibit_id") or (row.get("metadata") or {}).get("exhibit_id")
     match = _EXHIBIT_ID_RE.match(str(raw or ""))

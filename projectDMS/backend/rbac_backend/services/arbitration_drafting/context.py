@@ -15,6 +15,7 @@ from ..contract_scope_resolver import (
 from ..document_relationship_service import DocumentRelationshipService
 from ..evidence_graph_service import EvidenceGraphService
 from .citation_refs import CITATION_VERIFIED_STATUSES
+from .citation_states import is_case_analysis
 from .matrix_evidence_authority import matrix_clause_fence
 from .matrix_registry import MATRIX_COLLECTIONS
 from .permission_receipts import VERIFIED, rejoinder_permission_states
@@ -197,6 +198,7 @@ from ..publication_policy import (
     authoritative_fact_text,
     authoritative_summary,
     consumable_derived_text,
+    escalated_claim_id,
     document_id_candidates,
     is_consumable,
     resolve_derived_authority,
@@ -986,7 +988,9 @@ class ArbitrationContextBuilder:
             ledger_row = {
                 "source_key": f"S{offset + len(out) + 1}",
                 "source_id": str(row.get("expert_report_source_id") or row.get("_id")),
-                "source_type": "expert_report",
+                # With a report, the report (document-governed); without one, the
+                # approved alignment row itself (JG-5).
+                "source_type": "expert_report" if row.get("expert_report_source_id") else "expert_alignment",
                 "allowed_use": "expert",
                 "permitted_uses": ["expert", "fact"],
                 "label": f"{row.get('expert_type') or 'expert'} alignment: claim {row.get('claim_no')}",
@@ -1149,17 +1153,27 @@ class ArbitrationContextBuilder:
             if not _is_verified_source(row, include_review_sources=include_review_sources):
                 continue
             event = await self._load_chronology_event(row)
+            # JG-5: a row claim escalation carried names no event and no
+            # document - its date and wording came from the claim register - so
+            # it is cited as itself, an application record (`chronology_entry`).
+            carried = not row.get("chronology_event_id") and not row.get("source_document_id") and bool(
+                escalated_claim_id(row)
+            )
             # `row["event"]` is `f"{title}. {description}"` composed by the
             # adapter from the source document's extracted span, so the LABEL
             # carries the same text the snippet below is gated on. A label is
             # not free-standing metadata here: it is displayed, and it is what
             # counsel picks evidence by.
-            gated_event = await consumable_derived_text(
-                self.db,
-                row,
-                "event",
-                source_id=row.get("source_document_id")
-                or (event or {}).get("source_document_id"),
+            gated_event = (
+                str(row.get("event") or "")
+                if carried
+                else await consumable_derived_text(
+                    self.db,
+                    row,
+                    "event",
+                    source_id=row.get("source_document_id")
+                    or (event or {}).get("source_document_id"),
+                )
             )
             if gated_event:
                 title = gated_event
@@ -1190,7 +1204,7 @@ class ArbitrationContextBuilder:
             ledger_row = {
                 "source_key": f"S{offset + len(out) + 1}",
                 "source_id": str(row.get("chronology_event_id") or row.get("_id")),
-                "source_type": "chronology_event",
+                "source_type": "chronology_entry" if carried else "chronology_event",
                 "allowed_use": allowed,
                 "permitted_uses": sorted(set([allowed, "chronology", "fact"])),
                 "label": condense(title, 180),
@@ -2284,7 +2298,9 @@ class ArbitrationContextBuilder:
                 flags.append("unverified_ai_suggestion")
             row["quality_flags"] = sorted(set(flags))
             row["evidence_strength"] = "strong" if not flags else ("medium" if flags == ["missing_snippet"] else "needs_review")
-        if any("user_supplied" in row.get("quality_flags", []) for row in rows):
+        # Approved case analysis (issues, jurisdiction checks) is flagged user_supplied so it is
+        # never cited as evidence, but it is not a manual fact: it does not raise this warning (JG-5).
+        if any("user_supplied" in row.get("quality_flags", []) and not is_case_analysis(row) for row in rows):
             context_warnings.append("Manual fact sources are not independent evidence and require legal review.")
         if any("unverified_ai_suggestion" in row.get("quality_flags", []) for row in rows):
             context_warnings.append("Source ledger includes unverified AI graph suggestions.")

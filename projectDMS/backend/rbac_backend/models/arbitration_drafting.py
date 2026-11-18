@@ -25,6 +25,9 @@ PRIVILEGED_MATRIX_FIELDS = {
     "last_material_editor_id",
     "last_review_action",
     "material_contributor_ids",
+    # Where claim escalation carried the row from (JG-5): written by the server only.
+    "origin",
+    "origin_key",
     "last_reviewed_at",
     "last_reviewed_by",
     "permission_approved_at",

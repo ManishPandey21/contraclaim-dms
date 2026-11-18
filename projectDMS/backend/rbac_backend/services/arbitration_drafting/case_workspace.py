@@ -174,6 +174,11 @@ SERVER_CONTROLLED_MATRIX_FIELDS = {
     "last_material_editor_id",
     "last_review_action",
     "material_contributor_ids",
+    # Where a row was carried from (claim escalation). Written by the server only:
+    # chronology authority is resolved against the claim it names (JG-5), so a
+    # client must not be able to name one.
+    "origin",
+    "origin_key",
     "last_reviewed_at",
     "last_reviewed_by",
     "permission_approved_at",
@@ -418,10 +423,28 @@ class ArbitrationCaseWorkspaceService:
             )
         return self.db[collection_name]
 
-    async def list_matrix_rows(self, case_id: str, matrix_slug: str, *, draft_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def list_matrix_rows(
+        self,
+        case_id: str,
+        matrix_slug: str,
+        *,
+        draft_id: Optional[str] = None,
+        with_case_rows: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """The case's rows of one matrix; with ``draft_id``, those bound to that draft.
+
+        ``with_case_rows`` (JG-5) is how a pleading's workflow reads the case: the
+        rows bound to its draft *and* the case-level rows (no draft), which is where
+        the case workspace and claim escalation put them. Rows bound to another
+        draft are still left out. Without it, a draft-linked workflow saw only
+        draft-bound rows - in a Statement of Claim case, none - so its matrix gate
+        never cleared, while readiness counted the same case rows as ready.
+        """
         await self.get_case(case_id)
         query: Dict[str, Any] = {"case_id": case_id, "deleted_at": {"$exists": False}}
-        if draft_id:
+        if draft_id and with_case_rows:
+            query["$or"] = [{"draft_id": draft_id}, {"draft_id": None}]
+        elif draft_id:
             query["draft_id"] = draft_id
         rows = await _collect(self._collection(matrix_slug).find(query).sort("created_at", 1))
         if matrix_slug == "document-index":
@@ -440,7 +463,11 @@ class ArbitrationCaseWorkspaceService:
         matrix_slug: str,
         payload: ArbitrationMatrixRowCreate,
         current_user: Any,
+        *,
+        server_fields: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        """``server_fields`` are written as given after the client body is cleaned:
+        the server's own provenance (``origin``, ``origin_key``), never a client's."""
         case = await self.get_case(case_id)
         body = _clean_payload(payload.model_dump(exclude_none=True))
         if matrix_slug in PARAGRAPH_POSITION_MATRICES and body.get("draft_id"):
@@ -454,6 +481,7 @@ class ArbitrationCaseWorkspaceService:
         if str(body.get("status") or "").strip().lower() in APPROVAL_STATUS_VALUES:
             body.pop("status", None)
         body.update(_matrix_review_defaults(matrix_slug))
+        body.update(server_fields or {})
         now = datetime.utcnow()
         row = ArbitrationMatrixRow(
             **body,
@@ -821,7 +849,7 @@ class ArbitrationCaseWorkspaceService:
             )
         actor = _actor_id(current_user)
         enforce_author_approver_separation(current_user, approval_barred_actors(row), gate="rejoinder permission")
-        approver_role = resolve_gate_role("legal_review", current_user)
+        approver_role = resolve_gate_role("legal_review", current_user, roles=await self.reviewer_roles(case, current_user))
         # Interrupted decisions on this case are cleaned up here, on a write path,
         # never by a reader. Readers refuse those grants regardless, so a cleanup
         # failure is logged and does not block this decision.
@@ -2374,7 +2402,7 @@ class ArbitrationCaseWorkspaceService:
         return manifest, exhibit_files
 
     async def _authorize_filing_bundle(self, payload: Dict[str, Any], export_format: str, current_user: Any) -> Dict[str, Any]:
-        resolve_gate_role("export", current_user)
+        resolve_gate_role("export", current_user, roles=await self.reviewer_roles(payload.get("case") or {}, current_user))
         drafts = payload.get("drafts") or []
         enforce_author_approver_separation(
             current_user,

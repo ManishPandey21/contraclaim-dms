@@ -359,7 +359,7 @@ class ArbitrationGraphCommandExecutor:
             payload.opponent_pleadings,
         )
         rows = {
-            slug: await self.cases.list_matrix_rows(case_id, slug, draft_id=payload.draft_id)
+            slug: await self.cases.list_matrix_rows(case_id, slug, draft_id=payload.draft_id, with_case_rows=True)
             for slug in MATRIX_COLLECTIONS
         }
         evidence_manifest = await self.cases._authoritative_evidence_manifest(case, rows)
@@ -429,7 +429,7 @@ class ArbitrationGraphCommandExecutor:
         case = await self.cases.get_case(str(run["case_id"]))
         rows = {
             slug: await self.cases.list_matrix_rows(
-                str(run["case_id"]), slug, draft_id=run.get("draft_id")
+                str(run["case_id"]), slug, draft_id=run.get("draft_id"), with_case_rows=True
             )
             for slug in MATRIX_COLLECTIONS
         }
