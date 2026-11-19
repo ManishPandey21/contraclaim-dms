@@ -248,3 +248,83 @@ Findings 1 to 7 are closed. Residuals and side effects:
 This is not the authorised security review.
 
 **CI.** CI run 44523611467 on `a43eb6a`: backend (8,414 unit; real-Mongo 79 modules, 1,063 passed, every module ran, none skipped), frontend, dependency scan and Docker green; secret scan red (same two findings). Run 44519551894 on `5053ca8` had failed only at the suites-ran gate, which counted the then-`xfail` DEF-5 tests as skips; fixed in `a43eb6a` without changing the gate. Stages: implemented, tested and CI-verified; **not** security-approved (authorised review outstanding) and **not** production-accepted.
+
+## Owner decisions T-1 to T-4 (2026-11-19, fourth pass)
+
+Stages as before. Nothing here changes stored users, roles, aliases or production configuration, and nothing creates a production index.
+
+### T-2: client permissions fail closed (highest priority)
+
+`client/src/hooks/useRBAC.ts`, rewritten:
+
+- **No role-catalogue fallback.** An empty list returned by the server means "no permissions". Before, the hook downloaded the role catalogue and expanded roles itself, without scope.
+- **No client alias expansion.** `can()` matches the server's effective list exactly. Before, the client's two-hop alias table passed checks the server refuses, for example `dms.claim.manage` → `projects:update` → `dms.task.manage` and `dms.keydate.manage`. The server list already contains every check a held name passes.
+- **Three states**, each failing closed: `loading` (deny), `error` (deny, with the message; `ProtectedRoute` already shows sign-in), `ready` (the server's answer, possibly empty).
+- **Invalidation.** On `auth-state-changed`, `profile-updated` and the new `tenant-scope-changed` (dispatched by `TenantContext` on every selection change), the hook forgets what it knew, denies, and re-reads `/me` with `force`. An answer to an older request never overwrites a newer one; nothing applies after unmount. The module-wide permission cache, keyed by roles only, is removed.
+- **Super Admin and `*`.** They pass every check except the explicit-grant permissions (`EXPLICIT_GRANT_PERMISSIONS`), which need the name itself in the server list. The backend test `test_client_explicit_grant_permissions.py` keeps that list equal to `SUPERADMIN_EXCLUDED_PERMISSIONS`. The server's `["*"]` response contract is unchanged.
+
+Proof:
+- `useRBAC.test.ts`: 14 tests (server list only; authoritative empty; loading; error; no fan-out; Super Admin; wildcard; explicit grants; three invalidation events; account-switch race; unmount). All 14 fail on the old hook.
+- `TenantContext.test.tsx`: the scope event fires.
+- Mutants: explicit rule, stale-answer guard, clear-on-refresh, `force`, fan-out — all killed. The `status` gate is equivalent: loading and error states hold empty roles and permissions.
+- Full client suite: 1,010 passed.
+
+**Super Admin UI audit.** No client guard grants an explicit-grant permission through the Super Admin role or `*`:
+- `ClaimBenchPage` asks the server (`useHasPermission`);
+- the determination picker is filtered by the server;
+- no Sidebar link uses an explicit-grant permission;
+- the other `roles.includes("superadmin")` checks guard platform pages, which the backend restricts to Super Admin.
+
+Every privilege is enforced at the backend route regardless.
+
+### T-1: the user-read rule counts project memberships
+
+`AuthorizationService.check_user_access` serves `GET/PUT/DELETE /api/users/{id}` and the other-user path of `/permissions/check`. For project-tier actors, each side's projects are now:
+- `users.projects` plus active `project_memberships` rows (`status` active or unset);
+- limited to existing, active projects of the actor's organisation.
+
+The two sides must overlap. A project-tier actor with no such project reaches nobody; before, an empty `users.projects` skipped the test and gave organisation-wide reach. Organisation-tier rules are unchanged.
+
+Proof (`I/test_user_access_project_memberships_mongo.py`, real HTTP):
+- a membership-only project administrator reads only their project's users, both listed and membership-only;
+- revoked rows, inactive projects, and another organisation's project in a row confer nothing;
+- an unassigned project administrator reaches nobody;
+- organisation-tier access is unchanged.
+
+The old code fails 4 of 5. Mutants (inactive filter, organisation filter, membership rows, status filter, empty-skip): all killed.
+
+### T-3: digest jobs resolve the email service when they run
+
+`services/scheduler.py` no longer captures `email_service` methods at start-up. Each daily and weekly digest run asks `dependencies.get_email_service()`, which returns the service bound to the current database handle (DEF-6). Leader locks, job ids, triggers, `max_instances=1`, `coalesce=True` and the services' own retry and idempotency are unchanged.
+
+Proof (`T/test_scheduler_email_binding.py`):
+- no service is captured at start-up;
+- a handle change (disconnect and connect) is followed by the next run;
+- an unchanged handle keeps one service;
+- the leader lock still gates both jobs;
+- the schedule and options are unchanged.
+
+The old scheduler fails 2 of 5. Limitation: unit-level, with the real dependency resolution and stand-in handles; no real-Mongo digest run.
+
+### T-4: the skill-version unique index is verified, never created
+
+`services/skills/version_index.py` reads the live `skill_version_unique` index on every call and compares it with the migration's definition (keys, unique, not partial). `T/test_skill_version_index_gate.py` asserts the definition equals migration `20261114_0001`'s entry.
+
+`SkillRegistry.create_draft` (the import's upsert-or-insert) and `SkillRegistry.deprecate` refuse with 503 and write nothing when the index is missing, wrong or unreadable. No code path creates or repairs it; the gate itself is proven not to create it. The deterministic-`_id` safeguard in `deprecate` is kept and proven separately with the gate bypassed. No other writer inserts into `skill_versions`: `publish` and approvals update existing documents. No migration was added, so Gate 6 is unchanged.
+
+Test databases now look like production after the migration:
+- the real-route harness `_env` applies the migration's own `apply_indexes`;
+- `tests/bench_fakes.FakeDB` reports the index.
+
+Proof:
+- real replica set: dropped, non-unique and wrong-key index are each refused, with no write and no index created;
+- 5 rounds of concurrent materialisation behind a bypassed gate;
+- unit gate tests (9).
+
+Mutants: unique check, key check, fail-open on unreadable index, partial check, and each of the two gate calls removed — all killed.
+
+### DEF-4 and Super Admin
+
+- **DEF-4:** design and migration plan in `docs/DEF4_BILLING_PERMISSION_SEPARATION.md`. Production aliases are unchanged. Notable: `orgadmin` holds no billing permission explicitly today, so it must be granted before any alias is removed.
+- **Super Admin:** the `*` contract is kept and never read as the explicit-grant permissions (T-2).
+- **DEF-5:** unchanged; nothing enabled.
