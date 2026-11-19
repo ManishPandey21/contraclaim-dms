@@ -209,13 +209,15 @@ Details and proofs: `docs/SECURITY_REMEDIATION_2026-11-19.md`, "Final code harde
 
 | Item | Implemented | Tested (real MongoDB, mutation) | CI-verified | Security-approved | Production-accepted |
 |---|---|---|---|---|---|
-| 4B-05 deprecation in one transaction (read, materialise with deterministic `_id`, status, audit) | Yes | Yes: rollback, concurrency with and without the unique index, forced interleaving, repeats, 503 without transactions; mutants killed (two overlapping guards equivalent alone) | Pending (this commit) | No | No |
-| `POST /permissions/check`: self unchanged; other user needs `roles:read` in scope, membership, user-read rule; no enumeration; audited | Yes | Yes: 14 tests over real HTTP; 13 mutants killed | Pending | No | No |
-| Advertised = what both gate kinds grant (stored field, custom `users:create`, wildcard `*` removed) | Yes | Yes: agreement over the catalogue in four scopes, real Redis cache test; 5 mutants killed | Pending | No | No |
-| DEF-4 compatibility assessment and separation proposal | Assessment and proposal only; aliases unchanged; names non-delegable | Behaviour pinned (3 tests) | Pending | No | Needs P-05 and approval |
-| DEF-5 string user ids | Tests and design only; no change to users or authentication | 3 baseline + 3 intended-behaviour guards (fail when a fix lands) | Pending | No | Needs P-05 |
-| DEF-6 notification service rebinds on a new database handle | Yes | Yes: 3 unit, 1 real HTTP (500 on the old code) | Pending | No | No |
+| 4B-05 deprecation in one transaction (read, materialise with deterministic `_id`, status, audit) | Yes | Yes: rollback, concurrency with and without the unique index, forced interleaving, repeats, 503 without transactions; mutants killed (two overlapping guards equivalent alone) | Yes, run 44523611467 | No | No |
+| `POST /permissions/check`: self unchanged; other user needs `roles:read` in scope, membership, user-read rule; no enumeration; audited | Yes | Yes: 14 tests over real HTTP; 13 mutants killed | Yes, run 44523611467 | No | No |
+| Advertised = what both gate kinds grant (stored field, custom `users:create`, wildcard `*` removed) | Yes | Yes: agreement over the catalogue in four scopes, real Redis cache test; 5 mutants killed | Yes, run 44523611467 | No | No |
+| DEF-4 compatibility assessment and separation proposal | Assessment and proposal only; aliases unchanged; names non-delegable | Behaviour pinned (3 tests) | Yes, run 44523611467 | No | Needs P-05 and approval |
+| DEF-5 string user ids | Tests and design only; no change to users or authentication | 3 baseline + 3 intended-behaviour guards (fail when a fix lands) | Yes, run 44523611467 | No | Needs P-05 |
+| DEF-6 notification service rebinds on a new database handle | Yes | Yes: 3 unit, 1 real HTTP (500 on the old code) | Yes, run 44523611467 | No | No |
 | Independent review of this pass (agent, not the security owner) | 7 findings fixed, 4 documented; tickets T-1 to T-4 | | | Not a security approval | |
+
+CI run 44523611467 on `a43eb6a`: backend (8,414 unit; real-Mongo 79 modules, 1,063 passed, every module ran, none skipped), frontend, dependency scan and Docker green; secret scan red (same two findings). Run 44519551894 on `5053ca8` had failed only at the suites-ran gate, which counted the then-`xfail` DEF-5 tests as skips; fixed in `a43eb6a` without changing the gate.
 
 Local evidence at this pass: real-Mongo step (all CI modules, real Redis) 1,048 passed, 3 xfailed before the review fixes (the xfails since rewritten as guards, see CI); reruns of the changed modules after them. Phase 4b is **not** complete: P-01 to P-16, JG-5(f) legal sign-off, expert golden sets, authorised security review and two consecutive deployed staging runs remain.
 

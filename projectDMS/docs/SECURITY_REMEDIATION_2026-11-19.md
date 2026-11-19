@@ -246,3 +246,5 @@ Findings 1 to 7 are closed. Residuals and side effects:
 | Draft import and seed migration `20261114_0002` can still duplicate a version where `skill_version_unique` is absent. This predates the change. | Info | Ticket T-4: create the index at start-up |
 
 This is not the authorised security review.
+
+**CI.** CI run 44523611467 on `a43eb6a`: backend (8,414 unit; real-Mongo 79 modules, 1,063 passed, every module ran, none skipped), frontend, dependency scan and Docker green; secret scan red (same two findings). Run 44519551894 on `5053ca8` had failed only at the suites-ran gate, which counted the then-`xfail` DEF-5 tests as skips; fixed in `a43eb6a` without changing the gate. Stages: implemented, tested and CI-verified; **not** security-approved (authorised review outstanding) and **not** production-accepted.

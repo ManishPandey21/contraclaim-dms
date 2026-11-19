@@ -106,7 +106,7 @@ Open:
 
 ## Third pass (final code hardening, 2026-11-19)
 
-- **Done (implemented and tested; CI pending at the time of writing):**
+- **Done (implemented, tested, CI-verified in run 44523611467 on `a43eb6a`; secret scan red as before):**
   - 4B-05 deprecation in one transaction;
   - `POST /permissions/check` restricted to self-checks, or scoped administrators with an audit trail;
   - the advertised permission list reconciled with both gate kinds;
