@@ -199,8 +199,8 @@ PAGE_STATES: Dict[str, PageStates] = {
     # is rendered but has no test of its own yet, so it is declared untested.
     "LetterBenchPage": _fetching(),
     "BenchOpenRoute": _fetching(empty=False),
-    "SkillAdminPage": _fetching(),
-    "ReviewerAssignmentsPage": _fetching(),
+    "SkillAdminPage": _fetching(error="client/src/pages/__tests__/SkillAdminPage.errors.test.tsx"),
+    "ReviewerAssignmentsPage": _fetching(error="client/src/pages/__tests__/ReviewerAssignmentsPage.errors.test.tsx"),
     "LetterReviewPage": _fetching(empty=False),
     "LetterApprovalPage": _fetching(empty=False),
     "LetterCompletedPage": _fetching(empty=False),
