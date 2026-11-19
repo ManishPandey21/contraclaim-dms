@@ -49,15 +49,35 @@ class PolicyService:
         self.audit_service = audit_service or AuditEventService(db)
         self.usage_metering_service = usage_metering_service or UsageMeteringService(db)
 
-    async def has_explicit_grant(self, current_user: Any, permission: str) -> bool:
+    async def has_explicit_grant(
+        self,
+        current_user: Any,
+        permission: str,
+        *,
+        organization_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> bool:
         """A grant held by name on the user's own roles: no Super Admin, wildcard or dms.admin shortcut."""
         return await self.permission_service.user_has_explicit_permission(
-            str(getattr(current_user, "id", "") or ""), permission
+            str(getattr(current_user, "id", "") or ""),
+            permission,
+            organization_id=organization_id,
+            project_id=project_id,
         )
 
-    async def has_permission(self, current_user: Any, permission: str) -> bool:
+    async def has_permission(
+        self,
+        current_user: Any,
+        permission: str,
+        *,
+        organization_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> bool:
+        """Whether the user holds ``permission``; with a scope, through a role that applies there (SEC-1)."""
         if permission in SUPERADMIN_EXCLUDED_PERMISSIONS:
-            return await self.has_explicit_grant(current_user, permission)
+            return await self.has_explicit_grant(
+                current_user, permission, organization_id=organization_id, project_id=project_id
+            )
         if self.scope_service.is_superadmin(current_user):
             return True
         # `user_has_permission` applies the alias contract itself. Expanding the
@@ -76,6 +96,8 @@ class PolicyService:
                 getattr(current_user, "id", ""),
                 candidate,
                 log=False,
+                organization_id=organization_id,
+                project_id=project_id,
             ):
                 return True
         return False
@@ -155,13 +177,17 @@ class PolicyService:
         explicit_only = permission in SUPERADMIN_EXCLUDED_PERMISSIONS
         try:
             if explicit_only:
-                if not await self.has_explicit_grant(current_user, permission):
+                if not await self.has_explicit_grant(
+                    current_user, permission, organization_id=organization_id, project_id=project_id
+                ):
                     reason = "explicit_grant_required"
                     return await self._deny(reason)
             elif self.scope_service.is_superadmin(current_user):
                 return await _allow("superadmin")
 
-            if not explicit_only and not await self.has_permission(current_user, permission):
+            if not explicit_only and not await self.has_permission(
+                current_user, permission, organization_id=organization_id, project_id=project_id
+            ):
                 reason = "missing_permission"
                 return await self._deny(reason)
 
@@ -189,7 +215,7 @@ class PolicyService:
                     reason = "scope_denied"
                     return await self._deny(reason)
                 if permission in self.DRAFTING_ADMIN_PERMISSIONS and await self.has_permission(
-                    current_user, Permissions.DRAFTING_ADMIN
+                    current_user, Permissions.DRAFTING_ADMIN, organization_id=organization_id, project_id=project_id
                 ):
                     return await _allow("drafting_admin")
                 if await self.scope_service.has_expert_allocation(

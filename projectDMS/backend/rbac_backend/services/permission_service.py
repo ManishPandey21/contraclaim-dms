@@ -31,6 +31,7 @@ from ..models.permission import (
 from ..utils.error_handler import BaseDomainError, ValidationError
 from ..utils.audit_logger import AuditLogger
 from .runtime_state import get_runtime_state
+from .role_grants import applicable_names, grant_applies, role_grant_scope, role_is_built_in, user_memberships
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +90,9 @@ def _normalize_role_name(value: Any) -> str:
 #: soft-deleted roles and transitive aliases still granted (v1), or with a legacy
 #: spelling's role names but not its document (v2); under a new key no process
 #: reads them, and they expire unread on their own TTL.
-PERMISSION_CACHE_KEY_PREFIX = "user_perms:v3:"
+#: v4 (SEC-1): an entry holds each role's names with the scope they apply in, never
+#: a pooled set; a v3 entry (pooled across roles and organisations) is never read.
+PERMISSION_CACHE_KEY_PREFIX = "user_perms:v4:"
 
 
 def permission_cache_key(user_id: Any) -> str:
@@ -319,10 +322,15 @@ class PermissionService:
         # enforced by PolicyService.
 
     async def _get_db(self):
-        """Get database connection."""
-        if self.db is None:
-            self.db = await get_database()
-        return self.db
+        """The database handle: the one injected, else the process database, read each time.
+
+        Not cached: ``require_permission`` keeps one PermissionService per route for the
+        life of the process, so a cached handle outlives a database swap (and, under
+        tests, the event loop it was created on).
+        """
+        if self.db is not None:
+            return self.db
+        return await get_database()
 
     @staticmethod
     async def _cache_entry_is_current(redis: Any, user_id: Any, entry: Dict[str, Any]) -> bool:
@@ -688,13 +696,9 @@ class PermissionService:
             return False
 
     async def get_user_permissions(self, user_id: str) -> List[Permission]:
-        """
-        Get all permissions effective for a given user by aggregating across roles.
-        Supports wildcard '*' and role permissions as names/IDs.
-        """
+        """The catalogue permissions the user's roles grant where each role applies (SEC-1)."""
         try:
             db = await self._get_db()
-            # Load user
             try:
                 user_query_id = ObjectId(user_id)
             except Exception:
@@ -702,48 +706,24 @@ class PermissionService:
             user_doc = await db.users.find_one({"_id": user_query_id})
             if not user_doc:
                 return []
-
-            role_ids = user_doc.get("roles", []) or []
-            if not role_ids:
+            grants, _ = await self.scoped_grants(db, user_doc)
+            names = applicable_names(grants)
+            if not names:
                 return []
-
-            # Collect unique permission identifiers and detect wildcard
-            has_wildcard = False
-            perm_names: List[str] = []
-            perm_ids: List[ObjectId] = []
-
-            for rid in role_ids:
-                role = (await self._load_role(db, rid)).document
-                if not role:
-                    continue
-                rperms = role.get("permissions", []) or []
-                if "*" in rperms:
-                    has_wildcard = True
-                for rp in rperms:
-                    if isinstance(rp, str):
-                        try:
-                            perm_ids.append(ObjectId(rp))
-                        except Exception:
-                            perm_names.append(rp)
-
-            if has_wildcard:
-                cursor = db.permissions.find({"is_active": {"$ne": False}})
-                docs = await cursor.to_list(length=None)
+            if "*" in names:
+                docs = await db.permissions.find({"is_active": {"$ne": False}}).to_list(length=None)
             else:
-                ors = []
-                if perm_ids:
-                    ors.append({"_id": {"$in": perm_ids}})
-                if perm_names:
-                    ors.append({"name": {"$in": perm_names}})
-                if not ors:
-                    return []
-                cursor = db.permissions.find({"$or": ors})
-                docs = await cursor.to_list(length=None)
-
-            results: List[Permission] = []
-            for doc in docs:
-                results.append(self._build_permission_from_doc(doc))
-            return results
+                ors: List[Dict[str, Any]] = [{"name": {"$in": sorted(names)}}]
+                ids: List[ObjectId] = []
+                for name in names:
+                    try:
+                        ids.append(ObjectId(name))
+                    except Exception:
+                        pass
+                if ids:
+                    ors.append({"_id": {"$in": ids}})
+                docs = await db.permissions.find({"$or": ors}).to_list(length=None)
+            return [self._build_permission_from_doc(doc) for doc in docs]
         except Exception as e:
             logger.error(f"Failed to get permissions for user {user_id}: {str(e)}")
             return []
@@ -775,14 +755,21 @@ class PermissionService:
         documents = await db.permissions.find({"$or": ors}).to_list(length=None)
         return {self._build_permission_from_doc(document).name for document in documents}
 
-    async def get_effective_permission_names(self, user_id: str) -> List[str]:
+    async def get_effective_permission_names(
+        self,
+        user_id: str,
+        *,
+        organization_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> List[str]:
         """
         Return the current user's effective permission names without requiring
         the caller to read the role catalog.
 
         This is intentionally name-based so frontend route guards can work even
         when role documents contain permissions that have not yet been seeded in
-        the permissions collection.
+        the permissions collection. It advertises what ``user_has_permission``
+        grants: each role only where it applies (SEC-1).
         """
         try:
             db = await self._get_db()
@@ -795,51 +782,19 @@ class PermissionService:
             if not user_doc:
                 return []
 
+            grants, role_names = await self.scoped_grants(db, user_doc)
+            if "superadmin" in role_names:
+                return ["*"]
             raw_permissions: set[str] = {
                 str(permission)
                 for permission in (user_doc.get("permissions", []) or [])
                 if permission is not None and str(permission).strip()
             }
-            role_names: set[str] = set()
-            role_entries: set[str] = set()
-
-            for rid in user_doc.get("roles", []) or []:
-                resolution = await self._load_role(db, rid)
-                if not resolution.keeps_role_key:
-                    continue
-                role = resolution.document
-                # The reference contributes exactly the key the principal carries.
-                if resolution.key:
-                    role_names.add(resolution.key)
-                    if "superadmin" in role_names:
-                        return ["*"]
-
-                if not role:
-                    continue
-
-                role_name = str(role.get("name", "")).strip()
-                if role_name:
-                    role_names.add(role_name.lower())
-                    normalized_name = _normalize_role_name(role_name)
-                    if normalized_name:
-                        role_names.add(normalized_name)
-
-                role_entries.update(
-                    str(permission)
-                    for permission in (role.get("permissions", []) or [])
-                    if permission is not None and str(permission).strip()
-                )
-
-            raw_permissions.update(role_entries)
-            if "superadmin" in role_names or "*" in raw_permissions:
+            raw_permissions.update(
+                applicable_names(grants, organization_id=organization_id, project_id=project_id)
+            )
+            if "*" in raw_permissions:
                 return ["*"]
-
-            # A role can hold catalogue ids (the role API accepts them), which
-            # `user_has_permission` honours through `get_user_permissions`. Advertise the
-            # names those ids (and catalogue labels) stand for, or the client hides what
-            # the server allows. Role entries only: the user's own `permissions` field is
-            # not read by the check, so resolving it would advertise more than it grants.
-            raw_permissions.update(await self._catalogue_names(db, role_entries))
 
             if role_names & {"orgadmin", "orguser", "projectadmin", "projectuser"}:
                 raw_permissions.add("users:read")
@@ -971,19 +926,27 @@ class PermissionService:
         spellings.discard("*")
         return spellings
 
-    async def user_has_explicit_permission(self, user_id: str, permission_name: str) -> bool:
+    async def user_has_explicit_permission(
+        self,
+        user_id: str,
+        permission_name: str,
+        *,
+        organization_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> bool:
         """Whether one of the user's own roles names ``permission_name`` (or a label spelling of it).
 
         For permissions that must be granted deliberately (core.permissions
         SUPERADMIN_EXCLUDED_PERMISSIONS). Unlike ``user_has_permission`` it does
         not honour the ``*`` wildcard or the Super Admin role key, does not
         widen through ``dms.admin``, and never reads or writes the permission
-        cache, so a revocation takes effect on the next request.
+        cache, so a revocation takes effect on the next request. A role counts
+        only where it applies (SEC-1).
         """
         permission_key = (permission_name or "").strip()
         if not permission_key or not user_id:
             return False
-        lookup_keys = equivalent_permissions(permission_key) or {permission_key}
+        lookup_keys = set(equivalent_permissions(permission_key) or set()) | {permission_key}
         try:
             db = await self._get_db()
             try:
@@ -994,11 +957,11 @@ class PermissionService:
             if not user_doc:
                 return False
             named = set(lookup_keys) | await self._catalogue_spellings(db, lookup_keys)
-            for rid in user_doc.get("roles", []) or []:
-                resolution = await self._load_role(db, rid)
-                if not resolution.keeps_role_key or not resolution.document:
+            grants, _ = await self.scoped_grants(db, user_doc)
+            for grant in grants:
+                if not grant_applies(grant.get("scope"), organization_id=organization_id, project_id=project_id):
                     continue
-                held = {str(p).strip() for p in (resolution.document.get("permissions") or []) if p is not None}
+                held = set(grant.get("names") or [])
                 held.discard("*")
                 if held & named:
                     return True
@@ -1008,6 +971,68 @@ class PermissionService:
             return False
         return False
 
+    async def scoped_grants(self, db: Any, user_doc: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], set]:
+        """Each of the user's roles as ``{"names", "scope"}`` (SEC-1), and the built-in role names.
+
+        A role contributes only where it was granted (``services.role_grants``): a
+        custom role of another organisation, of a project the user is not on, or a
+        platform role held by an organisation's user contributes nothing. Names are
+        the role's entries plus the catalogue names its ids and labels stand for, so
+        an ObjectId entry is the permission it names. Only built-in roles contribute
+        role names (the name-based ``users:create`` / ``users:read`` rules): a custom
+        role named like a built-in one confers nothing by its name.
+        """
+        memberships = None
+        project_cache: Dict[str, Optional[str]] = {}
+        grants: List[Dict[str, Any]] = []
+        role_names: set = set()
+        for rid in user_doc.get("roles", []) or []:
+            resolution = await self._load_role(db, rid)
+            if not resolution.keeps_role_key:
+                continue
+            role = resolution.document
+            if not role:
+                # A bare built-in key with no document keeps its name, as before.
+                if resolution.key:
+                    role_names.add(resolution.key)
+                continue
+            if not role_is_built_in(role) and memberships is None:
+                memberships = await user_memberships(db, user_doc)
+            applies, scope = await role_grant_scope(db, role, memberships or (set(), set()), project_cache)
+            if not applies:
+                continue
+            if role_is_built_in(role):
+                if resolution.key:
+                    role_names.add(resolution.key)
+                role_name = str(role.get("name", "")).strip().lower()
+                if role_name:
+                    role_names.add(role_name)
+                    normalized_name = _normalize_role_name(role_name)
+                    if normalized_name:
+                        role_names.add(normalized_name)
+            entries = {str(p).strip() for p in (role.get("permissions") or []) if p is not None and str(p).strip()}
+            names = set(entries) | await self._catalogue_names(db, entries)
+            grants.append({"names": sorted(names), "scope": scope})
+        return grants, role_names
+
+    @staticmethod
+    def _decide(
+        grants: List[Dict[str, Any]],
+        role_names: set,
+        permission_key: str,
+        lookup_keys: set,
+        *,
+        organization_id: Optional[str],
+        project_id: Optional[str],
+    ) -> bool:
+        names = applicable_names(grants, organization_id=organization_id, project_id=project_id)
+        granted = "*" in names or bool(lookup_keys & names)
+        if permission_key == "users:create":
+            granted = bool(role_names & {"superadmin", "orgadmin", "projectadmin"})
+        if not granted and permission_key == "users:read":
+            granted = bool(role_names & {"orgadmin", "orguser", "projectadmin", "projectuser"})
+        return granted
+
     async def user_has_permission(
         self,
         user_id: str,
@@ -1016,9 +1041,16 @@ class PermissionService:
         log: bool = True,
         resource_type: Optional[str] = None,
         resource_id: Optional[str] = None,
+        organization_id: Optional[str] = None,
+        project_id: Optional[str] = None,
     ) -> bool:
-        """
-        Check whether a user has a specific permission, honoring wildcard roles and raw permission strings.
+        """Whether the user holds ``permission_name`` through a role that applies here (SEC-1).
+
+        Honours the ``*`` wildcard, catalogue ids and the one-hop alias contract, per
+        role. ``organization_id`` / ``project_id`` are the request's scope when the
+        caller knows it (``PolicyService.authorize``): a custom role then counts only
+        in its own organisation and project. Without them a custom role still counts
+        only for a member of the organisation (and project) it was granted in.
         """
         permission_key = (permission_name or "").strip()
         if not permission_key:
@@ -1027,12 +1059,23 @@ class PermissionService:
         # Held names that satisfy this check: the name, its label spellings, and
         # names it declares or that declare it - one hop, never through a shared
         # legacy alias (F-A9A-2).
-        lookup_keys = equivalent_permissions(permission_key) or {permission_key}
+        lookup_keys = set(equivalent_permissions(permission_key) or set()) | {permission_key}
+        request_org = str(organization_id) if organization_id else None
+        request_project = str(project_id) if project_id else None
 
-        granted = False
+        async def _logged(granted: bool, error: Optional[str] = None) -> bool:
+            if log:
+                try:
+                    extra = {"error": error} if error else {}
+                    await self.audit_logger.log_permission_check(
+                        user_id, permission_key, granted, resource_type=resource_type, resource_id=resource_id, **extra
+                    )
+                except Exception:
+                    pass
+            return granted
+
         redis = None
         cache_key = permission_cache_key(user_id)
-
         try:
             runtime = get_runtime_state()
             redis = await runtime.get_redis()
@@ -1041,36 +1084,17 @@ class PermissionService:
                 cache_parsed = json.loads(cached_data) if cached_data else None
                 if cache_parsed is not None and not await self._cache_entry_is_current(redis, user_id, cache_parsed):
                     cache_parsed = None
-                if cache_parsed is not None:
-                    raw_permissions = cache_parsed.get("raw_permissions", [])
-                    role_names = set(cache_parsed.get("role_names", []))
-                    perm_names = set(cache_parsed.get("perm_names", []))
-
-                    if "*" in raw_permissions or permission_key in raw_permissions:
-                        granted = True
-                    elif lookup_keys and set(raw_permissions) & lookup_keys:
-                        granted = True
-                    else:
-                        granted = bool(lookup_keys & perm_names) or "*" in perm_names
-
-                    if permission_key == "users:create":
-                        if role_names & {"superadmin", "orgadmin", "projectadmin"}:
-                            granted = True
-                        else:
-                            granted = False
-
-                    if not granted and permission_key == "users:read":
-                        if role_names & {"orgadmin", "orguser", "projectadmin", "projectuser"}:
-                            granted = True
-
-                    if log:
-                        try:
-                            await self.audit_logger.log_permission_check(
-                                user_id, permission_key, granted, resource_type=resource_type, resource_id=resource_id
-                            )
-                        except Exception:
-                            pass
-                    return granted
+                if cache_parsed is not None and isinstance(cache_parsed.get("grants"), list):
+                    return await _logged(
+                        self._decide(
+                            cache_parsed["grants"],
+                            set(cache_parsed.get("role_names", [])),
+                            permission_key,
+                            lookup_keys,
+                            organization_id=request_org,
+                            project_id=request_project,
+                        )
+                    )
         except Exception as e:
             logger.warning(f"Failed to read permission cache for {user_id}: {e}")
 
@@ -1086,92 +1110,27 @@ class PermissionService:
 
             user_doc = await db.users.find_one({"_id": user_query_id})
             if not user_doc:
-                granted = False
-            else:
-                role_ids = user_doc.get("roles", []) or []
-                raw_permissions = []
-                perm_names = set()
-                role_names = set()
-                for rid in role_ids:
-                    resolution = await self._load_role(db, rid)
-                    if not resolution.keeps_role_key:
-                        continue
-                    role = resolution.document
-                    # The reference contributes exactly the key the principal carries.
-                    if resolution.key:
-                        role_names.add(resolution.key)
-                    if not role:
-                        continue
-                    role_name = str(role.get("name", "")).lower()
-                    if role_name:
-                        role_names.add(role_name)
-                        normalized_name = _normalize_role_name(role_name)
-                        if normalized_name:
-                            role_names.add(normalized_name)
-                    perms = role.get("permissions", []) or []
-                    raw_permissions.extend([str(p) for p in perms if p is not None])
-
-                if "*" in raw_permissions or permission_key in raw_permissions:
-                    granted = True
-                elif lookup_keys and set(raw_permissions) & lookup_keys:
-                    granted = True
-                else:
-                    user_permissions = await self.get_user_permissions(user_id)
-                    perm_names = {p.name for p in user_permissions}
-                    granted = bool(lookup_keys & perm_names) or "*" in perm_names
-
-                if permission_key == "users:create":
-                    if role_names & {"superadmin", "orgadmin", "projectadmin"}:
-                        granted = True
-                    else:
-                        granted = False
-
-                if not granted and permission_key == "users:read":
-                    if role_names & {"orgadmin", "orguser", "projectadmin", "projectuser"}:
-                        granted = True
-
-                if redis is not None:
-                    try:
-                        # Never cache a decision computed while an authority change
-                        # is pending: it may have read the authority being replaced.
-                        if await redis.get(authority_change_pending_key(user_id)) is None:
-                            await redis.set(cache_key, json.dumps({
-                                "raw_permissions": raw_permissions,
-                                "role_names": list(role_names),
-                                "perm_names": list(perm_names),
-                                "computed_at": computed_at,
-                            }), ex=PERMISSION_CACHE_TTL_SECONDS)
-                    except Exception as e:
-                        logger.warning(f"Failed to write permission cache for {user_id}: {e}")
+                return await _logged(False)
+            grants, role_names = await self.scoped_grants(db, user_doc)
+            granted = self._decide(
+                grants, role_names, permission_key, lookup_keys, organization_id=request_org, project_id=request_project
+            )
+            if redis is not None:
+                try:
+                    # Never cache a decision computed while an authority change
+                    # is pending: it may have read the authority being replaced.
+                    if await redis.get(authority_change_pending_key(user_id)) is None:
+                        await redis.set(cache_key, json.dumps({
+                            "grants": grants,
+                            "role_names": sorted(role_names),
+                            "computed_at": computed_at,
+                        }), ex=PERMISSION_CACHE_TTL_SECONDS)
+                except Exception as e:
+                    logger.warning(f"Failed to write permission cache for {user_id}: {e}")
         except Exception as exc:
             logger.error(f"Failed permission check for user {user_id}: {exc}")
-            granted = False
-            if log:
-                try:
-                    await self.audit_logger.log_permission_check(
-                        user_id,
-                        permission_key,
-                        False,
-                        resource_type=resource_type,
-                        resource_id=resource_id,
-                        error=str(exc),
-                    )
-                except Exception:
-                    pass
-            return False
-
-        if log:
-            try:
-                await self.audit_logger.log_permission_check(
-                    user_id,
-                    permission_key,
-                    granted,
-                    resource_type=resource_type,
-                    resource_id=resource_id,
-                )
-            except Exception:
-                pass
-        return granted
+            return await _logged(False, str(exc))
+        return await _logged(granted)
 
     async def check_resource_access(
         self,

@@ -51,6 +51,7 @@ class AuthenticationService:
         user.username = doc.get("username") or (user.email.split("@")[0] if user.email else "")
         user.roles = doc.get("roles", [])
         user.disabled = bool(doc.get("disabled", False))
+        user.is_active = doc.get("is_active", True) is not False
         user.organization_id = doc.get("organization_id")
         user.projects = doc.get("projects", [])
         user.preferences = doc.get("preferences", {})

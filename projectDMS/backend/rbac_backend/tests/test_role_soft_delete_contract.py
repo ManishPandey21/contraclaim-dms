@@ -351,7 +351,7 @@ def test_deleting_a_role_revokes_a_grant_already_in_the_permission_cache(monkeyp
     assert h.has("dms.document.view")
     cache_key = permission_module.permission_cache_key(USER_ID)
     assert cache_key in h.redis.store, "precondition: the grant is now served from the cache"
-    assert "dms.document.view" in json.loads(h.redis.store[cache_key])["raw_permissions"]
+    assert any("dms.document.view" in grant["names"] for grant in json.loads(h.redis.store[cache_key])["grants"])
 
     h.delete(ROLE_ID)
 
@@ -379,7 +379,7 @@ def test_a_cache_entry_without_a_computation_stamp_is_never_served(monkeypatch) 
     h = _Harness(monkeypatch, redis=_Redis())
     h.seed([_role(ROLE_ID, [])], role_refs=[str(ROLE_ID)], catalogue=[])
     h.redis.store[permission_module.permission_cache_key(USER_ID)] = json.dumps(
-        {"raw_permissions": ["dms.document.delete"], "role_names": [], "perm_names": []}
+        {"grants": [{"names": ["dms.document.delete"], "scope": None}], "role_names": []}
     )
     assert not h.has("dms.document.delete")
 

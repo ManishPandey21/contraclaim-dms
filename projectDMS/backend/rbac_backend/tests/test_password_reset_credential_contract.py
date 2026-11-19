@@ -658,6 +658,7 @@ def _create_controller(db):
     controller._validate_user_input = _passthrough
     controller._resolve_assigned_roles = _passthrough
     controller._validate_user_context = _nothing
+    controller._fence_added_roles = _nothing  # SEC-3: role fit is not what these tests are about
     return controller, audit
 
 

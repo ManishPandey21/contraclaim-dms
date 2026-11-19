@@ -11,6 +11,7 @@ import jwt
 from pydantic import BaseModel, Field
 
 from ..core.security import get_current_user, CurrentUser, create_access_token
+from ..services.account_status import object_account_is_active
 from ..core.csrf import clear_csrf_cookie, create_csrf_token, set_csrf_cookie
 from ..core.database import get_db
 from ..core.config import settings
@@ -179,7 +180,7 @@ class AuthController:
                 )
 
             # Check if account is disabled
-            if user.disabled:
+            if not object_account_is_active(user):
                 await self.audit_logger.log_login_failed(
                     validated_email,
                     "account_disabled",
@@ -262,7 +263,7 @@ class AuthController:
 
             # Validate current user is still active
             user = await self.user_service.get_user_by_id(current_user.id)
-            if not user or user.disabled:
+            if not object_account_is_active(user):
                 await self.audit_logger.log_token_refresh_failed(
                     current_user.id, "user_inactive"
                 )

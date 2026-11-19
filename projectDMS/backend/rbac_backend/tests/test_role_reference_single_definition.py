@@ -94,9 +94,12 @@ def test_the_principal_judges_references_with_the_resolver() -> None:
 def test_every_permission_resolver_loads_roles_through_the_resolver() -> None:
     path = BACKEND_ROOT / "services" / "permission_service.py"
     assert "load_role_resolution" in _calls(_function(path, "_load_role"))
+    # SEC-1: the aggregating resolvers evaluate each role in its scope through
+    # `scoped_grants`, which is the one place they load role references.
+    assert "_load_role" in _calls(_function(path, "scoped_grants"))
     for name in ("get_user_permissions", "get_effective_permission_names", "user_has_permission", "check_resource_access"):
         calls = _calls(_function(path, name))
-        assert "_load_role" in calls, f"{name} no longer resolves role references through _load_role"
+        assert {"_load_role", "scoped_grants"} & calls, f"{name} no longer resolves role references through _load_role"
 
 
 def test_role_documents_are_read_by_reference_only_inside_the_fetchers() -> None:

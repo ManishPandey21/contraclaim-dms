@@ -14,6 +14,7 @@ from bson import ObjectId
 from pydantic import ConfigDict
 from ..services.permission_service import PermissionService, fetch_role_documents
 from ..services.credential_fields import credential_version, token_credential_version
+from ..services.account_status import account_is_active
 from .role_reference import ROLE_ALIASES as _ROLE_REFERENCE_ALIASES, normalize_role_key, resolve_role_reference
 from ..utils.audit_logger import get_audit_logger
 
@@ -231,7 +232,7 @@ async def resolve_stored_principal(db, actor_reference: Any) -> CurrentUser:
         raise StoredPrincipalUnavailableError(
             f"stored actor reference {reference!r} resolves to no user"
         )
-    if user.get("disabled"):
+    if not account_is_active(user):
         raise StoredPrincipalUnavailableError(
             f"stored actor reference {reference!r} resolves to a disabled account"
         )
@@ -272,6 +273,10 @@ async def principal_from_access_token(token: str, db) -> Optional[CurrentUser]:
             return None
         user = await db.users.find_one({"email": email})
         if not user:
+            return None
+        # SEC-4: a disabled account stops authenticating on its next request,
+        # whatever its token's expiry and whether or not a session store exists.
+        if not account_is_active(user):
             return None
         user_id_str = str(user["_id"])
 
@@ -402,6 +407,8 @@ async def get_current_user(request: Request, db = Depends(get_db)):
 
         # Try load real user if possible
         user_doc = await db.users.find_one({"_id": x_user_id}) or await db.users.find_one({"email": x_user_id})
+        if user_doc is not None and not account_is_active(user_doc):
+            raise credentials_exception  # SEC-4: a disabled account stops here too
         username = (user_doc.get("username") if user_doc else None) or str(x_user_id)
         first_name = (user_doc.get("first_name") or user_doc.get("firstName")) if user_doc else None
         last_name = (user_doc.get("last_name") or user_doc.get("lastName")) if user_doc else None

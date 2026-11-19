@@ -628,6 +628,22 @@ def equivalent_permissions(permission: str) -> set[str]:
     return equivalents
 
 
+def known_permission_name(permission: str) -> Optional[str]:
+    """The name a role entry stands for if the platform defines it, else ``None`` (SEC-2).
+
+    A label spelling resolves to its target; a canonical or declared legacy name is
+    itself. Catalogue documents are resolved by the role service.
+    """
+    text = (permission or "").strip()
+    if not text:
+        return None
+    if text in _LABEL_TARGET:
+        return _LABEL_TARGET[text]
+    if text in CANONICAL_PERMISSIONS or text in LEGACY_PERMISSION_ALIASES or text in ALIAS_TO_CANONICAL or text in LEGACY_LABEL_ALIASES:
+        return text
+    return None
+
+
 def permission_domain(permission: str) -> str:
     canonical = ALIAS_TO_CANONICAL.get(permission, permission)
     return PERMISSION_DOMAINS.get(canonical, "system")

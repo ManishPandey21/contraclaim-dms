@@ -1,6 +1,6 @@
 """D4-B: an authorization change never leaves stale authority silently trusted.
 
-`PermissionService.user_has_permission` serves grants from `user_perms:v3:{id}` for
+`PermissionService.user_has_permission` serves grants from `user_perms:v4:{id}` for
 up to an hour. Every authority-changing mutation - role delete, role permission
 update, user role update - therefore has to make that entry untrustworthy. Before
 R-A9D the invalidation ran AFTER the database write and swallowed every error:
@@ -267,7 +267,7 @@ def _assert_refused_as_outage(mutation, refusal: BaseException) -> None:
 def _cached_grant(h: _Harness) -> None:
     assert h.has(), "positive control: the role grants before the change"
     assert h.cache_key in h.redis.store, "precondition: the grant is now served from the cache"
-    assert REVOKED in json.loads(h.redis.store[h.cache_key])["raw_permissions"]
+    assert any(REVOKED in grant["names"] for grant in json.loads(h.redis.store[h.cache_key])["grants"])
 
 
 # --------------------------------------------------------------------------- #
@@ -373,9 +373,8 @@ def _joins_the_role_during_the_write(h: _Harness) -> None:
     h.db.users.docs.append({"_id": LATE_OID, "email": "late@example.com", "roles": [str(ROLE_ID)], "organization_id": "org1"})
     h.redis.store[permission_module.permission_cache_key(LATE_ID)] = json.dumps(
         {
-            "raw_permissions": [REVOKED, "dms.document.view"],
+            "grants": [{"names": [REVOKED, "dms.document.view"], "scope": {"organization_id": "org1", "project_id": None}}],
             "role_names": [],
-            "perm_names": [],
             # Comfortably older than the invalidation to come, so the whole-second tie
             # guard cannot mask a missing invalidation.
             "computed_at": datetime.utcnow().timestamp() - 30,

@@ -422,7 +422,11 @@ class UserService:
 
             # A role change is announced to the permission cache BEFORE the write, and
             # refused (503) if it cannot be: a revoked grant must never stay cached (D4-B).
-            role_change = "roles" in update_dict
+            # SEC-1: a custom role counts only where the user is a member, so a
+            # membership change is an authority change too, as is disabling.
+            role_change = bool(
+                {"roles", "organization_id", "organizations", "projects", "disabled", "is_active"} & set(update_dict)
+            )
             if role_change:
                 await begin_authority_change([user_oid])
 
