@@ -35,4 +35,6 @@ python-docx is pinned in `rbac_backend/requirements-docx-writer.txt`, installed 
 - `services/contracts_ingest.py`: DOCX contracts gain a python-docx text parser at ingestion;
 - `services/contract_appraisal/service.py` `build_docx` and `services/chronology.py` `_docx_bytes`: these Word exports import python-docx unconditionally, so today they fail in production and would start working.
 
+Separately, `services/docling/ocr_service.py` (the Docling microservice, its own image) already installs `python-docx>=1.1.0` from `services/docling/requirements.txt`; it is unaffected by this setting and by the backend's requirements.
+
 Approving `DOCX_WRITER=python_docx` therefore also needs a decision on each of these (or a guard on each) before python-docx moves into `requirements.txt`.

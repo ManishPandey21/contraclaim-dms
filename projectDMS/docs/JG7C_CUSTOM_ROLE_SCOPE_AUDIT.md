@@ -2,7 +2,9 @@
 
 **Owner decision (2026-11-18):** support explicitly authorised custom organisation/project roles in `build_scope_query`; audit every permission, membership, tenant-scope and role-resolution path first; never relax row visibility globally; a custom role alone is never enough - the user must hold the required effective permission and explicit organisation/project access; production compatibility pending P-05.
 
-**Status: audited, not implemented.** The audit found that the platform cannot yet tell *where* a custom role's permission was granted, so "permission P + membership of organisation B" does not prove P was granted in B. Implementing the scope change on today's resolver would widen access across organisations. Four prerequisites (section 3) need an owner decision first; the design in section 4 is ready once they are in place. Every statement below was read in the code at `82973e9` (file:line), the key ones re-checked by hand.
+**Status update 2026-11-19:** the four prerequisites (section 3) are implemented as SEC-1 to SEC-4 and the design in section 4 as `permission_scope_query`, opted in on `GET /api/claims` only; see `docs/SECURITY_REMEDIATION_2026-11-19.md`. Implemented and locally verified, not production-approved. The text below is the 2026-11-18 audit as written.
+
+**Status (2026-11-18): audited, not implemented.** The audit found that the platform cannot yet tell *where* a custom role's permission was granted, so "permission P + membership of organisation B" does not prove P was granted in B. Implementing the scope change on today's resolver would widen access across organisations. Four prerequisites (section 3) need an owner decision first; the design in section 4 is ready once they are in place. Every statement below was read in the code at `82973e9` (file:line), the key ones re-checked by hand.
 
 ## 1. What happens today
 
