@@ -215,6 +215,8 @@ Severity-ranked tickets, code references, tests, migration risks and P-05 depend
 | SEC-4 | Medium | Disabled accounts kept authenticating with live tokens; `is_active: false` ignored | Implemented | `I/test_security_remediation_mongo.py` (both flags, worker principal, service account) | P-05 (`is_active: false` users locked out) | Not accepted |
 | JG-7(c) | - | Custom-role row visibility | Implemented, opt-in on `GET /api/claims` only | `I/test_security_remediation_mongo.py` (claims list, filter shape) | P-05; security review | Not accepted |
 
+**CI.** Run 44467711965 on `b64d4ca` (SEC-1 to SEC-4, JG-7(c), Gate 3, readings, docs): backend job failed at the mypy staged gate (six new type errors in the new code; no test ran); fixed in `0a62ba8`. Run 44468193199 on `0a62ba8`: backend 8,408 unit and 989 real-MongoDB passed, 0 failed (including `test_security_remediation_mongo`, 11); frontend passed; dependency scan passed; Docker passed; secret scan failed (the two known findings, with the security owner). Locally: 18 mutants, 17 killed, 1 equivalent (removed). Not run on staging.
+
 Also: Gate 3 error-state tests for `/reviewer-roles`, `/skill-reviews`, `/skills` (and `/letters/skills`): `client/src/pages/__tests__/ReviewerAssignmentsPage.errors.test.tsx`, `SkillAdminPage.errors.test.tsx` (8), `docs/GATE_3_ROUTE_INVENTORY.md` regenerated. Legacy `Other` claims: read-only P-03 `other_type`, no claim changed. python-docx: the Docling microservice is a fifth consumer (its own image, already installs it); production renderer unchanged.
 
 ### JG-7(c): custom roles and row visibility - audited, not implemented (owner decision needed)
