@@ -379,3 +379,5 @@ Still open, documented, not changed:
 - **Locally:** the full mocked set passes (78 passed; the 59 skipped are deployed-stack suites).
 
 Backend in both runs: 8,431 unit tests and 1,070 real-MongoDB tests (80 modules) passed.
+
+**CI (exact head).** CI run 44570828567 on `14b695b`: backend (8,431 unit; real-Mongo 80 modules, 1,070 passed, every module ran), frontend (1,014 unit; 78 mocked E2E passed), dependency scan and Docker green; secret scan red (same two findings). Fourth-pass stages: implemented, tested and CI-verified; **not** security-approved (authorised review outstanding) and **not** production-accepted.

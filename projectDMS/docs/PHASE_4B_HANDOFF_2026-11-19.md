@@ -126,7 +126,7 @@ Open:
 
 ## Fourth pass (T-1 to T-4, 2026-11-19)
 
-- **Done (implemented and tested; CI pending at the time of writing):**
+- **Done (implemented, tested, CI-verified in run 44570828567 on `14b695b`; secret scan red as before):**
   - T-2: client permissions fail closed, including the fix for a Critical remount loop found by review;
   - T-1: user read and user list count memberships;
   - T-3: digests resolve the email service at run time;

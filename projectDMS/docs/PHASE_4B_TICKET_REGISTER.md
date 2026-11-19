@@ -209,13 +209,15 @@ Details: `docs/SECURITY_REMEDIATION_2026-11-19.md`, "Owner decisions T-1 to T-4"
 
 | Ticket | Implemented | Tested | CI-verified | Security-approved | Production-accepted |
 |---|---|---|---|---|---|
-| T-2 client permissions fail closed (no catalogue fallback, server list only, three states, invalidation, explicit-grant rule) | Yes, including the Critical loop fix from review | 16 hook tests plus the loop regression; full client suite; mutants killed | Pending (`e922566`) | No | No |
-| T-1 user-read rule and user list count active project memberships | Yes | Real HTTP (6 tests); mutants killed | Pending | No | No |
-| T-3 digest jobs resolve the email service at run time | Yes | Unit (5); old scheduler fails 2 | Pending | No | No |
-| T-4 skill-version index verified and fail closed; never created | Yes | Real replica set plus unit (11); mutants killed | Pending | No | No |
+| T-2 client permissions fail closed (no catalogue fallback, server list only, three states, invalidation, explicit-grant rule) | Yes, including the Critical loop fix from review | 16 hook tests plus the loop regression; full client suite; mutants killed | Yes, run 44570828567 | No | No |
+| T-1 user-read rule and user list count active project memberships | Yes | Real HTTP (6 tests); mutants killed | Yes, run 44570828567 | No | No |
+| T-3 digest jobs resolve the email service at run time | Yes | Unit (5); old scheduler fails 2 | Yes, run 44570828567 | No | No |
+| T-4 skill-version index verified and fail closed; never created | Yes | Real replica set plus unit (11); mutants killed | Yes, run 44570828567 | No | No |
 | DEF-4 billing separation | Design and migration plan only; aliases unchanged | — | — | No | Needs P-05, security review, release decision |
-| Super Admin `*` contract | Kept; never read as explicit-grant | Hook tests | Pending | No | No |
+| Super Admin `*` contract | Kept; never read as explicit-grant | Hook tests | Yes, run 44570828567 | No | No |
 | DEF-5 | Unchanged; nothing enabled | — | — | — | Needs P-05 |
+
+CI run 44570828567 on `14b695b`: backend (8,431 unit; real-Mongo 80 modules, 1,070 passed, every module ran), frontend (1,014 unit; 78 mocked E2E passed), dependency scan and Docker green; secret scan red (same two findings). Not security-approved; not production-accepted.
 
 ### Final code hardening and security follow-ups (owner instructions 2026-11-19, third pass)
 
