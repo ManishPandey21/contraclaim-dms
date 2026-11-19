@@ -142,3 +142,107 @@ Unchanged: no claim, notice decision or type is changed; P-03 reports the counts
 2. For each non-zero P-05 count: accept the loss of access at deployment, or re-grant the roles correctly before it.
 3. Authorised security review of SEC-1 to SEC-4 and JG-7(c).
 4. Legacy `Other` claims: provisional or not.
+
+## Final code hardening and security follow-ups (owner instructions, 2026-11-19, third pass)
+
+Stages kept apart as before: **implemented** (code and its proof ran here), **tested** (real MongoDB, mutation), **CI-verified** (exact-head run), **security-approved** (authorised review; not given), **production-accepted** (not given). Nothing here changes stored users, roles, claims, production configuration or rollout settings.
+
+### 1. 4B-05: deprecation is one transaction
+
+Before: `SkillRegistry.deprecate` materialised a bundled-only version **before** the transaction, so a refused or failed deprecation (and any call on a standalone server, which answers 503) could leave a materialised copy behind, and two concurrent deprecations of a bundled version could both insert. Now the read, the materialisation, the status change and the audit event are all inside `run_in_transaction`; the production unique index `skill_version_unique` (migration `20261114_0001`) makes concurrent materialisations conflict, and the retried call reads the winner's result and is refused 409. Without transactions the call is refused 503 before any write.
+
+Proof (`I/test_skill_publication_transactions_mongo.py`, real replica set, with the production unique index, and without it): materialisation in the transaction; a failure at the audit write rolls back the materialised copy and leaves a stored version published; 4 concurrent deprecations × 5 rounds × (bundled, stored) succeed once, write one document and one audit event; a forced interleaving (A reads, B commits, A must lose); repeats, a missing version (404) and a draft (409, nothing materialised); a standalone server (503, no write); 4 concurrent deprecations × 5 rounds with the unique index dropped (the review found the migration index is not created at start-up; the materialised copy now has a deterministic `_id`, `bundled:<key>@<version>`, so the `_id` index serialises them). Mutants: no deterministic `_id` (killed, 5 rounds); materialising outside the transaction (killed, 9 tests); removing either of the two overlapping status guards alone is equivalent (each covers the other), removing both is killed (13 tests).
+
+### 2. `POST /permissions/check`
+
+Callers: one, the client's `useHasPermission` (`client/src/services/enhanced-api.ts::checkUserPermission`), which sends only `{"permission"}` and reads `granted`; used by the Claim Bench for `dms.claim.strategy.read`. The response contract for that call is unchanged.
+
+- **Self-check** (no `user_id`, or your own): any signed-in user, as before. It now answers with the gates' permission-level rule (`PolicyService.has_permission`), so an explicit-grant permission needs an explicit grant: before, a holder of a custom wildcard role was told `granted: true` for `dms.claim.strategy.read`, which every gate refuses.
+- **Another user**: `roles:read` (held by Super Admin, organisation and project administrators; not by ordinary members) in a named `organization_id` or `project_id` through `PolicyService.authorize` (membership and subscription checked); Super Admin may omit the scope. Authority (`roles:read` anywhere) is checked before the named scope is read. A project is resolved to its own organisation; an unknown or mismatched project answers exactly like a refused scope (403, same body). A project administrator naming only an organisation is refused (organisation-wide scope required). The target must be the one user stored under that id (both id forms present: refused), a member of the named scope, and visible under the existing user-read rule (`AuthorizationService.check_user_access`). A missing and a hidden user get the same 404 and body, and the same membership reads. The target is evaluated as a request would see them (revoked role references dropped, role spellings normalised). The answer is the target's permission in that scope; a disabled account is `granted: false`, `account_active: false`. Rate limited (`scope="permission_check_other_user"`, 60/min). Every other-user check, allowed, refused, rate-limited or failed, writes `permission.check.other_user` (actor, target, permission, scope, result, reason, granted).
+
+Proof (`I/test_permission_check_mongo.py`, real HTTP): self-check unchanged for every member; members without `roles:read` refused and audited; scope required; organisation administrator in scope, with project roles counting only in their project and the B role of a dual member not counting in A; no cross-tenant enumeration (other organisation 403; hidden vs missing identical 404; mismatched project 404; another organisation's project 403); project administrator confined to their project; organisation administrator naming a project the target is not on (404); Super Admin unscoped and scoped, a string-id target found as stored; audit sequence for each; and, from the review below, no project-existence oracle (every probe of a missing, foreign or mismatched project gives one identical answer per caller), a project administrator by membership row confined, a revoked superadmin role not reported, an id stored in both forms refused, rate-limited checks audited, the user-read rule kept. The original route fails 6 of the first 7 tests (the unchanged self-check passes). Mutants (13): no authority-first check, unresolved scope as 404, no organisation-wide requirement, raw target principal, first-match id lookup, unaudited limiter, no authorisation, no scope requirement, no organisation membership, no project membership, no user-read rule, no disabled-account rule, no Super Admin scope rule: all killed.
+
+### 3. Advertised versus enforced permissions
+
+Audit of `PermissionService.get_effective_permission_names` (the `permissions` list on login and `/api/users/me`, which the client uses to show and hide actions) against the evaluators the gates use. There are two kinds of gate: `require_permission` (Super Admin, else `user_has_permission`) and `PolicyService.authorize` (`has_permission`: the explicit-grant rule for `SUPERADMIN_EXCLUDED_PERMISSIONS`, and administrator widening, `dms.admin` passing `dms.*`). A list the client cannot attribute to a gate kind may only name what **both** grant.
+
+Over-advertisement found and removed:
+
+| What was advertised | Why it was wrong |
+|---|---|
+| The user document's own `permissions` field | No evaluator reads it. The two routes also fell back to it whenever the effective list was empty. |
+| `users:create` (and its aliases) from a custom role | The check grants it only to the built-in administrator roles. |
+| `["*"]` for a holder of a custom wildcard role | It claimed `users:create` and the explicit-grant permissions, which the gates refuse. Such a user is now listed from the catalogue. |
+
+Kept, documented: `["*"]` for Super Admin (the client short-circuits Super Admin by role anyway); it does not cover the explicit-grant permissions, which the client asks the server about. Not advertised by design: the policy's administrator widening, because a `require_permission` gate does not apply it (under-advertisement, the safe direction; the self-check answers with the policy rule).
+
+Proof (`I/test_effective_permissions_mongo.py`): for custom, dual-organisation, project, platform-held, wildcard and explicit-grant holders, and for every built-in persona, in four scopes, the advertised list equals the set of catalogue names both gate kinds grant; `/api/users/me` returns `[]` for a user whose only "permissions" are the stored field; a catalogue-id entry advertises the name, not the id. With real Redis (`I/test_security_redis_mongo.py`): after a role edit and a revocation through the API, the cached checks and the advertised list change together. Mutants (5): advertising the stored field, dropping the explicit rule, `*` for wildcard roles, the policy widening, `users:create` from a custom role: all killed. Existing tests that encoded the old advertisement (`T/test_role_permission_catalog_drift.py`, `T/test_role_soft_delete_contract.py`) were updated with a note.
+
+### 4. DEF-4: compatibility assessment and separation proposal (no change made)
+
+Owner decision: aliases and billing/subscription visibility unchanged; the three names stay non-delegable.
+
+Observed (pinned by `I/test_def4_alias_compatibility_mongo.py`, real HTTP):
+
+| Held name | Who holds it (built-in) | Billing/subscription checks it passes by alias |
+|---|---|---|
+| `organizations:read` | every tenant role: superadmin, orgadmin, orguser, contractmgr_org, projectadmin, projectuser | `billing.plan.view`, `billing.invoice.view`, `billing.invoice.download`, `subscription.history.view` (and `dms.contract.catalogue.browse`) |
+| `orgs:view` | none built-in (legacy spelling) | same as `organizations:read` |
+| `reports:view` | reporter | `subscription.usage.view` (and `dms.report.view`) |
+
+Consequence today: an ordinary organisation or project user reads their organisation's billing records, billing review queue and subscription history (`/api/rbac-monetization/billing/{records,review-queue,history}/{org}`), always within their own organisation (another organisation: 403). None of the three names can be put on a role by a non-Super-Admin (403).
+
+Proposal (for decision; not implemented):
+
+1. Introduce view-only names that carry no billing meaning, for example `dms.organization.view` and `dms.report.view` (exists), and grant them to the built-in roles alongside the legacy names.
+2. Give billing and subscription visibility its own names on the roles that should have it (proposed: orgadmin, and `contraclaim_billing_admin`); ordinary members would lose it.
+3. Remove the billing/subscription members from the `organizations:read`/`orgs:view`/`reports:view` alias groups only after P-05 reports, per organisation, which custom roles hold these names and which users would lose billing visibility, and after approval. Until then the aliases stay and the names stay non-delegable.
+4. Expected effect: ordinary members stop seeing billing records and subscription history; organisation administrators and billing administrators unchanged. The client's billing pages would need checking for how they gate (not assessed here).
+
+### 5. DEF-5: string user ids (tests and design; no change made)
+
+Reproduced with real login (`I/test_def5_string_user_ids_mongo.py`): a user stored under a string id signs in, but `/api/users/me` answers 422 and `/api/me` and `/api/refresh` 401 "no longer active". Tests: ObjectId users unaffected (pass); a string id never resolves to another user, including an ObjectId user with the same hex (pass); today's signature pinned (pass); three intended-behaviour tests marked `xfail(strict=True)`, so a fix turns them red until they are updated deliberately.
+
+Backwards-compatible design (for after P-05):
+
+- One lookup helper used by `UserService` and the user routes: match `_id` as stored, `{"_id": {"$in": [raw, ObjectId(raw) if valid]}}`, with `limit 2`; **two matches is refused** (fail closed: a string id equal to another user's ObjectId hex), never the first one.
+- Never rewrite stored ids; tokens keep naming the id as stored.
+- Behind a setting (`ACCEPT_LEGACY_STRING_USER_IDS`, default off), turned on only if P-05 reports string ids, with the strict xfails flipped in the same change.
+- `update_last_login`, `_validate_user_id` call sites and `validate_object_id` in `routers/users.py` move to the helper; everything else that reads users by id already tolerates both forms (`PermissionService`, `/permissions/check`).
+
+### 6. DEF-6: notification service and the database handle (fixed)
+
+`dependencies.get_notification_service` kept the first database handle for the life of the process. The test harness swaps handles (the reproduced 500), and so does production on `disconnect`/`connect`, after which the service would write through a closed client. Now the service (and the email service) is rebuilt when the handle object changes; with an unchanged handle it is the same object as before, and every service shares the one WebSocket connection manager. Proof: `T/test_notification_service_binding.py` (3) and `I/test_notifications_real_deps_mongo.py` (two databases in turn over real HTTP; fails with 500 on the old code).
+
+### Independent review of the third pass
+
+A separate reviewing agent (not the authorised security owner) read the diff end to end; no Critical or High findings.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium, introduced | Project-existence oracle: the scope was resolved before authority, so any member could tell a missing project (404) from another tenant's (403), and which organisation owns it | Fixed: authority first; unresolved scope answers like a refusal. Test and two mutants |
+| 2 | Low-Medium, introduced | Timing: a missing user cost fewer reads than a hidden one | Fixed: the same membership reads and user-read rule run for a missing user (probe document); residual sub-query timing not eliminated |
+| 3 | Low-Medium, pre-existing rule newly reachable | A project administrator assigned by membership row only (empty `users.projects`) passes `check_user_access` organisation-wide | Fixed in this route: organisation-wide answers need organisation-wide scope. The rule in `check_user_access` itself is unchanged (ticket below) |
+| 4 | Low, introduced | Target evaluated from raw `roles`: a revoked superadmin role still reported authority | Fixed: canonical principal builder with revoked roles dropped |
+| 5 | Low, conditional | `skill_version_unique` is created by migration only; without it concurrent materialisations duplicate | Fixed: deterministic `_id` |
+| 6 | Low, DEF-5 class | Both id forms stored: visibility and evaluation could read different users | Fixed: ambiguous id refused (404) |
+| 7 | Low, introduced | Limiter refusals and unexpected errors not audited | Fixed |
+| 8 | Low, pre-existing | Super Admin advertised as `["*"]`, which implies the explicit-grant permissions | Kept and documented (the client short-circuits Super Admin by role; the explicit permissions are asked of the server) |
+| 9 | Info | With the stored field no longer advertised, an empty effective list sends the client (`useRBAC.ts`) to its role-catalogue fallback, which ordinary users cannot read; `routers/users.py` still shows the stored field for other users' records | Not changed (UI-only; ticket below) |
+| 10 | Info | A self-check naming a foreign organisation answers from the caller's own grants | Not changed; no foreign data involved |
+| 11 | Info | `_refresh_skill` pointer outside the transaction; observability counter on retries; `services/scheduler.py` keeps start-up `email_service` methods (DEF-6 rebinding does not reach the digest jobs) | Not changed; ticket below for the scheduler |
+
+New tickets (not fixed here): T-1 `AuthorizationService.check_user_access` should read project assignment from `project_memberships` as well as `users.projects` (finding 3, general rule); T-2 client `useRBAC` should trust an empty effective list instead of falling back to the role catalogue (finding 9); T-3 scheduler digest jobs should resolve the email service per run (finding 11).
+
+**Re-review (same agent, after the fixes).**
+
+Findings 1 to 7 are closed. Residuals and side effects:
+
+| Item | Severity | Status |
+|---|---|---|
+| Timing residual of finding 1. A tenant administrator can tell an unresolvable project from another tenant's project by timing, because the latter goes on into `authorize`. Limited to administrators and 60 requests a minute. | Low | Documented |
+| New bug from fix 4. A target whose stored email the user model rejects (none, or a local domain) answered 500. | Low | Fixed: the target principal is no longer a validated model. Test `test_a_target_without_a_valid_email_is_answered`; the raw-role mutant is still caught |
+| Side effect of fix 3. The other-user check now serves built-in administrators, `orguser` holders and Super Admin. Holders of a custom `roles:read` role, at organisation or project level, are refused. | Info | Stricter than the contract; documented |
+| Draft import and seed migration `20261114_0002` can still duplicate a version where `skill_version_unique` is absent. This predates the change. | Info | Ticket T-4: create the index at start-up |
+
+This is not the authorised security review.

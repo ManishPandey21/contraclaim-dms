@@ -97,12 +97,32 @@ Fixed:
 
 Open:
 
-- **DEF-5:** string user ids get 422 on `/api/users/me`, 401 on `/api/me` and refresh. This is data-dependent and P-05 counts the users. Ticket only.
-- **DEF-6:** the notifications service singleton keeps a stale database handle. Harness only. Ticket.
-- **DEF-4 root cause (owner decision):** should `organizations:read`, `orgs:view` and `reports:view` keep satisfying the billing and subscription checks?
-- **Pre-existing:** `POST /permissions/check` lets any user query any user's permissions (information disclosure). The advertised permission list includes the user's own `permissions` field, which enforcement ignores.
+- **DEF-5:** string user ids get 422 on `/api/users/me`, 401 on `/api/me` and refresh. This is data-dependent and P-05 counts the users. Regression tests and design added in the third pass; fix after P-05.
+- **DEF-6:** fixed in the third pass (the service rebinds on a new database handle; also covers production reconnects).
+- **DEF-4 root cause (owner decision):** should `organizations:read`, `orgs:view` and `reports:view` keep satisfying the billing and subscription checks? Assessment and separation proposal in the third pass.
+- **Fixed in the third pass:** `POST /permissions/check` information disclosure, and the advertised permission list including the stored `permissions` field.
 - **Legacy built-in roles:** ones stored under an ObjectId without `is_system` now count as custom. P-05 counts them; audit before deployment.
 - **R-3 effect:** a user whose only access is a custom project role must select the project to list claims.
+
+## Third pass (final code hardening, 2026-11-19)
+
+- **Done (implemented and tested; CI pending at the time of writing):**
+  - 4B-05 deprecation in one transaction;
+  - `POST /permissions/check` restricted to self-checks, or scoped administrators with an audit trail;
+  - the advertised permission list reconciled with both gate kinds;
+  - DEF-6 notification service rebinding.
+- **Assessment only:**
+  - DEF-4: aliases unchanged; proposal to separate billing visibility, which needs P-05 and approval;
+  - DEF-5: tests and design, behind a setting, after P-05.
+- **Independent review:** 7 findings fixed, 4 documented.
+- **New tickets:**
+  - T-1: `check_user_access` and membership rows;
+  - T-2: client `useRBAC` fallback;
+  - T-3: scheduler email binding.
+- **Owner decisions needed:**
+  - DEF-4 separation;
+  - the Super Admin `["*"]` advertisement.
+- **Found and pinned:** today, ordinary organisation and project members read their organisation's billing records and subscription history through the `organizations:read` alias.
 
 ## Blockers before production authorisation
 
@@ -122,6 +142,6 @@ Open:
   - a production reading: 4B-04 M-01 (P-02) and the P-05 re-grants;
   - staging: 4B-44;
   - experts or the owner: 4B-42, and the DEF-4 decision;
-  - an approval to fix: DEF-5, DEF-6 and `POST /permissions/check`.
+  - DEF-5 after P-05; DEF-4 separation after P-05 and approval; T-1 to T-4 (approval to fix).
 
   None of these should be started without that input. The security fixes would change behaviour, so they need explicit approval.
