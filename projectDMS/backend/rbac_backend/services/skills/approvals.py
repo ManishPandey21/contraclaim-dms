@@ -37,7 +37,7 @@ from ...models.skill import (
 )
 from ...utils.datetime import now_utc
 from .system_skills import with_approval_floor
-from .transactions import SKILL_VERSIONS, run_in_transaction, session_kwargs
+from .transactions import SKILL_VERSIONS, audit_skill_decision, run_in_transaction, session_kwargs
 
 SKILL_APPROVALS = "skill_approvals"
 
@@ -290,6 +290,23 @@ class SkillApprovalService:
             await self.db[SKILL_APPROVALS].insert_one(approval.model_dump(by_alias=True), **kw)
             live_ids = sorted([*(i.id or "" for i in matching), approval.id or ""])
             await self._bump(current, kw, {"approvals_digest": approvals_digest(live_ids)})
+            await audit_skill_decision(
+                self.db,
+                session,
+                action="skill.approval.record",
+                actor_id=actor_id,
+                skill_key=version.skill_key,
+                version=version.version,
+                metadata={
+                    "approval_id": approval.id,
+                    "kind": request.kind,
+                    "reviewer_role": request.reviewer_role,
+                    "content_hash": version.content_hash,
+                    "policy_hash": policy_hash,
+                    "eval_report_hash": report_hash,
+                    "eval_run_id": eval_run_id,
+                },
+            )
             return approval
 
         return await run_in_transaction(self.db, decide)
@@ -326,12 +343,14 @@ class SkillApprovalService:
                 **kw,
             )
             current = await self._version_in(approval.skill_key, approval.version, kw)
+            deprecated = False
             if current is not None:
                 fields: Dict[str, Any] = {}
                 if current.status == "published" and relied_on(current, approval):
                     fields.update(
                         {"status": "deprecated", "deprecated_by": actor_id, "deprecated_at": now}
                     )
+                    deprecated = True
                 live_ids = sorted(
                     item.id or ""
                     for item in await self._list_in(approval.skill_key, approval.version, kw)
@@ -339,6 +358,34 @@ class SkillApprovalService:
                 )
                 fields["approvals_digest"] = approvals_digest(live_ids)
                 await self._bump(current, kw, fields)
+            await audit_skill_decision(
+                self.db,
+                session,
+                action="skill.approval.revoke",
+                actor_id=actor_id,
+                skill_key=approval.skill_key,
+                version=approval.version,
+                metadata={
+                    "approval_id": approval.id,
+                    "kind": approval.kind,
+                    "reviewer_role": approval.reviewer_role,
+                    "reviewer_user_id": approval.reviewer_user_id,
+                    "reason": reason,
+                    "deprecated_version": deprecated,
+                },
+            )
+            if deprecated:
+                await audit_skill_decision(
+                    self.db,
+                    session,
+                    action="skill.version.deprecate",
+                    actor_id=actor_id,
+                    skill_key=approval.skill_key,
+                    version=approval.version,
+                    before={"status": "published"},
+                    after={"status": "deprecated"},
+                    metadata={"cause": "approval_revoked", "approval_id": approval.id},
+                )
             return approval.model_copy(update={"revoked_at": now, "revoked_by": actor_id, "revoke_reason": reason})
 
         return await run_in_transaction(self.db, decide)

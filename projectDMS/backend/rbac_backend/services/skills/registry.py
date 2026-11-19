@@ -42,7 +42,7 @@ from .approvals import (
     required_reviews,
     revision_filter,
 )
-from .transactions import run_in_transaction, session_kwargs
+from .transactions import audit_skill_decision, run_in_transaction, session_kwargs
 from .loader import LoadedSkill
 from .system_skills import (
     AWAITING_APPROVAL_REASON,
@@ -403,6 +403,23 @@ class SkillRegistry:
             )
             if not getattr(result, "matched_count", 0):
                 raise HTTPException(status_code=409, detail="Version changed while publishing; retry")
+            await audit_skill_decision(
+                self.db,
+                session,
+                action="skill.version.publish",
+                actor_id=publisher,
+                skill_key=skill_key,
+                version=version,
+                before={"status": "draft"},
+                after={"status": "published"},
+                metadata={
+                    "content_hash": record.content_hash,
+                    "eval_run_id": eval_run_id,
+                    "eval_score": eval_report.score,
+                    "eval_threshold": eval_report.threshold,
+                    "approval_ids": sorted(item.id or "" for item in approvals if item.revoked_at is None),
+                },
+            )
             return record
 
         record = await run_in_transaction(self.db, decide)
@@ -422,17 +439,37 @@ class SkillRegistry:
         if record.id is None:
             # Bundled-only version: materialise it so the deprecation is durable.
             await self.db[SKILL_VERSIONS].insert_one(_strip_id(record.model_dump(by_alias=True)))
-        await self.db[SKILL_VERSIONS].update_one(
-            {"skill_key": skill_key, "version": version, "status": "published"},
-            {
-                "$set": {
-                    "status": "deprecated",
-                    "deprecated_by": deprecated_by,
-                    "deprecated_at": now_utc(),
+
+
+        async def decide(session: Optional[Any]) -> None:
+            kw = session_kwargs(session)
+            result = await self.db[SKILL_VERSIONS].update_one(
+                {"skill_key": skill_key, "version": version, "status": "published"},
+                {
+                    "$set": {
+                        "status": "deprecated",
+                        "deprecated_by": deprecated_by,
+                        "deprecated_at": now_utc(),
+                    },
+                    "$inc": {"approval_revision": 1},
                 },
-                "$inc": {"approval_revision": 1},
-            },
-        )
+                **kw,
+            )
+            if getattr(result, "matched_count", 0):
+                # Only the call that made the change records it; a concurrent one finds it done.
+                await audit_skill_decision(
+                    self.db,
+                    session,
+                    action="skill.version.deprecate",
+                    actor_id=deprecated_by,
+                    skill_key=skill_key,
+                    version=version,
+                    before={"status": "published"},
+                    after={"status": "deprecated"},
+                    metadata={"cause": "direct"},
+                )
+
+        await run_in_transaction(self.db, decide)
         await self._refresh_skill(record)
         return await self._require_db_version(skill_key, version)
 

@@ -70,6 +70,7 @@ async def _db() -> AsyncIterator[Any]:
     await db.create_collection(SKILL_VERSIONS)
     await db.create_collection(SKILL_APPROVALS)
     await db.create_collection("skills")
+    await db.create_collection("audit_events")
     try:
         yield db
     finally:
@@ -441,5 +442,122 @@ def test_revoking_an_approval_the_version_did_not_rely_on_does_not_deprecate_it(
             await SkillApprovalService(db).revoke(stale.id, "superseded evaluation", COUNSEL)
             assert (await db[SKILL_VERSIONS].find_one({"version": "1.9.0"}))["status"] == "published"
             await _assert_invariant(db)
+
+    _run(scenario())
+
+
+# --------------------------------------------------------------------------- #
+# Audit events (4B-05): written in the decision's transaction
+# --------------------------------------------------------------------------- #
+
+
+async def _events(db: Any, version: str) -> list:
+    return [
+        (doc["action"], doc["actor_id"])
+        async for doc in db["audit_events"].find(
+            {"resource_type": "skill_version", "metadata.version": version}
+        ).sort("created_at", 1)
+    ]
+
+
+def test_every_publication_decision_writes_one_audit_event() -> None:
+    async def scenario() -> None:
+        async with _db() as db:
+            _record, legal = await _fully_approved(db, "2.1.0")
+            # Recording the same review again changes nothing and records nothing.
+            await _approve(db, _record, "legal", LEGAL, COUNSEL)
+            await SkillRegistry(db).publish(CLAIMS_SKILL_KEY, "2.1.0", REPORT, PUBLISHER)
+            await SkillApprovalService(db).revoke(legal.id, "overruled", COUNSEL)
+            # A second revoke of the same approval is a no-op and records nothing.
+            await SkillApprovalService(db).revoke(legal.id, "overruled", COUNSEL)
+            assert await _events(db, "2.1.0") == [
+                ("skill.approval.record", "contract-expert"),
+                ("skill.approval.record", "counsel"),
+                ("skill.version.publish", PUBLISHER),
+                ("skill.approval.revoke", "counsel"),
+                ("skill.version.deprecate", "counsel"),
+            ]
+            revoke = await db["audit_events"].find_one({"action": "skill.approval.revoke"})
+            assert revoke["metadata"]["approval_id"] == legal.id
+            assert revoke["metadata"]["reason"] == "overruled"
+            assert revoke["metadata"]["deprecated_version"] is True
+            assert revoke["resource_id"] == f"{CLAIMS_SKILL_KEY}@2.1.0"
+            publish = await db["audit_events"].find_one({"action": "skill.version.publish"})
+            assert publish["before"] == {"status": "draft"} and publish["after"] == {"status": "published"}
+            assert len(publish["metadata"]["approval_ids"]) == 2
+
+    _run(scenario())
+
+
+def test_a_direct_deprecation_is_audited_once() -> None:
+    async def scenario() -> None:
+        async with _db() as db:
+            await _fully_approved(db, "2.2.0")
+            registry = SkillRegistry(db)
+            await registry.publish(CLAIMS_SKILL_KEY, "2.2.0", REPORT, PUBLISHER)
+            await registry.deprecate(CLAIMS_SKILL_KEY, "2.2.0", "platform-admin")
+            with pytest.raises(HTTPException):
+                await registry.deprecate(CLAIMS_SKILL_KEY, "2.2.0", "platform-admin")
+            events = await _events(db, "2.2.0")
+            assert events.count(("skill.version.deprecate", "platform-admin")) == 1
+            event = await db["audit_events"].find_one({"action": "skill.version.deprecate"})
+            assert event["metadata"]["cause"] == "direct"
+
+    _run(scenario())
+
+
+def test_a_refused_decision_writes_no_audit_event() -> None:
+    async def scenario() -> None:
+        async with _db() as db:
+            record = await _draft(db, "2.3.0")
+            await _approve(db, record, "technical", CONTRACT, CONTRACT_EXPERT)
+            # Publishing without the legal review is refused inside the transaction.
+            with pytest.raises(HTTPException):
+                await SkillRegistry(db).publish(CLAIMS_SKILL_KEY, "2.3.0", REPORT, PUBLISHER)
+            assert await _events(db, "2.3.0") == [("skill.approval.record", "contract-expert")]
+
+    _run(scenario())
+
+
+def test_an_aborted_decision_leaves_no_audit_event(monkeypatch) -> None:
+    """The event is in the transaction: a failure after it rolls it back with the decision."""
+
+    async def scenario() -> None:
+        async with _db() as db:
+            _record, legal = await _fully_approved(db, "2.4.0")
+            await SkillRegistry(db).publish(CLAIMS_SKILL_KEY, "2.4.0", REPORT, PUBLISHER)
+            before = await _events(db, "2.4.0")
+            from rbac_backend.services.skills import approvals as approvals_module
+
+            real = approvals_module.audit_skill_decision
+            calls = {"n": 0}
+
+            async def fail_after_first(*args: Any, **kwargs: Any) -> None:
+                await real(*args, **kwargs)  # the revoke event is written...
+                calls["n"] += 1
+                if calls["n"] == 2:
+                    raise _Injected("injected failure after the deprecation event")  # ...then this aborts
+
+            monkeypatch.setattr(approvals_module, "audit_skill_decision", fail_after_first)
+            with pytest.raises(_Injected):
+                await SkillApprovalService(db).revoke(legal.id, "overruled", COUNSEL)
+            assert await _events(db, "2.4.0") == before
+            assert (await db[SKILL_APPROVALS].find_one({"_id": legal.id}))["revoked_at"] is None
+            assert (await db[SKILL_VERSIONS].find_one({"version": "2.4.0"}))["status"] == "published"
+
+    _run(scenario())
+
+
+def test_a_lost_publish_race_writes_one_publish_event(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _db() as db:
+            await _fully_approved(db, "2.5.0")
+            outcomes = await asyncio.gather(
+                _outcome(SkillRegistry(db).publish(CLAIMS_SKILL_KEY, "2.5.0", REPORT, PUBLISHER)),
+                _outcome(SkillRegistry(db).publish(CLAIMS_SKILL_KEY, "2.5.0", REPORT, "publisher-2")),
+            )
+            assert sum(not isinstance(item, HTTPException) for item in outcomes) == 1
+            events = [action for action, _ in await _events(db, "2.5.0")]
+            assert events.count("skill.version.publish") == 1
 
     _run(scenario())
