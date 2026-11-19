@@ -58,7 +58,7 @@ Data, gates and scope:
 
 - **Implemented, and CI-verified at least for the built part:**
   - 4B-01 to 4B-03;
-  - 4B-05 (complete as of this commit; the audit events still need CI);
+  - 4B-05 (complete; audit events CI-verified in run 44493207076);
   - 4B-06 to 4B-41;
   - 4B-43, 4B-45 to 4B-47 and 4B-49.
 
@@ -117,7 +117,7 @@ Open:
 
 ## Next dependency-ready work (no owner decision needed)
 
-- Confirm CI on the commit that carries the 4B-05 audit events.
+- Done: CI on `fa2ab5c` (run 44488223050) and on `187a51d` with the 4B-05 audit events (run 44493207076) green except the secret scan.
 - Everything else left in Phase 4b waits on one of these:
   - a production reading: 4B-04 M-01 (P-02) and the P-05 re-grants;
   - staging: 4B-44;

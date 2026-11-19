@@ -27,7 +27,7 @@ CI column derived mechanically from CI run 398 (`f31ace1`, 2026-11-17): each row
 | 4B-02 | Yes | Yes, run 398 at `f31ace1` | None required | Not accepted |
 | 4B-03 | Yes | Yes, run 398 at `f31ace1` | None required | Not accepted |
 | 4B-04 | Partial | Yes, run 398 at `f31ace1` (built part only) | Pending: P-02 (order of M-01) | Not accepted |
-| 4B-05 | Yes (audit events added 2026-11-19; the live-approval index is replaced by in-transaction checks, plan line 179) | Built part: run 398 at `f31ace1`; audit events: pending CI | None required | Not accepted |
+| 4B-05 | Yes (audit events added 2026-11-19; the live-approval index is replaced by in-transaction checks, plan line 179) | Built part: run 398 at `f31ace1`; audit events: yes, run 44493207076 (`187a51d`): backend (8,410 unit; real-Mongo 74 modules, 1,011 passed, including the five audit tests), frontend, dependency scan and Docker green; secret scan red (same two findings) | None required | Not accepted |
 | 4B-06 | Yes (not released) | Yes, run 398 at `f31ace1` | Pending: P-05, P-10: release of M-02 waits for both | Not accepted |
 | 4B-07 | Yes | Yes, run 398 at `f31ace1` | Pending: P-05 (legacy role holders), P-10 | Not accepted |
 | 4B-08 | Yes | Yes, run 398 at `f31ace1` | Pending: P-06 (how many users lost roles to the old form) | Not accepted |
@@ -328,5 +328,7 @@ Backend and frontend inventories regenerated at `378076d` and diffed against the
 | `fb2baa0`, `b41b8e5`, `303823c`, `f23de0c` | 4B-26, debt, 4B-23, 4B-24 | Owner review of 2026-11-17: corrections table, OD-1, "4B-24 sources", "Found in passing"; status rows for 4B-19, 4B-23, 4B-24, 4B-26 and 4B-49 updated from CI run 405. |
 
 Fixed since the verification: the order-dependent test in `I/test_caseless_draft_compat_mongo.py` (4B-45) now passes alone, as a file and after another suite; the case-less draft line in `docs/CLAIM_BENCH.md` describes both modes. CI's type gate failed on `8726558` to `edb3dfd` for one finding in `services/reviewer_assignments.py`, fixed in `92c37ab`.
+
+CI on `fa2ab5c` (run 44488223050): backend 8,410 unit and 1,006 real-Mongo (74 modules) passed, frontend, dependency scan and Docker green; secret scan red (same two findings).
 
 Open items carried from the verification, not yet fixed: M-01 absent (4B-04; waits for P-02). Skills audit events (4B-05) closed 2026-11-19.
