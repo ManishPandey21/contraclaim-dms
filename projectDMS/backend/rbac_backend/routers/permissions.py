@@ -165,8 +165,9 @@ async def check_permission_endpoint(
             await record("deny", "not_authorized")
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_SCOPE_REFUSED)
         # Organisation-wide answers need organisation-wide authority: a project
-        # administrator names their project (review finding 3; membership rows do not
-        # reach CurrentUser.projects, so check_user_access alone cannot confine them).
+        # administrator names their project (review finding 3). Since T-1 check_user_access
+        # also confines project-tier actors through membership rows; this stays as the
+        # route's own, earlier refusal.
         if (
             not project_id
             and organization_id

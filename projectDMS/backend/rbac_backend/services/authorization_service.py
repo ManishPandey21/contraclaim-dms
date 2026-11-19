@@ -55,7 +55,9 @@ class AuthorizationService:
     (tests/test_tenant_isolation.py) run to prevent lockout regressions.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, db: Any = None) -> None:
+        # The database the scope checks read (T-1); the process database when not injected.
+        self._db = db
         self.permission_service = PermissionService()
         self.audit_logger = get_audit_logger()
 
@@ -119,8 +121,9 @@ class AuthorizationService:
             ):
                 if row.get("project_id"):
                     candidates.add(str(row["project_id"]))
-        if not candidates:
-            return set()
+        projects = getattr(db, "projects", None)
+        if not candidates or projects is None:
+            return set()  # nothing to confirm a project against: no project
         keys: list[Any] = list(candidates)
         for candidate in candidates:
             try:
@@ -128,7 +131,7 @@ class AuthorizationService:
             except Exception:
                 pass
         kept: set[str] = set()
-        async for project in db.projects.find(
+        async for project in projects.find(
             {"_id": {"$in": keys}}, {"organization_id": 1, "organizationId": 1, "is_active": 1}
         ):
             owner = project.get("organization_id") or project.get("organizationId")
@@ -473,10 +476,33 @@ class AuthorizationService:
             org = getattr(current_user, "organization_id", None)
             if org:
                 query["organization_id"] = str(org)
-            # Limit to users whose project list intersects current user's projects
-            allowed_projects = self._collect_user_project_ids(current_user)
-            if allowed_projects:
-                query["projects"] = {"$in": sorted(allowed_projects)}
+            # Users on one of the actor's projects: listed or by active membership row, only
+            # active projects of the actor's organisation (T-1, list path). No project: no
+            # users (before, an empty users.projects listed the whole organisation).
+            db = self._db if self._db is not None else await get_database()
+            allowed_projects = sorted(
+                await self._active_project_ids(
+                    db, getattr(current_user, "id", None), self._collect_user_project_ids(current_user), str(org)
+                )
+            )
+            if not allowed_projects:
+                query["_id"] = {"$in": []}
+                return query
+            member_ids: list[Any] = []
+            rows = getattr(db, "project_memberships", None)
+            if rows is not None:
+                async for row in rows.find(
+                    {"project_id": {"$in": allowed_projects}, "status": {"$in": ["active", None]}}, {"user_id": 1}
+                ):
+                    raw = row.get("user_id")
+                    if raw:
+                        member_ids.append(str(raw))
+                        try:
+                            member_ids.append(ObjectId(str(raw)))
+                        except Exception:
+                            pass
+            on_project = {"$or": [{"projects": {"$in": allowed_projects}}, {"_id": {"$in": member_ids}}]}
+            query = {"$and": [query, on_project]} if query else on_project
 
         return query
 
@@ -521,7 +547,7 @@ class AuthorizationService:
             # of the actor's organisation. A project-tier actor with no such project reaches
             # nobody: a project role never becomes organisation-wide access (before, an
             # empty ``users.projects`` skipped the overlap test entirely).
-            db = await get_database()
+            db = self._db if self._db is not None else await get_database()
             target_id = user.get("_id") if isinstance(user, dict) else getattr(user, "id", None)
             target_listed = user.get("projects", []) if isinstance(user, dict) else getattr(user, "projects", [])
             allowed_projects = await self._active_project_ids(

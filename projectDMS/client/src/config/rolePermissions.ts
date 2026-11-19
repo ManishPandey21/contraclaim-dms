@@ -166,10 +166,14 @@ export const EXPLICIT_GRANT_PERMISSIONS: ReadonlySet<string> = new Set([
   "dms.claim.signal.view",
 ]);
 
-/** Window events after which `useRBAC` forgets what it knew and asks the server again. */
-export const RBAC_REFRESH_EVENTS: readonly string[] = [
-  "auth-state-changed", // sign-in, sign-out, token refresh
-  "profile-updated", // the user's own profile (and roles) changed
+/** Window events meaning the signed-in account may have changed: `useRBAC` forgets what it
+ * knew and denies until the server answers. (Token refresh dispatches nothing.) */
+export const RBAC_ACCOUNT_EVENTS: readonly string[] = ["auth-state-changed"];
+
+/** Window events after which `useRBAC` re-reads the server in the background, keeping its
+ * current answer until the new one arrives. */
+export const RBAC_REVALIDATE_EVENTS: readonly string[] = [
+  "profile-updated", // the user's own profile changed
   "tenant-scope-changed", // the navbar organisation or project selection changed
 ];
 

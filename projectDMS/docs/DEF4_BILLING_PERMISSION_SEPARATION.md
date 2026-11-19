@@ -25,9 +25,16 @@ Evidence: `backend/rbac_backend/tests/integration/test_def4_alias_compatibility_
 
 They are never given another organisation's (403).
 
+**Not permission-gated at all (review, 2026-11-19).** `GET /api/rbac-monetization/subscriptions` and `GET /plan-settings` are scoped by membership and role name, not by any billing permission (`routers/rbac_monetization.py::_subscription_scope_filters`):
+
+- `ORG_SUBSCRIPTION_VIEW_ROLES` includes orguser, reporter, doccontroller, settings_manager and contractmgr_org;
+- `PROJECT_SUBSCRIPTION_VIEW_ROLES` includes projectuser.
+
+Removing the aliases alone does not end ordinary members' subscription visibility; these routes must be re-gated too (step 4). Also gated by `billing.plan.view`: `/billing/summary/{org}`.
+
 **Already in place.** None of the three names can be put on a role by anyone but Super Admin (403; SEC-2/DEF-4 fix).
 
-**Client.** The same aliases are mirrored in `client/src/config/rolePermissions.ts::PERMISSION_ALIASES`. Since T-2 the client no longer expands aliases itself; it shows exactly the server's effective list, which today still includes the billing names for holders of `organizations:read`.
+**Client.** Since T-2 the client no longer expands aliases; it shows exactly the server's effective list, which today still includes the billing names for holders of `organizations:read`. Its alias table (`client/src/config/rolePermissions.ts::PERMISSION_ALIASES`) is now unused in production: only a sidebar test uses it. Removing it changes no client behaviour.
 
 ## 2. Target design
 
@@ -53,7 +60,14 @@ Alias changes in the target (`core/permissions.py` and the client mirror), appli
 Route changes:
 
 - `/billing/records/{org}`, `/billing/review-queue/{org}` and the receipt download: gate on `billing.record.view` (receipts on `billing.invoice.download`) instead of `billing.plan.view`.
+- `/billing/summary/{org}`: gate on `billing.record.view`.
+- `/subscriptions` and `/plan-settings`: replace the role-name scoping (`ORG_/PROJECT_SUBSCRIPTION_VIEW_ROLES`) with an explicit `subscription.history.view` / `billing.plan.view` check in the named scope.
 - `/plans` (catalogue, `billing_plan_view` allowance in `PolicyService`) stays on `billing.plan.view`.
+- Wiring for `billing.record.view`:
+  - add it to `CANONICAL_PERMISSIONS` (catalogue);
+  - make it non-delegable like the other billing names (`role_service._ensure_permissions_assignable` refuses billing and subscription names for anyone but Super Admin);
+  - give it the billing domain in `PolicyService` (`permission_domain`);
+  - add it to the alias contract tests.
 
 ### 2.2 Who holds what (proposed)
 
@@ -64,7 +78,7 @@ Route changes:
 | orgadmin | `billing.plan.view`, `billing.invoice.view`, `billing.invoice.download`, `billing.record.view`, `subscription.history.view`, `subscription.usage.view` |
 | contraclaim_billing_admin | the same, plus its existing manage permissions |
 | orguser, projectadmin, projectuser, contractmgr_org, reporter | none |
-| custom roles | only what is put on them explicitly. The names are delegable only by holders (SEC-2 subset rule). Whether billing names are non-delegable outside Super Admin is a decision for the release record. |
+| custom roles | only what is put on them explicitly. Billing and subscription names, and anything satisfying them through an alias, are already non-delegable for everyone but Super Admin (`role_service._ensure_permissions_assignable`), so step 3 re-grants on custom roles are Super Admin actions (or an approved migration). |
 
 ## 3. Migration plan (each step separately approved; none run yet)
 
@@ -82,13 +96,17 @@ Route changes:
 4. **Introduce `billing.record.view`.** Re-gate the record, review-queue and receipt routes behind a setting (`BILLING_EXPLICIT_PERMISSIONS`, default off). With it off, behaviour is unchanged. Add route tests both ways.
 5. **Remove the aliases (the breaking step).** One change set covering:
    - the server alias tables;
-   - the client mirror;
+   - the now-unused client alias table (cleanup only);
    - flipping the setting on;
    - updating `test_def4_alias_compatibility_mongo.py`, so the "ordinary members read billing" test becomes "ordinary members are refused";
    - the alias contract tests.
 
    Staging first (two consecutive deployed runs), then production in a release window.
-6. **Rollback.** Turn the setting off and restore the alias groups. The explicit grants from step 3 stay; they are additive and harmless. No data migration needs reversing.
+6. **Rollback.** Planned as a release, not a toggle:
+   - the alias groups are code constants, so restoring them is a code revert and redeploy;
+   - only the route re-gating from step 4 sits behind the setting.
+
+   The explicit grants from step 3 stay; they are additive and harmless. No data migration needs reversing.
 
 ## 4. Tests required before step 5
 

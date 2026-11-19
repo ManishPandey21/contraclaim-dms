@@ -66,8 +66,8 @@ describe("useRBAC", () => {
     expect(result.current.error).toBeNull();
     expect(result.current.can("dms.document.view")).toBe(false);
     expect(result.current.can("dms.document.delete")).toBe(false);
-    // The backend's role-name rule for users:read still applies.
-    expect(result.current.can("users:read")).toBe(true);
+    // Not even users:read by role name: the server lists it where its rule grants it.
+    expect(result.current.can("users:read")).toBe(false);
     expect(mocks.getRoles).not.toHaveBeenCalled();
   });
 
@@ -155,9 +155,39 @@ describe("useRBAC", () => {
     });
   });
 
+  it("decides from the server list alone, never from profile role names", async () => {
+    // A stored superadmin reference whose role is deactivated: the server does not answer "*".
+    mocks.getCurrentUserProfile.mockResolvedValue({ roles: ["superadmin", "orguser"], permissions: ["users:read"] });
+    const { result } = renderHook(() => useRBAC());
+    await waitFor(() => expect(result.current.status).toBe("ready"));
+    expect(result.current.can("users:read")).toBe(true);
+    expect(result.current.can("dms.document.view")).toBe(false);
+    expect(result.current.can("billing.plan.manage")).toBe(false);
+  });
+
   describe("invalidation", () => {
-    it.each(["auth-state-changed", "profile-updated", "tenant-scope-changed"])(
-      "forgets the previous answer and asks the server again on %s",
+    it("forgets the previous answer and denies until the server answers after an account change", async () => {
+      mocks.getCurrentUserProfile.mockResolvedValueOnce({ roles: ["orgadmin"], permissions: ["dms.document.view"] });
+      const { result } = renderHook(() => useRBAC());
+      await waitFor(() => expect(result.current.can("dms.document.view")).toBe(true));
+
+      const next = deferred<unknown>();
+      mocks.getCurrentUserProfile.mockReturnValueOnce(next.promise);
+      act(() => {
+        window.dispatchEvent(new CustomEvent("auth-state-changed"));
+      });
+      expect(result.current.status).toBe("loading");
+      expect(result.current.can("dms.document.view")).toBe(false);
+      expect(mocks.getCurrentUserProfile).toHaveBeenLastCalledWith({ force: true });
+
+      await act(async () => next.resolve({ roles: ["projectuser"], permissions: [] }));
+      expect(result.current.status).toBe("ready");
+      expect(result.current.roles).toEqual(["projectuser"]);
+      expect(result.current.can("dms.document.view")).toBe(false);
+    });
+
+    it.each(["profile-updated", "tenant-scope-changed"])(
+      "re-reads the server in the background on %s, keeping the current answer meanwhile",
       async (event) => {
         mocks.getCurrentUserProfile.mockResolvedValueOnce({ roles: ["orgadmin"], permissions: ["dms.document.view"] });
         const { result } = renderHook(() => useRBAC());
@@ -168,14 +198,11 @@ describe("useRBAC", () => {
         act(() => {
           window.dispatchEvent(new CustomEvent(event));
         });
-        // Fail closed until the new answer arrives.
-        expect(result.current.status).toBe("loading");
-        expect(result.current.can("dms.document.view")).toBe(false);
+        // Not cleared: clearing unmounts the layout behind ProtectedRoute (review, Critical).
+        expect(result.current.status).toBe("ready");
         expect(mocks.getCurrentUserProfile).toHaveBeenLastCalledWith({ force: true });
 
-        await act(async () => next.resolve({ roles: ["projectuser"], permissions: [] }));
-        expect(result.current.status).toBe("ready");
-        expect(result.current.roles).toEqual(["projectuser"]);
+        await act(async () => next.resolve({ roles: ["orgadmin"], permissions: [] }));
         expect(result.current.can("dms.document.view")).toBe(false);
       },
     );

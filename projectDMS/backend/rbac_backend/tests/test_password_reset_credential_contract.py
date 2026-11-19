@@ -805,7 +805,7 @@ def test_cross_scope_reset_is_denied_and_writes_nothing(
             async def require_permission(self, *args, **kwargs):
                 return None
 
-        controller.auth_service = _RealScope()
+        controller.auth_service = _RealScope(db)  # reads this test's database, never a shared one
         actor = SimpleNamespace(
             id=str(ObjectId()),
             roles=actor_roles,

@@ -33,7 +33,12 @@ SKILL_VERSION_UNIQUE_INDEX: Dict[str, Any] = {
 
 
 def _keys(live: Mapping[str, Any]) -> List[tuple]:
-    return [(str(field), int(direction)) for field, direction in (live.get("key") or [])]
+    # A text or hashed index has a string direction: kept as is, so it simply differs
+    # (review: int() raised there and the gate answered 500 instead of 503).
+    return [
+        (str(field), int(direction) if isinstance(direction, (int, float)) else str(direction))
+        for field, direction in (live.get("key") or [])
+    ]
 
 
 def skill_version_index_problems(index_information: Mapping[str, Any]) -> List[str]:

@@ -124,3 +124,32 @@ def test_organisation_tier_access_is_unchanged(monkeypatch) -> None:
             assert (await env.client.get(f"/api/users/{in_b}", headers=org_admin)).status_code == 403
 
     _run(scenario())
+
+
+async def _listed(env: Any, actor: str) -> set:
+    response = await env.client.get("/api/users", headers=_headers(actor), params={"limit": 100})
+    assert response.status_code == 200, response.text[:300]
+    body = response.json()
+    rows = body.get("users", body) if isinstance(body, dict) else body
+    return {str(row.get("id") or row.get("_id")) for row in rows}
+
+
+def test_the_user_list_is_bounded_the_same_way(monkeypatch) -> None:
+    """Independent review (pre-existing, list path): GET /api/users gave a membership-only
+    project administrator every user of the organisation."""
+
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            await _member(env, "t1_list_admin", ["projectadmin"], rows=[{"project_id": PROJ_A1, "status": "active"}])
+            listed_a1 = await _member(env, "t1_list_a1", ["projectuser"], projects=[PROJ_A1])
+            row_a1 = await _member(env, "t1_list_row_a1", ["projectuser"], rows=[{"project_id": PROJ_A1, "status": "active"}])
+            only_a2 = await _member(env, "t1_list_a2", ["projectuser"], projects=[PROJ_A2])
+            revoked = await _member(env, "t1_list_revoked", ["projectuser"], rows=[{"project_id": PROJ_A1, "status": "revoked"}])
+            other_org = await _member(env, "t1_list_b", ["projectuser"], org=ORG_B, projects=[PROJ_B1])
+            seen = await _listed(env, "t1_list_admin")
+            assert {listed_a1, row_a1} <= seen
+            assert not ({only_a2, revoked, other_org} & seen), seen
+            await _member(env, "t1_list_unassigned", ["projectadmin"])
+            assert await _listed(env, "t1_list_unassigned") == set(), "no project: no users"
+
+    _run(scenario())

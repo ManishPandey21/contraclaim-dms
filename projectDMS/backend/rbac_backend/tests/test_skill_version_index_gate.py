@@ -41,6 +41,8 @@ def test_a_correct_index_passes() -> None:
         ({"skill_version_unique": {"key": [("skill_key", 1), ("version", 1)]}}, "not unique"),
         ({"skill_version_unique": {"key": [("skill_key", 1)], "unique": True}}, "has keys"),
         ({"skill_version_unique": {"key": [("version", 1), ("skill_key", 1)], "unique": True}}, "has keys"),
+        ({"skill_version_unique": {"key": [("skill_key", "text"), ("version", 1)], "unique": True}}, "has keys"),
+        ({"skill_version_unique": {"key": [("skill_key", "hashed")]}}, "has keys"),
         ({"skill_version_unique": {"key": [("skill_key", 1), ("version", 1)], "unique": True,
                                    "partialFilterExpression": {"status": "draft"}}}, "partial"),
     ],
