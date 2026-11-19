@@ -702,12 +702,14 @@ class UserService:
         """
         class _U:
             credential_version: int
+            is_active: bool
         u = _U()
         u.id = str(doc.get("_id") or doc.get("id") or "")
         u.email = doc.get("email")
         u.username = doc.get("username") or (u.email.split("@")[0] if u.email else "")
         u.roles = doc.get("roles", [])
         u.disabled = bool(doc.get("disabled", False))
+        u.is_active = doc.get("is_active", True) is not False  # SEC-4: read by the shared active-account rule
         # Support both hashed_password (new) and passwordHash (older seeds)
         u.hashed_password = stored_password_hash(doc) or ""
         u.credential_version = credential_version(doc)

@@ -290,8 +290,10 @@ def test_a_deleted_wildcard_role_grants_nothing(monkeypatch) -> None:
 def test_a_deleted_role_confers_no_role_name_grant(monkeypatch) -> None:
     """`users:read` is granted by an org-admin role NAME, so the name must also be revoked."""
     h = _Harness(monkeypatch)
+    # Review R-1 (2026-11-19): only a built-in role's name grants by name; the role here
+    # is a system role document stored under an id, as older seeds wrote it.
     h.seed(
-        [_role(ROLE_ID, [], name="Organization Admin")],
+        [{**_role(ROLE_ID, [], name="Organization Admin"), "is_system": True}],
         role_refs=[str(ROLE_ID)],
         catalogue=[],
     )

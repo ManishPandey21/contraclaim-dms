@@ -406,7 +406,10 @@ async def get_current_user(request: Request, db = Depends(get_db)):
             raise credentials_exception
 
         # Try load real user if possible
-        user_doc = await db.users.find_one({"_id": x_user_id}) or await db.users.find_one({"email": x_user_id})
+        id_candidates: List[Any] = [x_user_id]
+        if ObjectId.is_valid(str(x_user_id)):
+            id_candidates.append(ObjectId(str(x_user_id)))  # review: an ObjectId id must be found too
+        user_doc = await db.users.find_one({"_id": {"$in": id_candidates}}) or await db.users.find_one({"email": x_user_id})
         if user_doc is not None and not account_is_active(user_doc):
             raise credentials_exception  # SEC-4: a disabled account stops here too
         username = (user_doc.get("username") if user_doc else None) or str(x_user_id)
@@ -804,12 +807,21 @@ async def permission_scope_query(
     deny: Dict[str, Any] = {"_id": {"$in": []}}
     if roles & SCOPE_QUERY_ROLE_KEYS or not permission:
         return query
-    target_org = str(organization_id or getattr(current_user, "organization_id", None) or "")
-    if not target_org:
-        return deny
     from .database import get_database
 
     db = db if db is not None else await get_database()
+    service = PermissionService()
+    service.db = db
+    if project_id is not None:
+        # The project's own organisation decides (SEC-1 boundary); unresolvable fails closed.
+        resolved, _ = await service.resolve_request_scope(db, organization_id, project_id)
+        if resolved == PermissionService.UNRESOLVED_ORGANISATION:
+            return deny
+        target_org = str(resolved)
+    else:
+        target_org = str(organization_id or getattr(current_user, "organization_id", None) or "")
+    if not target_org:
+        return deny
     candidates: List[Any] = [current_user.id]
     try:
         candidates.append(ObjectId(str(current_user.id)))
@@ -818,8 +830,6 @@ async def permission_scope_query(
     user_doc = await db.users.find_one({"_id": {"$in": candidates}})
     if not user_doc or not account_is_active(user_doc):
         return deny
-    service = PermissionService()
-    service.db = db
     grants, _ = await service.scoped_grants(db, user_doc)
     matching: List[Dict[str, Any]] = []
     for grant in service.grants_naming(grants, permission):

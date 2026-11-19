@@ -191,6 +191,49 @@ async def complete_authority_change(user_ids: Any) -> bool:
     return complete
 
 
+async def complete_grant_change(user_ids: Any) -> bool:
+    """After a change to what users' roles grant, but not to the users themselves.
+
+    Like ``complete_authority_change`` without the re-authentication marker: a project
+    being deactivated or deleted changes where its project roles count, not who the
+    members are, so their sessions stay valid. Pair it with ``begin_authority_change``
+    before the write (no cached grant is served or written in between).
+    """
+    ids = _distinct_user_ids(user_ids)
+    if not ids:
+        return True
+    try:
+        redis = await get_runtime_state().get_redis()
+    except Exception as exc:
+        logger.error("Grant change applied; invalidation deferred to the pending marker: %s", exc)
+        return False
+    if redis is None:
+        return True
+    complete = True
+    for user_id in ids:
+        try:
+            await redis.delete(permission_cache_key(user_id))
+            await redis.delete(authority_change_pending_key(user_id))
+        except Exception as exc:
+            complete = False
+            logger.error("Grant change for user %s applied but its cache was not cleared: %s", user_id, exc)
+    return complete
+
+
+async def project_member_ids(db: Any, project_id: Any) -> List[str]:
+    """Users assigned to a project, directly or through an active project membership."""
+    text = str(project_id)
+    candidates: List[Any] = [text]
+    try:
+        candidates.append(ObjectId(text))
+    except Exception:
+        pass
+    ids = {str(row["_id"]) for row in await db.users.find({"projects": {"$in": candidates}}, {"_id": 1}).to_list(length=None)}
+    rows = await db.project_memberships.find({"project_id": {"$in": candidates}}, {"user_id": 1}).to_list(length=None)
+    ids.update(str(row["user_id"]) for row in rows if row.get("user_id"))
+    return sorted(ids)
+
+
 async def cancel_authority_change(user_ids: Any) -> None:
     """The announced change was not made. Best effort: a marker left behind only bypasses the cache."""
     ids = _distinct_user_ids(user_ids)
@@ -707,7 +750,7 @@ class PermissionService:
             if not user_doc:
                 return []
             grants, _ = await self.scoped_grants(db, user_doc)
-            names = applicable_names(grants)
+            names = applicable_names(grants, primary_organization_id=self.primary_organisation(user_doc))
             if not names:
                 return []
             if "*" in names:
@@ -785,13 +828,20 @@ class PermissionService:
             grants, role_names = await self.scoped_grants(db, user_doc)
             if "superadmin" in role_names:
                 return ["*"]
+            if organization_id or project_id:
+                organization_id, project_id = await self.resolve_request_scope(db, organization_id, project_id)
             raw_permissions: set[str] = {
                 str(permission)
                 for permission in (user_doc.get("permissions", []) or [])
                 if permission is not None and str(permission).strip()
             }
             raw_permissions.update(
-                applicable_names(grants, organization_id=organization_id, project_id=project_id)
+                applicable_names(
+                    grants,
+                    organization_id=organization_id,
+                    project_id=project_id,
+                    primary_organization_id=self.primary_organisation(user_doc),
+                )
             )
             if "*" in raw_permissions:
                 return ["*"]
@@ -957,9 +1007,15 @@ class PermissionService:
             if not user_doc:
                 return False
             named = set(lookup_keys) | await self._catalogue_spellings(db, lookup_keys)
+            organization_id, project_id = await self.resolve_request_scope(db, organization_id, project_id)
             grants, _ = await self.scoped_grants(db, user_doc)
             for grant in grants:
-                if not grant_applies(grant.get("scope"), organization_id=organization_id, project_id=project_id):
+                if not grant_applies(
+                    grant.get("scope"),
+                    organization_id=organization_id,
+                    project_id=project_id,
+                    primary_organization_id=self.primary_organisation(user_doc),
+                ):
                     continue
                 held = set(grant.get("names") or [])
                 held.discard("*")
@@ -970,6 +1026,43 @@ class PermissionService:
             logger.error(f"Explicit permission check failed for user {user_id}: {exc}")
             return False
         return False
+
+    @staticmethod
+    def primary_organisation(user_doc: Dict[str, Any]) -> Optional[str]:
+        """The organisation a permission-only gate is judged in for custom roles (review R-4)."""
+        value = user_doc.get("organization_id")
+        return str(value) if value else None
+
+    #: Stands for the organisation of a request whose project cannot be resolved, or
+    #: whose organisation and project disagree: no custom grant names it.
+    UNRESOLVED_ORGANISATION = "\x00unresolved-request-scope"
+
+    async def resolve_request_scope(
+        self, db: Any, organization_id: Optional[str], project_id: Optional[str]
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """The request's organisation as the stored project states it (SEC-1 boundary).
+
+        No project: the organisation as given. A project: its own organisation, read
+        from ``projects`` every time (a project can be re-parented, so it is never
+        cached). A project that does not exist, has no organisation, or belongs to an
+        organisation other than the one given resolves to ``UNRESOLVED_ORGANISATION``,
+        which no custom grant matches. Built-in roles are unaffected (their scope is
+        checked by ScopeService, as before).
+        """
+        org = str(organization_id) if organization_id else None
+        if not project_id:
+            return org, None
+        project = str(project_id)
+        candidates: List[Any] = [project]
+        try:
+            candidates.append(ObjectId(project))
+        except Exception:
+            pass
+        document = await db.projects.find_one({"_id": {"$in": candidates}}, {"organization_id": 1, "organizationId": 1})
+        owner = str((document or {}).get("organization_id") or (document or {}).get("organizationId") or "") or None
+        if owner is None or (org is not None and org != owner):
+            return self.UNRESOLVED_ORGANISATION, project
+        return owner, project
 
     async def scoped_grants(self, db: Any, user_doc: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], set]:
         """Each of the user's roles as ``{"names", "scope"}`` (SEC-1), and the built-in role names.
@@ -1016,6 +1109,11 @@ class PermissionService:
         return grants, role_names
 
     @staticmethod
+    def checks_satisfied_by(held: str) -> set:
+        """The permission checks a held name passes: itself and its one-hop equivalents."""
+        return set(equivalent_permissions(held) or set()) | {held}
+
+    @staticmethod
     def grants_naming(grants: List[Dict[str, Any]], permission: str) -> List[Dict[str, Any]]:
         """The grants that hold ``permission`` by name (its one-hop equivalents count).
 
@@ -1034,8 +1132,14 @@ class PermissionService:
         *,
         organization_id: Optional[str],
         project_id: Optional[str],
+        primary_organization_id: Optional[str] = None,
     ) -> bool:
-        names = applicable_names(grants, organization_id=organization_id, project_id=project_id)
+        names = applicable_names(
+            grants,
+            organization_id=organization_id,
+            project_id=project_id,
+            primary_organization_id=primary_organization_id,
+        )
         granted = "*" in names or bool(lookup_keys & names)
         if permission_key == "users:create":
             granted = bool(role_names & {"superadmin", "orgadmin", "projectadmin"})
@@ -1070,8 +1174,13 @@ class PermissionService:
         # names it declares or that declare it - one hop, never through a shared
         # legacy alias (F-A9A-2).
         lookup_keys = set(equivalent_permissions(permission_key) or set()) | {permission_key}
-        request_org = str(organization_id) if organization_id else None
-        request_project = str(project_id) if project_id else None
+        try:
+            request_org, request_project = await self.resolve_request_scope(
+                await self._get_db(), organization_id, project_id
+            )
+        except Exception as exc:  # an unreadable project is not a grant
+            logger.error(f"Request scope unresolvable for user {user_id}: {exc}")
+            request_org, request_project = self.UNRESOLVED_ORGANISATION, (str(project_id) if project_id else None)
 
         async def _logged(granted: bool, error: Optional[str] = None) -> bool:
             if log:
@@ -1094,7 +1203,11 @@ class PermissionService:
                 cache_parsed = json.loads(cached_data) if cached_data else None
                 if cache_parsed is not None and not await self._cache_entry_is_current(redis, user_id, cache_parsed):
                     cache_parsed = None
-                if cache_parsed is not None and isinstance(cache_parsed.get("grants"), list):
+                if (
+                    cache_parsed is not None
+                    and isinstance(cache_parsed.get("grants"), list)
+                    and "primary_organization_id" in cache_parsed
+                ):
                     return await _logged(
                         self._decide(
                             cache_parsed["grants"],
@@ -1103,6 +1216,7 @@ class PermissionService:
                             lookup_keys,
                             organization_id=request_org,
                             project_id=request_project,
+                            primary_organization_id=cache_parsed.get("primary_organization_id"),
                         )
                     )
         except Exception as e:
@@ -1122,8 +1236,15 @@ class PermissionService:
             if not user_doc:
                 return await _logged(False)
             grants, role_names = await self.scoped_grants(db, user_doc)
+            primary = self.primary_organisation(user_doc)
             granted = self._decide(
-                grants, role_names, permission_key, lookup_keys, organization_id=request_org, project_id=request_project
+                grants,
+                role_names,
+                permission_key,
+                lookup_keys,
+                organization_id=request_org,
+                project_id=request_project,
+                primary_organization_id=primary,
             )
             if redis is not None:
                 try:
@@ -1133,6 +1254,7 @@ class PermissionService:
                         await redis.set(cache_key, json.dumps({
                             "grants": grants,
                             "role_names": sorted(role_names),
+                            "primary_organization_id": primary,
                             "computed_at": computed_at,
                         }), ex=PERMISSION_CACHE_TTL_SECONDS)
                 except Exception as e:

@@ -91,6 +91,13 @@ async def _has(user_id: str, permission: str, **scope: Any) -> bool:
     return await PermissionService().user_has_permission(user_id, permission, log=False, **scope)
 
 
+def _no_role_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests make more role changes a minute than the per-process limit (20) allows."""
+    from rbac_backend.routers import roles as roles_router
+
+    monkeypatch.setattr(roles_router.role_mutation_limiter, "max_requests", 10_000)
+
+
 def _step_up(persona: str, user_id: str) -> Dict[str, str]:
     from rbac_backend.services.step_up_service import StepUpService
 
@@ -225,6 +232,7 @@ def test_built_in_roles_keep_their_meaning(monkeypatch) -> None:
 
 
 def test_a_role_carries_only_what_its_creator_may_delegate_there(monkeypatch) -> None:
+    _no_role_rate_limit(monkeypatch)
     async def scenario() -> None:
         async with _env(monkeypatch) as env:
             headers = _step_up("org_admin", "user-org_admin")
@@ -420,7 +428,9 @@ def test_custom_role_holders_see_claims_only_where_they_hold_the_permission(monk
             assert ids(await _claims(env, "sec_cv_org", PROJ_A1)) == {"claim-bench-a1"}
             await env.db.users.update_one({"email": "sec_cv_org@example.com"}, {"$set": {"projects": []}})
             assert ids(await _claims(env, "sec_cv_a2", PROJ_A2)) == {"sec-claim-a2"}
-            assert ids(await _claims(env, "sec_cv_a2")) == {"sec-claim-a2"}
+            # Review R-3: a project role counts only where its project is named, so a project-role
+            # holder lists claims by selecting the project; without one the list is refused.
+            assert (await _claims(env, "sec_cv_a2")).status_code == 403
             # A project role reaches no other project's rows.
             other = await _claims(env, "sec_cv_a2", PROJ_A1)
             assert other.status_code in {403} or ids(other) == set()
@@ -476,5 +486,222 @@ def test_the_custom_role_filter_never_widens_and_always_names_the_organisation(m
             # Built-in principals: exactly build_scope_query.
             builtin = principal("user-org_admin", ["orgadmin"], [])
             assert await permission_scope_query(builtin, VIEW, db=env.db) == build_scope_query(builtin)
+
+    _run(scenario())
+
+
+# --------------------------------------------------------------------------- #
+# SEC-1 boundary (review 2026-11-19): a project names its organisation
+# --------------------------------------------------------------------------- #
+
+
+def test_an_organisation_role_never_reaches_a_project_of_another_organisation(monkeypatch) -> None:
+    """A member of A and B holding only A's organisation role asks about a project of B,
+    with the organisation omitted, with the wrong organisation, and for a project that
+    does not exist. The project's own organisation decides; anything unresolvable fails."""
+
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            from types import SimpleNamespace
+
+            from fastapi import HTTPException
+
+            from rbac_backend.services.permission_service import PermissionService
+            from rbac_backend.services.policy_service import PolicyService
+
+            await _seed_roles(env.db)
+            dual = await _user(env.db, "sec_boundary", [ROLE_A], organization_id=ORG_A,
+                               organizations=[ORG_A, ORG_B], projects=[PROJ_A1, PROJ_B1])
+            service = PermissionService()
+            for _ in range(2):  # the second pass is served from whatever the first cached
+                assert await _has(dual, VIEW, project_id=PROJ_A1)
+                assert not await _has(dual, VIEW, project_id=PROJ_B1), "A's role reached a project of B"
+                assert not await _has(dual, VIEW, organization_id=ORG_A, project_id=PROJ_B1), "mismatched pair"
+                # The other mismatch: the organisation is one the user has no grant in, the project
+                # is one of A. A request that contradicts itself is refused, not reinterpreted.
+                assert not await _has(dual, VIEW, organization_id=ORG_B, project_id=PROJ_A1), "contradictory pair"
+                assert not await _has(dual, VIEW, project_id="no-such-project"), "unresolvable project"
+                assert not await service.user_has_explicit_permission(dual, VIEW, project_id=PROJ_B1)
+                assert VIEW not in set(await service.get_effective_permission_names(dual, project_id=PROJ_B1))
+
+            policy = PolicyService(env.db)
+            principal = SimpleNamespace(id=dual, roles=[ROLE_A], organization_id=ORG_A, organizations=[ORG_A, ORG_B],
+                                        projects=[PROJ_A1, PROJ_B1], account_type="client_user")
+            assert await policy.has_permission(principal, VIEW, project_id=PROJ_A1)
+            assert not await policy.has_permission(principal, VIEW, project_id=PROJ_B1)
+            for organisation in (None, ORG_A, ORG_B):
+                with pytest.raises(HTTPException) as refused:
+                    await policy.authorize(principal, VIEW, resource_type="claims", organization_id=organisation,
+                                           project_id=PROJ_B1, audit=False)
+                assert refused.value.status_code == 403, organisation
+
+            # Row visibility resolves the project's organisation too: a project role of B1 held by a
+            # user whose home organisation is A, and who is a member of B, sees B1's rows (named as B).
+            from rbac_backend.core.security import CurrentUser, permission_scope_query
+
+            await env.db.roles.insert_one(_role("sec-role-b1", [VIEW], organization_id=ORG_B, project_id=PROJ_B1))
+            b1_holder = await _user(env.db, "sec_b1_holder", ["sec-role-b1"], organization_id=ORG_A,
+                                    organizations=[ORG_A, ORG_B], projects=[PROJ_B1])
+            holder = CurrentUser(id=b1_holder, username="u", email="u@example.com", roles=["sec-role-b1"],
+                                 organization_id=ORG_A, organizations=[ORG_A, ORG_B], projects=[PROJ_B1])
+            rows = await permission_scope_query(holder, VIEW, project_id=PROJ_B1, db=env.db)
+            assert rows.get("organization_id") == ORG_B, rows
+            assert await permission_scope_query(holder, VIEW, project_id=PROJ_A1, db=env.db) == {"_id": {"$in": []}}
+            assert await _has(b1_holder, VIEW, project_id=PROJ_B1)
+
+            # Over HTTP: the claims list for B1 is refused; for A1 it answers.
+            await env.db.claims.insert_one({"_id": "sec-b1", "claim_ref": "B1", "title": "B1", "type": "eot", "status": "draft",
+                                            "organization_id": ORG_B, "project_id": PROJ_B1, "evidence_frozen_at": None})
+            b1 = await _claims(env, "sec_boundary", PROJ_B1)
+            assert b1.status_code == 403 or b1.json() == [], b1.text[:300]
+            a1 = await _claims(env, "sec_boundary", PROJ_A1)
+            assert a1.status_code == 200 and "sec-b1" not in {row["_id"] for row in a1.json()}
+
+    _run(scenario())
+
+
+# --------------------------------------------------------------------------- #
+# SEC-2 / SEC-3 adversarial review (2026-11-19)
+# --------------------------------------------------------------------------- #
+
+
+def test_no_spelling_of_a_privileged_permission_reaches_a_role(monkeypatch) -> None:
+    _no_role_rate_limit(monkeypatch)
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            headers = _step_up("org_admin", "user-org_admin")
+            # A catalogue document whose display name hides drafting.admin in its code.
+            hidden = ObjectId()
+            await env.db.permissions.insert_one({"_id": hidden, "name": "Drafting admin label", "code": "drafting.admin"})
+            attempts = {
+                "catalogue id": str(hidden),
+                "catalogue label": "Drafting admin label",
+                "wildcard": "*",
+                "role management": "roles:assign",
+                "platform": "platform.role.manage",
+                # DEF-4: ordinary-looking legacy names that pass non-delegable billing checks.
+                "alias of billing views": "organizations:read",
+                "label of that alias": "orgs:view",
+                "alias of subscription usage": "reports:view",
+            }
+            for label, entry in attempts.items():
+                response = await env.client.post("/api/roles", headers=headers, json={"name": f"Try {label}", "permissions": [entry]})
+                assert response.status_code == 403, (label, response.status_code, response.text[:200])
+            assert await env.db.roles.count_documents({"name": {"$regex": "^Try "}}) == 0
+
+    _run(scenario())
+
+
+def test_no_role_impersonates_a_built_in_or_system_role(monkeypatch) -> None:
+    _no_role_rate_limit(monkeypatch)
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            headers = _step_up("org_admin", "user-org_admin")
+            for name in ("Super Admin", "SUPERADMIN", "super_user", "Org Admin", "organization-admin", "Project User", "orguser"):
+                response = await env.client.post("/api/roles", headers=headers, json={"name": name, "permissions": [VIEW]})
+                assert response.status_code in {400, 403, 409}, (name, response.status_code)  # 409: the name is taken
+            for body in ({"name": "Sys", "permissions": [VIEW], "is_system": True}, {"name": "Sys2", "permissions": [VIEW], "scope": "system"}):
+                response = await env.client.post("/api/roles", headers=headers, json=body)
+                stored = await env.db.roles.find_one({"name": body["name"]})
+                assert response.status_code == 403 or (stored and stored.get("scope") != "system" and not stored.get("is_system")), body
+
+            # Legacy spellings of built-in roles are judged as the role they become.
+            target = await _user(env.db, "sec_alias_target", ["orguser"], organization_id=ORG_A)
+            for spelling in ("org-admin", "Organization Admin", "super-admin"):
+                response = await _assign(env, "org_admin", target, ["orguser", spelling])
+                assert response.status_code in {400, 403}, (spelling, response.status_code, response.text[:200])
+            stored = await env.db.users.find_one({"_id": ObjectId(target)})
+            assert stored["roles"] == ["orguser"]
+
+            # A stored custom role that merely carries a system name confers no bypass.
+            await env.db.roles.insert_one({"_id": "sec-fake-sa", "name": "Super Admin Lookalike", "permissions": [],
+                                           "scope": "organization", "organization_id": ORG_A, "is_active": True})
+            pretender = await _user(env.db, "sec_pretender", ["sec-fake-sa"], organization_id=ORG_A)
+            assert not await _has(pretender, VIEW)
+            from types import SimpleNamespace
+
+            from fastapi import HTTPException
+
+            from rbac_backend.services.policy_service import PolicyService
+
+            principal = SimpleNamespace(id=pretender, roles=["sec-fake-sa"], organization_id=ORG_A, organizations=[ORG_A],
+                                        projects=[], account_type="client_user")
+            with pytest.raises(HTTPException):
+                await PolicyService(env.db).authorize(principal, VIEW, resource_type="claims", organization_id=ORG_B, audit=False)
+
+    _run(scenario())
+
+
+# --------------------------------------------------------------------------- #
+# Independent security review (2026-11-19): findings R-1 to R-3
+# --------------------------------------------------------------------------- #
+
+
+def test_r1_a_custom_role_named_like_a_built_in_key_is_still_a_custom_role(monkeypatch) -> None:
+    _no_role_rate_limit(monkeypatch)
+
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            headers = _step_up("org_admin", "user-org_admin")
+            for name in ("legal_reviewer", "Legal_Reviewer", "contract_expert", "chief_contract_expert", "Quantum Reviewer"):
+                response = await env.client.post("/api/roles", headers=headers, json={"name": name, "permissions": [VIEW]})
+                assert response.status_code in {400, 403, 409}, (name, response.status_code, response.text[:200])
+            # A stored one (legacy, or written around the API) is judged by its id, not its name.
+            await env.db.roles.insert_one(_role("x", [VIEW], organization_id=ORG_A) | {"_id": ObjectId("65f0000000000000000000aa"), "name": "legal_reviewer"})
+            holder_b = await _user(env.db, "sec_r1_b", ["65f0000000000000000000aa"], organization_id=ORG_B)
+            assert not await _has(holder_b, VIEW), "a name made a custom role built-in"
+            target = await _user(env.db, "sec_r1_target", ["orguser"], organization_id=ORG_B)
+            assigned = await _assign(env, "superadmin", target, ["orguser", "65f0000000000000000000aa"])
+            assert assigned.status_code == 403, assigned.text[:200]
+
+    _run(scenario())
+
+
+def test_r2_an_alias_cannot_carry_permissions_its_creator_does_not_hold(monkeypatch) -> None:
+    _no_role_rate_limit(monkeypatch)
+
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            # A project admin creates a project role with the legacy projects:update (and its label
+            # projects:edit), which passes 23 canonical checks including org-tier ones it lacks.
+            headers = _step_up("project_admin", "user-project_admin")
+            for entry in ("projects:update", "projects:edit"):
+                response = await env.client.post("/api/roles", headers=headers,
+                                                 json={"name": f"Alias {entry}", "permissions": [entry], "project_id": PROJ_A1})
+                assert response.status_code == 403, (entry, response.status_code, response.text[:200])
+            assert await env.db.roles.count_documents({"name": {"$regex": "^Alias "}}) == 0
+
+    _run(scenario())
+
+
+def test_r3_a_project_role_never_counts_at_organisation_level(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            from rbac_backend.services.permission_service import PermissionService
+
+            await env.db.roles.insert_one(_role("sec-r3-p", [VIEW, STRATEGY], organization_id=ORG_A, project_id=PROJ_A1))
+            holder = await _user(env.db, "sec_r3", ["sec-r3-p"], organization_id=ORG_A, projects=[PROJ_A1])
+            assert await _has(holder, VIEW, project_id=PROJ_A1)
+            assert not await _has(holder, VIEW, organization_id=ORG_A), "a project role counted for the whole organisation"
+            # Re-review: nor on a permission-only gate (nothing named), primary organisation or not.
+            assert not await _has(holder, VIEW), "a project role passed an unscoped gate"
+            service = PermissionService()
+            assert await service.user_has_explicit_permission(holder, STRATEGY, organization_id=ORG_A, project_id=PROJ_A1)
+            assert not await service.user_has_explicit_permission(holder, STRATEGY, organization_id=ORG_A)
+            # A project role stops counting once its project is inactive.
+            await env.db.projects.update_one({"_id": PROJ_A1}, {"$set": {"is_active": False}})
+            assert not await _has(holder, VIEW, project_id=PROJ_A1)
+
+    _run(scenario())
+
+
+def test_r4_an_unscoped_check_counts_custom_roles_only_in_the_primary_organisation(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            await _seed_roles(env.db)
+            # Primary organisation B, still listed in A, holding A's custom role.
+            moved = await _user(env.db, "sec_r4", [ROLE_A], organization_id=ORG_B, organizations=[ORG_A, ORG_B])
+            assert not await _has(moved, VIEW), "an unscoped check counted a role outside the primary organisation"
+            assert await _has(moved, VIEW, organization_id=ORG_A), "named explicitly, the A membership still counts"
 
     _run(scenario())

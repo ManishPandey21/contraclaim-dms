@@ -28,6 +28,7 @@ from ..services.authorization_service import AuthorizationService
 from ..services.permission_service import PermissionService
 from ..services.role_service import RoleService, RoleServiceError
 from ..services.role_grants import role_is_built_in
+from ..services.account_status import object_account_is_active
 from ..models.user_models import (
     User, UserCreate, UserUpdate, UserResponse, UserListResponse,
     LoginRequest, LoginResponse, TokenResponse
@@ -184,8 +185,8 @@ class UserController:
                     status.HTTP_401_UNAUTHORIZED
                 )
 
-            # Check if user is disabled
-            if user.disabled:
+            # Check if user is disabled (SEC-4: the one rule, disabled or is_active false)
+            if not object_account_is_active(user):
                 await self.audit_logger.log_login_failed(
                     validated_email,
                     "account_disabled",
@@ -808,6 +809,21 @@ class UserController:
 
         if update_data.organization_id is not None:
             validated_fields['organization_id'] = update_data.organization_id
+
+        # DEF-3 (2026-11-19): `organizations` is membership to ScopeService and to the
+        # permission checks, and was silently dropped here, so a user moved to another
+        # organisation stayed a member of the old one. It is applied when sent; a move
+        # that does not say which memberships the user keeps is refused rather than
+        # guessed (no silent change of access either way).
+        if update_data.organizations is not None:
+            validated_fields['organizations'] = [str(org) for org in update_data.organizations if org]
+        elif update_data.organization_id is not None and str(update_data.organization_id) != str(
+            getattr(existing_user, "organization_id", "") or ""
+        ):
+            raise UserError(
+                "Moving a user to another organisation must also say which organisations they keep (organizations)",
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
 
         if update_data.projects is not None:
             validated_fields['projects'] = update_data.projects

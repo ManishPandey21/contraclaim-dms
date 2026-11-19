@@ -247,9 +247,23 @@ def test_the_readings_are_right_change_nothing_and_name_no_one() -> None:
         assert roles["chief_contract_expert"]["role_documents_with_this_name"] == 1
         assert roles["chief_contract_expert"]["role_documents_with_this_id"] == 0
 
-        assert by_code["P-05"]["custom_role_compatibility"] == {
-            "custom_roles_total": 3,
-            "custom_roles_without_organisation_or_project": 1,
+        compatibility = dict(by_code["P-05"]["custom_role_compatibility"])
+        changes = compatibility.pop("changes")
+        assert {key: (value["users"], value["role_type"], value["organisations_affected"], value["users_per_organisation"],
+                      value["permission_entries_affected"]) for key, value in changes.items()} == {
+            "custom_role_of_an_organisation_the_user_is_not_in": (1, "organisation", 1, [1], {"dms.claim.view": 1}),
+            "project_role_for_a_project_the_user_is_not_assigned_to": (1, "project", 1, [1], {}),
+            "role_naming_no_organisation_held_by_an_organisation_user": (1, "platform", 1, [1], {"dms.claim.view": 1}),
+            "account_is_active_false_but_not_disabled": (1, "account", 1, [1], {}),
+        }
+        assert all(value["recommended_regrant"] for value in changes.values())
+        assert compatibility.pop("users_with_a_non_objectid_id") == 5
+        assert compatibility.pop("custom_roles_carrying_a_name_that_passes_a_non_delegable_check") == 0
+        assert compatibility == {
+            # Review R-1: the two roles only *named* like built-ins (Chief_Contract_Expert,
+            # Organization User) are custom roles, and name no organisation.
+            "custom_roles_total": 5,
+            "custom_roles_without_organisation_or_project": 3,
             "roles_named_like_a_built_in_role": 2,
             "users_total": 5,
             "users_with_custom_roles_only": 2,

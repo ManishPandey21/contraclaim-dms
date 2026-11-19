@@ -140,10 +140,25 @@ jobs:
           done
           echo "the replica set never elected a writable primary" >&2
           exit 1
+      - name: Start a disposable Redis for the session and permission-cache suites
+        shell: bash
+        run: |
+          # SEC-1 to SEC-4 (2026-11-19): sessions, refresh and the permission cache are
+          # tested with a real runtime Redis, not only without one.
+          docker run -d --name redis-sec -p 6390:6379 redis:7.2-alpine --save "" --appendonly no
+          for attempt in $(seq 1 30); do
+            if docker exec redis-sec redis-cli ping 2>/dev/null | grep -q PONG; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "the disposable Redis never answered" >&2
+          exit 1
       - name: Run the real-Mongo relationship suites (must run, not skip)
         working-directory: projectDMS
         shell: bash
         env:
+          SECURITY_REDIS_URI: redis://localhost:6390/0
           RELATIONSHIP_CL1_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
           RELATIONSHIP_CL2_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
           RELATIONSHIP_CL3A_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
@@ -274,6 +289,7 @@ jobs:
             backend/rbac_backend/tests/integration/test_claim_type_confirmation_mongo.py
             backend/rbac_backend/tests/integration/test_claim_evidence_snapshots_mongo.py
             backend/rbac_backend/tests/integration/test_security_remediation_mongo.py
+            backend/rbac_backend/tests/integration/test_security_redis_mongo.py
           )
           python -m pytest -q -rs --junitxml=real-mongo-relationships.xml "${suites[@]}" \
             | tee real-mongo-relationships.log

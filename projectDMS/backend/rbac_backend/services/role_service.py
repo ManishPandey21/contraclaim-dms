@@ -119,6 +119,19 @@ class RoleService:
             role_names.add(str(role).lower())
         return role_names
 
+    def _is_reserved_name(self, name: Any) -> bool:
+        """A name no one but a Super Admin may give a role: any built-in key, in any spelling.
+
+        Compared both as the canonical key (``normalize_role_key``: aliases, case) and with
+        every non-alphanumeric removed, so ``contract_expert``, ``Contract Expert`` and
+        ``contractexpert`` are all refused (review R-1).
+        """
+        from .role_grants import BUILT_IN_ROLE_KEYS
+
+        keys = RESERVED_ROLE_KEYS | SYSTEM_ROLE_NAMES | set(BUILT_IN_ROLE_KEYS)
+        stripped = {self._normalize_role_key(key) for key in keys}
+        return normalize_role_key(str(name or "")) in keys or self._normalize_role_key(name) in stripped
+
     def _normalize_role_key(self, value: Any) -> str:
         raw = str(value or "").strip().lower()
         if not raw:
@@ -169,6 +182,13 @@ class RoleService:
             seen.add(value)
             normalized.append(value)
         return normalized
+
+    @staticmethod
+    def _satisfied_by(name: str) -> set:
+        """Every permission check that a role holding ``name`` passes (the one-hop alias contract)."""
+        from .permission_service import PermissionService
+
+        return PermissionService.checks_satisfied_by(name)
 
     @staticmethod
     def _is_non_delegable(permission: str) -> bool:
@@ -245,23 +265,36 @@ class RoleService:
                 if value not in resolved:
                     resolved.append(value)
                 continue
-            if self._is_non_delegable(entry) or (name and self._is_non_delegable(name)):
+            if self._is_non_delegable(entry):
                 raise RoleServiceError(f"Not authorized to assign privileged permission: {entry}", 403)
-            if name is None:
-                raise RoleServiceError(f"Unknown permission: {entry}", 422)
-            if name in EXPLICIT_GRANT_ONLY_PERMISSIONS or name in SUPERADMIN_EXCLUDED_PERMISSIONS:
-                held = await permission_service.user_has_explicit_permission(
-                    actor_id, name, organization_id=organization_id, project_id=project_id
-                )
-            else:
-                held = await permission_service.user_has_permission(
-                    actor_id, name, log=False, organization_id=organization_id, project_id=project_id
-                )
-            if not held:
+            # The name the entry resolves to, and (DEF-4) every check it passes through the
+            # one-hop alias contract: organizations:read satisfies the billing views that
+            # declare it, so it is non-delegable as well.
+            if name and any(self._is_non_delegable(other) for other in self._satisfied_by(name)):
                 raise RoleServiceError(
-                    f"You can only give a role permissions you hold yourself in its organisation or project: {name}",
+                    f"Not authorized to assign {entry}: it also grants a permission only a Super Admin may give",
                     403,
                 )
+            if name is None:
+                raise RoleServiceError(f"Unknown permission: {entry}", 422)
+            # Review R-2: a role holding `name` passes every check `name` satisfies (the
+            # one-hop alias contract: projects:update passes 23 canonical checks), so the
+            # creator must hold each of those checks here, not merely `name` or one equivalent.
+            for check in sorted(self._satisfied_by(name)):
+                if check in EXPLICIT_GRANT_ONLY_PERMISSIONS or check in SUPERADMIN_EXCLUDED_PERMISSIONS:
+                    held = await permission_service.user_has_explicit_permission(
+                        actor_id, check, organization_id=organization_id, project_id=project_id
+                    )
+                else:
+                    held = await permission_service.user_has_permission(
+                        actor_id, check, log=False, organization_id=organization_id, project_id=project_id
+                    )
+                if not held:
+                    raise RoleServiceError(
+                        f"You can only give a role permissions you hold yourself in its organisation or project: {name}"
+                        + (f" (it also grants {check})" if check != name else ""),
+                        403,
+                    )
             if name not in resolved:
                 resolved.append(name)
         return resolved
@@ -600,8 +633,7 @@ class RoleService:
             org_id = getattr(created_by, "organization_id", None)
             project_ids = [str(p) for p in (getattr(created_by, "projects", []) or []) if p]
 
-            role_name_key = self._normalize_role_key(role_data.name)
-            if role_name_key in RESERVED_ROLE_KEYS | SYSTEM_ROLE_NAMES and not is_superadmin:
+            if self._is_reserved_name(role_data.name) and not is_superadmin:
                 raise RoleServiceError("Not authorized to create reserved roles", 403)
             await self._refuse_lookalike_name(db, role_data.name, None)
 
@@ -823,7 +855,7 @@ class RoleService:
 
             self._ensure_role_manageable(updated_by, existing)
             if not self._is_superadmin_actor(updated_by):
-                if update_data.name is not None and self._normalize_role_key(update_data.name) in RESERVED_ROLE_KEYS | SYSTEM_ROLE_NAMES:
+                if update_data.name is not None and self._is_reserved_name(update_data.name):
                     raise RoleServiceError("Not authorized to rename roles to reserved names", 403)
                 if update_data.is_system is not None and self._field_changed(existing, "is_system", bool(update_data.is_system)):
                     raise RoleServiceError("Not authorized to change system role status", 403)

@@ -34,7 +34,7 @@ from __future__ import annotations
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 from ..core.permissions import REVIEWER_ROLE_KEYS
-from ..core.role_reference import normalize_role_key, role_is_system
+from ..core.role_reference import normalize_role_key
 
 #: Role keys whose meaning is defined by the code, not by their document.
 BUILT_IN_ROLE_KEYS: frozenset = frozenset(
@@ -69,17 +69,19 @@ def _key(value: Any) -> str:
 
 
 def role_is_built_in(document: Mapping[str, Any]) -> bool:
-    """A role whose meaning the code defines: system, or keyed or named as a built-in role.
+    """A role whose meaning the code defines: marked system, or stored under a built-in key.
 
-    The name counts too, so an older built-in document stored under an ObjectId
-    (``name: "Organization Admin"``) keeps its built-in meaning. Role creation and
-    renaming refuse built-in names for everyone but a Super Admin (SEC-2), so no new
-    custom role can borrow one; existing documents named like a built-in role are a
-    P-05 reading.
+    Never by name (independent review R-1, 2026-11-19): a custom role named
+    ``legal_reviewer`` or ``Organization Admin`` is a custom role, bounded like any other.
+    Role creation and renaming refuse built-in names; P-05 counts the stored ones.
     """
-    if document.get("is_system") is True or role_is_system(document):
+    if document.get("is_system") is True:
         return True
-    return _key(document.get("_id")) in BUILT_IN_ROLE_KEYS or _key(document.get("name")) in BUILT_IN_ROLE_KEYS
+    scope = document.get("scope")
+    if isinstance(scope, str) and scope.strip().lower() == "system":
+        return True
+    # Not core.role_reference.role_is_system: with no stored scope it falls back to the name.
+    return _key(document.get("_id")) in BUILT_IN_ROLE_KEYS
 
 
 def _text(value: Any) -> Optional[str]:
@@ -112,6 +114,9 @@ async def user_memberships(db: Any, user_doc: Mapping[str, Any]) -> Tuple[Set[st
     return organisations, projects
 
 
+_INACTIVE = "\x00inactive-project"
+
+
 async def _project_organisation(db: Any, project_id: str, cache: Dict[str, Optional[str]]) -> Optional[str]:
     if project_id in cache:
         return cache[project_id]
@@ -122,8 +127,10 @@ async def _project_organisation(db: Any, project_id: str, cache: Dict[str, Optio
         candidates.append(ObjectId(project_id))
     except Exception:
         pass
-    project = await db.projects.find_one({"_id": {"$in": candidates}}, {"organization_id": 1, "organizationId": 1})
+    project = await db.projects.find_one({"_id": {"$in": candidates}}, {"organization_id": 1, "organizationId": 1, "is_active": 1})
     organisation = _text((project or {}).get("organization_id") or (project or {}).get("organizationId"))
+    if project is not None and project.get("is_active") is False:
+        organisation = _INACTIVE  # review: a project role stops counting once its project is inactive
     cache[project_id] = organisation
     return organisation
 
@@ -146,7 +153,7 @@ async def role_grant_scope(
         if role_project not in projects:
             return False, None
         project_org = await _project_organisation(db, role_project, project_cache)
-        if project_org is None:
+        if project_org is None or project_org == _INACTIVE:
             return False, None
         if role_org and project_org != role_org:
             return False, None
@@ -166,16 +173,36 @@ def grant_applies(
     *,
     organization_id: Optional[str] = None,
     project_id: Optional[str] = None,
+    primary_organization_id: Optional[str] = None,
 ) -> bool:
-    """Whether a grant with this scope counts for a request in (organization_id, project_id)."""
+    """Whether a grant with this scope counts for a request in (organization_id, project_id).
+
+    - Built-in (``scope`` None) and platform grants: as before.
+    - A request naming a project: ``organization_id`` must be that project's own
+      organisation, resolved by the caller (``PermissionService.resolve_request_scope``);
+      without it a custom grant is refused (SEC-1 boundary).
+    - A project grant counts only for a request naming that project; never for its
+      whole organisation (review R-3).
+    - A request naming nothing (a permission-only gate): a custom grant counts only in
+      the principal's primary organisation (review R-4), never in another organisation
+      the user is also listed in.
+    """
     if scope is None:
         return True
     if scope.get("platform"):
         return True
-    if organization_id and str(organization_id) != str(scope.get("organization_id")):
+    if not organization_id and not project_id:
+        # Organisation roles of the primary organisation only: a project role needs its project named.
+        return (
+            bool(primary_organization_id)
+            and not scope.get("project_id")
+            and str(scope.get("organization_id")) == str(primary_organization_id)
+        )
+    # A project named without its resolved organisation compares "None" here and fails closed.
+    if str(organization_id) != str(scope.get("organization_id")):
         return False
-    if project_id and scope.get("project_id") and str(project_id) != str(scope.get("project_id")):
-        return False
+    if scope.get("project_id"):
+        return bool(project_id) and str(project_id) == str(scope.get("project_id"))
     return True
 
 
@@ -184,10 +211,16 @@ def applicable_names(
     *,
     organization_id: Optional[str] = None,
     project_id: Optional[str] = None,
+    primary_organization_id: Optional[str] = None,
 ) -> Set[str]:
     names: Set[str] = set()
     for grant in grants:
-        if grant_applies(grant.get("scope"), organization_id=organization_id, project_id=project_id):
+        if grant_applies(
+            grant.get("scope"),
+            organization_id=organization_id,
+            project_id=project_id,
+            primary_organization_id=primary_organization_id,
+        ):
             names.update(grant.get("names") or [])
     return names
 

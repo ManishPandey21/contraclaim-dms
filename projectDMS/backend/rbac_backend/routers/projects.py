@@ -450,7 +450,14 @@ async def delete_project(
     existing = await _find_by_id(db.projects, project_id)
     if not existing:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    from ..services.permission_service import begin_authority_change, complete_grant_change, project_member_ids
+
+    # Review (2026-11-19): project roles of a deleted project grant nothing; clear the
+    # members' cached grants around the delete (a 503 if that cannot be announced).
+    members = await project_member_ids(db, existing["_id"])
+    await begin_authority_change(members)
     deleted_project = await db.projects.find_one_and_delete({"_id": existing["_id"]})
+    await complete_grant_change(members)
     if not deleted_project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     return {"message": "Project deleted successfully"}

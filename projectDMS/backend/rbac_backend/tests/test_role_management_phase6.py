@@ -277,7 +277,7 @@ def _super_admin():
         # resolves one hop to projectuser; a lookalike would leave every holder with nothing.
         # SEC-2: projectuser is now a reserved built-in key, so an org admin is refused first (403).
         ("project-user", 403),
-        ("Organization User", 400),
+        ("Organization User", 403),  # review R-1: orguser is a reserved built-in key
         ("org-admin", 403),  # already a reserved key for non-superadmins
         ("Super Admin", 403),  # a system key: never for non-superadmins
     ],
