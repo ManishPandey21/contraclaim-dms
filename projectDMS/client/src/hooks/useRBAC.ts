@@ -1,16 +1,34 @@
-import { useEffect, useMemo, useState } from "react";
-import { enhancedApi as api, Role } from "@/services/enhanced-api";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentUserProfile } from "@/services/session-api";
 import {
-  expandPermissionAliases,
-  expandPermissionSet,
+  EXPLICIT_GRANT_PERMISSIONS,
+  RBAC_REFRESH_EVENTS,
   normalizeRoleId,
 } from "@/config/rolePermissions";
 
-const permissionCache = new Map<
-  string,
-  { permissions: Set<string>; cachedAt: number }
->();
+/**
+ * The signed-in user's permissions, as the server's effective list (`/me`) states them.
+ *
+ * T-2 (owner decision 2026-11-19). The server list is authoritative and complete: every
+ * name in it passes both kinds of backend gate, and it already includes each check a held
+ * name passes. So:
+ *
+ * - **No role-catalogue fallback.** An empty list returned by the server means "no
+ *   permissions"; the hook never downloads the role catalogue and expands roles itself
+ *   (that ignored scope, and ordinary users cannot read the catalogue anyway).
+ * - **No client-side alias expansion.** `can()` matches the server list exactly; the
+ *   client's two-hop alias table could grant what the server refuses.
+ * - **Three states.** `loading` (nothing is known: deny), `error` (the profile could not
+ *   be read: deny, and say so), `ready` (the server's answer, possibly empty).
+ * - **Fail closed on change.** Signing in or out, a role change, a profile update and a
+ *   scope change clear what was known and read the server again (`force`); an answer to an
+ *   older request never overwrites a newer one.
+ * - **Super Admin and `["*"]`** pass every check except the explicit-grant permissions
+ *   (`EXPLICIT_GRANT_PERMISSIONS`), which need the name itself in the list. The backend
+ *   enforces every privilege regardless; this only decides what the UI offers.
+ */
+
+export type RBACStatus = "loading" | "error" | "ready";
 
 export interface UseRBACResult {
   roles: string[];
@@ -18,181 +36,90 @@ export interface UseRBACResult {
   can: (permId: string) => boolean;
   loading: boolean;
   error: string | null;
+  status: RBACStatus;
+}
+
+interface RBACState {
+  status: RBACStatus;
+  roles: string[];
+  permissions: Set<string>;
+  error: string | null;
+}
+
+const LOADING: RBACState = { status: "loading", roles: [], permissions: new Set(), error: null };
+
+const ROLE_NAME_READERS = ["orgadmin", "orguser", "projectadmin", "projectuser"];
+
+function listFrom(value: unknown, normalise: (item: string) => string): string[] {
+  const items = Array.isArray(value)
+    ? value.map((item) => String(item))
+    : typeof value === "string"
+      ? value.split(",")
+      : [];
+  return items.map((item) => normalise(item.trim())).filter(Boolean);
+}
+
+export function decide(state: RBACState, permId: string): boolean {
+  const key = String(permId || "").trim().toLowerCase();
+  if (!key || state.status !== "ready") return false;
+  if (EXPLICIT_GRANT_PERMISSIONS.has(key)) {
+    // Never through "*" or the Super Admin role: only a grant of the name itself.
+    return state.permissions.has(key);
+  }
+  if (state.roles.includes("superadmin") || state.permissions.has("*")) return true;
+  if (key === "users:read" && state.roles.some((role) => ROLE_NAME_READERS.includes(role))) {
+    return true; // the backend's role-name rule for users:read
+  }
+  return state.permissions.has(key);
 }
 
 export function useRBAC(): UseRBACResult {
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [perms, setPerms] = useState<Set<string>>(new Set());
-  const [roles, setRoles] = useState<string[]>([]);
-  const [profilePermissions, setProfilePermissions] = useState<string[]>([]);
-  // Whether the first role fetch has completed. Until it has, an empty `roles`
-  // means "still loading", not "no access" — otherwise a freshly-mounted
-  // RoleGuard would deny and bounce deep-links to /overview before roles arrive.
-  const [rolesResolved, setRolesResolved] = useState(false);
+  const [state, setState] = useState<RBACState>(LOADING);
+  const request = useRef(0);
 
-  useEffect(() => {
-    let mounted = true;
-    const refreshRoles = async () => {
-      try {
-        const me = await getCurrentUserProfile();
-        const fetched = Array.isArray(me?.roles)
-          ? (me.roles as string[]).map((r) => normalizeRoleId(String(r)))
-          : typeof me?.roles === "string"
-            ? me.roles
-                .split(",")
-                .map((r) => normalizeRoleId(r))
-                .filter(Boolean)
-            : [];
-        const fetchedPermissions = Array.isArray(me?.permissions)
-          ? me.permissions.map((permission) => String(permission).trim()).filter(Boolean)
-          : typeof me?.permissions === "string"
-            ? me.permissions
-                .split(",")
-                .map((permission) => permission.trim())
-                .filter(Boolean)
-            : [];
-        if (mounted) {
-          setRoles(fetched);
-          setProfilePermissions(fetchedPermissions);
-        }
-      } catch {
-        if (mounted) {
-          setRoles([]);
-          setProfilePermissions([]);
-        }
-      } finally {
-        if (mounted) setRolesResolved(true);
-      }
-    };
-
-    void refreshRoles();
-    const listener = () => void refreshRoles();
-    window.addEventListener("auth-state-changed", listener);
-    return () => {
-      mounted = false;
-      window.removeEventListener("auth-state-changed", listener);
-    };
+  const refresh = useCallback(async (force: boolean) => {
+    const id = ++request.current;
+    setState(LOADING); // fail closed while the new answer is read
+    try {
+      const me = await getCurrentUserProfile({ force });
+      if (id !== request.current) return; // a newer request owns the state
+      setState({
+        status: "ready",
+        roles: listFrom(me?.roles, normalizeRoleId),
+        permissions: new Set(listFrom(me?.permissions, (item) => item.toLowerCase())),
+        error: null,
+      });
+    } catch (e: any) {
+      if (id !== request.current) return;
+      setState({
+        status: "error",
+        roles: [],
+        permissions: new Set(),
+        error: e?.message || "Your permissions could not be loaded.",
+      });
+    }
   }, []);
 
-  const roleKey = useMemo(
-    () =>
-      `${roles.join(",")}|${[...profilePermissions]
-        .sort()
-        .join(",")}`,
-    [profilePermissions, roles],
-  );
-
   useEffect(() => {
-    let mounted = true;
-
-    async function load() {
-      try {
-        setLoading(true);
-        setError(null);
-
-        // If roles are not yet resolved but we have a JWT, wait for the /me sync effect
-        // to populate roles. This prevents premature "access denied" UI: stay in the
-        // loading state until the first role fetch has actually completed.
-        if (roles.length === 0 && profilePermissions.length === 0) {
-          if (mounted) setLoading(!rolesResolved);
-          return;
-        }
-
-        // Superadmin / wildcard short-circuit
-        if (roles.includes("superadmin") || profilePermissions.includes("*")) {
-          const superSet = new Set<string>(["*"]);
-          if (mounted) {
-            setPerms(superSet);
-            permissionCache.set(roleKey, {
-              permissions: superSet,
-              cachedAt: Date.now(),
-            });
-            setLoading(false);
-          }
-          return;
-        }
-
-        if (profilePermissions.length > 0) {
-          const expanded = expandPermissionSet(profilePermissions);
-          if (mounted) {
-            setPerms(expanded);
-            permissionCache.set(roleKey, {
-              permissions: new Set(expanded),
-              cachedAt: Date.now(),
-            });
-            setLoading(false);
-          }
-          return;
-        }
-
-        // Use simple in-memory cache (5 minutes)
-        const cached = permissionCache.get(roleKey);
-        if (cached && Date.now() - cached.cachedAt < 5 * 60 * 1000) {
-          if (mounted) {
-            setPerms(new Set(cached.permissions));
-            setLoading(false);
-          }
-          return;
-        }
-
-        const allRoles: Role[] = await api.getRoles();
-        const wanted = new Set(roles);
-        const collected = new Set<string>();
-
-        for (const role of allRoles) {
-          const rid = normalizeRoleId(role._id);
-          if (wanted.has(rid)) {
-            (role.permissions || []).forEach((p) => {
-              expandPermissionAliases(p).forEach((candidate) =>
-                collected.add(candidate)
-              );
-            });
-          }
-        }
-
-        const expanded = expandPermissionSet(collected);
-
-        if (mounted) {
-          setPerms(expanded);
-          permissionCache.set(roleKey, {
-            permissions: new Set(expanded),
-            cachedAt: Date.now(),
-          });
-          setLoading(false);
-        }
-      } catch (e: any) {
-        if (mounted) {
-          setError(e?.message || "Failed to load RBAC permissions");
-          setLoading(false);
-        }
-      }
-    }
-
-    load();
+    void refresh(false);
+    const listener = () => void refresh(true);
+    for (const event of RBAC_REFRESH_EVENTS) window.addEventListener(event, listener);
     return () => {
-      mounted = false;
+      request.current += 1; // ignore any answer that arrives after unmount
+      for (const event of RBAC_REFRESH_EVENTS) window.removeEventListener(event, listener);
     };
-  }, [profilePermissions, roleKey, roles, rolesResolved]);
+  }, [refresh]);
 
-  const can = (permId: string) => {
-    if (!permId) return false;
-    if (roles.includes("superadmin")) return true;
-    if (perms.has("*")) return true;
-    if (
-      permId === "users:read" &&
-      roles.some((role) =>
-        ["orgadmin", "orguser", "projectadmin", "projectuser"].includes(role)
-      )
-    ) {
-      return true;
-    }
-    return expandPermissionAliases(permId).some((candidate) =>
-      perms.has(candidate)
-    );
+  const can = useCallback((permId: string) => decide(state, permId), [state]);
+
+  return {
+    roles: state.roles,
+    permissions: state.permissions,
+    can,
+    loading: state.status === "loading",
+    error: state.error,
+    status: state.status,
   };
-
-  return { roles, permissions: perms, can, loading, error };
 }
 
 export default useRBAC;

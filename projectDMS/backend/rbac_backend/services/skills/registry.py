@@ -43,6 +43,7 @@ from .approvals import (
     revision_filter,
 )
 from .transactions import audit_skill_decision, run_in_transaction, session_kwargs
+from .version_index import require_skill_version_index
 from .loader import LoadedSkill
 from .system_skills import (
     AWAITING_APPROVAL_REASON,
@@ -275,6 +276,9 @@ class SkillRegistry:
         guardrail_findings: Optional[List[Dict[str, Any]]] = None,
         bundle_file_id: Optional[str] = None,
     ) -> SkillVersion:
+        # The write below relies on skill_version_unique to stop a concurrent import
+        # writing a second document (T-4): verify it, never create it here.
+        await require_skill_version_index(self.db)
         existing = await self.get_version(loaded.skill_key, version)
         if existing and existing.status != "draft":
             raise HTTPException(
@@ -497,6 +501,7 @@ class SkillRegistry:
             )
             return record
 
+        await require_skill_version_index(self.db)  # T-4: verified, never created here
         record = await run_in_transaction(self.db, decide)
         await self._refresh_skill(record)
         return await self._require_db_version(skill_key, version)

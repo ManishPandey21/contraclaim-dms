@@ -154,6 +154,25 @@ const DRAFTING_ROLES: Role[] = [
   Roles.ExpertReviewer,
 ];
 
+/**
+ * Permissions that only an explicit grant of the name confers: never the `*` wildcard,
+ * never the Super Admin role (backend core.permissions.SUPERADMIN_EXCLUDED_PERMISSIONS;
+ * tests/test_client_explicit_grant_permissions.py keeps the two lists equal).
+ */
+export const EXPLICIT_GRANT_PERMISSIONS: ReadonlySet<string> = new Set([
+  "dms.claim.determine",
+  "dms.claim.strategy.read",
+  "dms.claim.evidence.confirm_contract",
+  "dms.claim.signal.view",
+]);
+
+/** Window events after which `useRBAC` forgets what it knew and asks the server again. */
+export const RBAC_REFRESH_EVENTS: readonly string[] = [
+  "auth-state-changed", // sign-in, sign-out, token refresh
+  "profile-updated", // the user's own profile (and roles) changed
+  "tenant-scope-changed", // the navbar organisation or project selection changed
+];
+
 // Keep frontend aliases aligned with backend core.permissions.LEGACY_PERMISSION_ALIASES
 // plus the non-document org/project aliases retained by PermissionService.
 // Document access is intentionally canonical-only, matching backend policy.

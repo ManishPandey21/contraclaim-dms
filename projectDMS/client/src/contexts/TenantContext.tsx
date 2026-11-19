@@ -140,6 +140,12 @@ export function TenantProvider({ children }: React.PropsWithChildren) {
     } else {
       window.localStorage.removeItem(PROJECT_STORAGE_KEY);
     }
+    // Permission holders (useRBAC) re-read the server after a scope change (T-2).
+    window.dispatchEvent(
+      new CustomEvent("tenant-scope-changed", {
+        detail: { organizationId: selectedOrganizationId, projectId: selectedProjectId || null },
+      }),
+    );
   }, [selectedOrganizationId, selectedProjectId]);
 
   const projectsForSelectedOrganization = useMemo(

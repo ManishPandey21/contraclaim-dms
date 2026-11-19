@@ -99,6 +99,10 @@ class _Cursor:
 class FakeCollection:
     def __init__(self, docs: Optional[List[Dict[str, Any]]] = None) -> None:
         self.docs: List[Dict[str, Any]] = docs or []
+        self.indexes: Dict[str, Dict[str, Any]] = {"_id_": {"key": [("_id", 1)]}}
+
+    async def index_information(self) -> Dict[str, Dict[str, Any]]:
+        return copy.deepcopy(self.indexes)
 
     async def insert_one(self, doc: Dict[str, Any], **_: Any) -> _Result:
         stored = copy.deepcopy(doc)
@@ -183,7 +187,12 @@ class FakeCollection:
         return _Result(before - len(self.docs), before - len(self.docs))
 
     async def create_index(self, *args: Any, **kwargs: Any) -> str:
-        return kwargs.get("name", "index")
+        name = kwargs.get("name", "index")
+        keys = args[0] if args else kwargs.get("keys", [])
+        if isinstance(keys, str):
+            keys = [(keys, 1)]
+        self.indexes[name] = {"key": list(keys), **({"unique": True} if kwargs.get("unique") else {})}
+        return name
 
     async def count_documents(self, query: Dict[str, Any]) -> int:
         return sum(1 for doc in self.docs if _match(doc, query))
@@ -194,7 +203,15 @@ class FakeDB:
         self._collections: Dict[str, FakeCollection] = {}
 
     def __getitem__(self, name: str) -> FakeCollection:
-        return self._collections.setdefault(name, FakeCollection())
+        if name not in self._collections:
+            collection = FakeCollection()
+            if name == "skill_versions":
+                # As migration 20261114_0001 leaves a production database (T-4 gate).
+                collection.indexes["skill_version_unique"] = {
+                    "key": [("skill_key", 1), ("version", 1)], "unique": True,
+                }
+            self._collections[name] = collection
+        return self._collections[name]
 
     def __getattr__(self, name: str) -> FakeCollection:
         if name.startswith("_"):

@@ -120,6 +120,12 @@ async def _env(monkeypatch: pytest.MonkeyPatch, mode: str = "primary") -> AsyncI
     database_module.database = db
     try:
         await _seed(db)
+        # The skill registry's indexes as the governed migration creates them in production
+        # (T-4: skill writes verify skill_version_unique and refuse without it).
+        from rbac_backend.migrations.v20261114_0001_skill_registry import INDEXES as SKILL_INDEXES
+        from rbac_backend.migrations.v20261114_0001_skill_registry import apply_indexes as apply_skill_indexes
+
+        await apply_skill_indexes(db, SKILL_INDEXES, dry_run=False)
         await db.claims.delete_many({})
         await db.claims.insert_one(_claim_doc())
         await db.projects.update_one({"_id": PROJ_A1}, {"$set": {"contractual_capacity": "contractor"}})

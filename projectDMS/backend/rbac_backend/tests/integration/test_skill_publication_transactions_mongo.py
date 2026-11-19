@@ -774,13 +774,52 @@ def test_without_transactions_deprecation_is_refused_before_any_write() -> None:
     _run(scenario())
 
 
-@pytest.mark.parametrize("round_", range(5))
-def test_concurrent_materialisations_collide_even_without_the_unique_index(round_: int) -> None:
-    """Review finding 5: the migration's skill_version_unique index is not created at
-    startup; without it two transactions could each insert their own copy."""
+def test_without_the_unique_index_skill_version_writes_are_refused() -> None:
+    """T-4: the index is verified, never created. Missing or wrong: 503, nothing written."""
 
     async def scenario() -> None:
         async with _db() as db:
+            await db[SKILL_VERSIONS].drop_index("skill_version_unique")
+            for call in (
+                lambda: SkillRegistry(db).deprecate(BUNDLED_KEY, BUNDLED_VERSION, "admin"),
+                lambda: _draft(db, "4.0.0"),
+            ):
+                with pytest.raises(HTTPException) as refused:
+                    await call()
+                assert refused.value.status_code == 503 and "skill_version_unique" in str(refused.value.detail)
+            assert await db[SKILL_VERSIONS].count_documents({}) == 0
+            assert await db["audit_events"].count_documents({}) == 0
+            names = set((await db[SKILL_VERSIONS].index_information()).keys())
+            assert "skill_version_unique" not in names, "the gate must not create the index"
+            # A same-named index that is not unique is refused too.
+            await db[SKILL_VERSIONS].create_index([("skill_key", 1), ("version", 1)], name="skill_version_unique")
+            with pytest.raises(HTTPException) as weak:
+                await SkillRegistry(db).deprecate(BUNDLED_KEY, BUNDLED_VERSION, "admin")
+            assert weak.value.status_code == 503
+            # Wrong keys under the right name.
+            await db[SKILL_VERSIONS].drop_index("skill_version_unique")
+            await db[SKILL_VERSIONS].create_index([("skill_key", 1)], name="skill_version_unique", unique=True)
+            with pytest.raises(HTTPException) as wrong:
+                await _draft(db, "4.0.1")
+            assert wrong.value.status_code == 503
+            assert await db[SKILL_VERSIONS].count_documents({}) == 0
+
+    _run(scenario())
+
+
+@pytest.mark.parametrize("round_", range(5))
+def test_the_deterministic_id_still_serialises_materialisation_behind_the_gate(monkeypatch, round_: int) -> None:
+    """Review finding 5's safeguard is kept as a second line: with the gate bypassed and the
+    index absent, concurrent materialisations still collide on the deterministic _id."""
+
+    async def scenario() -> None:
+        async with _db() as db:
+            from rbac_backend.services.skills import registry as registry_module
+
+            async def gate_passes(_db: Any) -> None:
+                return None
+
+            monkeypatch.setattr(registry_module, "require_skill_version_index", gate_passes)
             await db[SKILL_VERSIONS].drop_index("skill_version_unique")
             outcomes = await asyncio.gather(
                 *(_outcome(SkillRegistry(db).deprecate(BUNDLED_KEY, BUNDLED_VERSION, f"admin-{n}")) for n in range(4))

@@ -105,6 +105,38 @@ class AuthorizationService:
                 project_ids.add(str(project))
         return project_ids
 
+    @staticmethod
+    async def _active_project_ids(
+        db: Any, user_id: Any, listed: set[str], organization_id: str
+    ) -> set[str]:
+        """A user's projects in ``organization_id``: listed on the user or held by an active
+        membership row, and only projects that exist, are active and belong to it (T-1)."""
+        candidates = set(listed)
+        rows = getattr(db, "project_memberships", None)
+        if user_id and rows is not None:
+            async for row in rows.find(
+                {"user_id": str(user_id), "status": {"$in": ["active", None]}}, {"project_id": 1}
+            ):
+                if row.get("project_id"):
+                    candidates.add(str(row["project_id"]))
+        if not candidates:
+            return set()
+        keys: list[Any] = list(candidates)
+        for candidate in candidates:
+            try:
+                keys.append(ObjectId(candidate))
+            except Exception:
+                pass
+        kept: set[str] = set()
+        async for project in db.projects.find(
+            {"_id": {"$in": keys}}, {"organization_id": 1, "organizationId": 1, "is_active": 1}
+        ):
+            owner = project.get("organization_id") or project.get("organizationId")
+            if project.get("is_active") is False or str(owner) != organization_id:
+                continue
+            kept.add(str(project["_id"]))
+        return kept
+
     # ------------------------------------------------------------------
     # Letters
     # ------------------------------------------------------------------
@@ -481,16 +513,24 @@ class AuthorizationService:
             return
 
         if {"projectadmin", "projectuser"} & role_names:
-            if target_org is None or str(target_org) != str(getattr(current_user, "organization_id", None)):
+            actor_org = getattr(current_user, "organization_id", None)
+            if target_org is None or str(target_org) != str(actor_org):
                 raise AuthorizationError("Access denied to this user")
-            # Enforce project overlap
-            allowed_projects = self._collect_user_project_ids(current_user)
-            target_projects = set()
-            if isinstance(user, dict):
-                target_projects.update({str(p) for p in user.get("projects", []) if p})
-            else:
-                target_projects.update({str(p) for p in getattr(user, "projects", []) or [] if p})
-            if allowed_projects and not (allowed_projects & target_projects):
+            # Project overlap, over both assignment sources (T-1): ``users.projects`` and
+            # active ``project_memberships`` rows, counting only existing, active projects
+            # of the actor's organisation. A project-tier actor with no such project reaches
+            # nobody: a project role never becomes organisation-wide access (before, an
+            # empty ``users.projects`` skipped the overlap test entirely).
+            db = await get_database()
+            target_id = user.get("_id") if isinstance(user, dict) else getattr(user, "id", None)
+            target_listed = user.get("projects", []) if isinstance(user, dict) else getattr(user, "projects", [])
+            allowed_projects = await self._active_project_ids(
+                db, getattr(current_user, "id", None), self._collect_user_project_ids(current_user), str(actor_org)
+            )
+            target_projects = await self._active_project_ids(
+                db, target_id, {str(p) for p in (target_listed or []) if p}, str(actor_org)
+            )
+            if not (allowed_projects & target_projects):
                 raise AuthorizationError("Access denied to this user")
             return
 
