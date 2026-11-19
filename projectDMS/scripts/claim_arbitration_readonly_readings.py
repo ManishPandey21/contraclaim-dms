@@ -218,7 +218,43 @@ def read_claims(db: ReadOnlyDatabase, now: datetime) -> Dict[str, Any]:
         updated_in_window=claims.count_documents({"updated_at": {"$gte": since}}),
         created_in_window=claims.count_documents({"created_at": {"$gte": since}}),
         window_days=READING_WINDOW_DAYS,
+        other_type=_read_other_claim_types(db, claims),
     )
+
+
+def _read_other_claim_types(db: ReadOnlyDatabase, claims: ReadOnlyCollection) -> Dict[str, Any]:
+    """Claim-type confirmation (2026-11-18): how many stored "other" claims predate it.
+
+    A claim stored before the change has no ``type_confirmed`` and reads as confirmed,
+    so its notice assessment can show a verified "other" period nobody chose for it.
+    Counts only, for the owner's decision on whether those claims become provisional;
+    nothing is changed.
+    """
+    legacy = {"type": "other", "type_confirmed": {"$exists": False}}
+    verified_other_orgs: List[str] = []
+    if "claim_notice_requirements" in db.list_collection_names():
+        verified_other_orgs = [
+            str(org)
+            for org in db["claim_notice_requirements"].distinct(
+                "organization_id", {"status": "current", "claim_type": "other", "verification": "verified"}
+            )
+            if org
+        ]
+    return {
+        "other_total": claims.count_documents({"type": "other"}),
+        "legacy_without_type_confirmed": claims.count_documents(legacy),
+        "provisional": claims.count_documents({"type": "other", "type_confirmed": False}),
+        "confirmed": claims.count_documents({"type": "other", "type_confirmed": True}),
+        "legacy_by_status": _group_count(claims, "status", legacy),
+        "legacy_with_frozen_evidence": claims.count_documents({**legacy, "evidence_frozen_at": {"$nin": [None, ""]}}),
+        # These would read "verified against the contract" today without a person having chosen the type.
+        "legacy_in_organisations_with_a_verified_other_period": claims.count_documents(
+            {**legacy, "organization_id": {"$in": verified_other_orgs}}
+        ),
+        "organisations_with_legacy_other_claims": len(
+            [org for org in claims.distinct("organization_id", legacy) if org]
+        ),
+    }
 
 
 def read_sla_rules(db: ReadOnlyDatabase) -> Dict[str, Any]:
@@ -251,7 +287,65 @@ def read_roles(db: ReadOnlyDatabase) -> Dict[str, Any]:
             "role_documents_with_this_name": documents_by_name,
             "users_holding_this_key": holders,
         }
-    return _reading("P-05", reviewer_roles=by_key)
+    return _reading("P-05", reviewer_roles=by_key, custom_role_compatibility=_read_custom_role_compatibility(db))
+
+
+def _read_custom_role_compatibility(db: ReadOnlyDatabase) -> Dict[str, Any]:
+    """SEC-1 to SEC-4 and JG-7(c): what the security changes would change for stored data.
+
+    Counts only. A custom role now grants only where it was granted (its organisation,
+    its project, to a member); a role naming no organisation grants an organisation's
+    user nothing; a role named like a built-in role keeps the built-in meaning; a
+    disabled or ``is_active: false`` account stops authenticating. Read before
+    deployment; nothing here is changed by the code.
+    """
+    try:
+        from rbac_backend.services.role_grants import role_is_built_in
+    except ImportError:
+        return {"status": "not_read", "reason": "this image has no services.role_grants"}
+    roles = list(db["roles"].find({}, {"name": 1, "is_system": 1, "scope": 1, "organization_id": 1, "project_id": 1, "is_active": 1}))
+    by_id = {str(role["_id"]): role for role in roles}
+    custom = {key: role for key, role in by_id.items() if not role_is_built_in(role)}
+    named_like_built_in = sum(
+        1
+        for role in roles
+        if role.get("is_system") is not True
+        and role_is_built_in({"name": role.get("name")})
+        and not role_is_built_in({"_id": role.get("_id"), "scope": role.get("scope")})
+    )
+    counts = {
+        "custom_roles_total": len(custom),
+        "custom_roles_without_organisation_or_project": sum(
+            1 for role in custom.values() if not role.get("organization_id") and not role.get("project_id")
+        ),
+        "roles_named_like_a_built_in_role": named_like_built_in,
+        "users_total": 0,
+        "users_with_custom_roles_only": 0,
+        "users_holding_a_custom_role_of_another_organisation": 0,
+        "users_holding_a_project_role_without_the_project": 0,
+        "organisation_users_holding_a_role_naming_no_organisation": 0,
+        "users_disabled": 0,
+        "users_is_active_false_but_not_disabled": 0,
+    }
+    for user in db["users"].find({}, {"roles": 1, "organization_id": 1, "organizations": 1, "projects": 1, "disabled": 1, "is_active": 1}):
+        counts["users_total"] += 1
+        if user.get("disabled"):
+            counts["users_disabled"] += 1
+        elif user.get("is_active") is False:
+            counts["users_is_active_false_but_not_disabled"] += 1
+        references = [str(reference) for reference in (user.get("roles") or [])]
+        held = [custom[ref] for ref in references if ref in custom]
+        if references and len(held) == len(references):
+            counts["users_with_custom_roles_only"] += 1
+        organisations = {str(org) for org in [user.get("organization_id"), *(user.get("organizations") or [])] if org}
+        projects = {str(project) for project in (user.get("projects") or []) if project}
+        if any(role.get("organization_id") and str(role["organization_id"]) not in organisations for role in held):
+            counts["users_holding_a_custom_role_of_another_organisation"] += 1
+        if any(role.get("project_id") and str(role["project_id"]) not in projects for role in held):
+            counts["users_holding_a_project_role_without_the_project"] += 1
+        if organisations and any(not role.get("organization_id") and not role.get("project_id") for role in held):
+            counts["organisation_users_holding_a_role_naming_no_organisation"] += 1
+    return counts
 
 
 def read_multi_role_users(db: ReadOnlyDatabase) -> Dict[str, Any]:

@@ -74,6 +74,15 @@ def _seed(db: Any) -> None:
              "eot_days_claimed": 30.0, "created_at": old, "updated_at": old},
             {"_id": "c3", "type": "eot", "status": "pending_review", "amount_claimed": None,
              "created_at": old, "updated_at": recent},
+            # Claim-type confirmation: two legacy "other" claims (one in an organisation with
+            # a verified "other" period), one provisional, one confirmed.
+            {"_id": "c-other-1", "type": "other", "status": "draft", "organization_id": "org-a", "created_at": old, "updated_at": old},
+            {"_id": "c-other-2", "type": "other", "status": "submitted", "organization_id": "org-b",
+             "evidence_frozen_at": old, "created_at": old, "updated_at": old},
+            {"_id": "c-other-3", "type": "other", "type_confirmed": False, "status": "draft", "organization_id": "org-a",
+             "created_at": old, "updated_at": old},
+            {"_id": "c-other-4", "type": "other", "type_confirmed": True, "status": "draft", "organization_id": "org-a",
+             "created_at": old, "updated_at": old},
         ]
     )
     db.sla_rules.insert_one({"organization_id": "org-a", "notice_windows": {"eot": "28", "variation": 14}})
@@ -83,6 +92,11 @@ def _seed(db: Any) -> None:
             {"_id": "contractmgr_org", "name": "contractmgr_org", "permissions": ["dms.admin"]},
             {"_id": "senior_legal_approver", "name": "senior_legal_approver"},
             {"_id": "65f000000000000000000001", "name": "Chief_Contract_Expert"},
+            # SEC: custom roles of org-a, of a project, and naming no organisation.
+            {"_id": "custom-a", "name": "Site viewer", "organization_id": "org-a", "permissions": ["dms.claim.view"]},
+            {"_id": "custom-p", "name": "P1 manager", "organization_id": "org-a", "project_id": "p1", "permissions": []},
+            {"_id": "custom-none", "name": "Orphan", "permissions": ["dms.claim.view"]},
+            {"_id": "65f000000000000000000002", "name": "Organization User", "permissions": []},
         ]
     )
     db.users.insert_many(
@@ -91,6 +105,9 @@ def _seed(db: Any) -> None:
              "roles": ["orgadmin", "senior_legal_approver"]},
             {"_id": "u2", "email": "vikram@example.com", "full_name": "Vikram Shah", "roles": ["orgadmin"]},
             {"_id": "u3", "email": "u3@example.com", "full_name": "Private Manager", "roles": ["contractmgr_org"]},
+            {"_id": "u4", "email": "u4@example.com", "roles": ["custom-a"], "organization_id": "org-b", "disabled": True},
+            {"_id": "u5", "email": "u5@example.com", "roles": ["custom-p", "custom-none"], "organization_id": "org-a",
+             "projects": [], "is_active": False},
         ]
     )
     db.projects.insert_many([{"_id": "p1", "name": "NH-48"}, {"_id": "p2", "name": "Metro", "contractual_capacity": "engineer"}])
@@ -136,6 +153,8 @@ def _seed(db: Any) -> None:
              "origin": "clause_index", "verification": "verified", "created_by": "u1", "verified_by": "u2"},
             {"_id": "nr-4", "organization_id": "org-a", "status": "superseded", "claim_type": "eot",
              "origin": "entered", "verification": "verified", "created_by": "u2", "verified_by": "u2"},
+            {"_id": "nr-5", "organization_id": "org-a", "status": "current", "claim_type": "other",
+             "origin": "clause_index", "verification": "verified", "created_by": "u1", "verified_by": "u2"},
         ]
     )
 
@@ -201,9 +220,20 @@ def test_the_readings_are_right_change_nothing_and_name_no_one() -> None:
         assert "20261119_0001" in p02["phase_migrations_absent"]
 
         p03 = by_code["P-03"]
-        assert p03["total"] == 3 and p03["off_enum_statuses"] == 1
-        assert p03["amount_claimed_types"] == {"float_integral": 1, "null": 1, "string_numeric": 1}
-        assert p03["eot_days_claimed_types"] == {"float_integral": 1, "int": 1, "null": 1}
+        assert p03["other_type"] == {
+            "other_total": 4,
+            "legacy_without_type_confirmed": 2,
+            "provisional": 1,
+            "confirmed": 1,
+            "legacy_by_status": {"draft": 1, "submitted": 1},
+            "legacy_with_frozen_evidence": 1,
+            "legacy_in_organisations_with_a_verified_other_period": 1,
+            "organisations_with_legacy_other_claims": 2,
+        }
+        assert "c-other-1" not in json.dumps(p03)
+        assert p03["total"] == 7 and p03["off_enum_statuses"] == 1
+        assert p03["amount_claimed_types"] == {"float_integral": 1, "null": 5, "string_numeric": 1}
+        assert p03["eot_days_claimed_types"] == {"float_integral": 1, "int": 1, "null": 5}
         assert p03["updated_in_window"] == 2 and p03["created_in_window"] == 1
         assert p03["with_bench"] == 0 and p03["with_contract_id"] == 0
 
@@ -217,7 +247,20 @@ def test_the_readings_are_right_change_nothing_and_name_no_one() -> None:
         assert roles["chief_contract_expert"]["role_documents_with_this_name"] == 1
         assert roles["chief_contract_expert"]["role_documents_with_this_id"] == 0
 
-        assert by_code["P-06"] == {"reading": "P-06", "status": "read", "users_total": 3, "users_with_more_than_one_role": 1}
+        assert by_code["P-05"]["custom_role_compatibility"] == {
+            "custom_roles_total": 3,
+            "custom_roles_without_organisation_or_project": 1,
+            "roles_named_like_a_built_in_role": 2,
+            "users_total": 5,
+            "users_with_custom_roles_only": 2,
+            "users_holding_a_custom_role_of_another_organisation": 1,
+            "users_holding_a_project_role_without_the_project": 1,
+            "organisation_users_holding_a_role_naming_no_organisation": 1,
+            "users_disabled": 1,
+            "users_is_active_false_but_not_disabled": 1,
+        }
+        assert "u4" not in json.dumps(by_code["P-05"]) and "custom-a" not in json.dumps(by_code["P-05"])
+        assert by_code["P-06"] == {"reading": "P-06", "status": "read", "users_total": 5, "users_with_more_than_one_role": 2}
 
         p07 = by_code["P-07"]
         assert p07["drafts_total"] == 4 and p07["drafts_without_case"] == 3
@@ -241,10 +284,10 @@ def test_the_readings_are_right_change_nothing_and_name_no_one() -> None:
         assert p13["records_referencing_affected_cases"]["arbitration_drafts"] == 0
         assert "case-null-1" not in json.dumps(p13) and "org-b" not in json.dumps(p13)
         p14 = by_code["P-14"]
-        assert p14["requirements_total"] == 4
-        assert p14["by_status"] == {"current": 3, "superseded": 1}
-        assert p14["current_by_origin"] == {"clause_index": 2, "entered": 1}
-        assert p14["current_by_verification"] == {"extracted_unverified": 1, "verified": 2}
+        assert p14["requirements_total"] == 5
+        assert p14["by_status"] == {"current": 4, "superseded": 1}
+        assert p14["current_by_origin"] == {"clause_index": 3, "entered": 1}
+        assert p14["current_by_verification"] == {"extracted_unverified": 1, "verified": 3}
         assert p14["current_verified_by_their_recorder"] == 1  # nr-1; nr-4 is superseded
         assert p14["current_with_unknown_claim_type"] == 1
         assert p14["organisations_with_current_requirements"] == 2
@@ -252,7 +295,7 @@ def test_the_readings_are_right_change_nothing_and_name_no_one() -> None:
 
         p15 = by_code["P-15"]
         assert p15["users"] == {
-            "by_name": 2, "by_name_through_a_catalogue_id_only": 0, "only_by_inheritance": 1, "not_holding": 0,
+            "by_name": 2, "by_name_through_a_catalogue_id_only": 0, "only_by_inheritance": 1, "not_holding": 2,
         }
         assert p15["only_by_inheritance_by_path"] == {"dms_admin": 1}
         assert p15["only_by_inheritance_by_seed_role"] == {"contractmgr_org": 1}
