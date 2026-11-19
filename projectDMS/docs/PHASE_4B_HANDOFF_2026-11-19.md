@@ -139,6 +139,20 @@ Open:
   - `skill_bindings` and `skills` index gates;
   - unused client alias helpers.
 
+## Fifth pass (DEF-4 implementation, 2026-11-19)
+
+- **Done (implemented and tested; CI pending at the time of writing):**
+  - `BILLING_EXPLICIT_PERMISSIONS`, default off; with it off, authorisation is unchanged;
+  - the explicit billing policy, status and financial separation, scoped effective services, and no role-name checkout;
+  - P-05 `billing_permission_impact`;
+  - the measured matrix and the grant-before-revoke plan (`docs/DEF4_BILLING_PERMISSION_SEPARATION.md`).
+- **Not done, by instruction:** policy not activated, no aliases removed, no roles granted, no data migrated.
+- **Owner decisions:**
+  - M1: per-organisation built-in roles;
+  - M4: whether a tenant billing admin may edit the global plan and add-on catalogue;
+  - L3: validating the new scope on `PUT /subscriptions/{id}`;
+  - whether operational `features` should omit `entitlement_overrides`.
+
 ## Blockers before production authorisation
 
 1. P-01 to P-16 production readings with authorised read-only access (AQ-11). This includes:
