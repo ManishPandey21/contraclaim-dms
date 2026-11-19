@@ -12,7 +12,13 @@ from pymongo.errors import DuplicateKeyError
 
 from ..core.config import settings
 from ..core.database import get_database
-from ..core.permissions import CANONICAL_PERMISSIONS, SUPERADMIN_EXCLUDED_PERMISSIONS, equivalent_permissions
+from ..core.permissions import (
+    CANONICAL_PERMISSIONS,
+    LEGACY_BILLING_VIEW_ALIASES,
+    SUPERADMIN_EXCLUDED_PERMISSIONS,
+    equivalent_permissions,
+    is_billing_permission,
+)
 from ..core.role_reference import (
     RoleResolution,
     normalize_role_key,
@@ -878,6 +884,12 @@ class PermissionService:
                     lookup_keys = self.checks_satisfied_by(candidate)
                     named = lookup_keys | await self._catalogue_spellings(db, lookup_keys)
                     granted = self._explicitly_held(grants, named, **scope)
+                elif granted and settings.BILLING_EXPLICIT_PERMISSIONS and is_billing_permission(candidate):
+                    # DEF-4 target policy, as PolicyService applies it: the name itself, never
+                    # through the legacy view aliases or a wildcard.
+                    lookup_keys = self.checks_satisfied_by(candidate) - LEGACY_BILLING_VIEW_ALIASES
+                    named = lookup_keys | await self._catalogue_spellings(db, lookup_keys)
+                    granted = self._explicitly_held(grants, named, **scope)
                 if granted:
                     advertised.add(candidate)
             return sorted(advertised)
@@ -1008,8 +1020,12 @@ class PermissionService:
         *,
         organization_id: Optional[str] = None,
         project_id: Optional[str] = None,
+        exclude: frozenset = frozenset(),
     ) -> bool:
         """Whether one of the user's own roles names ``permission_name`` (or a label spelling of it).
+
+        ``exclude``: held names that must not count even though the alias contract makes them
+        equivalent (DEF-4: the legacy view aliases under BILLING_EXPLICIT_PERMISSIONS).
 
         For permissions that must be granted deliberately (core.permissions
         SUPERADMIN_EXCLUDED_PERMISSIONS). Unlike ``user_has_permission`` it does
@@ -1021,7 +1037,7 @@ class PermissionService:
         permission_key = (permission_name or "").strip()
         if not permission_key or not user_id:
             return False
-        lookup_keys = set(equivalent_permissions(permission_key) or set()) | {permission_key}
+        lookup_keys = (set(equivalent_permissions(permission_key) or set()) | {permission_key}) - set(exclude)
         try:
             db = await self._get_db()
             try:

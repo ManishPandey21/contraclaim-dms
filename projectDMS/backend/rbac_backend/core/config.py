@@ -327,6 +327,12 @@ class Settings(BaseSettings):
     # Which Word writer arbitration exports use (D-19, AQ-7). "minimal" is the writer production
     # uses today; "python_docx" only after the owner has reviewed docs/DOCX_WRITER_COMPARISON.md.
     DOCX_WRITER: str = Field(default="minimal", validation_alias="DOCX_WRITER")
+    # DEF-4 (owner decisions 2026-11-19): with this on, billing and subscription checks need an
+    # explicit grant in scope; organizations:read, orgs:view and reports:view no longer reach
+    # them, financial records are separated from operational status, and checkout needs an
+    # explicit subscription.upgrade. Off (the default) changes nothing. Turn on only after P-05,
+    # the authorised security review, staging evidence and a recorded release decision.
+    BILLING_EXPLICIT_PERMISSIONS: bool = Field(default=False, validation_alias="BILLING_EXPLICIT_PERMISSIONS")
     ARBITRATION_ENGINE_DEFAULT: str = Field(default="arbitration_v2", validation_alias="ARBITRATION_ENGINE_DEFAULT")
     ARBITRATION_ENGINE_ROLLOUT_MODE: str = Field(default="off", validation_alias="ARBITRATION_ENGINE_ROLLOUT_MODE")
     ARBITRATION_ENGINE_CANARY_PERCENT: int = Field(default=0, ge=0, le=100, validation_alias="ARBITRATION_ENGINE_CANARY_PERCENT")

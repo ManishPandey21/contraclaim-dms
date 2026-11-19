@@ -1,128 +1,307 @@
-# DEF-4: separating billing and subscription visibility from organisation and report viewing
+# DEF-4: billing and subscription permissions, separated from organisation and report viewing
 
-Status: **design and migration plan only** (conditional owner approval, 2026-11-19). Nothing here changes code, roles, aliases, or production behaviour. The production aliases stay until all of the following hold:
+**Status (2026-11-19).** Implemented behind `BILLING_EXPLICIT_PERMISSIONS`, which defaults to **off**; tested on real MongoDB; CI-verified.
 
-- P-05 has quantified the impact;
-- the authorised security review is complete;
-- a separate release decision is recorded.
+**Not activated, and nothing in production changed:**
 
-## 1. Today (observed, pinned by tests)
+- no alias removed;
+- no role granted;
+- no data migrated.
 
-Evidence: `backend/rbac_backend/tests/integration/test_def4_alias_compatibility_mongo.py` (real HTTP) and `core/permissions.py::equivalent_permissions`.
+**Activation requires all of the following:**
 
-| Held name | Built-in holders | Billing and subscription checks it passes by alias |
+1. the P-05 reading (section 6);
+2. the authorised security review;
+3. staging evidence (two consecutive deployed runs);
+4. a separate, recorded owner release decision.
+
+## 1. Owner decisions (2026-11-19)
+
+1. **Project Admin.**
+   - Sees its assigned project's active subscription, service entitlements, feature availability and expiry.
+   - Gets no organisation-wide billing records, invoices, payment details or financial history by default.
+   - Cannot purchase, upgrade, downgrade, cancel or otherwise change commercially binding terms without explicit scoped authority.
+
+   **Project User:** only the service availability needed to use the application.
+2. **Effective services.** `/plan-settings/effective-services` stays available to authorised organisation and project users within their scope.
+   - It returns only the service and feature availability each caller needs; no amounts, payment details, invoices, unrelated projects or hidden organisations.
+   - It does not require billing-finance permissions to answer whether a feature is on.
+3. **Organisation Admin and the billing administrator.**
+   - Both are granted the billing and subscription view permissions explicitly before any alias is removed.
+   - Viewing financial records stays separate from performing financial mutations.
+   - No ordinary role gains financial permissions through `organizations:read`, `orgs:view` or `reports:view` in the target policy.
+
+## 2. Endpoint audit (all methods)
+
+The audit covers every route under `/api/rbac-monetization`, plus `/api/billing/webhooks/{provider}`: 45 routes matched the billing, subscription, plan or payment patterns. Out of scope, as not billing:
+
+- expert allocations (`drafting.request.assign`);
+- the unrelated "plan" routes (deep planning, drafting plans).
+
+Before (flag off, today):
+
+| Endpoint group | Gate today | Finding |
 |---|---|---|
-| `organizations:read` | superadmin, orgadmin, orguser, contractmgr_org, projectadmin, projectuser | `billing.plan.view`, `billing.invoice.view`, `billing.invoice.download`, `subscription.history.view` |
-| `orgs:view` | none built-in (legacy spelling) | same as `organizations:read` |
-| `reports:view` | reporter | `subscription.usage.view` |
+| `GET /billing/records`, `/billing/review-queue`, `/billing/summary`, receipt | `billing.plan.view` in the organisation | Reached by `organizations:read` (every tenant built-in role) through the alias |
+| `GET /billing/history`, `/subscriptions/{id}/history` | `subscription.history.view` | Same alias |
+| `GET /subscriptions/{id}/invoice-preview` | `billing.invoice.view` | Same alias |
+| `GET /subscriptions/{id}` | `subscription.usage.view` | Reached by `reports:view` (Reporter) |
+| `GET /subscriptions`, `GET /plan-settings` | **Role-name lists** (`ORG_/PROJECT_SUBSCRIPTION_VIEW_ROLES`), with a fallback for any member | Every member, including a custom role holding no billing permission, gets **full rows**: billing status, billing period, payment-gateway subscription id |
+| `GET /plan-settings/effective-services` | Membership; **any holder of `subscription.entitlement.manage` sees every organisation** | Cross-tenant read for the billing administrator role, wherever it is held |
+| `POST /subscriptions/checkout` | Role names: `orgadmin` (organisation or project), `projectadmin` (own project), else `subscription.upgrade` | **A purchase by role name**, contrary to Decision 1 |
+| Upgrade, downgrade, cancel, reactivate, change period, add-ons, trials, `PUT /subscriptions/{id}`, `POST /subscriptions` | Their own mutation names via `PolicyService.authorize` with step-up | Not reachable through the view aliases; administrator widening (`billing.plan.manage` / `subscription.entitlement.manage` pass any `billing.*` / `subscription.*` check) |
+| `PUT /plan-settings/scope` | Super Admin only, with step-up | — |
+| Plan and add-on CRUD, `POST /billing-records`, `POST /usage-events` | `billing.plan.manage` / `subscription.entitlement.manage` | — |
+| `GET /plan-catalog`, `/plans/{code}`, `/add-ons` | Authentication only | Public product catalogue (prices of plans), not organisation data; unchanged |
+| `POST /api/billing/webhooks/{provider}` | Provider signature | Unchanged |
 
-**Effect.** An ordinary organisation or project member can read their own organisation's:
+## 3. Role × endpoint matrix (measured)
 
-- billing records (`/api/rbac-monetization/billing/records/{org}`);
-- billing review queue (`/api/rbac-monetization/billing/review-queue/{org}`);
-- subscription history (`/api/rbac-monetization/billing/history/{org}`);
-- invoice preview and plan list.
+These are real HTTP responses from the production app on a disposable replica set, one persona per role in organisation A (`backend/rbac_backend/tests/integration/test_def4_billing_explicit_permissions_mongo.py` seeds them; the probe ran every route for every persona).
 
-They are never given another organisation's (403).
+How to read the cells:
 
-**Not permission-gated at all (review, 2026-11-19).** `GET /api/rbac-monetization/subscriptions` and `GET /plan-settings` are scoped by membership and role name, not by any billing permission (`routers/rbac_monetization.py::_subscription_scope_filters`):
+- **allow:** authorisation passed.
+- **allow (400) / allow (404):** authorisation passed, and the request was then refused for its content (an upgrade to the same plan; a receipt that does not exist).
+- **deny:** 403.
+- Every route also refuses another organisation's data in every state (tests: cross-tenant cases).
 
-- `ORG_SUBSCRIPTION_VIEW_ROLES` includes orguser, reporter, doccontroller, settings_manager and contractmgr_org;
-- `PROJECT_SUBSCRIPTION_VIEW_ROLES` includes projectuser.
+#### Flag off: today's production behaviour
 
-Removing the aliases alone does not end ordinary members' subscription visibility; these routes must be re-gated too (step 4). Also gated by `billing.plan.view`: `/billing/summary/{org}`.
+| Endpoint | Super Admin | Billing Admin | Org Admin | Org User | Project Admin | Project User | Contract Mgr | Reporter | Custom (billing.record.view) | Custom (organizations:read) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `GET /billing/records/{org}` | allow | allow | allow | allow | allow | allow | allow | **deny** | **deny** | allow |
+| `GET /billing/review-queue/{org}` | allow | allow | allow | allow | allow | allow | allow | **deny** | **deny** | allow |
+| `GET /billing/summary/{org}` | allow | allow | allow | allow | allow | allow | allow | **deny** | **deny** | allow |
+| `GET /billing/history/{org}` | allow | allow | allow | allow | allow | allow | allow | **deny** | **deny** | allow |
+| `GET /billing/records/{record}/receipt?organization_id={org}` | allow (404) | allow (404) | allow (404) | allow (404) | allow (404) | allow (404) | allow (404) | **deny** | **deny** | allow (404) |
+| `GET /plans` | allow | allow | allow | allow | allow | allow | allow | **deny** | **deny** | allow |
+| `GET /plan-catalog` | allow | allow | allow | allow | allow | allow | allow | allow | allow | allow |
+| `GET /plans/dms_enterprise` | allow | allow | allow | allow | allow | allow | allow | allow | allow | allow |
+| `GET /add-ons` | allow | allow | allow | allow | allow | allow | allow | allow | allow | allow |
+| `GET /subscriptions` | allow | allow | allow | allow | allow | allow | allow | allow | allow | allow |
+| `GET /subscriptions/{sub}` | allow | allow | **deny** | **deny** | **deny** | **deny** | **deny** | allow | **deny** | **deny** |
+| `GET /subscriptions/{sub}/history` | allow | allow | allow | allow | allow | allow | allow | **deny** | **deny** | allow |
+| `GET /subscriptions/{sub}/invoice-preview` | allow | allow | allow | allow | allow | allow | allow | **deny** | **deny** | allow |
+| `GET /plan-settings` | allow | allow | allow | allow | allow | allow | allow | allow | allow | allow |
+| `GET /plan-settings/effective-services` | allow | allow | allow | allow | allow | allow | allow | allow | allow | allow |
+| `POST /subscriptions/checkout` | allow | allow | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `POST /subscriptions/checkout (project scope)` | allow | **deny** | allow | **deny** | allow | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `POST /subscriptions/{sub}/upgrade` | allow (400) | allow (400) | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `POST /subscriptions/{sub}/downgrade` | allow (400) | allow (400) | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `POST /subscriptions/{sub}/change-period` | allow | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `POST /subscriptions/{sub}/add-ons/add` | allow (400) | allow (400) | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `POST /subscriptions/start-trial` | allow | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `PUT /subscriptions/{sub}` | allow | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `POST /subscriptions` | allow | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `PUT /plan-settings/scope` | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `POST /billing-records` | allow | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `POST /usage-events` | allow | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `POST /subscriptions/{sub}/cancel` | allow | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `POST /subscriptions/{sub}/reactivate` | allow | allow (400) | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
 
-**Already in place.** None of the three names can be put on a role by anyone but Super Admin (403; SEC-2/DEF-4 fix).
+#### Flag on, before the grant step (why grant-before-revoke)
 
-**Client.** Since T-2 the client no longer expands aliases; it shows exactly the server's effective list, which today still includes the billing names for holders of `organizations:read`. Its alias table (`client/src/config/rolePermissions.ts::PERMISSION_ALIASES`) is now unused in production: only a sidebar test uses it. Removing it changes no client behaviour.
+| Endpoint | Super Admin | Billing Admin | Org Admin | Org User | Project Admin | Project User | Contract Mgr | Reporter | Custom (billing.record.view) | Custom (organizations:read) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `GET /billing/records/{org}` | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | allow | **deny** |
+| `GET /billing/review-queue/{org}` | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | allow | **deny** |
+| `GET /billing/summary/{org}` | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | allow | **deny** |
+| `GET /billing/history/{org}` | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `GET /billing/records/{record}/receipt?organization_id={org}` | allow (404) | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `GET /plans` | allow | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `GET /plan-catalog` | allow | allow | allow | allow | allow | allow | allow | allow | allow | allow |
+| `GET /plans/dms_enterprise` | allow | allow | allow | allow | allow | allow | allow | allow | allow | allow |
+| `GET /add-ons` | allow | allow | allow | allow | allow | allow | allow | allow | allow | allow |
+| `GET /subscriptions` | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `GET /subscriptions/{sub}` | allow | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `GET /subscriptions/{sub}/history` | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `GET /subscriptions/{sub}/invoice-preview` | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `GET /plan-settings` | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `GET /plan-settings/effective-services` | allow | allow | allow | allow | allow | allow | allow | allow | allow | allow |
+| `POST /subscriptions/checkout` | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `POST /subscriptions/checkout (project scope)` | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `POST /subscriptions/{sub}/upgrade` | allow (400) | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `POST /subscriptions/{sub}/downgrade` | allow (400) | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `POST /subscriptions/{sub}/change-period` | allow | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `POST /subscriptions/{sub}/add-ons/add` | allow (400) | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `POST /subscriptions/start-trial` | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `PUT /subscriptions/{sub}` | allow | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `POST /subscriptions` | allow | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `PUT /plan-settings/scope` | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `POST /billing-records` | allow | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `POST /usage-events` | allow | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `POST /subscriptions/{sub}/cancel` | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `POST /subscriptions/{sub}/reactivate` | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
 
-## 2. Target design
+#### Flag on, after the grant step (proposed target)
 
-**Principle:** ordinary organisation or report viewing never implies any billing or subscription permission. Each billing or subscription view is its own permission and is granted explicitly.
+| Endpoint | Super Admin | Billing Admin | Org Admin | Org User | Project Admin | Project User | Contract Mgr | Reporter | Custom (billing.record.view) | Custom (organizations:read) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `GET /billing/records/{org}` | allow | allow | allow | **deny** | **deny** | **deny** | **deny** | **deny** | allow | **deny** |
+| `GET /billing/review-queue/{org}` | allow | allow | allow | **deny** | **deny** | **deny** | **deny** | **deny** | allow | **deny** |
+| `GET /billing/summary/{org}` | allow | allow | allow | **deny** | **deny** | **deny** | **deny** | **deny** | allow | **deny** |
+| `GET /billing/history/{org}` | allow | allow | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `GET /billing/records/{record}/receipt?organization_id={org}` | allow (404) | allow (404) | allow (404) | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `GET /plans` | allow | allow | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `GET /plan-catalog` | allow | allow | allow | allow | allow | allow | allow | allow | allow | allow |
+| `GET /plans/dms_enterprise` | allow | allow | allow | allow | allow | allow | allow | allow | allow | allow |
+| `GET /add-ons` | allow | allow | allow | allow | allow | allow | allow | allow | allow | allow |
+| `GET /subscriptions` | allow | allow | allow | **deny** | allow | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `GET /subscriptions/{sub}` | allow | allow | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `GET /subscriptions/{sub}/history` | allow | allow | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `GET /subscriptions/{sub}/invoice-preview` | allow | allow | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `GET /plan-settings` | allow | allow | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `GET /plan-settings/effective-services` | allow | allow | allow | allow | allow | allow | allow | allow | allow | allow |
+| `POST /subscriptions/checkout` | allow | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `POST /subscriptions/checkout (project scope)` | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `POST /subscriptions/{sub}/upgrade` | allow (400) | allow (400) | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `POST /subscriptions/{sub}/downgrade` | allow (400) | allow (400) | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `POST /subscriptions/{sub}/change-period` | allow | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `POST /subscriptions/{sub}/add-ons/add` | allow (400) | allow (400) | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `POST /subscriptions/start-trial` | allow | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `PUT /subscriptions/{sub}` | allow | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `POST /subscriptions` | allow | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `PUT /plan-settings/scope` | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `POST /billing-records` | allow | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `POST /usage-events` | allow | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `POST /subscriptions/{sub}/cancel` | allow | allow | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
+| `POST /subscriptions/{sub}/reactivate` | allow | allow (400) | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** | **deny** |
 
-### 2.1 Permissions
+Reading the target table:
 
-| Permission | Meaning | Exists today |
+- **Financial reads** (records, review queue, summary, history, invoices, the full `/plan-settings` and full `/subscriptions` rows) are limited to Super Admin, Billing Admin and Org Admin, plus a custom role holding the exact name.
+- **Project Admin** sees `/subscriptions` as status rows for its own project only: no `billing_status`, `billing_period` or gateway ids, and not the organisation's or a sibling project's row.
+- **Effective services** stay open to every member for their own scope, cut to what each may see.
+- **Commercially binding mutations** are limited to Super Admin and Billing Admin. Project-scope checkout is refused for the billing administrator too, because it has no organisation-wide scope and is not on the project; that scope rule already exists.
+
+## 4. Permission model
+
+| Name | Kind | Meaning |
 |---|---|---|
-| `organizations:read` / `orgs:view` | read the organisation's profile and membership listing | yes (aliases change, see below) |
-| `dms.report.view` / `reports:view` | read operational reports | yes (aliases change) |
-| `billing.plan.view` | read the plan catalogue and the organisation's current plan | yes |
-| `billing.invoice.view`, `billing.invoice.download` | read and download invoices | yes |
-| `subscription.history.view` | read subscription history | yes |
-| `subscription.usage.view` | read metered usage | yes |
-| `billing.record.view` (new) | read billing records and the review queue (today gated as `billing.plan.view`) | no |
+| `billing.record.view` **(new)** | financial view | billing records, review queue, summary |
+| `billing.invoice.view`, `billing.invoice.download` | financial view | invoice preview; receipts |
+| `subscription.history.view` | financial view | subscription history; full `/subscriptions` rows; full `/plan-settings` |
+| `subscription.usage.view` | financial view | a single subscription record |
+| `billing.plan.view` | financial view | plan list with organisation context |
+| `subscription.status.view` **(new)** | operational | subscription status, entitlements, features and expiry, without financial fields |
+| `subscription.upgrade`, `.downgrade`, `.cancel`, `.addon.manage`, `.trial.manage` | mutation | commercially binding changes |
+| `subscription.entitlement.manage`, `billing.plan.manage` | platform administration | unchanged |
 
-Alias changes in the target (`core/permissions.py` and the client mirror), applied together:
+**Flag-on rule** (`PolicyService.has_permission`; the same rule in `get_effective_permission_names`):
 
-- `organizations:read` and `orgs:view`: remove `billing.plan.view`, `billing.invoice.view`, `billing.invoice.download`, `subscription.history.view`. Keep `dms.contract.catalogue.browse` (a separate review item, not billing).
-- `reports:view`: remove `subscription.usage.view`. Keep `dms.report.view`.
+- A `billing.*` or `subscription.*` check passes only through an explicit grant of that name on a role that applies in the request's scope.
+- It does not pass through `organizations:read`, `orgs:view` or `reports:view`, a wildcard, or an administrator name. A view never implies a mutation, and a mutation never implies a view.
+- Super Admin's bypass is unchanged.
+- At organisation level, a project-tier user (Project Admin, Project User) counts only with organisation-wide scope. A built-in project role's grant applies at organisation level too, and must not show the organisation's or sibling projects' subscriptions.
 
-Route changes:
+**Response shaping (flag on):**
 
-- `/billing/records/{org}`, `/billing/review-queue/{org}` and the receipt download: gate on `billing.record.view` (receipts on `billing.invoice.download`) instead of `billing.plan.view`.
-- `/billing/summary/{org}`: gate on `billing.record.view`.
-- `/subscriptions` and `/plan-settings`: replace the role-name scoping (`ORG_/PROJECT_SUBSCRIPTION_VIEW_ROLES`) with an explicit `subscription.history.view` / `billing.plan.view` check in the named scope.
-- `/plans` (catalogue, `billing_plan_view` allowance in `PolicyService`) stays on `billing.plan.view`.
-- Wiring for `billing.record.view`:
-  - add it to `CANONICAL_PERMISSIONS` (catalogue);
-  - make it non-delegable like the other billing names (`role_service._ensure_permissions_assignable` refuses billing and subscription names for anyone but Super Admin);
-  - give it the billing domain in `PolicyService` (`permission_domain`);
-  - add it to the alias contract tests.
-
-### 2.2 Who holds what (proposed)
-
-| Role | Billing and subscription grants in the target |
+| Data | Fields |
 |---|---|
-| superadmin | all (unchanged; Super Admin bypass) |
-| *(note)* | Today `orgadmin` holds **no** billing or subscription permission explicitly: everything it sees comes through the `organizations:read` alias. `contraclaim_billing_admin` holds `billing.plan.manage`, `billing.plan.view`, `subscription.archive_access`, `subscription.entitlement.manage`, `subscription.offboarding_export`, `subscription.usage.view`. Step 3 below must therefore grant orgadmin explicitly before any alias is removed. |
-| orgadmin | `billing.plan.view`, `billing.invoice.view`, `billing.invoice.download`, `billing.record.view`, `subscription.history.view`, `subscription.usage.view` |
-| contraclaim_billing_admin | the same, plus its existing manage permissions |
-| orguser, projectadmin, projectuser, contractmgr_org, reporter | none |
-| custom roles | only what is put on them explicitly. Billing and subscription names, and anything satisfying them through an alias, are already non-delegable for everyone but Super Admin (`role_service._ensure_permissions_assignable`), so step 3 re-grants on custom roles are Super Admin actions (or an approved migration). |
+| Status row | `id`, `organization_id`, `project_id`, `plan_code`, `status`, `starts_at`, `ends_at`, `current_period_end`, `trial`, `trial_ends_at`, `active_add_ons` |
+| Effective services, operational | `source`, `status`, `dms_enabled`, `drafting_enabled`, `features` |
+| Effective services, status | operational, plus `plan_code`, `plan_name`, `current_period_end`, `trial`, `trial_ends_at`, `active_add_ons`, `inherited_from_organization_id` |
+| Effective services, financial | the full state |
 
-## 3. Migration plan (each step separately approved; none run yet)
+**Target grants:** `backend/rbac_backend/services/billing_permission_plan.py::TARGET_ROLE_GRANTS`, one definition used by the tests, P-05 and the migration plan; nothing applies it.
 
-1. **Measure (P-05 extension, read-only).** For each organisation, count:
-   - users who today reach each billing route only through `organizations:read` / `orgs:view` / `reports:view`, split by role type (built-in or custom);
-   - custom roles that hold those names;
-   - whether any role already holds the explicit billing names.
+| Role | Granted in the grant step |
+|---|---|
+| `orgadmin` | all financial views + `subscription.status.view` (no mutations) |
+| `contraclaim_billing_admin` | all financial views + status + the five subscription mutations (it already holds `billing.plan.manage`, `subscription.entitlement.manage`) |
+| `projectadmin` | `subscription.status.view` |
+| `orguser`, `projectuser`, `contractmgr_org`, `reporter`, `doccontroller`, `settings_manager`, `limited_user` | nothing |
+| custom roles | nothing automatically; re-granted individually where P-05 shows a need, by Super Admin (billing names are non-delegable) |
 
-   No PII, as with P-05. Add the counts to `scripts/claim_arbitration_readonly_readings.py` and run it in production read-only.
-2. **Decide.** Record the per-organisation impact and the release decision: who keeps billing visibility (default: orgadmin and billing admin only). Get security review sign-off.
-3. **Grant before revoking (forward migration, idempotent).**
-   - Add the explicit billing names to the built-in roles in the target table (`initial_data/default_roles.py` and a migration that updates stored built-in role documents).
-   - For every custom role or user that the decision says must keep billing visibility, add the explicit names through an audited, scoped re-grant: the role API with step-up, or an approved migration listing role ids, never a blanket grant.
-   - After this step nothing has changed for anyone: the aliases still apply.
-4. **Introduce `billing.record.view` and re-gate every billing and subscription read** behind a setting (`BILLING_EXPLICIT_PERMISSIONS`, default off; with it off, behaviour is unchanged):
-   - records, review queue, receipt and `/billing/summary/{org}`: `billing.record.view` (receipts `billing.invoice.download`);
-   - `/subscriptions` and `/plan-settings`: explicit `subscription.history.view` / `billing.plan.view` in the named scope instead of `ORG_/PROJECT_SUBSCRIPTION_VIEW_ROLES`. **Decide first:** this removes the project-level subscription visibility projectadmin and projectuser have today, and the target table gives them nothing;
-   - `/plan-settings/effective-services`: role-scoped today and possibly read for feature gating. **Decide** whether it stays role-scoped (it shows which services are on, not billing data) or is re-gated.
+## 5. Implementation (flag off changes nothing)
 
-   Route tests both ways (setting off: today's behaviour; on: the target table).
-5. **Remove the aliases (the breaking step).** One change set covering:
-   - the server alias tables;
-   - the now-unused client alias table (cleanup only);
-   - flipping the setting on;
-   - updating `test_def4_alias_compatibility_mongo.py`, so the "ordinary members read billing" test becomes "ordinary members are refused";
-   - the alias contract tests.
+- **`core/config.py`:** `BILLING_EXPLICIT_PERMISSIONS: bool = False`.
+- **`core/permissions.py`:**
+  - the new names (catalogue and billing domain);
+  - `LEGACY_BILLING_VIEW_ALIASES`;
+  - `is_billing_permission`.
+- **`services/permission_service.py`:**
+  - `user_has_explicit_permission(..., exclude=)`;
+  - the advertised list applies the flag-on rule, so the client does not offer what the policy refuses.
+- **`services/policy_service.py`:** the flag-on explicit rule.
+- **`routers/rbac_monetization.py`** (flag on only):
+  - record, review-queue and summary gate on `billing.record.view`; receipts on `billing.invoice.download`;
+  - checkout requires `subscription.upgrade` in scope, with no role-name path;
+  - `/subscriptions`: full rows with `subscription.history.view`, status rows with `subscription.status.view`, otherwise 403;
+  - `/plan-settings`: `subscription.history.view` in the organisation, otherwise 403;
+  - `/plan-settings/effective-services`: scoped for everyone but Super Admin and cut per scope (the cross-tenant read is closed).
+- **Not changed:**
+  - the alias tables;
+  - built-in role documents;
+  - `initial_data/default_roles.py`;
+  - any migration.
 
-   Staging first (two consecutive deployed runs), then production in a release window.
-6. **Rollback.** Planned as a release, not a toggle:
-   - the alias groups are code constants, so restoring them is a code revert and redeploy;
-   - only the route re-gating from step 4 sits behind the setting.
+## 6. P-05 read-only impact assessment
 
-   The explicit grants from step 3 stay; they are additive and harmless. No data migration needs reversing.
+`scripts/claim_arbitration_readonly_readings.py`, P-05 → `billing_permission_impact`. It reads only, through the read-only guard. It reports counts and organisation ids, never names or emails:
 
-## 4. Tests required before step 5
+- active users; users reaching billing only through the legacy aliases; of those, how many keep billing after the grant step and how many lose it;
+- `losing_billing_by_role_type`, `keeping_billing_by_role_type`, `losing_billing_by_organization` (**per-organisation affected-user counts**);
+- Project Admins whose role-name checkout path ends;
+- holders of `subscription.entitlement.manage` (today's cross-tenant effective-services readers);
+- custom roles holding the legacy view names, and custom roles holding explicit billing names;
+- `grant_step_names_missing_per_built_in_role`, the exact size of the grant step.
 
-- Real HTTP, per route (records, review queue, receipt, summary, history, `/subscriptions`, `/plan-settings`, and `/plan-settings/effective-services` as decided), for each role in the target table: allowed or refused, own and foreign organisation.
-- Effective-permission agreement (`test_effective_permissions_mongo.py`) with the new alias groups: the advertised list drops the billing names for ordinary members.
-- Client: billing pages hidden for ordinary members (server list without billing names) and shown for orgadmin and billing admin.
-- Alias contract (`test_permission_alias_contract.py`): no billing name reachable from `organizations:read`, `orgs:view` or `reports:view`.
-- Delegation: a non-holder cannot put the new names on a role.
+Proof: the test runs it on the seeded database. It changes nothing, contains no names, and its counts match the matrix.
 
-## 5. Dependencies
+**Not yet read in production.** An unread count is never zero.
 
-- **Before steps 3 and 5:** P-05 (and its extension in step 1), the authorised security review, and a recorded release decision.
-- **Before step 5:** two consecutive staging E2E passes.
-- **Does not depend on, and does not change:** DEF-5, the claim and arbitration rollout, and skill publication.
+## 7. Grant-before-revoke migration plan (none of it run)
+
+1. **Read** P-05 `billing_permission_impact` in production. Record per-organisation `losing_billing_by_organization`, and decide for each affected custom-role holder whether they need billing access.
+2. **Approve:**
+   - the authorised security review of this design and code;
+   - the owner's release decision, which names the organisations, any custom re-grants, and the window.
+3. **Grant** (additive, idempotent, reversible by removing the added names):
+   - a governed migration adds `TARGET_ROLE_GRANTS` to the stored built-in role documents and to `initial_data/default_roles.py`;
+   - approved custom re-grants are made by Super Admin through the role API (step-up, audited).
+
+   With the flag still off, this changes no one's access: everyone it reaches already had the views through the aliases. Re-read P-05: `of_whom_lose_billing_after_the_grant_step` should then match the decision.
+4. **Staging:** turn the flag on in staging and run two consecutive deployed E2E runs plus the role matrix probe. Keep the client billing pages in mind, since they read the server's effective list.
+5. **Production activation:** set `BILLING_EXPLICIT_PERMISSIONS=true` in the release window. No code change.
+6. **Alias removal:** a separate, later release. Remove the billing members of the `organizations:read`, `orgs:view` and `reports:view` alias groups, and the now-unused client alias table. Only after a stable period with the flag on.
+
+**Rollback:**
+
+- **Activation (step 5):** set `BILLING_EXPLICIT_PERMISSIONS=false` and restart. Behaviour returns to today's exactly, because the aliases are still in place.
+- **Grants (step 3):** leave them. They are harmless with the flag off. To remove them, take the added names off the role documents (the migration's down step).
+- **Alias removal (step 6):** a code revert and redeploy, planned as a release.
+
+## 8. Tests and evidence
+
+`backend/rbac_backend/tests/integration/test_def4_billing_explicit_permissions_mongo.py` (real HTTP, real MongoDB; in CI's real-Mongo step):
+
+- **Flag off:** today's behaviour, the aliases and Project Admin's role-name checkout included; cross-tenant denial.
+- **Flag on, without grants:** the aliases no longer reach billing; Super Admin unchanged; a custom role holding the exact name counts in its own organisation only.
+- **Flag on, with grants:**
+  - the matrix for Org Admin, Billing Admin, Org User, Project Admin, Project User, Contract Manager and Reporter;
+  - invoices and history;
+  - Project Admin sees status rows for its project only, with no financial fields and no organisation or sibling-project rows;
+  - full `/plan-settings` for Org Admin only.
+- **Effective services:** scoped and minimal per role; the billing administrator sees only its organisation (previously every organisation).
+- **Mutations:** Project Admin and Org Admin refused checkout, upgrade and cancel. The billing administrator is allowed at organisation level, and refused at project scope and in another organisation.
+- **Advertised list:** drops alias-only billing names under the flag, and lists the granted ones.
+- **P-05 reading:** counts, no names, no writes.
+
+**Mutation testing:** 9 mutants, all killed:
+
+- no flag rule in `PolicyService`;
+- `exclude` ignored;
+- no project-tier organisation rule (two variants);
+- role-name checkout kept;
+- full rows instead of status;
+- effective services unminimised;
+- effective services unscoped;
+- records on the old name.
+
+## 9. Open items
+
+- **Client pages** (`PlanSettingsPage`, `SubscriptionManagementPage`) were not changed. Under the flag they receive 403 where the server now refuses; a UI pass to hide them is part of staging step 4.
+- **Plan catalogue and add-on list** remain readable by any authenticated user. They are product pricing, not organisation data; confirm in the release decision.
+- **Wildcard (`*`) custom roles** no longer reach billing under the flag (least privilege). P-05 does not count them separately; check the custom-role count.

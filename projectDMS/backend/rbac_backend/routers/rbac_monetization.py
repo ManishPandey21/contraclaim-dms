@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field
 
+from ..core.config import settings
 from ..core.permissions import Permissions
 from ..core.security import CurrentUser, get_current_user
 from ..models.rbac_monetization import (
@@ -101,6 +102,69 @@ async def _subscription_scope_filters(
     return [], []
 
 
+# ---------------------------------------------------------------------------
+# DEF-4 target policy (BILLING_EXPLICIT_PERMISSIONS). Off: none of this runs.
+# ---------------------------------------------------------------------------
+
+#: A subscription as operational status: what is on, until when. No billing status,
+#: billing period, payment-gateway ids, overrides or audit fields (Decision 1, item 3).
+SUBSCRIPTION_STATUS_FIELDS = (
+    "id", "organization_id", "project_id", "plan_code", "status", "starts_at", "ends_at",
+    "current_period_end", "trial", "trial_ends_at", "active_add_ons",
+)
+#: Service availability a user needs to use the application (Decision 2).
+OPERATIONAL_SERVICE_FIELDS = ("source", "status", "dms_enabled", "drafting_enabled", "features")
+#: Plus what a subscription-status holder sees (Decision 1: subscription, entitlements, expiry).
+STATUS_SERVICE_FIELDS = OPERATIONAL_SERVICE_FIELDS + (
+    "plan_code", "plan_name", "current_period_end", "trial", "trial_ends_at", "active_add_ons",
+    "inherited_from_organization_id",
+)
+
+
+def _explicit_billing_policy() -> bool:
+    return bool(settings.BILLING_EXPLICIT_PERMISSIONS)
+
+
+def _only(row: Dict[str, Any], fields: tuple) -> Dict[str, Any]:
+    return {key: row.get(key) for key in fields if key in row}
+
+
+async def _granted_in(
+    policy: PolicyService, current_user: CurrentUser, permission: str, *, organizations: set, projects: set
+) -> tuple[set, set]:
+    """The organisations and projects where ``permission`` is held (explicitly, under the flag).
+
+    A built-in project role's grant applies at organisation level too, so a project-tier user
+    (Project Admin / Project User) counts at organisation level only with organisation-wide
+    scope: their grant must not show the organisation's or sibling projects' subscriptions.
+    """
+    scope = ScopeService()
+    project_tier = bool(scope.role_names(current_user) & PROJECT_SUBSCRIPTION_VIEW_ROLES)
+
+    async def organisation_level(org: str) -> bool:
+        # A project-tier user without organisation-wide scope never answers at organisation
+        # level; an organisation-level role holder (e.g. the billing administrator) does.
+        if project_tier and not await scope.has_organization_wide_scope(current_user, organization_id=org):
+            return False
+        return await policy.has_permission(current_user, permission, organization_id=org)
+
+    orgs = {org for org in organizations if await organisation_level(org)}
+    projs = {proj for proj in projects if await policy.has_permission(current_user, permission, project_id=proj)}
+    return orgs, projs
+
+
+async def _visible_scope(current_user: CurrentUser, project_orgs: Dict[str, str]) -> tuple[set, set]:
+    """Member organisations, and projects: assigned ones, plus every project of an
+    organisation where the user has organisation-wide scope."""
+    scope = ScopeService()
+    organizations = set(await scope.client_organization_ids(current_user))
+    projects = set(await scope.client_project_ids(current_user))
+    for org in organizations:
+        if await scope.has_organization_wide_scope(current_user, organization_id=org):
+            projects.update(project for project, owner in project_orgs.items() if owner == org)
+    return organizations, projects
+
+
 async def _authorize_checkout_scope(
     payload: "CheckoutRequest",
     current_user: CurrentUser,
@@ -108,6 +172,17 @@ async def _authorize_checkout_scope(
 ) -> None:
     scope = ScopeService()
     if scope.is_superadmin(current_user):
+        return
+    if _explicit_billing_policy():
+        # Decision 1: a commercially binding change needs explicit scoped authority, never a
+        # role name (today Project Admin may check out for their project by role alone).
+        await policy.authorize(
+            current_user,
+            Permissions.SUBSCRIPTION_UPGRADE,
+            organization_id=payload.organization_id,
+            project_id=payload.project_id,
+            resource_type="subscription",
+        )
         return
 
     roles = _role_names(current_user)
@@ -299,6 +374,17 @@ async def get_plan_settings(
     service = MonetizationService()
     if ScopeService().is_superadmin(current_user):
         return await service.get_plan_settings()
+    if _explicit_billing_policy():
+        # The full settings carry financial subscription detail: only organisations where the
+        # caller holds subscription.history.view. Feature availability: effective-services.
+        organizations = set(await ScopeService().client_organization_ids(current_user))
+        policy = PolicyService()
+        full_orgs, _ = await _granted_in(
+            policy, current_user, Permissions.SUBSCRIPTION_HISTORY_VIEW, organizations=organizations, projects=set()
+        )
+        if not full_orgs:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Subscription history permission required")
+        return await service.get_plan_settings(organization_ids=sorted(full_orgs), project_ids=None)
 
     organization_ids, project_ids = await _subscription_scope_filters(current_user)
     if not organization_ids and not project_ids:
@@ -320,6 +406,8 @@ async def get_effective_plan_services(
     scope = ScopeService()
     if scope.is_superadmin(current_user):
         return {"effective": settings.get("effective", {})}
+    if _explicit_billing_policy():
+        return {"effective": await _minimal_effective_services(current_user, settings)}
 
     if await PolicyService().has_permission(current_user, Permissions.SUBSCRIPTION_ENTITLEMENT_MANAGE):
         return {"effective": settings.get("effective", {})}
@@ -354,6 +442,49 @@ async def get_effective_plan_services(
                 if project_id in allowed_projects
             },
         }
+    }
+
+
+async def _minimal_effective_services(current_user: CurrentUser, settings_payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Decision 2: each member scope's service state, cut to what the caller may see there.
+
+    Never an unscoped view (before, any holder of subscription.entitlement.manage, the
+    billing administrator role included, saw every organisation). Per organisation and
+    project: the full state with subscription.history.view, the status fields with
+    subscription.status.view, otherwise only the availability needed to use the application.
+    """
+    effective = settings_payload.get("effective", {}) or {}
+    project_orgs = {
+        str(project.get("id") or project.get("_id") or ""): str(
+            project.get("organization_id") or project.get("organizationId") or ""
+        )
+        for project in settings_payload.get("projects", [])
+    }
+    organizations, projects = await _visible_scope(current_user, project_orgs)
+    policy = PolicyService()
+    full_orgs, full_projects = await _granted_in(
+        policy, current_user, Permissions.SUBSCRIPTION_HISTORY_VIEW, organizations=organizations, projects=projects
+    )
+    status_orgs, status_projects = await _granted_in(
+        policy, current_user, Permissions.SUBSCRIPTION_STATUS_VIEW, organizations=organizations, projects=projects
+    )
+
+    def cut(state: Dict[str, Any], full: bool, status_view: bool) -> Dict[str, Any]:
+        if full:
+            return dict(state)
+        return _only(state, STATUS_SERVICE_FIELDS if status_view else OPERATIONAL_SERVICE_FIELDS)
+
+    return {
+        "organizations": {
+            org: cut(state, org in full_orgs, org in status_orgs)
+            for org, state in (effective.get("organizations") or {}).items()
+            if org in organizations
+        },
+        "projects": {
+            project: cut(state, project in full_projects, project in status_projects)
+            for project, state in (effective.get("projects") or {}).items()
+            if project in projects
+        },
     }
 
 
@@ -465,6 +596,8 @@ async def list_subscriptions(
     scope = ScopeService()
     if scope.is_superadmin(current_user):
         return await MonetizationService().list_subscriptions(organization_id)
+    if _explicit_billing_policy():
+        return await _explicit_subscription_list(current_user, policy, organization_id)
 
     allowed_orgs, allowed_projects = await _subscription_scope_filters(current_user)
     if organization_id:
@@ -484,6 +617,46 @@ async def list_subscriptions(
         organization_ids=allowed_orgs,
         project_ids=allowed_projects,
     )
+
+
+async def _explicit_subscription_list(
+    current_user: CurrentUser, policy: PolicyService, organization_id: Optional[str]
+) -> List[Dict[str, Any]]:
+    """DEF-4: full rows where subscription.history.view is held, status rows where only
+    subscription.status.view is, nothing elsewhere; never by role name."""
+    scope = ScopeService()
+    organizations = set(await scope.client_organization_ids(current_user))
+    projects = set(await scope.client_project_ids(current_user))
+    if organization_id and str(organization_id) not in organizations:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Subscription scope denied")
+    if organization_id:
+        organizations = {str(organization_id)}
+    full_orgs, full_projects = await _granted_in(
+        policy, current_user, Permissions.SUBSCRIPTION_HISTORY_VIEW, organizations=organizations, projects=projects
+    )
+    status_orgs, status_projects = await _granted_in(
+        policy, current_user, Permissions.SUBSCRIPTION_STATUS_VIEW, organizations=organizations, projects=projects
+    )
+    if not (full_orgs or full_projects or status_orgs or status_projects):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Subscription view permission required")
+    rows = await MonetizationService().list_subscriptions(organization_ids=sorted(organizations), project_ids=None)
+    visible: List[Dict[str, Any]] = []
+    for row in rows:
+        org = str(row.get("organization_id") or "")
+        project = str(row.get("project_id") or "") or None
+        if org not in organizations:
+            continue
+        if project:
+            full = project in full_projects or org in full_orgs
+            status_view = project in status_projects or org in status_orgs
+        else:
+            full = org in full_orgs
+            status_view = org in status_orgs
+        if full:
+            visible.append(row)
+        elif status_view:
+            visible.append(_only(row, SUBSCRIPTION_STATUS_FIELDS))
+    return visible
 
 
 @router.get("/subscriptions/{subscription_id}", response_model=Dict[str, Any])
@@ -874,7 +1047,7 @@ async def get_billing_summary(
     """Get billing summary for an organization."""
     await policy.authorize(
         current_user,
-        Permissions.BILLING_PLAN_VIEW,
+        Permissions.BILLING_RECORD_VIEW if _explicit_billing_policy() else Permissions.BILLING_PLAN_VIEW,
         organization_id=organization_id,
         resource_type="billing",
     )
@@ -906,7 +1079,7 @@ async def get_organization_billing_records(
     """Financial billing records (payments / failures / amount-mismatch review)."""
     await policy.authorize(
         current_user,
-        Permissions.BILLING_PLAN_VIEW,
+        Permissions.BILLING_RECORD_VIEW if _explicit_billing_policy() else Permissions.BILLING_PLAN_VIEW,
         organization_id=organization_id,
         resource_type="billing",
     )
@@ -922,7 +1095,7 @@ async def get_billing_review_queue(
     """Failed-payment / amount-mismatch records needing admin attention."""
     await policy.authorize(
         current_user,
-        Permissions.BILLING_PLAN_VIEW,
+        Permissions.BILLING_RECORD_VIEW if _explicit_billing_policy() else Permissions.BILLING_PLAN_VIEW,
         organization_id=organization_id,
         resource_type="billing",
     )
@@ -940,7 +1113,7 @@ async def download_billing_receipt(
     """Download a print-optimized receipt or GST tax invoice for a paid record."""
     await policy.authorize(
         current_user,
-        Permissions.BILLING_PLAN_VIEW,
+        Permissions.BILLING_INVOICE_DOWNLOAD if _explicit_billing_policy() else Permissions.BILLING_PLAN_VIEW,
         organization_id=organization_id,
         resource_type="billing",
     )

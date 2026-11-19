@@ -143,6 +143,8 @@ DRAFTING_PERMISSIONS: List[str] = [
 ]
 
 BILLING_PERMISSIONS: List[str] = [
+    "billing.record.view",  # DEF-4: billing records, review queue and summary
+    "subscription.status.view",  # DEF-4: operational subscription status (no financial detail)
     "billing.plan.view",
     "billing.plan.manage",
     "billing.invoice.view",
@@ -338,6 +340,8 @@ class Permissions:
     SUBSCRIPTION_TRIAL_MANAGE = "subscription.trial.manage"
     SUBSCRIPTION_ADDON_MANAGE = "subscription.addon.manage"
     SUBSCRIPTION_HISTORY_VIEW = "subscription.history.view"
+    BILLING_RECORD_VIEW = "billing.record.view"
+    SUBSCRIPTION_STATUS_VIEW = "subscription.status.view"
     SUBSCRIPTION_USAGE_VIEW = "subscription.usage.view"
     SUBSCRIPTION_ARCHIVE_ACCESS = "subscription.archive_access"
     SUBSCRIPTION_OFFBOARDING_EXPORT = "subscription.offboarding_export"
@@ -642,6 +646,16 @@ def known_permission_name(permission: str) -> Optional[str]:
     if text in CANONICAL_PERMISSIONS or text in LEGACY_PERMISSION_ALIASES or text in ALIAS_TO_CANONICAL or text in LEGACY_LABEL_ALIASES:
         return text
     return None
+
+
+#: DEF-4: held names that, with BILLING_EXPLICIT_PERMISSIONS on, no longer satisfy any
+#: billing or subscription check (today they do, through LEGACY_PERMISSION_ALIASES).
+LEGACY_BILLING_VIEW_ALIASES: frozenset = frozenset({"organizations:read", "orgs:view", "reports:view"})
+
+
+def is_billing_permission(permission: str) -> bool:
+    """A billing or subscription check (the names DEF-4's explicit-grant policy governs)."""
+    return str(permission or "").startswith(("billing.", "subscription."))
 
 
 def permission_domain(permission: str) -> str:

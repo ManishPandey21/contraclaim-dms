@@ -4,7 +4,14 @@ from typing import Any, Optional
 
 from fastapi import HTTPException, status
 
-from ..core.permissions import SUPERADMIN_EXCLUDED_PERMISSIONS, Permissions, permission_domain
+from ..core.config import settings
+from ..core.permissions import (
+    LEGACY_BILLING_VIEW_ALIASES,
+    SUPERADMIN_EXCLUDED_PERMISSIONS,
+    Permissions,
+    is_billing_permission,
+    permission_domain,
+)
 from ..services.audit_event_service import AuditEventService
 from ..services.entitlement_service import EntitlementService
 from ..services.permission_service import PermissionService
@@ -80,6 +87,17 @@ class PolicyService:
             )
         if self.scope_service.is_superadmin(current_user):
             return True
+        if settings.BILLING_EXPLICIT_PERMISSIONS and is_billing_permission(permission):
+            # DEF-4 target policy: the name itself, granted on a role that applies here. Not
+            # through organizations:read / orgs:view / reports:view, a wildcard, or an
+            # administrator name: viewing never implies a financial mutation, nor the reverse.
+            return await self.permission_service.user_has_explicit_permission(
+                str(getattr(current_user, "id", "") or ""),
+                permission,
+                organization_id=organization_id,
+                project_id=project_id,
+                exclude=LEGACY_BILLING_VIEW_ALIASES,
+            )
         # `user_has_permission` applies the alias contract itself. Expanding the
         # name here first made resolution two hops deep - through a shared legacy
         # alias, `billing.plan.manage` reached `dms.admin` (see

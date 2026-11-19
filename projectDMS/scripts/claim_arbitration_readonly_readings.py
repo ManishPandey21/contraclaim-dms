@@ -287,7 +287,104 @@ def read_roles(db: ReadOnlyDatabase) -> Dict[str, Any]:
             "role_documents_with_this_name": documents_by_name,
             "users_holding_this_key": holders,
         }
-    return _reading("P-05", reviewer_roles=by_key, custom_role_compatibility=_read_custom_role_compatibility(db))
+    return _reading(
+        "P-05",
+        reviewer_roles=by_key,
+        custom_role_compatibility=_read_custom_role_compatibility(db),
+        billing_permission_impact=_read_billing_permission_impact(db),
+    )
+
+
+def _read_billing_permission_impact(db: ReadOnlyDatabase) -> Dict[str, Any]:
+    """DEF-4: who the explicit billing policy would change, before anyone decides to turn it on.
+
+    Counts only; organisation ids are listed, never user names or emails. For each active
+    user: whether they reach billing or subscription views today only through the legacy
+    aliases (organizations:read, orgs:view, reports:view), whether the planned grant step
+    (TARGET_ROLE_GRANTS) would give them explicit names, and so whether they would keep or
+    lose billing visibility once BILLING_EXPLICIT_PERMISSIONS is on. Also: Project Admins
+    whose role-name checkout path would end, holders of subscription.entitlement.manage
+    (today they see every organisation's service state), custom roles holding the legacy or
+    the explicit names, and what the grant step must add to each built-in role document.
+    """
+    try:
+        from rbac_backend.services.billing_permission_plan import TARGET_ROLE_GRANTS
+    except Exception:
+        return {"status": "not_read", "reason": "this image has no services.billing_permission_plan"}
+    legacy = {"organizations:read", "orgs:view", "reports:view"}
+
+    def billing(name: str) -> bool:
+        return name.startswith(("billing.", "subscription."))
+
+    roles = {
+        str(row["_id"]): row
+        for row in db["roles"].find({}, {"permissions": 1, "is_system": 1, "is_active": 1, "deleted": 1})
+    }
+    built_in = set(TARGET_ROLE_GRANTS) | {"superadmin", "orgadmin", "orguser", "projectadmin", "projectuser",
+                                          "contractmgr_org", "reporter", "doccontroller", "settings_manager",
+                                          "limited_user", "contraclaim_billing_admin"}
+    losing_by_role: Dict[str, int] = {}
+    keeping_by_role: Dict[str, int] = {}
+    losing_by_org: Dict[str, int] = {}
+    counts = {
+        "active_users_read": 0,
+        "users_reaching_billing_only_through_legacy_aliases": 0,
+        "of_whom_keep_billing_after_the_grant_step": 0,
+        "of_whom_lose_billing_after_the_grant_step": 0,
+        "users_with_explicit_billing_names_today": 0,
+        "project_admins_with_role_name_checkout_today": 0,
+        "users_holding_subscription_entitlement_manage": 0,
+    }
+    for user in db["users"].find({}, {"roles": 1, "organization_id": 1, "organizations": 1, "disabled": 1, "is_active": 1}):
+        if user.get("disabled") or user.get("is_active") is False:
+            continue
+        counts["active_users_read"] += 1
+        keys = [str(key) for key in (user.get("roles") or [])]
+        if "superadmin" in keys:
+            continue
+        held: set = set()
+        for key in keys:
+            role = roles.get(key) or {}
+            if role.get("is_active") is False or role.get("deleted"):
+                continue
+            held.update(str(name) for name in (role.get("permissions") or []))
+        explicit = {name for name in held if billing(name)}
+        if explicit:
+            counts["users_with_explicit_billing_names_today"] += 1
+        if "projectadmin" in keys:
+            counts["project_admins_with_role_name_checkout_today"] += 1
+        if "subscription.entitlement.manage" in held:
+            counts["users_holding_subscription_entitlement_manage"] += 1
+        if explicit or not (held & legacy):
+            continue
+        counts["users_reaching_billing_only_through_legacy_aliases"] += 1
+        role_type = next((key for key in keys if key in built_in), "custom")
+        # Kept: a held built-in role that the grant step gives financial names (not status only).
+        if any(TARGET_ROLE_GRANTS.get(key, frozenset()) - {"subscription.status.view"} for key in keys):
+            counts["of_whom_keep_billing_after_the_grant_step"] += 1
+            keeping_by_role[role_type] = keeping_by_role.get(role_type, 0) + 1
+        else:
+            counts["of_whom_lose_billing_after_the_grant_step"] += 1
+            losing_by_role[role_type] = losing_by_role.get(role_type, 0) + 1
+            for org in {str(o) for o in [user.get("organization_id"), *(user.get("organizations") or [])] if o}:
+                losing_by_org[org] = losing_by_org.get(org, 0) + 1
+    custom = {key: role for key, role in roles.items() if key not in built_in and not role.get("is_system")}
+    return {
+        **counts,
+        "losing_billing_by_role_type": dict(sorted(losing_by_role.items())),
+        "keeping_billing_by_role_type": dict(sorted(keeping_by_role.items())),
+        "losing_billing_by_organization": dict(sorted(losing_by_org.items())),
+        "custom_roles_holding_legacy_view_names": sum(
+            1 for role in custom.values() if legacy & {str(n) for n in role.get("permissions") or []}
+        ),
+        "custom_roles_holding_explicit_billing_names": sum(
+            1 for role in custom.values() if any(billing(str(n)) for n in role.get("permissions") or [])
+        ),
+        "grant_step_names_missing_per_built_in_role": {
+            key: sorted(set(names) - {str(n) for n in (roles.get(key) or {}).get("permissions") or []})
+            for key, names in sorted(TARGET_ROLE_GRANTS.items())
+        },
+    }
 
 
 def _read_custom_role_compatibility(db: ReadOnlyDatabase) -> Dict[str, Any]:
