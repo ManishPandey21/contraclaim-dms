@@ -801,7 +801,7 @@ async def permission_scope_query(
     """
     query = build_scope_query(current_user, organization_id, project_id, org_field, project_field, id_field)
     roles = {str(role).lower() for role in (current_user.roles or [])}
-    deny = {"_id": {"$in": []}}
+    deny: Dict[str, Any] = {"_id": {"$in": []}}
     if roles & SCOPE_QUERY_ROLE_KEYS or not permission:
         return query
     target_org = str(organization_id or getattr(current_user, "organization_id", None) or "")
@@ -821,13 +821,11 @@ async def permission_scope_query(
     service = PermissionService()
     service.db = db
     grants, _ = await service.scoped_grants(db, user_doc)
-    matching = [
-        grant.get("scope")
-        for grant in service.grants_naming(grants, permission)
-        if grant.get("scope")
-        and not grant["scope"].get("platform")
-        and str(grant["scope"].get("organization_id") or "") == target_org
-    ]
+    matching: List[Dict[str, Any]] = []
+    for grant in service.grants_naming(grants, permission):
+        scope = grant.get("scope")
+        if isinstance(scope, dict) and not scope.get("platform") and str(scope.get("organization_id") or "") == target_org:
+            matching.append(scope)
     if not matching:
         return deny
     org_wide = any(not scope.get("project_id") for scope in matching)

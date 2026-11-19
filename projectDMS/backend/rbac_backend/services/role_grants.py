@@ -133,7 +133,7 @@ async def role_grant_scope(
     role: Mapping[str, Any],
     memberships: Tuple[Set[str], Set[str]],
     project_cache: Dict[str, Optional[str]],
-) -> Tuple[bool, Optional[Dict[str, Optional[str]]]]:
+) -> Tuple[bool, Optional[Dict[str, Any]]]:
     """``(applies, scope)``. Built-in: ``(True, None)`` (no role-level bound). Custom:
     the organisation/project it counts in, or ``(False, None)`` when the user is not
     a member where the role was granted."""

@@ -44,6 +44,7 @@ class AuthenticationService:
     def _to_light_user(self, doc: Dict[str, Any]):
         class _User:
             credential_version: int
+            is_active: bool
 
         user = _User()
         user.id = str(doc.get("_id") or doc.get("id") or "")
