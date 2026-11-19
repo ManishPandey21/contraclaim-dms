@@ -144,7 +144,7 @@ async function mockApi(page: Page, state: State) {
 
     if (path === "/csrf-token") return json(route, { csrf_token: "test-csrf" });
     if (path === "/me") {
-      return json(route, { id: "user-1", email: "superadmin@example.com", roles: ["superadmin"], organization_id: org.id, projects: [project.id] });
+      return json(route, { id: "user-1", email: "superadmin@example.com", roles: ["superadmin"], permissions: ["*"], organization_id: org.id, projects: [project.id] }); // The server lists Super Admin as ["*"] (get_effective_permission_names); since T-2 the client decides from that list alone.
     }
     if (path === "/roles" || path === "/users") return json(route, []);
     if (path === "/letters") {

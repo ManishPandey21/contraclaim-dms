@@ -328,3 +328,54 @@ Mutants: unique check, key check, fail-open on unreadable index, partial check, 
 - **DEF-4:** design and migration plan in `docs/DEF4_BILLING_PERMISSION_SEPARATION.md`. Production aliases are unchanged. Notable: `orgadmin` holds no billing permission explicitly today, so it must be granted before any alias is removed.
 - **Super Admin:** the `*` contract is kept and never read as the explicit-grant permissions (T-2).
 - **DEF-5:** unchanged; nothing enabled.
+
+### Independent review of the fourth pass (agent; not the authorised security review)
+
+| Finding | Severity | Resolution |
+|---|---|---|
+| T-2 remount loop | **Critical, introduced** | Fixed, with a regression test (`useRBAC.tenant-loop.test.tsx`, real hook and provider) that fails on the previous commit; the re-review confirmed it closed. |
+| T-1 read the process database | Medium, introduced | Fixed: `AuthorizationService(db=None)` is injectable, and the unit test injects its own fake. |
+| User list (`build_user_query`) still turned a project role into organisation-wide access | Medium, pre-existing | Fixed (see below). |
+| `can()` used profile role names | Low, UI | Fixed: the server list decides alone. |
+| Malformed index direction answered 500 | Low | Fixed: text and hashed directions answer 503. |
+| DEF-4 design inaccurate in places | — | Corrected (see below). |
+| Re-review: a failed background re-read showed the sign-in form | Low | Fixed: the last good answer is kept and the error recorded; a failed account change still denies. |
+| Re-review: membership rows with an ObjectId `project_id` dropped from the user list | Low, fail-closed | Fixed, with a test. |
+
+Details:
+
+- **Remount loop.** `TenantProvider` announced its scope on mount. `useRBAC` cleared to loading, `ProtectedRoute` unmounted the layout, and the provider remounted. The reviewer reproduced over a million `/me` calls in 20 ms. Now:
+  - only an account change (`auth-state-changed`) clears;
+  - profile and scope changes re-read in the background, keeping the current answer;
+  - the provider announces only real changes.
+- **User list.** It now gets the same bound as the single-user read: users listed on, or holding an active membership row for, the actor's active projects in their organisation. No project means no users. Proof in `I/test_user_access_project_memberships_mongo.py`, including ObjectId-stored rows; the old list code fails it.
+- **DEF-4 design corrections:**
+  - routes scoped by role name rather than permission (`/subscriptions`, `/plan-settings`, `/plan-settings/effective-services`);
+  - `/billing/summary`;
+  - billing names are already non-delegable;
+  - rollback is a release, not a toggle;
+  - the wiring for `billing.record.view`;
+  - step 4 now covers every route, with the open decisions named.
+
+Still open, documented, not changed:
+
+| Item | Severity |
+|---|---|
+| Consumers outside `can()` still check `roles.includes("superadmin")` for platform pages; the backend enforces | Low |
+| `ProtectedRoute` shows the sign-in form when the first `/me` fails | Low |
+| `session-api`'s shared profile cache can be overwritten by an older response | Low, pre-existing |
+| The `skill_bindings` and `skills` unique indexes are not gated | Low, pre-existing |
+| `bench_fakes` advertises an index it does not enforce | Low, test-only |
+| The client alias helpers are now unused | Info |
+| Admin-made role changes do not notify the affected user's open client; the server enforces immediately, and re-login is forced by the authority-change floor | Low |
+
+**End-to-end evidence (mocked Playwright suites in CI).**
+
+- **Run 44562598556 on `00a1224`:** 27 E2E failures. This was the remount loop; CI caught it independently of the review.
+- **Runs 44564993286 (`0292c7a`) and 44566844854 (`e922566`):** after the loop fix, 15 failures remained in three specs (`letter-bench`, `contract-workflows`, `correspondence-linking`).
+  - **Cause:** their mocked `/me` returned `roles: ["superadmin"]` without `permissions`.
+  - **Why that broke them:** the real `/me` lists Super Admin as `["*"]` (`get_effective_permission_names`), and since T-2 the client decides from that list alone, no longer from role names.
+  - **Fix:** the three mocks now return the server's contract (`permissions: ["*"]`).
+- **Locally:** the full mocked set passes (78 passed; the 59 skipped are deployed-stack suites).
+
+Backend in both runs: 8,431 unit tests and 1,070 real-MongoDB tests (80 modules) passed.

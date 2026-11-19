@@ -124,6 +124,21 @@ Open:
   - the Super Admin `["*"]` advertisement.
 - **Found and pinned:** today, ordinary organisation and project members read their organisation's billing records and subscription history through the `organizations:read` alias.
 
+## Fourth pass (T-1 to T-4, 2026-11-19)
+
+- **Done (implemented and tested; CI pending at the time of writing):**
+  - T-2: client permissions fail closed, including the fix for a Critical remount loop found by review;
+  - T-1: user read and user list count memberships;
+  - T-3: digests resolve the email service at run time;
+  - T-4: skill-version index gate.
+- **Design only:** DEF-4 billing separation (`docs/DEF4_BILLING_PERMISSION_SEPARATION.md`), with decisions open on project-level subscription visibility and `/plan-settings/effective-services`.
+- **Open, Low:**
+  - Super Admin role checks outside `can()`;
+  - sign-in form on the first `/me` failure;
+  - profile cache race;
+  - `skill_bindings` and `skills` index gates;
+  - unused client alias helpers.
+
 ## Blockers before production authorisation
 
 1. P-01 to P-16 production readings with authorised read-only access (AQ-11). This includes:
@@ -142,6 +157,6 @@ Open:
   - a production reading: 4B-04 M-01 (P-02) and the P-05 re-grants;
   - staging: 4B-44;
   - experts or the owner: 4B-42, and the DEF-4 decision;
-  - DEF-5 after P-05; DEF-4 separation after P-05 and approval; T-1 to T-4 (approval to fix).
+  - DEF-5 after P-05; DEF-4 separation after P-05 and approval; T-1 to T-4 done (fourth pass); remaining Low items above.
 
   None of these should be started without that input. The security fixes would change behaviour, so they need explicit approval.

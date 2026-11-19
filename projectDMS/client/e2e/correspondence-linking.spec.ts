@@ -102,6 +102,7 @@ async function mockBackend(
     if (path === "/me") {
       return json(route, {
         id: "user-1", email: "superadmin@example.com", roles: ["superadmin"],
+        permissions: ["*"], // The server lists Super Admin as ["*"] (get_effective_permission_names); since T-2 the client decides from that list alone.
         organization_id: ORG, projects: [PROJECT],
       });
     }
