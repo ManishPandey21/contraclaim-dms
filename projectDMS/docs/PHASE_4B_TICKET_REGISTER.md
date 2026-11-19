@@ -222,6 +222,8 @@ Detail: `docs/SECURITY_REMEDIATION_2026-11-19.md`, section "Review of 2026-11-19
 | DEF-5 non-ObjectId user ids break `/api/users/me`, `/api/me`, refresh | Depends on production data | Ticket; P-05 counts | probe with real dependencies |
 | DEF-6 notifications 500 after a database swap | Test harness only | Ticket (low) | probe with real dependencies |
 
+**CI.** Run 44483094374 on `14bc466` (fixes `1ce6730`, readings `f6a9156`, docs): backend 8,410 unit and 1,006 real-MongoDB passed, 0 failed, the real-Redis suite running against CI's disposable Redis; frontend, dependency scan and Docker passed; secret scan failed (the two known findings, with the security owner). Locally: unit 8,386 passed; real-MongoDB with Redis 1,006 passed; mypy gate passed.
+
 SEC-4 with Redis available, unreachable (fail-closed and fail-open) and absent: `I/test_security_redis_mongo.py` (10, CI now starts a disposable Redis). P-05 extended: affected users by change class, role type, organisations affected (counts, no identities), permission entries at stake, recommended re-grant. JG-7(c) unchanged in scope (claims list only). Legacy `Other` claims unchanged. Mutation: 32 mutants, 30 killed, 2 equivalent.
 
 ### Security remediation SEC-1 to SEC-4 and JG-7(c) (owner direction 2026-11-19)
