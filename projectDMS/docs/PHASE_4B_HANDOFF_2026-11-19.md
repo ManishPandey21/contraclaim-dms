@@ -141,7 +141,7 @@ Open:
 
 ## Fifth pass (DEF-4 implementation, 2026-11-19)
 
-- **Done (implemented and tested; CI pending at the time of writing):**
+- **Done (implemented, tested, CI-verified in run 44584757939 on `73c9b41`; secret scan red as before):**
   - `BILLING_EXPLICIT_PERMISSIONS`, default off; with it off, authorisation is unchanged;
   - the explicit billing policy, status and financial separation, scoped effective services, and no role-name checkout;
   - P-05 `billing_permission_impact`;

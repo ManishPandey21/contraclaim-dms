@@ -210,11 +210,13 @@ Details, the measured role × endpoint matrix and the migration plan: `docs/DEF4
 | Item | Implemented | Tested | CI-verified | Security-approved | Production-accepted |
 |---|---|---|---|---|---|
 | Endpoint audit (all methods) and measured matrix (flag off / on before grants / on after grants) | Yes | Probe over real HTTP | — | No | — |
-| Explicit billing policy behind the flag (default off): new `billing.record.view`, `subscription.status.view`; aliases, wildcards and admin names excluded; project-tier rule in `PolicyService` | Yes | Real Mongo (10 tests, both flag states); 9 mutants killed; M2/M3 tests fail on the pre-review commit | Pending (`73c9b41`) | No | No: needs P-05, authorised review, staging, release decision |
-| Status vs financial separation; scoped and minimal effective services; checkout needs explicit `subscription.upgrade` | Yes | As above | Pending | No | No |
-| P-05 `billing_permission_impact` (read-only, per-organisation counts, runs on old images) | Yes | Real Mongo plus parity unit test | Pending | — | Not read in production |
+| Explicit billing policy behind the flag (default off): new `billing.record.view`, `subscription.status.view`; aliases, wildcards and admin names excluded; project-tier rule in `PolicyService` | Yes | Real Mongo (10 tests, both flag states); 9 mutants killed; M2/M3 tests fail on the pre-review commit | Yes, run 44584757939 | No | No: needs P-05, authorised review, staging, release decision |
+| Status vs financial separation; scoped and minimal effective services; checkout needs explicit `subscription.upgrade` | Yes | As above | Yes, run 44584757939 | No | No |
+| P-05 `billing_permission_impact` (read-only, per-organisation counts, runs on old images) | Yes | Real Mongo plus parity unit test | Yes, run 44584757939 | — | Not read in production |
 | Grant-before-revoke migration and rollback | Plan only (target grants defined once, applied by nothing) | — | — | No | No |
 | Open (owner decisions): M1 global built-in roles (dual-role users); M4 tenant billing admin edits the global plan catalogue; L3 subscription scope change on `PUT` | Not changed | — | — | — | — |
+
+CI run 44584757939 on `73c9b41` (code identical at `698effd`): backend (8,432 unit; real-Mongo 81 modules, 1,080 passed, every module ran), frontend (1,014 unit; 78 mocked E2E), dependency scan and Docker green; secret scan red (same two findings). Earlier run 44582778268 on `2401094` (before the review fixes) also green except the secret scan. Flag off by default; not activated. Not security-approved; not production-accepted.
 
 ### Owner decisions T-1 to T-4 (2026-11-19, fourth pass)
 

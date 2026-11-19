@@ -326,3 +326,5 @@ No Critical or High issue. Flag-off paths are code-identical to today, and with 
 | **L3:** `PUT /subscriptions/{id}` authorises against the stored scope only. A project-scoped holder of `subscription.entitlement.manage` can set `project_id` to null or to another project. | Low-Medium, pre-existing | **Not changed;** recorded for a follow-up (validate the new scope as well). |
 | **Info:** operational `features` include `entitlement_overrides` (possibly negotiated terms); status rows include `current_period_end`. | Info | Recorded; decide in the release review whether to cut further. |
 | **Info:** a project-tier user holding an explicit custom organisation-level grant is refused at organisation level everywhere under the flag (consistent since the M2 fix). | Info | — |
+
+**CI.** CI run 44584757939 on `73c9b41` (code identical at `698effd`): backend (8,432 unit; real-Mongo 81 modules, 1,080 passed, every module ran), frontend (1,014 unit; 78 mocked E2E), dependency scan and Docker green; secret scan red (same two findings). Earlier run 44582778268 on `2401094` (before the review fixes) also green except the secret scan.
