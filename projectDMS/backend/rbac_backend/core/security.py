@@ -755,6 +755,98 @@ def build_scope_query(
     return {"_id": {"$in": []}}
 
 
+#: Role keys ``build_scope_query`` answers for. A principal holding any of them is
+#: answered by that function alone; ``permission_scope_query`` never widens it.
+SCOPE_QUERY_ROLE_KEYS = frozenset(
+    {
+        "superadmin",
+        "superuser",
+        "orgadmin",
+        "orguser",
+        "projectadmin",
+        "projectuser",
+        "contraclaim_expert_drafter",
+        "contraclaim_expert_reviewer",
+        "contraclaim_drafting_manager",
+        "contract_expert",
+    }
+)
+
+
+async def permission_scope_query(
+    current_user: CurrentUser,
+    permission: str,
+    *,
+    organization_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    org_field: str = "organization_id",
+    project_field: Optional[str] = "project_id",
+    id_field: str = "_id",
+    db: Any = None,
+) -> Dict[str, Any]:
+    """Row visibility for a list gated on ``permission`` (JG-7(c)); opt-in per call site.
+
+    Built-in roles: exactly ``build_scope_query``. A principal with none of them
+    (custom roles only) used to get deny-all; now it sees rows only where it holds
+    ``permission`` **by name** (no ``*``) through a custom role that applies
+    (SEC-1: an active role of the organisation it is a member of, or of a project it
+    is assigned to), in the organisation of the request or its own, never another:
+
+    - an organisation role: that organisation's rows (one project, if one is named);
+    - project roles: those projects' rows only.
+
+    Holding a custom role is never enough by itself, a platform role grants no rows,
+    a disabled account gets none, and the filter always names the organisation
+    (never ``{}``, never a top-level ``$or``, so call sites may add keys).
+    """
+    query = build_scope_query(current_user, organization_id, project_id, org_field, project_field, id_field)
+    roles = {str(role).lower() for role in (current_user.roles or [])}
+    deny = {"_id": {"$in": []}}
+    if roles & SCOPE_QUERY_ROLE_KEYS or not permission:
+        return query
+    target_org = str(organization_id or getattr(current_user, "organization_id", None) or "")
+    if not target_org:
+        return deny
+    from .database import get_database
+
+    db = db if db is not None else await get_database()
+    candidates: List[Any] = [current_user.id]
+    try:
+        candidates.append(ObjectId(str(current_user.id)))
+    except Exception:
+        pass
+    user_doc = await db.users.find_one({"_id": {"$in": candidates}})
+    if not user_doc or not account_is_active(user_doc):
+        return deny
+    service = PermissionService()
+    service.db = db
+    grants, _ = await service.scoped_grants(db, user_doc)
+    matching = [
+        grant.get("scope")
+        for grant in service.grants_naming(grants, permission)
+        if grant.get("scope")
+        and not grant["scope"].get("platform")
+        and str(grant["scope"].get("organization_id") or "") == target_org
+    ]
+    if not matching:
+        return deny
+    org_wide = any(not scope.get("project_id") for scope in matching)
+    projects = sorted({str(scope["project_id"]) for scope in matching if scope.get("project_id")})
+    field = project_field or id_field
+    if project_id is not None:
+        requested = str(project_id)
+        if not org_wide and requested not in projects:
+            return deny
+        if org_wide and requested not in projects:
+            owner = await db.projects.find_one({"_id": {"$in": _expand_object_ids([requested])}}, {"organization_id": 1})
+            if not owner or str(owner.get("organization_id") or "") != target_org:
+                return deny
+        return {org_field: target_org, field: {"$in": _expand_object_ids([requested])}}
+    if org_wide:
+        return {org_field: target_org}
+    return {org_field: target_org, field: {"$in": _expand_object_ids(projects)}}
+
+
 def validate_role_assignment(actor: CurrentUser, target_roles: List[str]) -> None:
     """
     Prevent privilege escalation on role assignments.

@@ -369,3 +369,112 @@ def test_a_disabled_account_stops_on_its_next_request(monkeypatch, field: str, v
             assert stopped.status_code == 401
 
     _run(scenario())
+
+
+# --------------------------------------------------------------------------- #
+# JG-7(c): custom-role row visibility, opted in on the claims list
+# --------------------------------------------------------------------------- #
+
+
+async def _claims(env: Any, persona: str, project: Optional[str] = None) -> Any:
+    headers = {"Authorization": f"Bearer {_token(persona)}"}
+    if project:
+        headers["X-Proj-Id"] = project
+    return await env.client.get("/api/claims", headers=headers)
+
+
+def test_custom_role_holders_see_claims_only_where_they_hold_the_permission(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            await env.db.claims.insert_many(
+                [
+                    {"_id": "sec-claim-a2", "claim_ref": "CLM-A2", "title": "A2", "type": "eot", "status": "draft",
+                     "organization_id": ORG_A, "project_id": PROJ_A2, "evidence_frozen_at": None},
+                    {"_id": "sec-claim-b1", "claim_ref": "CLM-B1", "title": "B1", "type": "eot", "status": "draft",
+                     "organization_id": ORG_B, "project_id": PROJ_B1, "evidence_frozen_at": None},
+                ]
+            )
+            await env.db.roles.insert_many(
+                [
+                    _role("sec-claims-org-a", [VIEW], organization_id=ORG_A),
+                    _role("sec-claims-a2", [VIEW], organization_id=ORG_A, project_id=PROJ_A2),
+                    _role("sec-claims-nothing", ["dms.document.view"], organization_id=ORG_A),
+                    _role("sec-claims-org-b", [VIEW], organization_id=ORG_B),
+                ]
+            )
+            await _user(env.db, "sec_cv_org", ["sec-claims-org-a"], organization_id=ORG_A)
+            await _user(env.db, "sec_cv_a2", ["sec-claims-a2"], organization_id=ORG_A, projects=[PROJ_A2])
+            await _user(env.db, "sec_cv_none", ["sec-claims-nothing"], organization_id=ORG_A)
+            await _user(env.db, "sec_cv_foreign", ["sec-claims-org-b"], organization_id=ORG_A)
+
+            def ids(response: Any) -> set:
+                assert response.status_code == 200, response.text[:300]
+                return {row["_id"] for row in response.json()}
+
+            org_wide = ids(await _claims(env, "sec_cv_org"))
+            assert org_wide == {"claim-bench-a1", "sec-claim-a2"}, org_wide
+            # Selecting a project needs an explicit assignment to it (the tenant gate), even
+            # with an organisation-wide custom role.
+            assert (await _claims(env, "sec_cv_org", PROJ_A1)).status_code == 403
+            await env.db.users.update_one({"email": "sec_cv_org@example.com"}, {"$set": {"projects": [PROJ_A1]}})
+            assert ids(await _claims(env, "sec_cv_org", PROJ_A1)) == {"claim-bench-a1"}
+            await env.db.users.update_one({"email": "sec_cv_org@example.com"}, {"$set": {"projects": []}})
+            assert ids(await _claims(env, "sec_cv_a2", PROJ_A2)) == {"sec-claim-a2"}
+            assert ids(await _claims(env, "sec_cv_a2")) == {"sec-claim-a2"}
+            # A project role reaches no other project's rows.
+            other = await _claims(env, "sec_cv_a2", PROJ_A1)
+            assert other.status_code in {403} or ids(other) == set()
+            # Holding a custom role is not enough: it must carry the permission.
+            assert (await _claims(env, "sec_cv_none")).status_code == 403
+            # A role of B held by a member of A grants nothing anywhere.
+            assert (await _claims(env, "sec_cv_foreign")).status_code == 403
+            # Built-in roles unchanged.
+            assert ids(await _claims(env, "org_admin")) >= {"claim-bench-a1", "sec-claim-a2"}
+            assert "sec-claim-b1" not in ids(await _claims(env, "org_admin"))
+
+            # Revoking the role, or disabling the account, ends the visibility.
+            await env.db.roles.update_one({"_id": "sec-claims-org-a"}, {"$set": {"is_active": False}})
+            assert (await _claims(env, "sec_cv_org")).status_code == 403
+            await env.db.users.update_one({"email": "sec_cv_a2@example.com"}, {"$set": {"disabled": True}})
+            assert (await _claims(env, "sec_cv_a2", PROJ_A2)).status_code == 401
+
+    _run(scenario())
+
+
+def test_the_custom_role_filter_never_widens_and_always_names_the_organisation(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            from rbac_backend.core.security import CurrentUser, build_scope_query, permission_scope_query
+
+            await env.db.roles.insert_many(
+                [_role("sec-q-org", [VIEW], organization_id=ORG_A), _role("sec-q-p", [VIEW], organization_id=ORG_A, project_id=PROJ_A2)]
+            )
+            org_user = await _user(env.db, "sec_q_org", ["sec-q-org"], organization_id=ORG_A)
+            project_user = await _user(env.db, "sec_q_p", ["sec-q-p"], organization_id=ORG_A, projects=[PROJ_A2])
+
+            def principal(user_id: str, roles: List[str], projects: List[str]) -> CurrentUser:
+                return CurrentUser(id=user_id, username="u", email="u@example.com", roles=roles,
+                                   organization_id=ORG_A, organizations=[ORG_A], projects=projects)
+
+            deny = {"_id": {"$in": []}}
+            org_principal = principal(org_user, ["sec-q-org"], [])
+            project_principal = principal(project_user, ["sec-q-p"], [PROJ_A2])
+            for query in (
+                await permission_scope_query(org_principal, VIEW, db=env.db),
+                await permission_scope_query(project_principal, VIEW, db=env.db),
+                await permission_scope_query(org_principal, VIEW, project_id=PROJ_A1, db=env.db),
+            ):
+                assert query != {} and "$or" not in query and query.get("organization_id") == ORG_A, query
+            assert await permission_scope_query(org_principal, VIEW, organization_id=ORG_B, db=env.db) == deny
+            assert await permission_scope_query(org_principal, VIEW, project_id=PROJ_B1, db=env.db) == deny
+            assert await permission_scope_query(project_principal, VIEW, project_id=PROJ_A1, db=env.db) == deny
+            assert await permission_scope_query(org_principal, MANAGE, db=env.db) == deny
+            # A wildcard is not a grant by name: it gives no rows.
+            await env.db.roles.insert_one(_role("sec-q-star", ["*"], organization_id=ORG_A))
+            star_user = await _user(env.db, "sec_q_star", ["sec-q-star"], organization_id=ORG_A)
+            assert await permission_scope_query(principal(star_user, ["sec-q-star"], []), VIEW, db=env.db) == deny
+            # Built-in principals: exactly build_scope_query.
+            builtin = principal("user-org_admin", ["orgadmin"], [])
+            assert await permission_scope_query(builtin, VIEW, db=env.db) == build_scope_query(builtin)
+
+    _run(scenario())

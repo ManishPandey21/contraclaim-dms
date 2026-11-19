@@ -1016,6 +1016,16 @@ class PermissionService:
         return grants, role_names
 
     @staticmethod
+    def grants_naming(grants: List[Dict[str, Any]], permission: str) -> List[Dict[str, Any]]:
+        """The grants that hold ``permission`` by name (its one-hop equivalents count).
+
+        For row visibility (``core.security.permission_scope_query``, JG-7(c)): names
+        are compared, so a ``*`` entry never matches and a wildcard role gives no rows.
+        """
+        wanted = set(equivalent_permissions(permission) or set()) | {permission}
+        return [grant for grant in grants if wanted & set(grant.get("names") or [])]
+
+    @staticmethod
     def _decide(
         grants: List[Dict[str, Any]],
         role_names: set,

@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.database import get_db
 from ..core.permissions import Permissions
-from ..core.security import CurrentUser, build_scope_query, get_current_user
+from ..core.security import CurrentUser, get_current_user, permission_scope_query
 from ..core.tenant_context import ActiveScope, active_scope
 from ..models.approval import ApprovalRecord, AssignBody, DecisionBody
 from ..models.claim import (
@@ -317,7 +317,11 @@ async def list_claims(
         project_id=project_id,
         audit=False,
     )
-    scope = build_scope_query(current_user, organization_id=organization_id, project_id=project_id)
+    # JG-7(c): custom-role holders see the claims of the organisation/projects where
+    # they hold dms.claim.view by name; built-in roles are unchanged.
+    scope = await permission_scope_query(
+        current_user, Permissions.CLAIM_VIEW, organization_id=organization_id, project_id=project_id, db=db
+    )
     claims = await ClaimService(db).list(
         scope,
         claim_type=claim_type,
