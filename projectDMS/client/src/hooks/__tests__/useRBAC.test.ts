@@ -207,6 +207,26 @@ describe("useRBAC", () => {
       },
     );
 
+    it("keeps the last answer when a background re-read fails", async () => {
+      mocks.getCurrentUserProfile.mockResolvedValueOnce({ roles: ["orgadmin"], permissions: ["dms.document.view"] });
+      const { result } = renderHook(() => useRBAC());
+      await waitFor(() => expect(result.current.can("dms.document.view")).toBe(true));
+      mocks.getCurrentUserProfile.mockRejectedValueOnce(new Error("timeout"));
+      await act(async () => {
+        window.dispatchEvent(new CustomEvent("tenant-scope-changed"));
+      });
+      expect(result.current.status).toBe("ready");
+      expect(result.current.error).toBe("timeout");
+      expect(result.current.can("dms.document.view")).toBe(true);
+      // An account change that fails still denies everything.
+      mocks.getCurrentUserProfile.mockRejectedValueOnce(new Error("down"));
+      await act(async () => {
+        window.dispatchEvent(new CustomEvent("auth-state-changed"));
+      });
+      expect(result.current.status).toBe("error");
+      expect(result.current.can("dms.document.view")).toBe(false);
+    });
+
     it("never lets an older answer overwrite a newer one (account switch)", async () => {
       const first = deferred<unknown>();
       const second = deferred<unknown>();

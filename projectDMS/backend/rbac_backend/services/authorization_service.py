@@ -491,8 +491,15 @@ class AuthorizationService:
             member_ids: list[Any] = []
             rows = getattr(db, "project_memberships", None)
             if rows is not None:
+                # Rows may store project_id as a string or an ObjectId (re-review).
+                project_keys: list[Any] = list(allowed_projects)
+                for project in allowed_projects:
+                    try:
+                        project_keys.append(ObjectId(project))
+                    except Exception:
+                        pass
                 async for row in rows.find(
-                    {"project_id": {"$in": allowed_projects}, "status": {"$in": ["active", None]}}, {"user_id": 1}
+                    {"project_id": {"$in": project_keys}, "status": {"$in": ["active", None]}}, {"user_id": 1}
                 ):
                     raw = row.get("user_id")
                     if raw:

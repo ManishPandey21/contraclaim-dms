@@ -146,7 +146,18 @@ def test_the_user_list_is_bounded_the_same_way(monkeypatch) -> None:
             only_a2 = await _member(env, "t1_list_a2", ["projectuser"], projects=[PROJ_A2])
             revoked = await _member(env, "t1_list_revoked", ["projectuser"], rows=[{"project_id": PROJ_A1, "status": "revoked"}])
             other_org = await _member(env, "t1_list_b", ["projectuser"], org=ORG_B, projects=[PROJ_B1])
+            # A project stored under an ObjectId, and a membership row naming it as an ObjectId.
+            from bson import ObjectId
+
+            oid_project = ObjectId()
+            await env.db.projects.insert_one({"_id": oid_project, "name": "A3", "organization_id": ORG_A})
+            await env.db.project_memberships.insert_one(
+                {"user_id": (await env.db.users.find_one({"username": "t1_list_admin"}))["_id"].__str__(),
+                 "project_id": str(oid_project), "status": "active"}
+            )
+            oid_row = await _member(env, "t1_list_oid_row", ["projectuser"], rows=[{"project_id": oid_project, "status": "active"}])
             seen = await _listed(env, "t1_list_admin")
+            assert oid_row in seen, "a membership row storing project_id as an ObjectId"
             assert {listed_a1, row_a1} <= seen
             assert not ({only_a2, revoked, other_org} & seen), seen
             await _member(env, "t1_list_unassigned", ["projectadmin"])

@@ -93,7 +93,12 @@ Route changes:
    - Add the explicit billing names to the built-in roles in the target table (`initial_data/default_roles.py` and a migration that updates stored built-in role documents).
    - For every custom role or user that the decision says must keep billing visibility, add the explicit names through an audited, scoped re-grant: the role API with step-up, or an approved migration listing role ids, never a blanket grant.
    - After this step nothing has changed for anyone: the aliases still apply.
-4. **Introduce `billing.record.view`.** Re-gate the record, review-queue and receipt routes behind a setting (`BILLING_EXPLICIT_PERMISSIONS`, default off). With it off, behaviour is unchanged. Add route tests both ways.
+4. **Introduce `billing.record.view` and re-gate every billing and subscription read** behind a setting (`BILLING_EXPLICIT_PERMISSIONS`, default off; with it off, behaviour is unchanged):
+   - records, review queue, receipt and `/billing/summary/{org}`: `billing.record.view` (receipts `billing.invoice.download`);
+   - `/subscriptions` and `/plan-settings`: explicit `subscription.history.view` / `billing.plan.view` in the named scope instead of `ORG_/PROJECT_SUBSCRIPTION_VIEW_ROLES`. **Decide first:** this removes the project-level subscription visibility projectadmin and projectuser have today, and the target table gives them nothing;
+   - `/plan-settings/effective-services`: role-scoped today and possibly read for feature gating. **Decide** whether it stays role-scoped (it shows which services are on, not billing data) or is re-gated.
+
+   Route tests both ways (setting off: today's behaviour; on: the target table).
 5. **Remove the aliases (the breaking step).** One change set covering:
    - the server alias tables;
    - the now-unused client alias table (cleanup only);
@@ -110,7 +115,7 @@ Route changes:
 
 ## 4. Tests required before step 5
 
-- Real HTTP, per route, for each role in the target table: allowed or refused, own and foreign organisation.
+- Real HTTP, per route (records, review queue, receipt, summary, history, `/subscriptions`, `/plan-settings`, and `/plan-settings/effective-services` as decided), for each role in the target table: allowed or refused, own and foreign organisation.
 - Effective-permission agreement (`test_effective_permissions_mongo.py`) with the new alias groups: the advertised list drops the billing names for ordinary members.
 - Client: billing pages hidden for ordinary members (server list without billing names) and shown for orgadmin and billing admin.
 - Alias contract (`test_permission_alias_contract.py`): no billing name reachable from `organizations:read`, `orgs:view` or `reports:view`.

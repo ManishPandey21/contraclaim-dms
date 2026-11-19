@@ -97,12 +97,15 @@ export function useRBAC(): UseRBACResult {
       });
     } catch (e: any) {
       if (id !== request.current) return;
-      setState({
-        status: "error",
-        roles: [],
-        permissions: new Set(),
-        error: e?.message || "Your permissions could not be loaded.",
-      });
+      const message = e?.message || "Your permissions could not be loaded.";
+      // A failed background re-read (same account) keeps the last answer the server gave
+      // and records the error; turning it into "error" sent a signed-in user to the
+      // sign-in form (re-review, 2026-11-19). The backend enforces regardless.
+      setState((current) =>
+        !clear && current.status === "ready"
+          ? { ...current, error: message }
+          : { status: "error", roles: [], permissions: new Set(), error: message },
+      );
     }
   }, []);
 
