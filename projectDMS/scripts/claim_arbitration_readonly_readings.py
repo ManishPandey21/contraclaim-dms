@@ -303,16 +303,21 @@ def _read_custom_role_compatibility(db: ReadOnlyDatabase) -> Dict[str, Any]:
         from rbac_backend.services.role_grants import role_is_built_in
     except ImportError:
         return {"status": "not_read", "reason": "this image has no services.role_grants"}
-    roles = list(db["roles"].find({}, {"name": 1, "is_system": 1, "scope": 1, "organization_id": 1, "project_id": 1, "is_active": 1}))
+    roles = list(db["roles"].find({}, {"name": 1, "is_system": 1, "scope": 1, "organization_id": 1, "project_id": 1, "is_active": 1, "permissions": 1}))
     by_id = {str(role["_id"]): role for role in roles}
     custom = {key: role for key, role in by_id.items() if not role_is_built_in(role)}
-    named_like_built_in = sum(
-        1
-        for role in roles
-        if role.get("is_system") is not True
-        and role_is_built_in({"name": role.get("name")})
-        and not role_is_built_in({"_id": role.get("_id"), "scope": role.get("scope")})
-    )
+    from rbac_backend.core.role_reference import normalize_role_key
+    from rbac_backend.services.role_grants import BUILT_IN_ROLE_KEYS
+
+    stripped_keys = {"".join(ch for ch in key if ch.isalnum()) for key in BUILT_IN_ROLE_KEYS}
+
+    def _named_like_built_in(name: Any) -> bool:
+        text = str(name or "").strip().lower()
+        return normalize_role_key(text) in BUILT_IN_ROLE_KEYS or "".join(ch for ch in text if ch.isalnum()) in stripped_keys
+
+    # Review R-1: such a role is a custom role now (bounded like any other); before it was
+    # treated as built-in by its name.
+    named_like_built_in = sum(1 for role in custom.values() if _named_like_built_in(role.get("name")))
     counts = {
         "custom_roles_total": len(custom),
         "custom_roles_without_organisation_or_project": sum(
@@ -327,6 +332,11 @@ def _read_custom_role_compatibility(db: ReadOnlyDatabase) -> Dict[str, Any]:
         "users_disabled": 0,
         "users_is_active_false_but_not_disabled": 0,
     }
+    changes: Dict[str, Any] = {}
+    project_orgs: Dict[str, Optional[str]] = {
+        str(row["_id"]): (str(row["organization_id"]) if row.get("organization_id") else None)
+        for row in db["projects"].find({}, {"organization_id": 1})
+    } if "projects" in db.list_collection_names() else {}
     for user in db["users"].find({}, {"roles": 1, "organization_id": 1, "organizations": 1, "projects": 1, "disabled": 1, "is_active": 1}):
         counts["users_total"] += 1
         if user.get("disabled"):
@@ -345,7 +355,110 @@ def _read_custom_role_compatibility(db: ReadOnlyDatabase) -> Dict[str, Any]:
             counts["users_holding_a_project_role_without_the_project"] += 1
         if organisations and any(not role.get("organization_id") and not role.get("project_id") for role in held):
             counts["organisation_users_holding_a_role_naming_no_organisation"] += 1
+        _classify_user(changes, user, held, organisations, projects, project_orgs)
+    summary: Dict[str, Any] = {}
+    for key, value in changes.items():
+        organisations_seen = value.pop("_orgs")
+        per_organisation = value.pop("_per_org")
+        # Counts only: how many organisations, and users per organisation (largest first), never which.
+        summary[key] = {
+            **value,
+            "organisations_affected": len(organisations_seen),
+            "users_per_organisation": sorted(per_organisation.values(), reverse=True),
+        }
+    counts["changes"] = summary
+    counts["users_with_a_non_objectid_id"] = sum(1 for _ in db["users"].find({"_id": {"$not": {"$type": "objectId"}}}, {"_id": 1}))
+    counts["custom_roles_carrying_a_name_that_passes_a_non_delegable_check"] = sum(
+        1 for role in custom.values() if _passes_non_delegable(role.get("permissions") or [])
+    )
     return counts
+
+
+#: Each class of user whose access SEC-1 to SEC-4 change, with the re-grant that keeps
+#: the intended access properly scoped (applied by an administrator before enforcement,
+#: never automatically).
+CHANGE_CLASSES = {
+    "custom_role_of_an_organisation_the_user_is_not_in": (
+        "organisation",
+        "re-create the role in the user's own organisation (or add the user to that organisation, if intended) and assign that",
+    ),
+    "project_role_for_a_project_the_user_is_not_assigned_to": (
+        "project",
+        "assign the user to the project, or replace the role with one for a project they are on",
+    ),
+    "project_role_for_a_project_of_another_organisation": (
+        "project",
+        "replace with a role of the user's organisation; a project of another organisation is never reachable",
+    ),
+    "role_naming_no_organisation_held_by_an_organisation_user": (
+        "platform",
+        "re-create the role in the user's organisation with the same permissions (each permission delegable there)",
+    ),
+    "account_is_active_false_but_not_disabled": (
+        "account",
+        "confirm the account is meant to be inactive; if not, set is_active true before enforcement",
+    ),
+}
+
+
+def _classify_user(changes: Dict[str, Any], user: Dict[str, Any], held: List[Dict[str, Any]],
+                   organisations: Any, projects: Any, project_orgs: Dict[str, Optional[str]]) -> None:
+    def note(key: str, organisation: Optional[str], entries: Iterable[Any]) -> None:
+        bucket = changes.setdefault(key, {
+            "role_type": CHANGE_CLASSES[key][0], "recommended_regrant": CHANGE_CLASSES[key][1],
+            "users": 0, "permission_entries_affected": {}, "_orgs": set(), "_per_org": {},
+        })
+        bucket["users"] += 1
+        label = organisation or "(none)"
+        bucket["_orgs"].add(label)
+        bucket["_per_org"][label] = bucket["_per_org"].get(label, 0) + 1
+        for entry in entries:
+            name = str(entry)
+            bucket["permission_entries_affected"][name] = bucket["permission_entries_affected"].get(name, 0) + 1
+
+    home = str(user.get("organization_id")) if user.get("organization_id") else None
+    seen = set()
+    for role in held:
+        org = str(role["organization_id"]) if role.get("organization_id") else None
+        project = str(role["project_id"]) if role.get("project_id") else None
+        entries = role.get("permissions") or []
+        if project:
+            owner = project_orgs.get(project)
+            if owner and owner not in organisations:
+                key = "project_role_for_a_project_of_another_organisation"
+            elif project not in projects:
+                key = "project_role_for_a_project_the_user_is_not_assigned_to"
+            else:
+                continue
+        elif org:
+            if org in organisations:
+                continue
+            key = "custom_role_of_an_organisation_the_user_is_not_in"
+        else:
+            if not organisations:
+                continue
+            key = "role_naming_no_organisation_held_by_an_organisation_user"
+        if (key, id(role)) not in seen:
+            seen.add((key, id(role)))
+            note(key, home, entries)
+    if not user.get("disabled") and user.get("is_active") is False:
+        note("account_is_active_false_but_not_disabled", home, [])
+
+
+def _passes_non_delegable(entries: Iterable[Any]) -> bool:
+    """DEF-4: a role entry that is, or passes a check for, a non-delegable permission."""
+    try:
+        from rbac_backend.core.permissions import equivalent_permissions
+    except ImportError:  # pragma: no cover - only in an image without the backend
+        return False
+    prefixes = ("platform.", "billing.", "subscription.", "permissions:", "roles:")
+    exact = {"*", "system:admin", "dms.admin", "drafting.admin"}
+    for entry in entries:
+        for name in set(equivalent_permissions(str(entry)) or set()) | {str(entry)}:
+            lowered = name.lower()
+            if lowered in exact or lowered.startswith(prefixes):
+                return True
+    return False
 
 
 def read_multi_role_users(db: ReadOnlyDatabase) -> Dict[str, Any]:
