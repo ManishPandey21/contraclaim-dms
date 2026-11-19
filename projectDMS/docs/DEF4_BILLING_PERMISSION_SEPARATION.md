@@ -1,12 +1,14 @@
 # DEF-4: billing and subscription permissions, separated from organisation and report viewing
 
-**Status (2026-11-19).** Implemented behind `BILLING_EXPLICIT_PERMISSIONS`, which defaults to **off**; tested on real MongoDB; CI-verified.
+**Status (2026-11-19).** Implemented behind `BILLING_EXPLICIT_PERMISSIONS`, which defaults to **off**; tested on real MongoDB; independently reviewed (agent, not the authorised security review). CI evidence is in the ticket register.
 
 **Not activated, and nothing in production changed:**
 
 - no alias removed;
-- no role granted;
+- no billing role grant applied;
 - no data migrated.
+
+**With the flag off, authorisation is unchanged.** One catalogue side effect on deployment: the two new names enter the permission catalogue. `ensure_permission_catalog_and_superadmin` then inserts their permission documents and adds them to the `superadmin` role document, which already passes every billing check. The `*` advertisement of a wildcard holder lists them too.
 
 **Activation requires all of the following:**
 
@@ -33,7 +35,7 @@
 
 ## 2. Endpoint audit (all methods)
 
-The audit covers every route under `/api/rbac-monetization`, plus `/api/billing/webhooks/{provider}`: 45 routes matched the billing, subscription, plan or payment patterns. Out of scope, as not billing:
+The audit covers every route under `/api/rbac-monetization` (37 routes), plus `/api/billing/webhooks/{provider}`. Out of scope, as not billing (they matched the search patterns only):
 
 - expert allocations (`drafting.request.assign`);
 - the unrelated "plan" routes (deep planning, drafting plans).
@@ -188,12 +190,14 @@ Reading the target table:
 | `subscription.upgrade`, `.downgrade`, `.cancel`, `.addon.manage`, `.trial.manage` | mutation | commercially binding changes |
 | `subscription.entitlement.manage`, `billing.plan.manage` | platform administration | unchanged |
 
-**Flag-on rule** (`PolicyService.has_permission`; the same rule in `get_effective_permission_names`):
+**Flag-on rule** (`PolicyService.has_permission`, its batch form `PolicyService.explicit_billing_scopes` used by the list and effective-services routes, and the same exclusion in `get_effective_permission_names`):
 
 - A `billing.*` or `subscription.*` check passes only through an explicit grant of that name on a role that applies in the request's scope.
 - It does not pass through `organizations:read`, `orgs:view` or `reports:view`, a wildcard, or an administrator name. A view never implies a mutation, and a mutation never implies a view.
 - Super Admin's bypass is unchanged.
-- At organisation level, a project-tier user (Project Admin, Project User) counts only with organisation-wide scope. A built-in project role's grant applies at organisation level too, and must not show the organisation's or sibling projects' subscriptions.
+- At organisation level, or with no scope, a project-tier user (Project Admin, Project User) counts only with organisation-wide scope. A built-in project role's grant is not bound to a project, and must not reach the organisation's records or sibling projects.
+  - This is applied in `PolicyService`, so every route uses it, checkout included.
+  - Proven with Project Admin's role granted financial views and `subscription.upgrade`: organisation-level reads and checkout are refused, and the project's own history and checkout are allowed.
 
 **Response shaping (flag on):**
 
@@ -239,9 +243,10 @@ Reading the target table:
 
 ## 6. P-05 read-only impact assessment
 
-`scripts/claim_arbitration_readonly_readings.py`, P-05 → `billing_permission_impact`. It reads only, through the read-only guard. It reports counts and organisation ids, never names or emails:
+`scripts/claim_arbitration_readonly_readings.py`, P-05 → `billing_permission_impact`. It reads only, through the read-only guard, and runs on images that predate DEF-4: the target grants are inlined, and a unit test keeps them equal to the plan module. It reports counts and organisation ids, never names or emails:
 
-- active users; users reaching billing only through the legacy aliases; of those, how many keep billing after the grant step and how many lose it;
+- active users; users relying on a legacy alias for at least one billing view they do not hold explicitly; of those, how many keep billing after the grant step and how many lose it (at least in part);
+- wildcard holders, who lose billing under the flag;
 - `losing_billing_by_role_type`, `keeping_billing_by_role_type`, `losing_billing_by_organization` (**per-organisation affected-user counts**);
 - Project Admins whose role-name checkout path ends;
 - holders of `subscription.entitlement.manage` (today's cross-tenant effective-services readers);
@@ -289,7 +294,7 @@ Proof: the test runs it on the seeded database. It changes nothing, contains no 
 - **Advertised list:** drops alias-only billing names under the flag, and lists the granted ones.
 - **P-05 reading:** counts, no names, no writes.
 
-**Mutation testing:** 9 mutants, all killed:
+**Mutation testing:** 9 mutants, all killed (the review's M2 and M3 tests also fail on the pre-review commit):
 
 - no flag rule in `PolicyService`;
 - `exclude` ignored;
@@ -304,4 +309,20 @@ Proof: the test runs it on the seeded database. It changes nothing, contains no 
 
 - **Client pages** (`PlanSettingsPage`, `SubscriptionManagementPage`) were not changed. Under the flag they receive 403 where the server now refuses; a UI pass to hide them is part of staging step 4.
 - **Plan catalogue and add-on list** remain readable by any authenticated user. They are product pricing, not organisation data; confirm in the release decision.
-- **Wildcard (`*`) custom roles** no longer reach billing under the flag (least privilege). P-05 does not count them separately; check the custom-role count.
+- **Wildcard (`*`) custom roles** no longer reach billing under the flag (least privilege); P-05 counts their holders.
+
+## 10. Independent review (agent, 2026-11-19; not the authorised security review)
+
+No Critical or High issue. Flag-off paths are code-identical to today, and with the flag on the alias, wildcard and administrator-widening bypasses are closed.
+
+| Finding | Severity | Resolution |
+|---|---|---|
+| **M2:** the project-tier rule existed only in the router helper, so every `policy.authorize` route (records, history, checkout and so on) skipped it. Latent: it bites if `projectadmin` is ever granted a financial view or mutation. | Medium, introduced | **Fixed:** moved into `PolicyService`. Test `test_flag_on_a_project_role_grant_never_reaches_organisation_level`. |
+| **M3:** per-scope evaluation read the user and roles once per organisation and project (thousands of queries for large organisations). | Medium, introduced | **Fixed:** one user read, one grants load and one project query per permission (`explicitly_held_scopes`). Test bounds grant loads at 2 per request with 42 projects. |
+| **L2:** the P-05 reading did not run on old images, and its counts were biased (partial explicit holders, wildcards, a `deleted` flag the application ignores). | Low | **Fixed:** grants inlined (parity test); counted per view relied on; wildcard holders counted; only `is_active: false`. Role-reference aliases and custom-role scope remain approximations, stated in the docstring. |
+| **L1:** "flag off changes nothing" was inaccurate (catalogue seeding of the two names). | Low | **Corrected** in the status note above. |
+| **M1:** built-in role names are global. A user who is Project Admin in A and Org User in B (and a member of both) passes the organisation-wide check in A, and an Org Admin of A who is merely a member of B reaches B. | Medium, pre-existing scope model | **Not changed.** DEF-4's guarantees hold for single-role users only. Per-organisation built-in roles are a separate change (owner decision). P-05 should be extended to count dual-role users before activation. |
+| **M4:** `contraclaim_billing_admin` (assignable to tenant users) holds `billing.plan.manage`, which `PolicyService` allows unscoped. A tenant's billing administrator can therefore edit the **global** plan and add-on catalogue (`POST/PUT /plans`, `/add-ons`). | Medium, pre-existing | **Not changed.** Owner decision needed: restrict plan and add-on CRUD to Super Admin, or make the billing administrator a platform-only role. The plan module's docstring has been corrected. |
+| **L3:** `PUT /subscriptions/{id}` authorises against the stored scope only. A project-scoped holder of `subscription.entitlement.manage` can set `project_id` to null or to another project. | Low-Medium, pre-existing | **Not changed;** recorded for a follow-up (validate the new scope as well). |
+| **Info:** operational `features` include `entitlement_overrides` (possibly negotiated terms); status rows include `current_period_end`. | Info | Recorded; decide in the release review whether to cut further. |
+| **Info:** a project-tier user holding an explicit custom organisation-level grant is refused at organisation level everywhere under the flag (consistent since the M2 fix). | Info | — |

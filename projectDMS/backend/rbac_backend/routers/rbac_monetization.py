@@ -132,25 +132,16 @@ def _only(row: Dict[str, Any], fields: tuple) -> Dict[str, Any]:
 async def _granted_in(
     policy: PolicyService, current_user: CurrentUser, permission: str, *, organizations: set, projects: set
 ) -> tuple[set, set]:
-    """The organisations and projects where ``permission`` is held (explicitly, under the flag).
+    """The organisations and projects where ``permission`` is held under the flag-on rule.
 
-    A built-in project role's grant applies at organisation level too, so a project-tier user
-    (Project Admin / Project User) counts at organisation level only with organisation-wide
-    scope: their grant must not show the organisation's or sibling projects' subscriptions.
+    One evaluation for all scopes (``PolicyService.explicit_billing_scopes``), which also
+    applies the project-tier rule: a Project Admin / Project User counts at organisation level
+    only with organisation-wide scope, so their grant never shows the organisation's or
+    sibling projects' subscriptions.
     """
-    scope = ScopeService()
-    project_tier = bool(scope.role_names(current_user) & PROJECT_SUBSCRIPTION_VIEW_ROLES)
-
-    async def organisation_level(org: str) -> bool:
-        # A project-tier user without organisation-wide scope never answers at organisation
-        # level; an organisation-level role holder (e.g. the billing administrator) does.
-        if project_tier and not await scope.has_organization_wide_scope(current_user, organization_id=org):
-            return False
-        return await policy.has_permission(current_user, permission, organization_id=org)
-
-    orgs = {org for org in organizations if await organisation_level(org)}
-    projs = {proj for proj in projects if await policy.has_permission(current_user, permission, project_id=proj)}
-    return orgs, projs
+    return await policy.explicit_billing_scopes(
+        current_user, permission, organizations=organizations, projects=projects
+    )
 
 
 async def _visible_scope(current_user: CurrentUser, project_orgs: Dict[str, str]) -> tuple[set, set]:

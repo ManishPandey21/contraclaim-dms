@@ -353,7 +353,7 @@ def test_the_p05_billing_reading_counts_who_keeps_and_loses_access(monkeypatch) 
             # orguser, projectuser, projectadmin, contract manager, reporter and the custom
             # organizations:read holder reach billing only through the aliases; the
             # organisation administrators keep it through the grant step.
-            assert reading["users_reaching_billing_only_through_legacy_aliases"] >= 6
+            assert reading["users_relying_on_legacy_aliases_for_billing"] >= 6
             assert reading["of_whom_keep_billing_after_the_grant_step"] >= 2  # org_admin, foreign_org_admin
             losing = reading["losing_billing_by_role_type"]
             for role_type in ("orguser", "projectuser", "projectadmin", "contractmgr_org", "reporter", "custom"):
@@ -369,5 +369,76 @@ def test_the_p05_billing_reading_counts_who_keeps_and_loses_access(monkeypatch) 
             text = repr(reading)
             for private in ("example.com", "def4_", "user-"):
                 assert private not in text, private
+
+    _run(scenario())
+
+
+def test_flag_on_a_project_role_grant_never_reaches_organisation_level(monkeypatch) -> None:
+    """Review M2: if Project Admin's built-in role is ever given a financial view or a mutation,
+    it must count for their project, never for the organisation or its other projects."""
+
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            _flag(monkeypatch, True)
+            await _seed(env)
+            await _grant_target(env)
+            from rbac_backend.services.permission_service import complete_grant_change
+
+            await env.db.roles.update_one(
+                {"_id": "projectadmin"},
+                {"$addToSet": {"permissions": {"$each": ["billing.record.view", "subscription.history.view", "subscription.upgrade"]}}},
+            )
+            await complete_grant_change(["user-project_admin"])
+            for path in (f"/billing/records/{ORG_A}", f"/billing/history/{ORG_A}", f"/subscriptions/sub-{ORG_A}/history"):
+                assert await _status(env, "project_admin", "GET", path) == 403, path
+            org_checkout = await _status(
+                env, "project_admin", "POST", "/subscriptions/checkout",
+                headers=_headers("project_admin", step_up_for=("user-project_admin", "subscription.checkout")),
+                json={"organization_id": ORG_A, "plan_code": "dms_enterprise"},
+            )
+            assert org_checkout == 403, "a project role's grant reached organisation level"
+            # Their own project: explicit scoped authority now exists, so it is allowed.
+            project_checkout = await _status(
+                env, "project_admin", "POST", "/subscriptions/checkout",
+                headers=_headers("project_admin", step_up_for=("user-project_admin", "subscription.checkout")),
+                json={"organization_id": ORG_A, "project_id": PROJ_A1, "plan_code": "dms_enterprise"},
+            )
+            assert project_checkout == 200
+            # The project's own history, yes; a sibling project's, no.
+            assert await _status(env, "project_admin", "GET", f"/subscriptions/{PROJECT_SUB}/history") == 200
+            assert await _status(env, "project_admin", "GET", "/subscriptions/sub-proj-a2/history") == 403
+
+    _run(scenario())
+
+
+def test_flag_on_scope_evaluation_reads_grants_once_per_permission(monkeypatch) -> None:
+    """Review M3: effective services and the subscription list evaluate every scope from one
+    grants load per permission, not one per organisation and project."""
+
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            _flag(monkeypatch, True)
+            await _seed(env)
+            await _grant_target(env)
+            await env.db.projects.insert_many(
+                [{"_id": f"proj-bulk-{n}", "name": f"Bulk {n}", "organization_id": ORG_A} for n in range(40)]
+            )
+            from rbac_backend.services.permission_service import PermissionService
+
+            calls = {"n": 0}
+            original = PermissionService.scoped_grants
+
+            async def counting(self: Any, db: Any, user_doc: Any) -> Any:
+                calls["n"] += 1
+                return await original(self, db, user_doc)
+
+            monkeypatch.setattr(PermissionService, "scoped_grants", counting)
+            response = await env.client.get(f"{BASE}/plan-settings/effective-services", headers=_headers("org_admin"))
+            assert response.status_code == 200
+            assert len(response.json()["effective"]["projects"]) >= 42
+            assert calls["n"] <= 2, calls  # one per permission evaluated (history, status)
+            calls["n"] = 0
+            listing = await env.client.get(f"{BASE}/subscriptions", headers=_headers("org_admin"))
+            assert listing.status_code == 200 and calls["n"] <= 2, calls
 
     _run(scenario())

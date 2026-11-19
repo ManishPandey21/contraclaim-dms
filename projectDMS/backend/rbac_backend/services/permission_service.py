@@ -3,7 +3,7 @@
 import logging
 import re
 from datetime import datetime
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, Iterable, List, Optional, Tuple
 from uuid import uuid4
 import json
 
@@ -1156,6 +1156,68 @@ class PermissionService:
         """
         wanted = set(equivalent_permissions(permission) or set()) | {permission}
         return [grant for grant in grants if wanted & set(grant.get("names") or [])]
+
+    async def explicitly_held_scopes(
+        self,
+        user_id: str,
+        permission_name: str,
+        *,
+        organizations: Iterable[str],
+        projects: Iterable[str],
+        exclude: frozenset = frozenset(),
+    ) -> Tuple[set, set]:
+        """``user_has_explicit_permission`` over many scopes, reading the user once (DEF-4 review M3).
+
+        Returns the organisations (organisation-level checks) and projects (project-level
+        checks, each against its own organisation read from ``projects``) where the name is
+        explicitly held. One user read, one grants load, one spelling lookup and one project
+        query, whatever the number of scopes. Errors fail closed (nothing held).
+        """
+        permission_key = (permission_name or "").strip()
+        organizations = [str(org) for org in organizations if org]
+        projects = [str(project) for project in projects if project]
+        if not permission_key or not user_id:
+            return set(), set()
+        lookup_keys = (set(equivalent_permissions(permission_key) or set()) | {permission_key}) - set(exclude)
+        try:
+            db = await self._get_db()
+            try:
+                user_query_id: Any = ObjectId(user_id)
+            except Exception:
+                user_query_id = user_id
+            user_doc = await db.users.find_one({"_id": user_query_id})
+            if not user_doc:
+                return set(), set()
+            named = set(lookup_keys) | await self._catalogue_spellings(db, lookup_keys)
+            grants, _ = await self.scoped_grants(db, user_doc)
+            primary = self.primary_organisation(user_doc)
+            held_orgs = {
+                org for org in organizations
+                if self._explicitly_held(grants, named, organization_id=org, project_id=None, primary_organization_id=primary)
+            }
+            owners: Dict[str, str] = {}
+            if projects:
+                keys: List[Any] = list(projects)
+                for project in projects:
+                    try:
+                        keys.append(ObjectId(project))
+                    except Exception:
+                        pass
+                async for row in db.projects.find({"_id": {"$in": keys}}, {"organization_id": 1, "organizationId": 1}):
+                    owner = row.get("organization_id") or row.get("organizationId")
+                    if owner:
+                        owners[str(row["_id"])] = str(owner)
+            held_projects = {
+                project for project in projects
+                if project in owners
+                and self._explicitly_held(
+                    grants, named, organization_id=owners[project], project_id=project, primary_organization_id=primary
+                )
+            }
+            return held_orgs, held_projects
+        except Exception as exc:
+            logger.error(f"Explicit permission scopes failed for user {user_id}: {exc}")
+            return set(), set()
 
     @staticmethod
     def _explicitly_held(

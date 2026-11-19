@@ -12,7 +12,9 @@ Principles (Decisions 1 to 3):
   names, and a view never implies a mutation;
 - Organisation Admin and the billing administrator are granted the views explicitly before
   any alias is removed; the billing administrator alone also holds the subscription
-  mutations, and only Super Admin manages plans and entitlements platform-wide as today;
+  mutations. (Plan and add-on catalogue management is unchanged: today both Super Admin and
+  the billing administrator hold billing.plan.manage, which PolicyService allows unscoped;
+  review M4, an open owner decision.)
 - Project Admin sees its project's operational subscription status (subscription,
   entitlements, features, expiry) and nothing financial; Project User only what
   ``/plan-settings/effective-services`` returns to everyone (service availability);

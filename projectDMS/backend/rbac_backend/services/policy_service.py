@@ -18,6 +18,9 @@ from ..services.permission_service import PermissionService
 from ..services.scope_service import ScopeService
 from ..services.usage_metering_service import QuotaExceededError, UsageMeteringService
 
+#: Roles whose authority is bound to assigned projects, never to a whole organisation.
+PROJECT_TIER_ROLE_KEYS = frozenset({"projectadmin", "projectuser"})
+
 
 class PolicyService:
     """Central deny-by-default authorization policy."""
@@ -72,6 +75,35 @@ class PolicyService:
             project_id=project_id,
         )
 
+    async def _may_answer_at_organisation_level(self, current_user: Any, organization_id: Optional[str]) -> bool:
+        """DEF-4: a project-tier user (Project Admin / Project User) answers a billing check
+        at organisation level, or unscoped, only with organisation-wide scope there. A built-in
+        project role's grant is not bound to a project, so without this a project
+        administrator's billing grant would reach the organisation's records and sibling
+        projects (review M2: the rule lives here, so every route applies it)."""
+        if not (self.scope_service.role_names(current_user) & PROJECT_TIER_ROLE_KEYS):
+            return True
+        return await self.scope_service.has_organization_wide_scope(current_user, organization_id=organization_id)
+
+    async def explicit_billing_scopes(
+        self, current_user: Any, permission: str, *, organizations: Any, projects: Any
+    ) -> tuple[set, set]:
+        """The flag-on billing rule over many scopes at once (review M3): the organisations and
+        projects where ``permission`` is held. Super Admin: all given."""
+        organizations = {str(org) for org in organizations or [] if org}
+        projects = {str(project) for project in projects or [] if project}
+        if self.scope_service.is_superadmin(current_user):
+            return organizations, projects
+        held_orgs, held_projects = await self.permission_service.explicitly_held_scopes(
+            str(getattr(current_user, "id", "") or ""),
+            permission,
+            organizations=organizations,
+            projects=projects,
+            exclude=LEGACY_BILLING_VIEW_ALIASES,
+        )
+        held_orgs = {org for org in held_orgs if await self._may_answer_at_organisation_level(current_user, org)}
+        return held_orgs, held_projects
+
     async def has_permission(
         self,
         current_user: Any,
@@ -91,6 +123,8 @@ class PolicyService:
             # DEF-4 target policy: the name itself, granted on a role that applies here. Not
             # through organizations:read / orgs:view / reports:view, a wildcard, or an
             # administrator name: viewing never implies a financial mutation, nor the reverse.
+            if not project_id and not await self._may_answer_at_organisation_level(current_user, organization_id):
+                return False
             return await self.permission_service.user_has_explicit_permission(
                 str(getattr(current_user, "id", "") or ""),
                 permission,

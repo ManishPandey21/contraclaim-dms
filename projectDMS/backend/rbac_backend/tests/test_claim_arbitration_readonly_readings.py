@@ -174,3 +174,23 @@ def test_p16_restates_the_key_date_formula_exactly() -> None:
         for week in (1, 4, 52, 104):
             assert reader._kd_calc(start, week, basis) == calculate_key_date(start, week, basis), (basis, week)
     assert reader._kd_calc(start, "not a week", "loa_plus_weeks") is None
+
+
+def test_def4_inline_grants_and_alias_reach_match_the_application() -> None:
+    """The P-05 billing reading runs on old images, so it inlines the DEF-4 target grants and
+    the alias reach; they must equal the application's definitions."""
+    import importlib.util
+    from pathlib import Path
+
+    from rbac_backend.core.permissions import equivalent_permissions
+    from rbac_backend.services.billing_permission_plan import TARGET_ROLE_GRANTS
+
+    path = Path(__file__).resolve().parents[3] / "scripts" / "claim_arbitration_readonly_readings.py"
+    spec = importlib.util.spec_from_file_location("readings_def4", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert {k: set(v) for k, v in module.DEF4_TARGET_ROLE_GRANTS.items()} == {k: set(v) for k, v in TARGET_ROLE_GRANTS.items()}
+    for legacy, reach in module.DEF4_ALIAS_REACH.items():
+        billing = {name for name in equivalent_permissions(legacy) if name.startswith(("billing.", "subscription."))}
+        assert billing == set(reach), (legacy, billing)
