@@ -201,13 +201,13 @@ Proposal (for decision; not implemented):
 
 ### 5. DEF-5: string user ids (tests and design; no change made)
 
-Reproduced with real login (`I/test_def5_string_user_ids_mongo.py`): a user stored under a string id signs in, but `/api/users/me` answers 422 and `/api/me` and `/api/refresh` 401 "no longer active". Tests: ObjectId users unaffected (pass); a string id never resolves to another user, including an ObjectId user with the same hex (pass); today's signature pinned (pass); three intended-behaviour tests marked `xfail(strict=True)`, so a fix turns them red until they are updated deliberately.
+Reproduced with real login (`I/test_def5_string_user_ids_mongo.py`): a user stored under a string id signs in, but `/api/users/me` answers 422 and `/api/me` and `/api/refresh` 401 "no longer active". Tests: ObjectId users unaffected (pass); a string id never resolves to another user, including an ObjectId user with the same hex (pass); today's signature pinned (pass); three intended-behaviour tests that run the intended assertion and require it to fail today (`_still_def5`), so a fix turns them red until they are updated deliberately; ordinary tests, not `xfail`, because CI's `assert_suites_ran.py` counts an xfail as a skip (CI run 44519551894 failed on exactly that; the gate is unchanged).
 
 Backwards-compatible design (for after P-05):
 
 - One lookup helper used by `UserService` and the user routes: match `_id` as stored, `{"_id": {"$in": [raw, ObjectId(raw) if valid]}}`, with `limit 2`; **two matches is refused** (fail closed: a string id equal to another user's ObjectId hex), never the first one.
 - Never rewrite stored ids; tokens keep naming the id as stored.
-- Behind a setting (`ACCEPT_LEGACY_STRING_USER_IDS`, default off), turned on only if P-05 reports string ids, with the strict xfails flipped in the same change.
+- Behind a setting (`ACCEPT_LEGACY_STRING_USER_IDS`, default off), turned on only if P-05 reports string ids, with the three intended-behaviour guards turned into plain assertions in the same change.
 - `update_last_login`, `_validate_user_id` call sites and `validate_object_id` in `routers/users.py` move to the helper; everything else that reads users by id already tolerates both forms (`PermissionService`, `/permissions/check`).
 
 ### 6. DEF-6: notification service and the database handle (fixed)

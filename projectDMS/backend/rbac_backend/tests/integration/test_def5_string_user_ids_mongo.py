@@ -10,9 +10,10 @@ is P-05's ``users_with_a_non_objectid_id`` reading, not yet taken.
 The owner's instruction (2026-11-19): regression tests and a backwards-compatible design
 now; no change to stored users or authentication until P-05 is read. So:
 
-- the tests that state the intended behaviour are ``xfail(strict=True)``: they fail
-  today as recorded, and turn red (XPASS) the moment a fix lands, so the fix must
-  update them deliberately;
+- the tests that state the intended behaviour run the intended assertion and require
+  it to fail today (``_still_def5``); the moment a fix lands they turn red, so the fix
+  must update them deliberately. (Written as ordinary tests, not ``xfail``: CI's
+  ``assert_suites_ran.py`` counts an xfail as a skip, and that gate is not changed.)
 - the baseline tests (ObjectId users unaffected; a string-id user is never resolved to
   anyone else) pass today and must keep passing after the fix.
 
@@ -116,37 +117,55 @@ def test_def5_signature_today(monkeypatch) -> None:
     _run(scenario())
 
 
-@pytest.mark.xfail(strict=True, reason=DEF5)
+async def _still_def5(check: Any) -> None:
+    """The intended behaviour does not hold yet (DEF-5 open). Fails once it does."""
+    try:
+        await check()
+    except AssertionError:
+        return
+    pytest.fail(f"{DEF5}: the intended behaviour now holds; turn this into a plain assertion")
+
+
 def test_a_string_id_user_reads_their_profile(monkeypatch) -> None:
     async def scenario() -> None:
         async with _env(monkeypatch) as env:
             await _insert(env, "legacy", STRING_ID)
             headers = await _login(env, "legacy")
-            response = await _call(env, "GET", "/api/users/me", headers)
-            assert response.status_code == 200 and response.json()["id"] == STRING_ID, response.text[:200]
+
+            async def intended() -> None:
+                response = await _call(env, "GET", "/api/users/me", headers)
+                assert response.status_code == 200 and response.json()["id"] == STRING_ID, response.text[:200]
+
+            await _still_def5(intended)
 
     _run(scenario())
 
 
-@pytest.mark.xfail(strict=True, reason=DEF5)
 def test_a_string_id_user_is_recognised_by_auth_me(monkeypatch) -> None:
     async def scenario() -> None:
         async with _env(monkeypatch) as env:
             await _insert(env, "legacy", STRING_ID)
             headers = await _login(env, "legacy")
-            response = await _call(env, "GET", "/api/me", headers)
-            assert response.status_code == 200 and response.json()["id"] == STRING_ID, response.text[:200]
+
+            async def intended() -> None:
+                response = await _call(env, "GET", "/api/me", headers)
+                assert response.status_code == 200 and response.json()["id"] == STRING_ID, response.text[:200]
+
+            await _still_def5(intended)
 
     _run(scenario())
 
 
-@pytest.mark.xfail(strict=True, reason=DEF5)
 def test_a_string_id_user_is_not_called_inactive_on_refresh(monkeypatch) -> None:
     async def scenario() -> None:
         async with _env(monkeypatch) as env:
             await _insert(env, "legacy", STRING_ID)
             headers = await _login(env, "legacy")
-            refresh = await _call(env, "POST", "/api/refresh", headers)
-            assert "no longer active" not in refresh.text, refresh.text[:200]
+
+            async def intended() -> None:
+                refresh = await _call(env, "POST", "/api/refresh", headers)
+                assert "no longer active" not in refresh.text, refresh.text[:200]
+
+            await _still_def5(intended)
 
     _run(scenario())

@@ -213,11 +213,11 @@ Details and proofs: `docs/SECURITY_REMEDIATION_2026-11-19.md`, "Final code harde
 | `POST /permissions/check`: self unchanged; other user needs `roles:read` in scope, membership, user-read rule; no enumeration; audited | Yes | Yes: 14 tests over real HTTP; 13 mutants killed | Pending | No | No |
 | Advertised = what both gate kinds grant (stored field, custom `users:create`, wildcard `*` removed) | Yes | Yes: agreement over the catalogue in four scopes, real Redis cache test; 5 mutants killed | Pending | No | No |
 | DEF-4 compatibility assessment and separation proposal | Assessment and proposal only; aliases unchanged; names non-delegable | Behaviour pinned (3 tests) | Pending | No | Needs P-05 and approval |
-| DEF-5 string user ids | Tests and design only; no change to users or authentication | 3 baseline + 3 strict-xfail tests | Pending | No | Needs P-05 |
+| DEF-5 string user ids | Tests and design only; no change to users or authentication | 3 baseline + 3 intended-behaviour guards (fail when a fix lands) | Pending | No | Needs P-05 |
 | DEF-6 notification service rebinds on a new database handle | Yes | Yes: 3 unit, 1 real HTTP (500 on the old code) | Pending | No | No |
 | Independent review of this pass (agent, not the security owner) | 7 findings fixed, 4 documented; tickets T-1 to T-4 | | | Not a security approval | |
 
-Local evidence at this pass: real-Mongo step (all CI modules, real Redis) 1,048 passed, 3 xfailed before the review fixes; reruns of the changed modules after them. Phase 4b is **not** complete: P-01 to P-16, JG-5(f) legal sign-off, expert golden sets, authorised security review and two consecutive deployed staging runs remain.
+Local evidence at this pass: real-Mongo step (all CI modules, real Redis) 1,048 passed, 3 xfailed before the review fixes (the xfails since rewritten as guards, see CI); reruns of the changed modules after them. Phase 4b is **not** complete: P-01 to P-16, JG-5(f) legal sign-off, expert golden sets, authorised security review and two consecutive deployed staging runs remain.
 
 ### SEC-1 to SEC-4 review and production compatibility (owner instructions 2026-11-19, second review)
 
