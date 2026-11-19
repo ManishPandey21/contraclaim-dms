@@ -8,7 +8,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from typing import List, Optional, Dict, Any
 import logging
 
-from ..core.security import get_current_user, CurrentUser, require_permission
+from ..core.security import (
+    CurrentUser,
+    _normalize_roles_list,
+    _without_revoked_roles,
+    get_current_user,
+    require_permission,
+)
 from ..services.permission_service import PermissionService
 from ..services.role_service import RoleService, RoleServiceError
 from ..services.audit_event_service import AuditEventService
@@ -17,6 +23,13 @@ from ..services.step_up_service import require_step_up
 from ..models.permission import Permission, PermissionCreate, PermissionUpdate
 from ..models.role import Role, RoleCreate, RoleUpdate
 from ..utils.error_handler import BaseDomainError
+from ..utils.rate_limiter import RateLimiter
+from ..services.account_status import account_is_active
+from ..services.authorization_service import AuthorizationService
+from ..services.role_grants import user_memberships
+from ..services.scope_service import ScopeService
+from bson import ObjectId
+from types import SimpleNamespace
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -31,24 +44,188 @@ def get_role_service() -> RoleService:
 def get_policy_service() -> PolicyService:
     return PolicyService()
 
+#: Another user's permissions are an administrative read (held by Super Admin and the
+#: organisation and project administrators, not by ordinary members).
+PERMISSION_CHECK_ADMIN_PERMISSION = "roles:read"
+permission_check_limiter = RateLimiter(max_requests=60, window_seconds=60, scope="permission_check_other_user")
+
+
+def _text_field(payload: Dict[str, Any], *keys: str) -> Optional[str]:
+    for key in keys:
+        value = payload.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return None
+
+
+async def _find_user(db: Any, user_id: str) -> Optional[Dict[str, Any]]:
+    """The one user stored under ``user_id`` (string or ObjectId form); ``None`` if none or
+    if both forms exist (two different users: never pick one, review finding 6)."""
+    candidates: List[Any] = [user_id]
+    try:
+        candidates.append(ObjectId(user_id))
+    except Exception:
+        pass
+    found = await db.users.find({"_id": {"$in": candidates}}).to_list(length=2)
+    return found[0] if len(found) == 1 else None
+
+
+#: Same status and body whether the caller lacks the authority or the scope does not
+#: resolve, so the route answers nothing about another tenant's projects (review finding 1).
+_SCOPE_REFUSED = "Not authorized: scope_denied"
+
+
 @router.post("/permissions/check", response_model=Dict[str, Any])
 async def check_permission_endpoint(
     payload: Dict[str, Any],
     permission_service: PermissionService = Depends(get_permission_service),
+    policy: PolicyService = Depends(get_policy_service),
     current_user: CurrentUser = Depends(get_current_user),
 ):
+    """Whether a user holds a permission.
+
+    - **Your own** (no ``user_id``, or your own): unchanged; any signed-in user. An
+      optional ``organization_id`` / ``project_id`` narrows the answer to that scope.
+    - **Another user's** is an administrative read: ``roles:read`` in a named
+      ``organization_id`` or ``project_id`` (Super Admin may omit the scope), and the
+      user must be a member of that scope and visible to you under the user-read rules.
+      A user who does not exist and one you may not see get the same 404, so the route
+      cannot be used to enumerate another tenant's users. Every such check is audited.
     """
-    Check whether the current user (or provided user_id) has a given permission.
-    """
-    permission_name = payload.get("permission") or payload.get("permission_name")
-    target_user_id = payload.get("user_id") or current_user.id
+    permission_name = _text_field(payload, "permission", "permission_name")
     if not permission_name:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="permission is required",
         )
-    granted = await permission_service.user_has_permission(target_user_id, permission_name)
-    return {"granted": granted, "permission": permission_name, "user_id": target_user_id}
+    organization_id = _text_field(payload, "organization_id")
+    project_id = _text_field(payload, "project_id")
+    target_user_id = _text_field(payload, "user_id") or str(current_user.id)
+    if target_user_id == str(current_user.id):
+        # The permission-level rule the gates use (PolicyService.has_permission): the
+        # explicit-grant permissions need an explicit grant (no wildcard, no Super Admin),
+        # and a role counts only where it applies.
+        granted = await policy.has_permission(
+            current_user, permission_name, organization_id=organization_id, project_id=project_id
+        )
+        return {"granted": granted, "permission": permission_name, "user_id": target_user_id}
+
+    db = await permission_service._get_db()
+    audit = AuditEventService(db)
+
+    async def record(result: str, reason: str, granted: Optional[bool] = None) -> None:
+        await audit.emit(
+            action="permission.check.other_user",
+            actor_id=str(current_user.id),
+            resource_type="user_permissions",
+            resource_id=target_user_id,
+            organization_id=organization_id,
+            project_id=project_id,
+            result=result,
+            reason=reason,
+            metadata={"permission": permission_name, "granted": granted},
+        )
+
+    try:
+        await permission_check_limiter.check_user_limit(str(current_user.id))
+    except HTTPException:
+        await record("deny", "rate_limited")
+        raise
+
+    scope_service = ScopeService()
+    is_superadmin = scope_service.is_superadmin(current_user)
+    try:
+        # Authority first, before anything about the named scope is read: a caller
+        # without roles:read anywhere learns nothing (review finding 1).
+        if not is_superadmin and not await policy.has_permission(current_user, PERMISSION_CHECK_ADMIN_PERMISSION):
+            await record("deny", "not_authorized")
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_SCOPE_REFUSED)
+        if not (organization_id or project_id) and not is_superadmin:
+            await record("deny", "scope_required")
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Checking another user's permissions needs an organization_id or project_id",
+            )
+        if project_id:
+            resolved_org, _ = await permission_service.resolve_request_scope(db, organization_id, project_id)
+            if resolved_org == PermissionService.UNRESOLVED_ORGANISATION:
+                await record("deny", "scope_unresolved")
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_SCOPE_REFUSED)
+            organization_id = resolved_org
+        try:
+            await policy.authorize(
+                current_user,
+                PERMISSION_CHECK_ADMIN_PERMISSION,
+                resource_type="user_permissions",
+                resource_id=target_user_id,
+                organization_id=organization_id,
+                project_id=project_id,
+            )
+        except HTTPException:
+            await record("deny", "not_authorized")
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_SCOPE_REFUSED)
+        # Organisation-wide answers need organisation-wide authority: a project
+        # administrator names their project (review finding 3; membership rows do not
+        # reach CurrentUser.projects, so check_user_access alone cannot confine them).
+        if (
+            not project_id
+            and organization_id
+            and not await scope_service.has_organization_wide_scope(current_user, organization_id=organization_id)
+        ):
+            await record("deny", "organization_wide_scope_required")
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_SCOPE_REFUSED)
+
+        # The same reads whether or not the user exists, so a missing and a hidden user
+        # cost about the same (review finding 2).
+        target = await _find_user(db, target_user_id)
+        probe: Dict[str, Any] = target or {"_id": "\x00no-such-user", "roles": [], "projects": []}
+        organisations, projects = await user_memberships(db, probe)
+        visible = target is not None
+        if organization_id and organization_id not in organisations:
+            visible = False
+        if project_id and project_id not in projects:
+            visible = False
+        if not is_superadmin:
+            try:
+                await AuthorizationService().check_user_access(current_user, probe, "read")
+            except (BaseDomainError, HTTPException):
+                visible = False
+        if not visible or target is None:
+            await record("deny", "target_not_visible")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+        # The target as a request would see them: revoked role references dropped, role
+        # spellings normalised (review finding 4).
+        # The roles a request would carry: revoked references dropped, spellings
+        # normalised. Not a validated CurrentUser: a stored email the model rejects
+        # (none, or a local domain) must not turn the answer into a 500 (re-review).
+        as_request = await _without_revoked_roles(db, dict(target))
+        principal = SimpleNamespace(
+            id=str(target["_id"]),
+            roles=_normalize_roles_list(as_request.get("roles", [])),
+            organization_id=as_request.get("organization_id"),
+            organizations=list(as_request.get("organizations") or []),
+            projects=list(as_request.get("projects") or []),
+            account_type=as_request.get("account_type", "client_user"),
+        )
+        account_active = account_is_active(target)
+        granted = account_active and await policy.has_permission(
+            principal, permission_name, organization_id=organization_id, project_id=project_id
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        await record("error", type(exc).__name__)
+        raise
+    await record("allow", "checked", granted)
+    return {
+        "granted": granted,
+        "permission": permission_name,
+        "user_id": target_user_id,
+        "organization_id": organization_id,
+        "project_id": project_id,
+        "account_active": account_active,
+    }
 
 # Permissions endpoints
 @router.get("/permissions", response_model=Dict[str, Any])

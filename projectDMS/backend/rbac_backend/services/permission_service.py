@@ -1,6 +1,7 @@
 # services/permission_service.py
 
 import logging
+import re
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Tuple
 from uuid import uuid4
@@ -11,7 +12,7 @@ from pymongo.errors import DuplicateKeyError
 
 from ..core.config import settings
 from ..core.database import get_database
-from ..core.permissions import equivalent_permissions
+from ..core.permissions import CANONICAL_PERMISSIONS, SUPERADMIN_EXCLUDED_PERMISSIONS, equivalent_permissions
 from ..core.role_reference import (
     RoleResolution,
     normalize_role_key,
@@ -34,6 +35,8 @@ from .runtime_state import get_runtime_state
 from .role_grants import applicable_names, grant_applies, role_grant_scope, role_is_built_in, user_memberships
 
 logger = logging.getLogger(__name__)
+
+_OBJECT_ID_TEXT = re.compile(r"[0-9a-fA-F]{24}")
 
 ROLE_ALIASES = {
     "organization-user": "orguser",
@@ -811,8 +814,14 @@ class PermissionService:
 
         This is intentionally name-based so frontend route guards can work even
         when role documents contain permissions that have not yet been seeded in
-        the permissions collection. It advertises what ``user_has_permission``
-        grants: each role only where it applies (SEC-1).
+        the permissions collection. Every name listed passes the evaluator the checks
+        use (2026-11-19 reconciliation): ``_decide`` as in ``user_has_permission``,
+        and for the explicit-grant permissions the explicit rule of
+        ``user_has_explicit_permission``. Each role counts only where it applies
+        (SEC-1). A name is listed only if both kinds of gate grant it (``require_permission``
+        and ``PolicyService``), so the policy's ``dms.admin`` widening is not listed. Super
+        Admin alone is listed as ``["*"]``; the explicit-grant permissions are not covered
+        by it, and the client asks the server about those (``POST /permissions/check``).
         """
         try:
             db = await self._get_db()
@@ -830,32 +839,48 @@ class PermissionService:
                 return ["*"]
             if organization_id or project_id:
                 organization_id, project_id = await self.resolve_request_scope(db, organization_id, project_id)
-            raw_permissions: set[str] = {
-                str(permission)
-                for permission in (user_doc.get("permissions", []) or [])
-                if permission is not None and str(permission).strip()
-            }
-            raw_permissions.update(
-                applicable_names(
-                    grants,
-                    organization_id=organization_id,
-                    project_id=project_id,
-                    primary_organization_id=self.primary_organisation(user_doc),
+            primary = self.primary_organisation(user_doc)
+            scope = {"organization_id": organization_id, "project_id": project_id, "primary_organization_id": primary}
+            held = applicable_names(grants, **scope)
+
+            def passes(name: str) -> bool:
+                return self._decide(grants, role_names, name, self.checks_satisfied_by(name), **scope)
+
+            # Candidates: every check a held name passes (the alias relation is symmetric)
+            # and the two role-name rules. The user document's own ``permissions`` field is
+            # not a candidate: no evaluator reads it (2026-11-19 reconciliation).
+            candidates: set[str] = {"users:read", "users:create"}
+            for name in held - {"*"}:
+                candidates.update(self.checks_satisfied_by(name))
+            if "*" in held:
+                # A wildcard passes checks it does not name: list them from the catalogue
+                # rather than as "*", which would also claim users:create (built-in
+                # administrators only) and the explicit-grant permissions.
+                catalogue = set(CANONICAL_PERMISSIONS)
+                catalogue.update(
+                    str(document.get("name"))
+                    for document in await db.permissions.find({}, {"name": 1}).to_list(length=None)
+                    if document.get("name")
                 )
-            )
-            if "*" in raw_permissions:
-                return ["*"]
-
-            if role_names & {"orgadmin", "orguser", "projectadmin", "projectuser"}:
-                raw_permissions.add("users:read")
-
-            # The alias relation is symmetric, so this advertises exactly what
-            # `user_has_permission` grants for each held name.
-            expanded_permissions: set[str] = set(raw_permissions)
-            for permission in raw_permissions:
-                expanded_permissions.update(equivalent_permissions(permission) or {permission})
-
-            return sorted(expanded_permissions)
+                for name in list(catalogue):
+                    candidates.update(self.checks_satisfied_by(name))
+            advertised: set[str] = set()
+            for candidate in candidates:
+                if _OBJECT_ID_TEXT.fullmatch(candidate):
+                    continue  # a catalogue id entry; the name it stands for is a candidate too
+                # Both kinds of gate must grant it: ``require_permission`` (this resolver,
+                # ``_decide``) and ``PolicyService`` (the explicit rule for the
+                # explicit-grant permissions). The policy's administrator widening
+                # (``dms.admin`` passing ``dms.*``) is not advertised, because a
+                # ``require_permission`` gate does not apply it.
+                granted = passes(candidate)
+                if granted and candidate in SUPERADMIN_EXCLUDED_PERMISSIONS:
+                    lookup_keys = self.checks_satisfied_by(candidate)
+                    named = lookup_keys | await self._catalogue_spellings(db, lookup_keys)
+                    granted = self._explicitly_held(grants, named, **scope)
+                if granted:
+                    advertised.add(candidate)
+            return sorted(advertised)
         except Exception as e:
             logger.error(f"Failed to get effective permission names for user {user_id}: {str(e)}")
             return []
@@ -1009,18 +1034,11 @@ class PermissionService:
             named = set(lookup_keys) | await self._catalogue_spellings(db, lookup_keys)
             organization_id, project_id = await self.resolve_request_scope(db, organization_id, project_id)
             grants, _ = await self.scoped_grants(db, user_doc)
-            for grant in grants:
-                if not grant_applies(
-                    grant.get("scope"),
-                    organization_id=organization_id,
-                    project_id=project_id,
-                    primary_organization_id=self.primary_organisation(user_doc),
-                ):
-                    continue
-                held = set(grant.get("names") or [])
-                held.discard("*")
-                if held & named:
-                    return True
+            if self._explicitly_held(
+                grants, named, organization_id=organization_id, project_id=project_id,
+                primary_organization_id=self.primary_organisation(user_doc),
+            ):
+                return True
         except Exception as exc:
             # Fail closed: an error is never a grant of privileged material.
             logger.error(f"Explicit permission check failed for user {user_id}: {exc}")
@@ -1122,6 +1140,30 @@ class PermissionService:
         """
         wanted = set(equivalent_permissions(permission) or set()) | {permission}
         return [grant for grant in grants if wanted & set(grant.get("names") or [])]
+
+    @staticmethod
+    def _explicitly_held(
+        grants: List[Dict[str, Any]],
+        named: set,
+        *,
+        organization_id: Optional[str],
+        project_id: Optional[str],
+        primary_organization_id: Optional[str],
+    ) -> bool:
+        """A role that applies here names one of ``named``; the ``*`` wildcard never counts."""
+        for grant in grants:
+            if not grant_applies(
+                grant.get("scope"),
+                organization_id=organization_id,
+                project_id=project_id,
+                primary_organization_id=primary_organization_id,
+            ):
+                continue
+            held = set(grant.get("names") or [])
+            held.discard("*")
+            if held & named:
+                return True
+        return False
 
     @staticmethod
     def _decide(

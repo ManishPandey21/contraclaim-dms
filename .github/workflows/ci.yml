@@ -290,6 +290,11 @@ jobs:
             backend/rbac_backend/tests/integration/test_claim_evidence_snapshots_mongo.py
             backend/rbac_backend/tests/integration/test_security_remediation_mongo.py
             backend/rbac_backend/tests/integration/test_security_redis_mongo.py
+            backend/rbac_backend/tests/integration/test_permission_check_mongo.py
+            backend/rbac_backend/tests/integration/test_effective_permissions_mongo.py
+            backend/rbac_backend/tests/integration/test_notifications_real_deps_mongo.py
+            backend/rbac_backend/tests/integration/test_def5_string_user_ids_mongo.py
+            backend/rbac_backend/tests/integration/test_def4_alias_compatibility_mongo.py
           )
           python -m pytest -q -rs --junitxml=real-mongo-relationships.xml "${suites[@]}" \
             | tee real-mongo-relationships.log

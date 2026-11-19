@@ -278,7 +278,11 @@ def test_with_one_deleted_and_one_active_role_only_the_active_role_grants(monkey
 def test_a_deleted_wildcard_role_grants_nothing(monkeypatch) -> None:
     h = _Harness(monkeypatch)
     h.seed([_role(ROLE_ID, ["*"])], role_refs=[str(ROLE_ID)], catalogue=["dms.document.view"])
-    assert h.has("dms.document.view") and h.effective() == {"*"}
+    # A custom wildcard role is listed from the catalogue, not as "*", which would also
+    # claim users:create and the explicit-grant permissions (2026-11-19 reconciliation).
+    assert h.has("dms.document.view") and "dms.document.view" in h.effective()
+    assert "*" not in h.effective() and "users:create" not in h.effective()
+    assert "dms.claim.strategy.read" not in h.effective()
 
     h.delete(ROLE_ID)
 

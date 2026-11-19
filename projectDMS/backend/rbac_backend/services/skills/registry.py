@@ -429,20 +429,47 @@ class SkillRegistry:
     async def deprecate(
         self, skill_key: str, version: str, deprecated_by: Optional[str]
     ) -> SkillVersion:
-        record = await self.get_version(skill_key, version)
-        if record is None:
-            raise HTTPException(status_code=404, detail="Skill version not found")
-        if record.status != "published":
-            raise HTTPException(
-                status_code=409, detail=f"Only a published version can be deprecated ({record.status})"
-            )
-        if record.id is None:
-            # Bundled-only version: materialise it so the deprecation is durable.
-            await self.db[SKILL_VERSIONS].insert_one(_strip_id(record.model_dump(by_alias=True)))
+        """Deprecate a published version: one transaction for the read, any materialisation,
+        the status change and the audit event (4B-05).
 
+        A version that exists only in the bundle is first written to the database so the
+        deprecation is durable; that write is inside the same transaction, so a failure or
+        a refusal leaves no materialised copy behind. The copy's deterministic ``_id`` makes
+        two concurrent materialisations conflict (with or without the migration's
+        ``skill_version_unique`` index), and the retried one then reads the other's result. Without transactions (a standalone server) the
+        call is refused with 503 before anything is written.
+        """
 
-        async def decide(session: Optional[Any]) -> None:
+        async def decide(session: Optional[Any]) -> SkillVersion:
             kw = session_kwargs(session)
+            doc = await self.db[SKILL_VERSIONS].find_one({"skill_key": skill_key, "version": version}, **kw)
+            if doc:
+                record = SkillVersion(**doc)
+            else:
+                bundled_match: Optional[SkillVersion] = next(
+                    (
+                        bundled
+                        for bundled in system_skill_versions()
+                        if bundled.skill_key == skill_key and bundled.version == version
+                    ),
+                    None,
+                )
+                if bundled_match is None:
+                    raise HTTPException(status_code=404, detail="Skill version not found")
+                record = bundled_match
+            if record.status != "published":
+                raise HTTPException(
+                    status_code=409, detail=f"Only a published version can be deprecated ({record.status})"
+                )
+            materialised = doc is None
+            if materialised:
+                # Bundled-only version: materialise it so the deprecation is durable. A
+                # deterministic _id makes two concurrent materialisations collide on the
+                # _id index, which every collection has, so this holds even where the
+                # migration's skill_version_unique index was never created (review finding 5).
+                materialised_doc = _strip_id(record.model_dump(by_alias=True))
+                materialised_doc["_id"] = f"bundled:{skill_key}@{version}"
+                await self.db[SKILL_VERSIONS].insert_one(materialised_doc, **kw)
             result = await self.db[SKILL_VERSIONS].update_one(
                 {"skill_key": skill_key, "version": version, "status": "published"},
                 {
@@ -455,21 +482,22 @@ class SkillRegistry:
                 },
                 **kw,
             )
-            if getattr(result, "matched_count", 0):
-                # Only the call that made the change records it; a concurrent one finds it done.
-                await audit_skill_decision(
-                    self.db,
-                    session,
-                    action="skill.version.deprecate",
-                    actor_id=deprecated_by,
-                    skill_key=skill_key,
-                    version=version,
-                    before={"status": "published"},
-                    after={"status": "deprecated"},
-                    metadata={"cause": "direct"},
-                )
+            if not getattr(result, "matched_count", 0):
+                raise HTTPException(status_code=409, detail="The version changed at the same time; reload")
+            await audit_skill_decision(
+                self.db,
+                session,
+                action="skill.version.deprecate",
+                actor_id=deprecated_by,
+                skill_key=skill_key,
+                version=version,
+                before={"status": "published"},
+                after={"status": "deprecated"},
+                metadata={"cause": "direct", "materialised": materialised},
+            )
+            return record
 
-        await run_in_transaction(self.db, decide)
+        record = await run_in_transaction(self.db, decide)
         await self._refresh_skill(record)
         return await self._require_db_version(skill_key, version)
 

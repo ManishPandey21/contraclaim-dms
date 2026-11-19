@@ -431,12 +431,11 @@ class AuthController:
         first_name = getattr(user, "first_name", None) or getattr(user, "username", "") or "user"
         last_name = getattr(user, "last_name", None) or "-"
         organizations = getattr(user, "organizations", []) or []
-        permissions = getattr(user, "permissions", []) or []
-        effective_permissions = await self.permission_service.get_effective_permission_names(
+        # What the evaluator grants, even when that is nothing: the user document's own
+        # ``permissions`` field is not read by any check, so it is never advertised.
+        permissions = await self.permission_service.get_effective_permission_names(
             str(getattr(user, "id", ""))
         )
-        if effective_permissions:
-            permissions = effective_permissions
         is_active = not bool(getattr(user, "disabled", False))
         is_verified = bool(getattr(user, "is_verified", False))
         preferences = getattr(user, "preferences", None) or {

@@ -335,3 +335,31 @@ def test_deactivating_a_project_clears_its_members_cached_grants(monkeypatch) ->
             assert await redis.get(f"user_jwt_min_iat:{member}") is None
 
     _run(scenario())
+
+
+def test_the_advertised_list_and_the_cached_checks_change_together(monkeypatch) -> None:
+    """2026-11-19 reconciliation: the advertised list reads the roles each time, the checks
+    may read Redis; after an edit through the roles API both say the same thing."""
+
+    async def scenario() -> None:
+        from rbac_backend.tests.integration.test_effective_permissions_mongo import _assert_agree
+
+        async with _redis_env(monkeypatch, "available") as env:
+            await _seed_roles(env.db)
+            super_headers = _step_up("superadmin", "user-superadmin")
+            target = await _user(env.db, "eff_cache_target", ["orguser", ROLE_A], organization_id=ORG_A)
+            assert await _has(target, VIEW) and await _cached(target) is not None
+            before = await _assert_agree(target)
+            assert VIEW in before and MANAGE not in before
+
+            edited = await env.client.put(f"/api/roles/{ROLE_A}", headers=super_headers, json={"permissions": [MANAGE]})
+            assert edited.status_code == 200, edited.text[:300]
+            after = await _assert_agree(target)
+            assert MANAGE in after and VIEW not in after
+
+            revoked = await env.client.put(f"/api/users/{target}", headers={"Authorization": f"Bearer {_token('superadmin')}"},
+                                           json={"roles": ["orguser"]})
+            assert revoked.status_code == 200, revoked.text[:300]
+            assert MANAGE not in await _assert_agree(target)
+
+    _run(scenario())

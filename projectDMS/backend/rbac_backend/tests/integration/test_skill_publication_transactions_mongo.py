@@ -71,6 +71,8 @@ async def _db() -> AsyncIterator[Any]:
     await db.create_collection(SKILL_APPROVALS)
     await db.create_collection("skills")
     await db.create_collection("audit_events")
+    # As migration 20261114_0001 creates it in production.
+    await db[SKILL_VERSIONS].create_index([("skill_key", 1), ("version", 1)], unique=True, name="skill_version_unique")
     try:
         yield db
     finally:
@@ -559,5 +561,232 @@ def test_a_lost_publish_race_writes_one_publish_event(monkeypatch) -> None:
             assert sum(not isinstance(item, HTTPException) for item in outcomes) == 1
             events = [action for action, _ in await _events(db, "2.5.0")]
             assert events.count("skill.version.publish") == 1
+
+    _run(scenario())
+
+
+# --------------------------------------------------------------------------- #
+# Deprecation is one transaction: read, materialise, status, audit (4B-05)
+# --------------------------------------------------------------------------- #
+
+BUNDLED_KEY = "indian-infra-letter-analysis"  # published in the bundle, absent from a new database
+BUNDLED_VERSION = "1.0.0"
+
+
+async def _deprecations(db: Any, key: str, version: str) -> list:
+    return [
+        doc
+        async for doc in db["audit_events"].find(
+            {"action": "skill.version.deprecate", "metadata.skill_key": key, "metadata.version": version}
+        )
+    ]
+
+
+def test_deprecating_a_bundled_only_version_materialises_it_in_the_same_transaction() -> None:
+    async def scenario() -> None:
+        async with _db() as db:
+            assert await db[SKILL_VERSIONS].count_documents({"skill_key": BUNDLED_KEY}) == 0
+            result = await SkillRegistry(db).deprecate(BUNDLED_KEY, BUNDLED_VERSION, "platform-admin")
+            assert result.status == "deprecated" and result.deprecated_by == "platform-admin"
+            docs = await db[SKILL_VERSIONS].find({"skill_key": BUNDLED_KEY}).to_list(length=None)
+            assert len(docs) == 1 and docs[0]["status"] == "deprecated"
+            events = await _deprecations(db, BUNDLED_KEY, BUNDLED_VERSION)
+            assert len(events) == 1 and events[0]["metadata"]["materialised"] is True
+            # The published pointer no longer names it.
+            skill = await db["skills"].find_one({"skill_key": BUNDLED_KEY})
+            assert skill is not None and skill["latest_published_version"] is None
+
+    _run(scenario())
+
+
+def test_a_deprecation_that_fails_after_materialising_leaves_nothing_behind(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _db() as db:
+            from rbac_backend.services.skills import registry as registry_module
+
+            async def failing(*args: Any, **kwargs: Any) -> None:
+                raise _Injected("injected failure at the audit write")
+
+            monkeypatch.setattr(registry_module, "audit_skill_decision", failing)
+            with pytest.raises(_Injected):
+                await SkillRegistry(db).deprecate(BUNDLED_KEY, BUNDLED_VERSION, "platform-admin")
+            assert await db[SKILL_VERSIONS].count_documents({"skill_key": BUNDLED_KEY}) == 0, (
+                "the materialised copy must roll back with the deprecation"
+            )
+            assert await _deprecations(db, BUNDLED_KEY, BUNDLED_VERSION) == []
+            # Without the fault the same call succeeds: the failure left no half-state.
+            monkeypatch.undo()
+            await SkillRegistry(db).deprecate(BUNDLED_KEY, BUNDLED_VERSION, "platform-admin")
+            assert len(await _deprecations(db, BUNDLED_KEY, BUNDLED_VERSION)) == 1
+
+    _run(scenario())
+
+
+def test_a_stored_version_that_fails_at_the_audit_write_stays_published(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _db() as db:
+            await _fully_approved(db, "3.1.0")
+            await SkillRegistry(db).publish(CLAIMS_SKILL_KEY, "3.1.0", REPORT, PUBLISHER)
+            from rbac_backend.services.skills import registry as registry_module
+
+            async def failing(*args: Any, **kwargs: Any) -> None:
+                raise _Injected("injected failure at the audit write")
+
+            monkeypatch.setattr(registry_module, "audit_skill_decision", failing)
+            with pytest.raises(_Injected):
+                await SkillRegistry(db).deprecate(CLAIMS_SKILL_KEY, "3.1.0", "platform-admin")
+            stored = await db[SKILL_VERSIONS].find_one({"version": "3.1.0"})
+            assert stored["status"] == "published" and stored.get("deprecated_by") is None
+
+    _run(scenario())
+
+
+@pytest.mark.parametrize("round_", range(5))
+@pytest.mark.parametrize("bundled", [True, False])
+def test_concurrent_deprecations_succeed_once_and_audit_once(round_: int, bundled: bool) -> None:
+    async def scenario() -> None:
+        async with _db() as db:
+            if bundled:
+                key, version = BUNDLED_KEY, BUNDLED_VERSION
+            else:
+                key, version = CLAIMS_SKILL_KEY, "3.2.0"
+                await _fully_approved(db, version)
+                await SkillRegistry(db).publish(key, version, REPORT, PUBLISHER)
+            outcomes = await asyncio.gather(
+                *(_outcome(SkillRegistry(db).deprecate(key, version, f"admin-{n}")) for n in range(4))
+            )
+            succeeded = [item for item in outcomes if not isinstance(item, HTTPException)]
+            refused = [item for item in outcomes if isinstance(item, HTTPException)]
+            assert len(succeeded) == 1, outcomes
+            assert all(item.status_code == 409 for item in refused), [i.detail for i in refused]
+            assert await db[SKILL_VERSIONS].count_documents({"skill_key": key, "version": version}) == 1
+            stored = await db[SKILL_VERSIONS].find_one({"skill_key": key, "version": version})
+            events = await _deprecations(db, key, version)
+            assert len(events) == 1 and events[0]["actor_id"] == stored["deprecated_by"]
+
+    _run(scenario())
+
+
+def test_a_deprecation_held_open_loses_to_one_that_commits_first() -> None:
+    """Forced interleaving: A reads the bundled version (absent from the database) and waits;
+    B materialises and commits; A's retry must see B's result and refuse."""
+
+    async def scenario() -> None:
+        async with _db() as db:
+            state = {"held": False}
+            real_insert_owner = db[SKILL_VERSIONS]
+
+            class SlowFirstInsert:
+                def __init__(self, inner: Any) -> None:
+                    self.inner = inner
+
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(self.inner, name)
+
+                async def insert_one(self, *args: Any, **kwargs: Any) -> Any:
+                    if not state["held"]:
+                        state["held"] = True
+                        await asyncio.sleep(0.5)  # after A's read, before A's write
+                    return await self.inner.insert_one(*args, **kwargs)
+
+            class Db:
+                client = db.client
+
+                def __getitem__(self, name: str) -> Any:
+                    if name == SKILL_VERSIONS:
+                        return SlowFirstInsert(real_insert_owner)
+                    return db[name]
+
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(db, name)
+
+            first = asyncio.create_task(_outcome(SkillRegistry(Db()).deprecate(BUNDLED_KEY, BUNDLED_VERSION, "admin-a")))
+            await asyncio.sleep(0.1)
+            second = await _outcome(SkillRegistry(db).deprecate(BUNDLED_KEY, BUNDLED_VERSION, "admin-b"))
+            first_result = await first
+            assert not isinstance(second, HTTPException), second
+            assert isinstance(first_result, HTTPException) and first_result.status_code == 409, first_result
+            stored = await db[SKILL_VERSIONS].find({"skill_key": BUNDLED_KEY}).to_list(length=None)
+            assert len(stored) == 1 and stored[0]["deprecated_by"] == "admin-b"
+            events = await _deprecations(db, BUNDLED_KEY, BUNDLED_VERSION)
+            assert [e["actor_id"] for e in events] == ["admin-b"]
+
+    _run(scenario())
+
+
+def test_repeating_a_deprecation_is_refused_and_records_nothing_more() -> None:
+    async def scenario() -> None:
+        async with _db() as db:
+            registry = SkillRegistry(db)
+            await registry.deprecate(BUNDLED_KEY, BUNDLED_VERSION, "platform-admin")
+            for _ in range(3):
+                with pytest.raises(HTTPException) as exc:
+                    await registry.deprecate(BUNDLED_KEY, BUNDLED_VERSION, "platform-admin")
+                assert exc.value.status_code == 409
+            with pytest.raises(HTTPException) as missing:
+                await registry.deprecate(BUNDLED_KEY, "9.9.9", "platform-admin")
+            assert missing.value.status_code == 404
+            with pytest.raises(HTTPException) as draft:
+                await registry.deprecate("indian-infra-claims", "1.0.0", "platform-admin")
+            assert draft.value.status_code == 409
+            assert await db[SKILL_VERSIONS].count_documents({"skill_key": "indian-infra-claims"}) == 0
+            assert len(await _deprecations(db, BUNDLED_KEY, BUNDLED_VERSION)) == 1
+
+    _run(scenario())
+
+
+def test_without_transactions_deprecation_is_refused_before_any_write() -> None:
+    """A server that cannot run transactions (standalone) answers 503 and writes nothing:
+    previously a bundled version was materialised before the transaction was attempted."""
+
+    async def scenario() -> None:
+        async with _db() as db:
+            from pymongo.errors import OperationFailure
+
+            class Session:
+                async def __aenter__(self) -> "Session":
+                    return self
+
+                async def __aexit__(self, *exc: Any) -> None:
+                    return None
+
+                async def with_transaction(self, callback: Any) -> Any:
+                    raise OperationFailure(
+                        "Transaction numbers are only allowed on a replica set member or mongos", code=20
+                    )
+
+            class Client:
+                async def start_session(self) -> Session:
+                    return Session()
+
+            class Standalone:
+                client = Client()
+
+                def __getitem__(self, name: str) -> Any:
+                    return db[name]
+
+            with pytest.raises(HTTPException) as exc:
+                await SkillRegistry(Standalone()).deprecate(BUNDLED_KEY, BUNDLED_VERSION, "platform-admin")
+            assert exc.value.status_code == 503
+            assert await db[SKILL_VERSIONS].count_documents({}) == 0
+            assert await db["audit_events"].count_documents({}) == 0
+
+    _run(scenario())
+
+
+@pytest.mark.parametrize("round_", range(5))
+def test_concurrent_materialisations_collide_even_without_the_unique_index(round_: int) -> None:
+    """Review finding 5: the migration's skill_version_unique index is not created at
+    startup; without it two transactions could each insert their own copy."""
+
+    async def scenario() -> None:
+        async with _db() as db:
+            await db[SKILL_VERSIONS].drop_index("skill_version_unique")
+            outcomes = await asyncio.gather(
+                *(_outcome(SkillRegistry(db).deprecate(BUNDLED_KEY, BUNDLED_VERSION, f"admin-{n}")) for n in range(4))
+            )
+            assert sum(not isinstance(item, HTTPException) for item in outcomes) == 1, outcomes
+            assert await db[SKILL_VERSIONS].count_documents({"skill_key": BUNDLED_KEY}) == 1
+            assert len(await _deprecations(db, BUNDLED_KEY, BUNDLED_VERSION)) == 1
 
     _run(scenario())
