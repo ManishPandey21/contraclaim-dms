@@ -304,6 +304,7 @@ jobs:
             backend/rbac_backend/tests/integration/test_r6_6_reactivation_mongo.py
             backend/rbac_backend/tests/integration/test_r6_7_plan_settings_cancellation_mongo.py
             backend/rbac_backend/tests/integration/test_gateway_db_consistency_mongo.py
+            backend/rbac_backend/tests/integration/test_p05_payment_integrity_mongo.py
             backend/rbac_backend/tests/integration/test_operational_minimum_disclosure_mongo.py
             backend/rbac_backend/tests/integration/test_m1_cross_org_role_combinations_mongo.py
             backend/rbac_backend/tests/integration/test_def4_standing_and_pricing_matrix_mongo.py

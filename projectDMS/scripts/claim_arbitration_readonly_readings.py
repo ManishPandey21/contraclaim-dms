@@ -295,6 +295,7 @@ def read_roles(db: ReadOnlyDatabase) -> Dict[str, Any]:
         built_in_role_scope_impact=_read_built_in_role_scope_impact(db),
         flag_off_disclosure_impact=_read_flag_off_disclosure_impact(db),
         subscription_security_impact=_read_subscription_security_impact(db),
+        payment_integrity_impact=_read_payment_integrity_impact(db),
     )
 
 
@@ -683,6 +684,195 @@ SR_ELIGIBLE = frozenset({"active", "pilot", "trial"})
 SR_RESTRICTED = frozenset({"archive", "offboarding"})
 SR_BLOCKING = frozenset({"past_due", "paused"})
 SR_NOT_GOVERNING = frozenset({"pending", "cancelled"})
+
+
+def _sr_instant(value: Any) -> Any:
+    """A stored timestamp as the entitlement resolver reads it: naive UTC, ``None`` when
+    absent, ``"unreadable"`` when present but unparseable."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        moment = value
+    elif isinstance(value, str):
+        try:
+            moment = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return "unreadable"
+    else:
+        return "unreadable"
+    return moment.astimezone(timezone.utc).replace(tzinfo=None) if moment.tzinfo else moment
+
+
+def _sr_governs(row: Dict[str, Any], now: datetime) -> bool:
+    """Whether a subscription governs its scope now (period-aware, as the resolver)."""
+    status = str(row.get("status") or "").strip().lower()
+    starts, ends = _sr_instant(row.get("starts_at")), _sr_instant(row.get("ends_at"))
+    trial_end = _sr_instant(row.get("trial_ends_at"))
+    if "unreadable" in (starts, ends) or (status == "trial" and trial_end == "unreadable"):
+        return True
+    if (starts is not None and starts > now) or (ends is not None and ends < now):
+        return False
+    if status in SR_NOT_GOVERNING or (status == "trial" and trial_end is not None and trial_end < now):
+        return False
+    return True
+
+
+#: Provenance classes of a gateway binding (R6 closure, 2026-11-21).
+PI_BINDING_CLASSES = ("verified_checkout", "verified_provider_reconciliation", "conflicting", "unverified")
+
+
+def _read_payment_integrity_impact(db: ReadOnlyDatabase) -> Dict[str, Any]:
+    """Payment integrity before release (R6-5 to R6-8 closure, owner decision 2026-11-21).
+
+    Counts and organisation ids only: no gateway id, customer id, name, email or amount
+    leaves this reading. Nothing is changed, rebound, trusted or disabled by it.
+
+    **Legacy gateway bindings, by provenance** (one class per bound subscription):
+    ``conflicting`` - the gateway id is bound to more than one subscription, the binding is
+    recorded as made outside checkout, or an ordinary create/update audit event wrote it;
+    ``verified_checkout`` - bound by checkout and a ``subscription.checkout_started`` audit
+    event names the subscription; ``verified_provider_reconciliation`` - a person recorded a
+    provider reconciliation (``payment_gateway_reconciled_at``); ``unverified`` - none of
+    these (the webhook still trusts it: review before release).
+
+    **Duplicate payments**: billing records sharing (provider, gateway payment id, event
+    type) - the unique index of migration 20261124_0001 refuses to build over them - and
+    payments recorded as refused for review.
+
+    **Overlap**: scopes (organisation, project, package) with two or more subscriptions
+    governing now (period-aware), and those where two or more are gateway-bound (possible
+    double billing for one entitlement).
+
+    **Cancellations without gateway evidence**: cancelled, gateway-bound subscriptions with
+    no cancellation history, no durable cancellation operation and not closed by a paid
+    trial conversion - e.g. plan-settings cancellations before R6-7, which never told the
+    gateway, so the gateway may still be billing.
+
+    **Activation dates**: governing subscriptions without a readable ``governing_since``,
+    alone in their scope (harmless) or with others (refused as ambiguous until resolved).
+
+    **Unfinished work**: durable operations needing review, trial conversions awaiting
+    payment, and no-charge conversions (for the owner's review).
+    """
+    now = datetime.utcnow()
+
+    def text(value: Any) -> str:
+        return str(value).strip() if value is not None else ""
+
+    collections = set(db.list_collection_names())
+
+    def rows(name: str, query: Dict[str, Any], projection: Dict[str, Any]) -> List[Dict[str, Any]]:
+        return list(db[name].find(query, projection)) if name in collections else []
+
+    checkout_audited = {text(r.get("resource_id")) for r in rows(
+        "audit_events", {"action": "subscription.checkout_started"}, {"resource_id": 1})}
+    written_by_ordinary_update = {text(r.get("resource_id")) for r in rows(
+        "audit_events",
+        {"action": {"$in": ["subscription.created", "subscription.updated"]},
+         "after.payment_gateway_subscription_id": {"$type": "string", "$gt": ""}},
+        {"resource_id": 1})}
+    cancellation_history = {text(r.get("subscription_id")) for r in rows(
+        "subscription_history", {"to_status": "cancelled"}, {"subscription_id": 1})}
+
+    subscriptions = rows("subscriptions", {}, {
+        "organization_id": 1, "project_id": 1, "package_id": 1, "status": 1, "billing_status": 1,
+        "starts_at": 1, "ends_at": 1, "trial_ends_at": 1, "governing_since": 1, "cancellation_reason": 1,
+        "cancellation_operation_id": 1, "payment_gateway_subscription_id": 1, "payment_gateway_bound_by": 1,
+        "payment_gateway_reconciled_at": 1, "conversion": 1,
+    })
+    gateway_use: Dict[str, int] = {}
+    for row in subscriptions:
+        gid = text(row.get("payment_gateway_subscription_id"))
+        if gid:
+            gateway_use[gid] = gateway_use.get(gid, 0) + 1
+
+    def bump(table: Dict[str, int], org: str) -> None:
+        table[org] = table.get(org, 0) + 1
+
+    bindings = {name: 0 for name in PI_BINDING_CLASSES}
+    bindings_by_org: Dict[str, Dict[str, int]] = {name: {} for name in PI_BINDING_CLASSES}
+    cancelled_without_evidence: Dict[str, int] = {}
+    scopes: Dict[tuple, List[Dict[str, Any]]] = {}
+    pending_conversions = 0
+    no_charge = 0
+    for row in subscriptions:
+        org = text(row.get("organization_id"))
+        sub_id = text(row.get("_id"))
+        gid = text(row.get("payment_gateway_subscription_id"))
+        status = text(row.get("status")).lower()
+        if gid:
+            bound_by = row.get("payment_gateway_bound_by")
+            if gateway_use.get(gid, 0) > 1 or bound_by not in (None, "checkout") or sub_id in written_by_ordinary_update:
+                cls = "conflicting"
+            elif bound_by == "checkout" and sub_id in checkout_audited:
+                cls = "verified_checkout"
+            elif row.get("payment_gateway_reconciled_at"):
+                cls = "verified_provider_reconciliation"
+            else:
+                cls = "unverified"
+            bindings[cls] += 1
+            bump(bindings_by_org[cls], org)
+            if (status == "cancelled" and sub_id not in cancellation_history and not row.get("cancellation_operation_id")
+                    and row.get("cancellation_reason") != "converted_to_paid"):
+                bump(cancelled_without_evidence, org)
+        if (row.get("conversion") or {}).get("state") == "pending_payment":
+            pending_conversions += 1
+        if text(row.get("billing_status")) == "no_charge_override":
+            no_charge += 1
+        key = (org, text(row.get("project_id")), text(row.get("package_id")))
+        scopes.setdefault(key, []).append(row)
+
+    overlapping: Dict[str, int] = {}
+    overlapping_paid: Dict[str, int] = {}
+    missing_alone = 0
+    missing_with_others = 0
+    for (org, _project, _package), members in scopes.items():
+        ruling = [row for row in members if _sr_governs(row, now)]
+        if len(ruling) > 1:
+            bump(overlapping, org)
+            if sum(1 for row in ruling if text(row.get("payment_gateway_subscription_id"))) > 1:
+                bump(overlapping_paid, org)
+        unstamped = [row for row in ruling if not isinstance(_sr_instant(row.get("governing_since")), datetime)]
+        if unstamped:
+            if len(ruling) > 1:
+                missing_with_others += len(unstamped)
+            else:
+                missing_alone += len(unstamped)
+
+    duplicate_payments: Dict[str, int] = {}
+    if "billing_records" in collections:
+        for group in db["billing_records"].aggregate([
+            {"$match": {"gateway_payment_id": {"$type": "string", "$gt": ""}}},
+            {"$group": {"_id": {"provider": "$provider", "payment": "$gateway_payment_id", "type": "$event_type"},
+                        "n": {"$sum": 1}, "org": {"$first": "$organization_id"}}},
+            {"$match": {"n": {"$gt": 1}}},
+        ]):
+            bump(duplicate_payments, text(group.get("org")))
+    refused_for_review = len(rows("billing_records", {"requires_review": True}, {"_id": 1}))
+    open_operations: Dict[str, int] = {}
+    for op in rows("subscription_operations", {"status": "needs_review"}, {"organization_id": 1}):
+        bump(open_operations, text(op.get("organization_id")))
+
+    return {
+        "gateway_bindings_by_class": bindings,
+        "gateway_bindings_by_class_and_organization": {
+            name: dict(sorted(table.items())) for name, table in bindings_by_org.items()},
+        "duplicate_payment_groups": sum(duplicate_payments.values()),
+        "duplicate_payment_groups_by_organization": dict(sorted(duplicate_payments.items())),
+        "payments_refused_for_review": refused_for_review,
+        "overlapping_governing_scopes": sum(overlapping.values()),
+        "overlapping_governing_scopes_by_organization": dict(sorted(overlapping.items())),
+        "overlapping_gateway_bound_scopes": sum(overlapping_paid.values()),
+        "overlapping_gateway_bound_scopes_by_organization": dict(sorted(overlapping_paid.items())),
+        "cancelled_bound_without_gateway_evidence": sum(cancelled_without_evidence.values()),
+        "cancelled_bound_without_gateway_evidence_by_organization": dict(sorted(cancelled_without_evidence.items())),
+        "governing_without_activation_date_alone": missing_alone,
+        "governing_without_activation_date_with_others": missing_with_others,
+        "operations_needing_review": sum(open_operations.values()),
+        "operations_needing_review_by_organization": dict(sorted(open_operations.items())),
+        "trial_conversions_awaiting_payment": pending_conversions,
+        "no_charge_conversions": no_charge,
+    }
 
 
 def _read_subscription_security_impact(db: ReadOnlyDatabase) -> Dict[str, Any]:
