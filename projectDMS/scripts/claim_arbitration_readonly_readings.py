@@ -294,6 +294,7 @@ def read_roles(db: ReadOnlyDatabase) -> Dict[str, Any]:
         billing_permission_impact=_read_billing_permission_impact(db),
         built_in_role_scope_impact=_read_built_in_role_scope_impact(db),
         flag_off_disclosure_impact=_read_flag_off_disclosure_impact(db),
+        subscription_security_impact=_read_subscription_security_impact(db),
     )
 
 
@@ -674,6 +675,93 @@ def _read_flag_off_disclosure_impact(db: ReadOnlyDatabase) -> Dict[str, Any]:
             1 for role in roles.values()
             if role.get("organization_id") and "platform.pricing.manage" in {str(n) for n in (role.get("permissions") or [])}
         ),
+    }
+
+
+#: Subscription status classes (services/subscription_resolution.py; parity test).
+SR_ELIGIBLE = frozenset({"active", "pilot", "trial"})
+SR_RESTRICTED = frozenset({"archive", "offboarding"})
+SR_BLOCKING = frozenset({"past_due", "paused"})
+SR_NOT_GOVERNING = frozenset({"pending", "cancelled"})
+
+
+def _read_subscription_security_impact(db: ReadOnlyDatabase) -> Dict[str, Any]:
+    """Who the 2026-11-20 entitlement-resolution and gateway-identity remediations affect.
+
+    Counts and organisation ids only. Periods and trial expiry are not evaluated here (stated
+    approximation: a row outside its period is counted by status).
+
+    Entitlement: scopes (organisation, project, package) with two or more governing
+    subscriptions (now refused as ambiguous), project scopes whose governing subscription is
+    blocking while the organisation has an eligible one (no fallback any more), scopes whose
+    most recently updated row is not governing although a governing row exists (the old
+    selection picked the wrong one), and rows with an unknown status (now refused).
+
+    Gateway identity: gateway ids bound to more than one subscription (the migration refuses
+    to apply until resolved), bindings without recorded provenance (legacy: trusted by the
+    webhook, review before release), bindings without a provider, and bindings with a
+    provider but no customer id.
+    """
+    def text(value: Any) -> str:
+        return str(value).strip() if value is not None else ""
+
+    scopes: Dict[tuple, List[Dict[str, Any]]] = {}
+    gateway_ids: Dict[str, int] = {}
+    counts = {
+        "subscriptions_read": 0,
+        "unknown_status_rows": 0,
+        "gateway_bindings": 0,
+        "gateway_bindings_without_provenance": 0,
+        "gateway_bindings_without_provider": 0,
+        "gateway_bindings_without_customer": 0,
+    }
+    for row in db["subscriptions"].find({}, {
+        "organization_id": 1, "project_id": 1, "package_id": 1, "status": 1, "updated_at": 1,
+        "payment_gateway_subscription_id": 1, "payment_gateway_bound_by": 1, "payment_provider": 1,
+        "payment_gateway_customer_id": 1,
+    }):
+        counts["subscriptions_read"] += 1
+        status = text(row.get("status")).lower()
+        if status not in SR_ELIGIBLE | SR_RESTRICTED | SR_BLOCKING | SR_NOT_GOVERNING:
+            counts["unknown_status_rows"] += 1
+        key = (text(row.get("organization_id")), text(row.get("project_id")), text(row.get("package_id")))
+        scopes.setdefault(key, []).append(row)
+        gateway_id = text(row.get("payment_gateway_subscription_id"))
+        if gateway_id:
+            counts["gateway_bindings"] += 1
+            gateway_ids[gateway_id] = gateway_ids.get(gateway_id, 0) + 1
+            if not text(row.get("payment_gateway_bound_by")):
+                counts["gateway_bindings_without_provenance"] += 1
+            if not text(row.get("payment_provider")):
+                counts["gateway_bindings_without_provider"] += 1
+            elif not text(row.get("payment_gateway_customer_id")):
+                counts["gateway_bindings_without_customer"] += 1
+
+    def governing(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return [r for r in rows if text(r.get("status")).lower() not in SR_NOT_GOVERNING]
+
+    ambiguous_by_org: Dict[str, int] = {}
+    shadowed = 0
+    lost_fallback_by_org: Dict[str, int] = {}
+    for (org, project, package), rows in scopes.items():
+        ruling = governing(rows)
+        if len(ruling) > 1:
+            ambiguous_by_org[org] = ambiguous_by_org.get(org, 0) + 1
+        latest = max(rows, key=lambda r: str(r.get("updated_at") or ""))
+        if ruling and latest not in ruling:
+            shadowed += 1
+        if project and not package and len(ruling) == 1 and text(ruling[0].get("status")).lower() in SR_BLOCKING:
+            org_rows = governing(scopes.get((org, "", ""), []))
+            if any(text(r.get("status")).lower() in SR_ELIGIBLE for r in org_rows):
+                lost_fallback_by_org[org] = lost_fallback_by_org.get(org, 0) + 1
+    return {
+        **counts,
+        "ambiguous_scopes": sum(ambiguous_by_org.values()),
+        "ambiguous_scopes_by_organization": dict(sorted(ambiguous_by_org.items())),
+        "scopes_previously_shadowed_by_a_non_governing_row": shadowed,
+        "blocking_project_scopes_no_longer_falling_back": sum(lost_fallback_by_org.values()),
+        "blocking_project_scopes_by_organization": dict(sorted(lost_fallback_by_org.items())),
+        "gateway_ids_bound_more_than_once": sum(1 for n in gateway_ids.values() if n > 1),
     }
 
 

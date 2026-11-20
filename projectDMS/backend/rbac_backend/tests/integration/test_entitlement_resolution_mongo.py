@@ -231,3 +231,47 @@ def test_the_policy_audit_records_the_selected_subscription_and_reason(monkeypat
             assert entitlement["status_class"] == "blocking"
 
     _run(scenario())
+
+
+def test_the_p05_subscription_security_reading_counts_the_impact(monkeypatch) -> None:
+    """Read-only P-05 reading of who the entitlement and gateway remediations affect."""
+
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            old, new = datetime.utcnow() - timedelta(days=5), datetime.utcnow()
+            await _seed(
+                env,
+                _sub("r-org", status="active", updated_at=old),
+                _sub("r-p1-a", status="active", project=P1, updated_at=old),
+                _sub("r-p1-b", status="trial", project=P1, updated_at=old),  # ambiguous with r-p1-a
+                _sub("r-p2-due", status="past_due", project=P2, updated_at=old),  # no fallback any more
+                _sub("r-p2-cancel", status="cancelled", project=P2, updated_at=new),  # shadowed r-p2-due before
+                _sub("r-odd", status="mystery", project="proj-ent-3"),
+                _sub("r-gw-1", status="cancelled", project="proj-ent-4", payment_gateway_subscription_id="gw-dup",
+                     payment_provider="razorpay", payment_gateway_customer_id="c1"),
+                _sub("r-gw-2", status="cancelled", project="proj-ent-5", payment_gateway_subscription_id="gw-dup",
+                     payment_gateway_bound_by="checkout"),
+            )
+            from pymongo import MongoClient
+
+            from rbac_backend.tests.integration.test_claim_arbitration_readings_mongo import _reader, _uri
+
+            reader = _reader()
+            client = MongoClient(_uri(), serverSelectionTimeoutMS=5_000)
+            try:
+                sync_db = client[env.db.name]
+                before = sync_db["subscriptions"].count_documents({})
+                reading = reader._read_subscription_security_impact(reader.ReadOnlyDatabase(sync_db))
+                assert sync_db["subscriptions"].count_documents({}) == before
+            finally:
+                client.close()
+            assert reading["ambiguous_scopes_by_organization"].get(ORG) == 1, reading
+            assert reading["blocking_project_scopes_by_organization"].get(ORG) == 1
+            assert reading["scopes_previously_shadowed_by_a_non_governing_row"] >= 1
+            assert reading["unknown_status_rows"] >= 1
+            assert reading["gateway_ids_bound_more_than_once"] == 1
+            assert reading["gateway_bindings_without_provenance"] >= 1
+            assert reading["gateway_bindings_without_provider"] >= 1
+            assert "r-" not in repr({k: v for k, v in reading.items() if not k.endswith("_by_organization")})
+
+    _run(scenario())

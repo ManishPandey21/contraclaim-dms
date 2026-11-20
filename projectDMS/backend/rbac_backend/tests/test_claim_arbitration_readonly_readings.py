@@ -228,3 +228,20 @@ def test_decision4_inline_standing_roles_and_views_match_the_application() -> No
     spec.loader.exec_module(module)
     assert set(module.D4_STANDING_ROLE_KEYS) == set(ORGANISATION_LEVEL_BILLING_ROLE_KEYS)
     assert set(module.D4_FINANCIAL_VIEWS) == set(ORGANISATION_FINANCIAL_VIEW_PERMISSIONS)
+
+
+def test_subscription_status_classes_match_the_resolver() -> None:
+    import importlib.util
+    from pathlib import Path
+
+    from rbac_backend.services import subscription_resolution as resolver
+
+    path = Path(__file__).resolve().parents[3] / "scripts" / "claim_arbitration_readonly_readings.py"
+    spec = importlib.util.spec_from_file_location("readings_sr", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert set(module.SR_ELIGIBLE) == set(resolver.ELIGIBLE_STATUSES)
+    assert set(module.SR_RESTRICTED) == set(resolver.RESTRICTED_STATUSES)
+    assert set(module.SR_BLOCKING) == set(resolver.BLOCKING_STATUSES)
+    assert set(module.SR_NOT_GOVERNING) == set(resolver.NOT_GOVERNING_STATUSES)
