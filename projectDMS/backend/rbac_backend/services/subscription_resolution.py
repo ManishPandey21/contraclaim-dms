@@ -47,7 +47,13 @@ RESTRICTED_STATUSES = frozenset({"archive", "offboarding"})
 BLOCKING_STATUSES = frozenset({"past_due", "paused"})
 NOT_GOVERNING_STATUSES = frozenset({"pending", "cancelled"})
 
-GOVERNING_CLASSES = frozenset({"eligible", "restricted", "blocking", "unknown"})
+#: Statuses that govern their tier; the write side keeps at most one per tier (supersede).
+GOVERNING_STATUSES = ELIGIBLE_STATUSES | RESTRICTED_STATUSES | BLOCKING_STATUSES
+
+GOVERNING_CLASSES = frozenset({"eligible", "restricted", "blocking", "unknown", "invalid_period"})
+
+_UNREADABLE = object()
+_CONSIDERED_CAP = 10
 
 
 @dataclass
@@ -61,12 +67,14 @@ class Resolution:
     considered: List[Tuple[str, str]] = field(default_factory=list)  # (subscription id, class)
 
     def diagnostic(self) -> Dict[str, Any]:
+        # Capped (entitlement review F8): every cancelled row stays in the scope's history.
         return {
             "subscription_id": str((self.subscription or {}).get("_id") or (self.subscription or {}).get("id") or "") or None,
             "tier": self.tier,
             "status_class": self.status_class,
             "reason": self.reason,
-            "considered": [{"subscription_id": sid, "class": cls} for sid, cls in self.considered],
+            "considered": [{"subscription_id": sid, "class": cls} for sid, cls in self.considered[:_CONSIDERED_CAP]],
+            "considered_total": len(self.considered),
         }
 
 
@@ -75,26 +83,33 @@ def _text(value: Any) -> Optional[str]:
     return text or None
 
 
-def _instant(value: Any) -> Optional[datetime]:
-    """A stored or normalised timestamp as naive UTC; unreadable values are ``None``."""
+def _instant(value: Any) -> Any:
+    """A stored or normalised timestamp as naive UTC; ``None`` when absent, ``_UNREADABLE``
+    when present but unreadable (entitlement review F3: an unreadable bound used to read as
+    unbounded, failing open)."""
     if value is None or value == "":
         return None
     if isinstance(value, datetime):
         moment = value
-    else:
+    elif isinstance(value, str):
         try:
-            moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            moment = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
         except ValueError:
-            return None
+            return _UNREADABLE
+    else:
+        return _UNREADABLE
     if moment.tzinfo is not None:
         moment = moment.astimezone(timezone.utc).replace(tzinfo=None)
     return moment
 
 
 def classify(subscription: Dict[str, Any], now: datetime) -> str:
-    """eligible, restricted, blocking, unknown, or a not-governing reason."""
+    """eligible, restricted, blocking, unknown, invalid_period, or a not-governing reason."""
     starts_at = _instant(subscription.get("starts_at"))
     ends_at = _instant(subscription.get("ends_at"))
+    trial_bound = _instant(subscription.get("trial_ends_at"))
+    if _UNREADABLE in (starts_at, ends_at) or (trial_bound is _UNREADABLE and str(subscription.get("status") or "").strip().lower() == "trial"):
+        return "invalid_period"  # governs and denies: never read as unbounded
     if starts_at is not None and starts_at > now:
         return "not_started"
     if ends_at is not None and ends_at < now:
@@ -158,6 +173,7 @@ def select_subscription(
 
 __all__ = [
     "BLOCKING_STATUSES",
+    "GOVERNING_STATUSES",
     "ELIGIBLE_STATUSES",
     "NOT_GOVERNING_STATUSES",
     "RESTRICTED_STATUSES",

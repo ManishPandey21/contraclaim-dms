@@ -278,7 +278,15 @@ class EntitlementService:
             resolution = select_subscription([], organization_id=None)
         else:
             db = await self._get_db()
-            scope = [None, ""] + ([str(project_id)] if project_id else [])
+            scope: list = [None, ""] + ([str(project_id)] if project_id else [])
+            if project_id:
+                # A project id stored as an ObjectId is the same project (entitlement review F5).
+                try:
+                    from bson import ObjectId
+
+                    scope.append(ObjectId(str(project_id)))
+                except Exception:
+                    pass
             candidates = await db.subscriptions.find(
                 {"organization_id": str(organization_id), "project_id": {"$in": scope}}
             ).to_list(length=None)
@@ -367,13 +375,18 @@ class EntitlementService:
         project_id: Optional[str] = None,
         package_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        subscription = await self._active_subscription(
+        resolution = await self.resolve_subscription(
             organization_id=organization_id,
             project_id=project_id,
             package_id=package_id,
         )
-        if not subscription:
+        subscription = resolution.subscription
+        if not subscription or resolution.status_class in {"blocking", "unknown", "invalid_period"}:
+            # The same gate as enforcement (entitlement review F4): a past-due, paused, unknown
+            # or invalid-period subscription offers no service here either.
             return {
+                "status_class": resolution.status_class,
+                "reason": resolution.reason,
                 "source": "none",
                 "subscription_id": None,
                 "plan_code": None,
@@ -387,7 +400,9 @@ class EntitlementService:
 
         addon_codes = subscription.get("active_add_ons") or []
         features = await self._subscription_features(subscription)
+        restricted = resolution.status_class == "restricted"
         return {
+            "status_class": resolution.status_class,
             "source": "project"
             if subscription.get("project_id") not in (None, "")
             else "organization",
@@ -399,7 +414,8 @@ class EntitlementService:
             "active_add_ons": addon_codes,
             "features": features,
             "dms_enabled": bool(features.get("feature.dms.enabled", False)),
-            "drafting_enabled": bool(features.get("feature.drafting.enabled", False)),
+            # Archive is read-only and offboarding export-only: no drafting service.
+            "drafting_enabled": bool(features.get("feature.drafting.enabled", False)) and not restricted,
         }
 
     async def is_feature_enabled(
@@ -456,9 +472,11 @@ class EntitlementService:
         if not subscription:
             return False, "no_active_subscription"
 
-        status = str(subscription.get("status") or "").lower()
+        status = str(subscription.get("status") or "").strip().lower()
         if resolution.status_class == "unknown":
             return False, "subscription_status_unknown"
+        if resolution.status_class == "invalid_period":
+            return False, "subscription_period_invalid"
         features = await self._subscription_features(subscription)
 
         if status in self.ARCHIVE_STATUSES:
@@ -499,14 +517,24 @@ class EntitlementService:
         organization_id: Optional[str],
         project_id: Optional[str] = None,
         quantity: int = 1,
+        package_id: Optional[str] = None,
     ) -> tuple[bool, str]:
         if not await self._collection_has_subscriptions():
             if settings.RBAC_ENTITLEMENT_FAIL_OPEN:
                 return True, "legacy_no_subscription_records"
             return False, "no_subscription_records"
-        subscription = await self._active_subscription(organization_id=organization_id, project_id=project_id)
+        resolution = await self.resolve_subscription(
+            organization_id=organization_id, project_id=project_id, package_id=package_id
+        )
+        subscription = resolution.subscription
+        if resolution.reason == "ambiguous_subscriptions":
+            return False, "ambiguous_subscriptions"
         if not subscription:
             return False, "no_active_subscription"
+        # Metered work (background OCR included, which meters directly) is refused where
+        # enforcement refuses service (entitlement review F4).
+        if resolution.status_class in {"blocking", "unknown", "invalid_period"}:
+            return False, f"subscription_{str(subscription.get('status') or 'inactive').strip().lower()}"
 
         # Resolve limit: subscription overrides > plan defaults > unlimited
         overrides = subscription.get("entitlement_overrides") or {}
@@ -569,10 +597,8 @@ class EntitlementService:
             organization_id=organization_id,
             project_id=project_id,
         )
-        subscription = await self._active_subscription(
-            organization_id=organization_id,
-            project_id=project_id,
-        )
+        resolution = await self.resolve_subscription(organization_id=organization_id, project_id=project_id)
+        subscription = resolution.subscription
         plan_info: Dict[str, Any] = {}
         if subscription and subscription.get("plan_code"):
             db = await self._get_db()

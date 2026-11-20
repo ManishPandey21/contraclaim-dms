@@ -275,3 +275,151 @@ def test_the_p05_subscription_security_reading_counts_the_impact(monkeypatch) ->
             assert "r-" not in repr({k: v for k, v in reading.items() if not k.endswith("_by_organization")})
 
     _run(scenario())
+
+
+# --------------------------------------------------------------------------- #
+# Independent review of 5740b06: F1-F6 (one governing subscription per tier on the
+# write side; fail-closed periods; the same gates for features, summary and quota)
+# --------------------------------------------------------------------------- #
+
+
+def _governing(rows: Any) -> list:
+    from rbac_backend.services.subscription_resolution import GOVERNING_STATUSES
+
+    return [r for r in rows if str(r.get("status") or "").lower() in GOVERNING_STATUSES]
+
+
+def test_f1_a_paid_upgrade_checkout_supersedes_the_old_plan_end_to_end(monkeypatch) -> None:
+    async def scenario() -> None:
+        import hashlib
+        import hmac
+        import json as _json
+
+        async with _env(monkeypatch) as env:
+            from rbac_backend.core.config import settings
+            from rbac_backend.services import monetization_service as module
+            from rbac_backend.services.monetization_service import MonetizationService
+            from rbac_backend.services.payment_gateway import NoOpPaymentGateway
+
+            monkeypatch.setattr(settings, "PAYMENT_PROVIDER", "razorpay", raising=False)
+            monkeypatch.setattr(settings, "RAZORPAY_WEBHOOK_SECRET", "ent-secret", raising=False)
+            monkeypatch.setattr(module, "get_payment_gateway", lambda *a, **k: NoOpPaymentGateway())
+            await _seed(env, _sub("u-old", status="active", plan="dms_starter"))
+            checkout = await MonetizationService(env.db).start_checkout(
+                organization_id=ORG, project_id=None, plan_code="dms_enterprise", billing_period="monthly",
+                current_user=SimpleNamespace(id="ent-actor"))
+            body = _json.dumps({"event": "subscription.activated", "created_at": 1000,
+                                "payload": {"subscription": {"entity": {"id": checkout["gateway_subscription_id"]}}}},
+                               sort_keys=True).encode()
+            signature = hmac.new(b"ent-secret", body, hashlib.sha256).hexdigest()
+            response = await env.client.post("/api/billing/webhooks/razorpay", content=body,
+                                             headers={"x-razorpay-signature": signature, "x-razorpay-event-id": "up-1",
+                                                      "Content-Type": "application/json"})
+            assert response.json()["status"] == "processed", response.text
+            rows = await env.db.subscriptions.find({"organization_id": ORG}).to_list(length=None)
+            assert [r["_id"] for r in _governing(rows)] == [checkout["subscription_id"]] or \
+                [str(r["_id"]) for r in _governing(rows)] == [checkout["subscription_id"]]
+            old = await env.db.subscriptions.find_one({"_id": "u-old"})
+            assert old["status"] == "cancelled" and old["superseded_by"] == checkout["subscription_id"]
+            allowed, reason, diagnostic = await _check(env, project=None)
+            assert (allowed, reason) == (True, "dms_entitlement") and diagnostic["subscription_id"] == checkout["subscription_id"]
+            assert await env.db.audit_events.count_documents({"action": "subscription.superseded", "resource_id": "u-old"}) == 1
+
+    _run(scenario())
+
+
+def test_f1_create_and_reactivation_supersede_rather_than_lock_the_tier_out(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            from rbac_backend.models.rbac_monetization import SubscriptionCreate, SubscriptionUpdate
+            from rbac_backend.services.monetization_service import MonetizationService
+
+            actor = SimpleNamespace(id="ent-actor")
+            service = MonetizationService(env.db)
+            await _seed(env, _sub("c-active", status="active", project=P1), _sub("c-cancelled", status="cancelled", project=P1))
+            created = await service.create_subscription(
+                SubscriptionCreate(organization_id=ORG, project_id=P1, plan_code="dms_enterprise"), actor)
+            assert (await env.db.subscriptions.find_one({"_id": "c-active"}))["status"] == "cancelled"
+            assert (await _check(env))[2]["subscription_id"] == created["id"]
+            # Reactivating the old cancelled row replaces the current one.
+            await service.update_subscription("c-cancelled", SubscriptionUpdate(status="active"), actor)
+            rows = await env.db.subscriptions.find({"organization_id": ORG, "project_id": P1}).to_list(length=None)
+            assert [r["_id"] for r in _governing(rows)] == ["c-cancelled"]
+            assert (await _check(env))[:2] == (True, "dms_entitlement")
+
+    _run(scenario())
+
+
+def test_f2_concurrent_plan_settings_writes_leave_one_governing_subscription(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            from rbac_backend.models.rbac_monetization import PlanSettingsMode, PlanSettingsScopeUpdate
+            from rbac_backend.services.monetization_service import MonetizationService
+
+            await _seed(env)
+            actor = SimpleNamespace(id="ent-actor")
+
+            async def set_plan(plan: str) -> None:
+                await MonetizationService(env.db).update_plan_settings_scope(
+                    PlanSettingsScopeUpdate(organization_id=ORG, mode=PlanSettingsMode.PLAN, plan_code=plan), actor)
+
+            await asyncio.gather(set_plan("dms_starter"), set_plan("dms_professional"), set_plan("dms_enterprise"))
+            rows = await env.db.subscriptions.find({"organization_id": ORG, "project_id": None}).to_list(length=None)
+            assert len(_governing(rows)) == 1, [(r.get("plan_code"), r.get("status")) for r in rows]
+            assert (await _check(env, project=None))[:2] == (True, "dms_entitlement")
+
+    _run(scenario())
+
+
+def test_f3_unreadable_periods_fail_closed_and_api_dates_are_stored_as_dates(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            from rbac_backend.models.rbac_monetization import SubscriptionCreate
+            from rbac_backend.services.monetization_service import MonetizationService
+
+            await _seed(env, _sub("i-org", status="active"), _sub("i-p1", status="active", project=P1, ends_at="31/12/2025"),
+                        _sub("i-p2", status="trial", project=P2, trial_ends_at="soon"))
+            assert (await _check(env, project=P1))[:2] == (False, "subscription_period_invalid")
+            assert (await _check(env, project=P2))[:2] == (False, "subscription_period_invalid")
+            created = await MonetizationService(env.db).create_subscription(
+                SubscriptionCreate(organization_id=ORG, project_id="proj-ent-9", plan_code="dms_enterprise",
+                                   starts_at=datetime(2026, 1, 1), ends_at=datetime(2030, 1, 1)),
+                SimpleNamespace(id="ent-actor"))
+            stored = await env.db.subscriptions.find_one({"organization_id": ORG, "project_id": "proj-ent-9"})
+            assert isinstance(stored["starts_at"], datetime) and isinstance(stored["ends_at"], datetime), created
+
+    _run(scenario())
+
+
+def test_f4_features_summary_and_quota_follow_the_same_gates(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            from rbac_backend.services.entitlement_service import EntitlementService
+
+            await _seed(env, _sub("q-org", status="active"), _sub("q-p1", status="past_due", project=P1))
+            service = EntitlementService(env.db)
+            effective = await service.effective_features(organization_id=ORG, project_id=P1)
+            assert effective["dms_enabled"] is False and effective["status_class"] == "blocking"
+            summary = await service.get_subscription_summary(organization_id=ORG, project_id=P1)
+            assert summary["dms_enabled"] is False
+            allowed, reason = await service.assert_quota_available(quota_key="document_upload", organization_id=ORG, project_id=P1)
+            assert (allowed, reason) == (False, "subscription_past_due")
+            assert (await service.assert_quota_available(quota_key="document_upload", organization_id=ORG, project_id=P2))[0]
+
+    _run(scenario())
+
+
+def test_f5_f6_objectid_project_ids_and_padded_statuses_resolve_like_the_display(monkeypatch) -> None:
+    async def scenario() -> None:
+        from bson import ObjectId
+
+        async with _env(monkeypatch) as env:
+            oid = ObjectId()
+            await _seed(env, _sub("o-org", status="active"), _sub("o-p", status="past_due", project=None),
+                        _sub("o-arch", status=" Archive ", project=P2))
+            await env.db.subscriptions.update_one({"_id": "o-p"}, {"$set": {"project_id": oid}})
+            assert (await _check(env, project=str(oid)))[:2] == (False, "subscription_past_due")
+            assert (await _check(env, READ, P2))[:2] == (True, "archive_read_only")
+            assert (await _check(env, WRITE, P2))[:2] == (False, "archive_read_only")
+
+    _run(scenario())
