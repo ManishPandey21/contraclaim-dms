@@ -1504,6 +1504,10 @@ class MonetizationService:
         )
 
         if scoped_org_ids is not None or scoped_project_ids is not None:
+            if scoped_project_ids is not None and scoped_org_ids is None:
+                # Review F1: project-only scope means the organisations of those projects;
+                # none resolved is none, never every organisation.
+                scoped_org_ids = set()
             if scoped_project_ids is not None:
                 for project in projects:
                     project_id = str(project.get("id") or project.get("_id") or "")

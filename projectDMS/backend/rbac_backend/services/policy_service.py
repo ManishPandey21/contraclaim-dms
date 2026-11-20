@@ -127,7 +127,9 @@ class PolicyService:
         resolved, _ = await self.permission_service.resolve_request_scope(db, None, project_id)
         return resolved
 
-    async def _may_answer_at_organisation_level(self, current_user: Any, organization_id: Optional[str]) -> bool:
+    async def _may_answer_at_organisation_level(
+        self, current_user: Any, organization_id: Optional[str], permission: Optional[str] = None
+    ) -> bool:
         """DEF-4: a project-tier user (Project Admin / Project User) answers a billing check
         at organisation level, or unscoped, only with organisation-wide scope there. A built-in
         project role's grant is not bound to a project, so without this a project
@@ -135,7 +137,18 @@ class PolicyService:
         projects (review M2: the rule lives here, so every route applies it)."""
         if not (self.scope_service.role_names(current_user) & PROJECT_TIER_ROLE_KEYS):
             return True
-        return await self.scope_service.has_organization_wide_scope(current_user, organization_id=organization_id)
+        if await self.scope_service.has_organization_wide_scope(current_user, organization_id=organization_id):
+            return True
+        # Review F4: a custom role of that organisation (no project) granting this permission
+        # itself answers for the organisation, whatever project role the user also holds -
+        # the same rule as organisation-level standing with the flag off (N1).
+        return bool(
+            permission
+            and organization_id
+            and await self.permission_service.holds_organisation_level_custom_role(
+                str(getattr(current_user, "id", "") or ""), str(organization_id), permission
+            )
+        )
 
     async def explicit_billing_scopes(
         self, current_user: Any, permission: str, *, organizations: Any, projects: Any
@@ -153,7 +166,7 @@ class PolicyService:
             projects=projects,
             exclude=LEGACY_BILLING_VIEW_ALIASES,
         )
-        held_orgs = {org for org in held_orgs if await self._may_answer_at_organisation_level(current_user, org)}
+        held_orgs = {org for org in held_orgs if await self._may_answer_at_organisation_level(current_user, org, permission)}
         return held_orgs, held_projects
 
     async def has_permission(
@@ -181,7 +194,7 @@ class PolicyService:
             # DEF-4 target policy: the name itself, granted on a role that applies here. Not
             # through organizations:read / orgs:view / reports:view, a wildcard, or an
             # administrator name: viewing never implies a financial mutation, nor the reverse.
-            if not project_id and not await self._may_answer_at_organisation_level(current_user, organization_id):
+            if not project_id and not await self._may_answer_at_organisation_level(current_user, organization_id, permission):
                 return False
             return await self.permission_service.user_has_explicit_permission(
                 str(getattr(current_user, "id", "") or ""),

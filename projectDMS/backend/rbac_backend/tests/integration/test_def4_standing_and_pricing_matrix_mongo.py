@@ -28,7 +28,7 @@ from fastapi import HTTPException
 
 from rbac_backend.tests.integration.test_claim_routes_real_deps_mongo import _env
 from rbac_backend.tests.integration.test_security_remediation_mongo import _role, _user
-from rbac_backend.tests.integration.test_variation_relationships_cl2_mongo import ORG_A, ORG_B, PROJ_A1
+from rbac_backend.tests.integration.test_variation_relationships_cl2_mongo import ORG_A, ORG_B, PROJ_A1, PROJ_B1
 
 pytestmark = pytest.mark.integration
 
@@ -158,17 +158,16 @@ def test_n1_standing_combinations_flag_off(monkeypatch) -> None:
 
 def test_n1_standing_combinations_flag_on(monkeypatch) -> None:
     """With the flag on the explicit name decides: aliases never count, and an unrelated
-    organisation role never confers anything. A Project User / Admin holding an explicit
-    organisation-level grant is still refused at organisation level (review M2 rule: a
-    project-tier role holder never answers there without organisation-wide scope). That is
-    stricter than the flag-off standing rule, which admits it; recorded for the owner."""
+    organisation role never confers anything. A custom organisation role holding the explicit
+    name answers for the organisation even alongside a project role (review F4: the same N1
+    rule as with the flag off)."""
 
     async def scenario() -> None:
         async with _env(monkeypatch) as env:
             _flag(monkeypatch, True)
             ids = await _seed_n1(env)
             for persona in ids:
-                allowed = persona == "n1_custom_only_real_billing"
+                allowed = persona in {"n1_custom_only_real_billing", "n1_pu_real_billing"}
                 for path in FINANCIAL:
                     code = await _status(env, persona, path.format(org=ORG_A))
                     assert (code == 200) is allowed, (persona, path, code)
@@ -316,5 +315,111 @@ def test_the_p05_flag_off_disclosure_reading_counts_who_is_affected(monkeypatch)
             text = repr(reading)
             for private in ("example.com", "n1_", "rd_", "user-"):
                 assert private not in text, private
+
+    _run(scenario())
+
+
+# --------------------------------------------------------------------------- #
+# Independent review of the complete DEF-4 work (2026-11-20): F1, F2, F4, F5
+# --------------------------------------------------------------------------- #
+
+F1_SECRETS = ("gw-f1-secret", "NEGOTIATED-F1", ORG_B)
+
+
+@pytest.mark.parametrize("flag", [False, True])
+def test_f1_plan_settings_fails_closed_without_a_resolvable_organisation(monkeypatch, flag: bool) -> None:
+    """A user whose projects resolve to no organisation (a deleted project, or a project of
+    a missing organisation) received every organisation and unminimised subscriptions."""
+
+    async def scenario() -> None:
+        import json
+        from datetime import datetime
+
+        async with _env(monkeypatch) as env:
+            _flag(monkeypatch, flag)
+            await env.db.projects.insert_one({"_id": "proj-orphan", "name": "Orphan", "organization_id": "org-missing"})
+            for sub_id, org, project in (("f1-b", ORG_B, PROJ_B1), ("f1-orphan", "org-missing", "proj-orphan")):
+                await env.db.subscriptions.insert_one(
+                    {"_id": sub_id, "organization_id": org, "project_id": project, "plan_code": "dms_enterprise",
+                     "status": "active", "billing_status": "active", "payment_gateway_subscription_id": "gw-f1-secret",
+                     "entitlement_overrides": {"negotiated": "NEGOTIATED-F1"}, "updated_at": datetime.utcnow()}
+                )
+            await _user(env.db, "f1_stale", ["projectuser"], organization_id=None, projects=["deleted-project"])
+            await _user(env.db, "f1_orphan", ["projectuser"], organization_id="org-missing", projects=["proj-orphan"])
+            for persona in ("f1_stale", "f1_orphan"):
+                for path in ("/plan-settings", "/plan-settings/effective-services", "/subscriptions"):
+                    response = await env.client.get(f"{BASE}{path}", headers=_headers(persona))
+                    env.client.cookies.clear()
+                    if response.status_code == 200:
+                        text = json.dumps(response.json(), default=str)
+                        for secret in F1_SECRETS:
+                            assert secret not in text, (persona, path, secret)
+                        if persona == "f1_stale":
+                            assert ORG_A not in text, (persona, path)
+                    else:
+                        assert response.status_code == 403, (persona, path, response.status_code)
+
+    _run(scenario())
+
+
+def test_f2_an_entitlement_role_elsewhere_does_not_widen_to_sibling_projects(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            _flag(monkeypatch, False)
+            await env.db.roles.insert_one(_role("f2-b-entitlement", ["subscription.entitlement.manage"], organization_id=ORG_B))
+            await _user(env.db, "f2_mixed", ["projectuser", "f2-b-entitlement"], organization_id=ORG_B,
+                        organizations=[ORG_A, ORG_B], projects=[PROJ_A1])
+            response = await env.client.get(f"{BASE}/plan-settings/effective-services", headers=_headers("f2_mixed"))
+            env.client.cookies.clear()
+            projects = set(response.json()["effective"]["projects"])
+            assert "proj-a2" not in projects, projects
+            assert PROJ_A1 in projects and PROJ_B1 in projects, projects
+
+    _run(scenario())
+
+
+@pytest.mark.parametrize("flag", [False, True])
+def test_f4_a_custom_finance_role_counts_alongside_a_project_role(monkeypatch, flag: bool) -> None:
+    """The N1 rule in both states: a custom organisation role granting the views stands for
+    the organisation, whether or not the user also holds projectuser."""
+
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            _flag(monkeypatch, flag)
+            await env.db.roles.insert_one(_role("f4-a-finance", ["subscription.history.view", "billing.record.view",
+                                                                 "billing.plan.view"], organization_id=ORG_A))
+            await _user(env.db, "f4_with_project_role", ["projectuser", "f4-a-finance"], organization_id=ORG_A, projects=[PROJ_A1])
+            await _user(env.db, "f4_alone", ["f4-a-finance"], organization_id=ORG_A)
+            for persona in ("f4_with_project_role", "f4_alone"):
+                for path in (f"/billing/records/{ORG_A}", f"/billing/history/{ORG_A}"):
+                    assert await _status(env, persona, path) == 200, (persona, path, flag)
+                assert await _status(env, persona, f"/billing/records/{ORG_B}") == 403, persona
+                if flag:
+                    # Flag on, the listing follows the same rule: the organisation's full rows.
+                    # (Flag off, a projectuser's listing stays filtered to their projects by the
+                    # pre-existing role-name scope; that withholds rows, it discloses nothing.)
+                    rows = (await env.client.get(f"{BASE}/subscriptions", headers=_headers(persona))).json()
+                    env.client.cookies.clear()
+                    org_rows = [row for row in rows if row.get("organization_id") == ORG_A and not row.get("project_id")]
+                    assert org_rows and "billing_status" in org_rows[0], (persona, rows)
+
+    _run(scenario())
+
+
+def test_f5_platform_rules_scoped_refusal_and_wildcard(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            from rbac_backend.services.policy_service import PolicyService
+
+            superadmin = SimpleNamespace(id="user-superadmin", roles=["superadmin"], organization_id=None, organizations=[], projects=[])
+            with pytest.raises(HTTPException) as refused:
+                await PolicyService().authorize(superadmin, PRICING, organization_id=ORG_A, resource_type="plan", audit=False)
+            assert refused.value.status_code == 403
+            # A platform role holding only "*" is not the platform pricing role.
+            await env.db.roles.insert_one(_role("f5-platform-wildcard", ["*"], organization_id=None))
+            user_id = await _user(env.db, "f5_platform_wildcard", ["f5-platform-wildcard"], organization_id=None,
+                                  account_type="contraclaim_staff")
+            results = await _evaluators(env, user_id, "f5_platform_wildcard")
+            assert not any(results.values()), results
 
     _run(scenario())

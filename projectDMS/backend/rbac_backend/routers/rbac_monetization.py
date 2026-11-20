@@ -35,6 +35,7 @@ from ..services.monetization_service import (
     scope_text,
     subscription_scope,
 )
+from ..services.permission_service import PermissionService
 from ..services.policy_service import PolicyService
 from ..services.scope_service import ScopeService
 from ..services.step_up_service import require_step_up
@@ -195,7 +196,16 @@ async def _project_tier_in(current_user: CurrentUser, organization_id: Optional[
     if _explicit_billing_policy():
         if not (scope.role_names(current_user) & PROJECT_SUBSCRIPTION_VIEW_ROLES):
             return False
-        return not await scope.has_organization_wide_scope(current_user, organization_id=organization_id)
+        if await scope.has_organization_wide_scope(current_user, organization_id=organization_id):
+            return False
+        # Review F4: a custom organisation role granting the financial view stands for the
+        # organisation (the N1 rule), even for a holder of a project role.
+        return not (
+            organization_id
+            and await PermissionService().holds_organisation_level_custom_role(
+                str(getattr(current_user, "id", "") or ""), str(organization_id), Permissions.SUBSCRIPTION_HISTORY_VIEW
+            )
+        )
     return not await PolicyService().has_organisation_level_standing(current_user, organization_id)
 
 
@@ -502,24 +512,32 @@ async def get_plan_settings(
 
 
 async def _minimise_plan_settings(current_user: CurrentUser, payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Decision 4 for /plan-settings: a project-tier caller's subscriptions and service
-    states are cut to the operational view, and organisations and projects to identity."""
-    tiers = {str(org.get("id") or org.get("_id") or ""): await _project_tier_in(current_user, str(org.get("id") or org.get("_id") or "") or None)
-             for org in payload.get("organizations", []) or []}
-    if not any(tiers.values()):
-        return payload
+    """Decision 4 for /plan-settings: every organisation, project, subscription row and service
+    state is judged in its own organisation (review F1: no shortcut on the organisations
+    listed, so an orphan project or a missing organisation fails closed). Where the caller
+    has no standing: subscriptions and states cut to the operational view, organisations and
+    projects to identity."""
     project_orgs = _project_orgs(payload)
+    cache: Dict[str, bool] = {}
+
+    async def cut_in(org: str) -> bool:
+        if org not in cache:
+            cache[org] = await _project_tier_in(current_user, org or None)
+        return cache[org]
+
     identity = ("id", "name", "organization_id", "is_active")
+    organizations = []
+    for org in payload.get("organizations", []) or []:
+        org_id = str(org.get("id") or org.get("_id") or "")
+        organizations.append(_only(org, identity) if await cut_in(org_id) else org)
+    projects = []
+    for project in payload.get("projects", []) or []:
+        org_id = project_orgs.get(str(project.get("id") or project.get("_id") or ""), "")
+        projects.append(_only(project, identity) if await cut_in(org_id) else project)
     return {
         **payload,
-        "organizations": [
-            _only(org, identity) if tiers.get(str(org.get("id") or org.get("_id") or "")) else org
-            for org in payload.get("organizations", []) or []
-        ],
-        "projects": [
-            _only(project, identity) if tiers.get(project_orgs.get(str(project.get("id") or project.get("_id") or ""), "")) else project
-            for project in payload.get("projects", []) or []
-        ],
+        "organizations": organizations,
+        "projects": projects,
         "subscriptions": await _minimise_rows(current_user, list(payload.get("subscriptions", []) or [])),
         "effective": await _minimise_effective(current_user, payload.get("effective", {}) or {}, project_orgs),
     }
@@ -552,12 +570,19 @@ async def get_effective_plan_services(
         )
         for project in settings.get("projects", [])
     }
-    if entitlement_manager or roles & {"orgadmin", "orguser"}:
-        allowed_projects.update(
-            project_id
-            for project_id, org_id in project_orgs.items()
-            if org_id in allowed_orgs
-        )
+    # Review F2: widen to an organisation's projects only where the caller stands for that
+    # organisation (organisation-wide role there, or the billing administrator role / a
+    # custom role of that organisation granting entitlement management), never to every
+    # member organisation because a role somewhere grants entitlement management.
+    caller_id = str(getattr(current_user, "id", "") or "")
+    for org_id in sorted(allowed_orgs):
+        widen = bool(roles & {"orgadmin", "orguser"}) and await scope.has_organization_wide_scope(current_user, organization_id=org_id)
+        if not widen and entitlement_manager:
+            widen = "contraclaim_billing_admin" in roles or await PermissionService().holds_organisation_level_custom_role(
+                caller_id, org_id, Permissions.SUBSCRIPTION_ENTITLEMENT_MANAGE
+            )
+        if widen:
+            allowed_projects.update(project_id for project_id, owner in project_orgs.items() if owner == org_id)
 
     effective = settings.get("effective", {})
     scoped = {
