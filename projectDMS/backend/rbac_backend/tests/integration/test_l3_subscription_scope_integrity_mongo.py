@@ -175,14 +175,14 @@ def test_stale_reads_and_concurrent_scope_changes_are_refused(monkeypatch) -> No
             await env.db.subscriptions.update_one({"_id": SUB_A1}, {"$set": {"project_id": PROJ_A2}})
             with pytest.raises(SubscriptionScopeConflict):
                 await service.update_subscription(SUB_A1, SubscriptionUpdate(auto_renew=False), actor,
-                                                  expected_scope=(ORG_A, PROJ_A1))
+                                                  expected_scope=(ORG_A, PROJ_A1, None))
             assert await _scope(env, SUB_A1) == (ORG_A, PROJ_A2, True)
             await env.db.subscriptions.update_one({"_id": SUB_A1}, {"$set": {"project_id": PROJ_A1}})
             # The scope changes between the read and the write: the compare-and-set misses.
             racing = MonetizationService(_ConcurrentScopeChange(env.db, SUB_A1, PROJ_A2))
             with pytest.raises(SubscriptionScopeConflict):
                 await racing.update_subscription(SUB_A1, SubscriptionUpdate(auto_renew=False), actor,
-                                                 expected_scope=(ORG_A, PROJ_A1))
+                                                 expected_scope=(ORG_A, PROJ_A1, None))
             assert (await env.db.subscriptions.find_one({"_id": SUB_A1}))["auto_renew"] is True
             # Internal callers (lifecycle operations) cannot change scope either.
             await env.db.subscriptions.update_one({"_id": SUB_A1}, {"$set": {"project_id": PROJ_A1}})

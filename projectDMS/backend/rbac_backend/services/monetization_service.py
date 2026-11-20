@@ -36,12 +36,14 @@ from ..services.audit_event_service import AuditEventService
 logger = logging.getLogger(__name__)
 
 
-#: A subscription's scope: preserved by every ordinary update (L3, owner decision 2026-11-20).
-SUBSCRIPTION_SCOPE_FIELDS: Tuple[str, str] = ("organization_id", "project_id")
+#: A subscription's scope: preserved by every ordinary update (L3, owner decision 2026-11-20;
+#: ``package_id`` added by F3, owner decision 2026-11-20 - entitlement resolution matches on
+#: organisation, project and package, so a package change moves the entitlement).
+SUBSCRIPTION_SCOPE_FIELDS: Tuple[str, str, str] = ("organization_id", "project_id", "package_id")
 
 
 class SubscriptionScopeChangeRefused(ValueError):
-    """An ordinary update tried to change a subscription's organisation or project."""
+    """An ordinary update tried to change a subscription's organisation, project or package."""
 
 
 class SubscriptionScopeConflict(Exception):
@@ -53,9 +55,10 @@ def scope_text(value: Any) -> Optional[str]:
     return text or None
 
 
-def subscription_scope(document: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
-    """(organisation, project) of a stored or normalised subscription, as text."""
-    return scope_text(document.get("organization_id")), scope_text(document.get("project_id"))
+def subscription_scope(document: Dict[str, Any]) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """(organisation, project, package) of a stored or normalised subscription, as text
+    (``None`` and the empty string are the same "none", as entitlement resolution reads them)."""
+    return tuple(scope_text(document.get(field)) for field in SUBSCRIPTION_SCOPE_FIELDS)  # type: ignore[return-value]
 
 
 class MonetizationService:
@@ -684,13 +687,15 @@ class MonetizationService:
         payload: SubscriptionUpdate,
         current_user: Any,
         *,
-        expected_scope: Optional[Tuple[str, Optional[str]]] = None,
+        expected_scope: Optional[Tuple[Optional[str], ...]] = None,
     ) -> Dict[str, Any]:
-        """Update a subscription; its organisation and project never change here (L3).
+        """Update a subscription; its organisation, project and package never change here
+        (L3; package: F3).
 
-        ``expected_scope``: the (organisation, project) the caller authorised against. If the
-        stored scope differs now, or changes between this read and the write (compare-and-set
-        on both fields), the update is refused with ``SubscriptionScopeConflict``. A scope
+        ``expected_scope``: the (organisation, project, package) the caller authorised against.
+        If the stored scope differs now, or changes between this read and the write
+        (compare-and-set on all three fields), the update is refused with
+        ``SubscriptionScopeConflict``. A scope
         field in ``payload`` equal to the stored value is a no-op; any other value, explicit
         null included, is refused with ``SubscriptionScopeChangeRefused``. A transfer between
         scopes is a separate, not yet designed, operation.
@@ -701,16 +706,16 @@ class MonetizationService:
         if before is None:
             raise LookupError("Subscription not found")
         stored_scope = subscription_scope(before)
-        if expected_scope is not None and stored_scope != (
-            scope_text(expected_scope[0]), scope_text(expected_scope[1])
-        ):
+        if expected_scope is not None and len(expected_scope) != len(SUBSCRIPTION_SCOPE_FIELDS):
+            raise TypeError("expected_scope must name the organisation, project and package")
+        if expected_scope is not None and stored_scope != tuple(scope_text(value) for value in expected_scope):
             raise SubscriptionScopeConflict("The subscription's scope changed; reload and try again")
         update_doc = payload.model_dump(mode="json", exclude_unset=True)
         for index, field in enumerate(SUBSCRIPTION_SCOPE_FIELDS):
             if field in update_doc:
                 if scope_text(update_doc[field]) != stored_scope[index]:
                     raise SubscriptionScopeChangeRefused(
-                        "The organisation and project of a subscription cannot be changed by an update"
+                        "The organisation, project and package of a subscription cannot be changed by an update"
                     )
                 update_doc.pop(field)
         update_doc["updated_at"] = datetime.utcnow()
@@ -721,8 +726,7 @@ class MonetizationService:
         result = await db.subscriptions.update_one(
             {
                 "_id": lookup,
-                "organization_id": before.get("organization_id"),
-                "project_id": before.get("project_id"),
+                **{field: before.get(field) for field in SUBSCRIPTION_SCOPE_FIELDS},
             },
             {"$set": update_doc},
         )

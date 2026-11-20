@@ -956,18 +956,19 @@ async def update_subscription(
         subscription_id=subscription_id,
     )
     stored_scope = subscription_scope(subscription)
-    # An organisation or project named in the body must equal the stored one. Omitted is
-    # unchanged; the same value is a no-op; anything else, explicit null included, is refused.
+    # An organisation, project or package (F3) named in the body, under any spelling, must
+    # equal the stored one. Omitted is unchanged; the same value is a no-op; anything else,
+    # explicit null included, is refused.
     extra = payload.model_extra or {}
-    for index, (field, camel) in enumerate((("organization_id", "organizationId"), ("project_id", "projectId"))):
+    for index, field in enumerate(("organization_id", "project_id", "package_id")):
         attempted = [getattr(payload, field)] if field in payload.model_fields_set else []
-        attempted += [extra[camel]] if camel in extra else []
+        attempted += [extra[key] for key in _SCOPE_FIELD_SPELLINGS[field] if key in extra]
         if any(scope_text(value) != stored_scope[index] for value in attempted):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_SCOPE_CHANGE_REFUSED)
     update = SubscriptionUpdate(**payload.model_dump(include=set(SubscriptionUpdate.model_fields) & payload.model_fields_set))
     try:
         return await service.update_subscription(
-            subscription_id, update, current_user, expected_scope=(stored_scope[0] or "", stored_scope[1])
+            subscription_id, update, current_user, expected_scope=stored_scope
         )
     except SubscriptionScopeChangeRefused as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_SCOPE_CHANGE_REFUSED) from exc
@@ -977,8 +978,16 @@ async def update_subscription(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Subscription not found") from exc
 
 
+#: Other spellings of the scope fields a client might send; each is refused unless it equals
+#: the stored value (earlier review Low 4: they used to be dropped silently).
+_SCOPE_FIELD_SPELLINGS = {
+    "organization_id": ("organizationId", "organisation_id", "organisationId", "org_id", "orgId", "organization"),
+    "project_id": ("projectId", "project"),
+    "package_id": ("packageId", "package"),
+}
+
 _SCOPE_CHANGE_REFUSED = (
-    "The organisation and project of a subscription cannot be changed by an update; "
+    "The organisation, project and package of a subscription cannot be changed by an update; "
     "a transfer is a separate, explicitly authorised operation"
 )
 
