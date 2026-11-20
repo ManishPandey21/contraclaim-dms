@@ -31,9 +31,13 @@ subscription applies - the meaning ``/plan-settings`` "inherit" already gives a 
 project override. A project subscription that is past due or paused still governs: the
 project is refused rather than silently moved onto the organisation's plan.
 
-**Ambiguity.** Two or more governing subscriptions in the deciding tier cannot be ranked
-safely (no contract rule says which plan wins): no subscription is selected and the reason is
-``ambiguous_subscriptions`` (fail closed). P-05 counts such scopes before any release.
+**Several governing subscriptions in one tier.** The most recently *activated* governs:
+``governing_since`` is stamped when a subscription becomes governing (create, payment
+activation, reactivation, plan settings) and never by an ordinary edit. Nothing is cancelled
+by this choice: a trial over a paid plan governs until it expires, then the paid plan does
+again; a future-dated replacement governs from its start. Rows that all predate the stamp
+(written before 2026-11-20) cannot be ordered safely: ``ambiguous_subscriptions``, fail
+closed; P-05 counts them before any release.
 """
 
 from __future__ import annotations
@@ -165,7 +169,20 @@ def select_subscription(
         if not governing:
             continue
         if len(governing) > 1:
-            return Resolution(None, tier, None, "ambiguous_subscriptions", considered)
+            # Several governing rows in one tier (an upgrade checkout activated while the old
+            # plan is still active, a trial over a paid plan, racing plan-settings writes):
+            # the most recently *activated* one governs. ``governing_since`` is stamped only
+            # when a row becomes governing (create, activation, reactivation, plan settings),
+            # never by a metadata edit, so the choice is deterministic whatever the write order
+            # and nothing is cancelled (entitlement re-review R1-R3). Ties: the larger id.
+            # Rows that all predate the stamp cannot be ordered safely: ambiguous, fail closed.
+            stamped = [(row, cls) for row, cls in governing if isinstance(_instant(row.get("governing_since")), datetime)]
+            if not stamped:
+                return Resolution(None, tier, None, "ambiguous_subscriptions", considered)
+            subscription, cls = max(
+                stamped, key=lambda pair: (_instant(pair[0].get("governing_since")), str(pair[0].get("_id") or pair[0].get("id") or ""))
+            )
+            return Resolution(subscription, tier, cls, cls, considered)
         subscription, cls = governing[0]
         return Resolution(subscription, tier, cls, cls, considered)
     return Resolution(None, None, None, "no_governing_subscription", considered)

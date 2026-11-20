@@ -90,56 +90,6 @@ def as_stored_dates(doc: Dict[str, Any]) -> Dict[str, Any]:
     return doc
 
 
-async def supersede_in_tier(db: Any, subscription: Dict[str, Any], *, actor_id: Any, audit_service: Any = None) -> int:
-    """Keep one governing subscription per tier (entitlement review F1, owner decision
-    2026-11-20). ``subscription`` has just become governing (created, activated, reactivated,
-    set by plan settings) and carries ``governing_since``. Every other governing subscription
-    of the same (organisation, project, package) that became governing earlier is cancelled as
-    superseded, with ``superseded_by``, an audit event and a history row. The comparison is on
-    ``governing_since``, so concurrent writers converge on the latest whatever order they run
-    in, and a reactivation supersedes what it replaces. Returns how many were superseded."""
-    from .subscription_resolution import GOVERNING_STATUSES
-
-    mine = subscription.get("governing_since")
-    if not isinstance(mine, datetime):
-        return 0
-    tier = subscription_scope(subscription)
-    others = await db.subscriptions.find(
-        {"organization_id": subscription.get("organization_id"), "_id": {"$ne": subscription["_id"]},
-         "status": {"$in": sorted(GOVERNING_STATUSES)}}
-    ).to_list(length=None)
-    targets = [o for o in others if subscription_scope(o) == tier]
-    if not targets:
-        return 0
-    now = datetime.utcnow()
-    superseded = 0
-    for other in targets:
-        result = await db.subscriptions.update_one(
-            {"_id": other["_id"], "status": {"$in": sorted(GOVERNING_STATUSES)},
-             "$or": [{"governing_since": {"$lt": mine}}, {"governing_since": {"$exists": False}}, {"governing_since": None}]},
-            {"$set": {"status": "cancelled", "billing_status": "inactive", "cancelled_at": now,
-                      "cancellation_reason": "superseded", "superseded_by": str(subscription["_id"]),
-                      "updated_at": now, "updated_by": actor_id}},
-        )
-        if not result.modified_count:
-            continue
-        superseded += 1
-        await db.subscription_history.insert_one({
-            "subscription_id": str(other["_id"]), "organization_id": str(other.get("organization_id") or ""),
-            "project_id": other.get("project_id"), "change_type": "superseded",
-            "from_status": str(other.get("status") or ""), "to_status": "cancelled",
-            "metadata": {"superseded_by": str(subscription["_id"])}, "changed_by": actor_id, "changed_at": now,
-        })
-        if audit_service is not None:
-            await audit_service.emit(
-                action="subscription.superseded", actor_id=actor_id, resource_type="subscription",
-                resource_id=str(other["_id"]), organization_id=str(other.get("organization_id") or ""),
-                project_id=other.get("project_id"),
-                metadata={"superseded_by": str(subscription["_id"]), "plan_code": other.get("plan_code")},
-            )
-    return superseded
-
-
 def scope_text(value: Any) -> Optional[str]:
     text = str(value).strip() if value is not None else ""
     return text or None
@@ -690,8 +640,6 @@ class MonetizationService:
         )
         result = await db.subscriptions.insert_one(doc)
         saved = await db.subscriptions.find_one({"_id": result.inserted_id})
-        if becomes_governing and saved:
-            await supersede_in_tier(db, saved, actor_id=getattr(current_user, "id", None), audit_service=self.audit_service)
 
         # Record history
         await self._record_history(
@@ -863,8 +811,6 @@ class MonetizationService:
         if result.matched_count == 0:
             raise SubscriptionScopeConflict("The subscription's scope changed; reload and try again")
         saved = await db.subscriptions.find_one({"_id": lookup})
-        if becomes_governing and saved:
-            await supersede_in_tier(db, saved, actor_id=getattr(current_user, "id", None), audit_service=self.audit_service)
         await self.audit_service.emit(
             action="subscription.updated",
             actor_id=getattr(current_user, "id", None),
@@ -1819,10 +1765,6 @@ class MonetizationService:
         if str(doc.get("status") or "").strip().lower() in GOVERNING_STATUSES:
             doc["governing_since"] = now
         result = await db.subscriptions.insert_one(doc)
-        # Concurrent plan-settings writes (entitlement review F2): each cancels what it finds,
-        # then the latest-governing row supersedes any row a racing writer inserted meanwhile.
-        await supersede_in_tier(db, {**doc, "_id": result.inserted_id},
-                                actor_id=getattr(current_user, "id", None), audit_service=self.audit_service)
         await self.audit_service.emit(
             action="subscription.scope_plan_set",
             actor_id=getattr(current_user, "id", None),

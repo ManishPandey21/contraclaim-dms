@@ -710,17 +710,30 @@ def _read_subscription_security_impact(db: ReadOnlyDatabase) -> Dict[str, Any]:
     counts = {
         "subscriptions_read": 0,
         "unknown_status_rows": 0,
+        "string_dated_fields": 0,
+        "unreadable_dated_fields": 0,
         "gateway_bindings": 0,
         "gateway_bindings_without_provenance": 0,
         "gateway_bindings_without_provider": 0,
         "gateway_bindings_without_customer": 0,
     }
     for row in db["subscriptions"].find({}, {
-        "organization_id": 1, "project_id": 1, "package_id": 1, "status": 1, "updated_at": 1,
+        "organization_id": 1, "project_id": 1, "package_id": 1, "status": 1, "updated_at": 1, "governing_since": 1,
+        "starts_at": 1, "ends_at": 1, "trial_ends_at": 1,
         "payment_gateway_subscription_id": 1, "payment_gateway_bound_by": 1, "payment_provider": 1,
         "payment_gateway_customer_id": 1,
     }):
         counts["subscriptions_read"] += 1
+        # Dates stored as strings (API writes before 2026-11-20) now govern by their value;
+        # unreadable ones now deny as an invalid period (entitlement re-review R4).
+        for field in ("starts_at", "ends_at", "trial_ends_at"):
+            value = row.get(field)
+            if isinstance(value, str) and value.strip():
+                counts["string_dated_fields"] = counts.get("string_dated_fields", 0) + 1
+                try:
+                    datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+                except ValueError:
+                    counts["unreadable_dated_fields"] = counts.get("unreadable_dated_fields", 0) + 1
         status = text(row.get("status")).lower()
         if status not in SR_ELIGIBLE | SR_RESTRICTED | SR_BLOCKING | SR_NOT_GOVERNING:
             counts["unknown_status_rows"] += 1
@@ -740,12 +753,18 @@ def _read_subscription_security_impact(db: ReadOnlyDatabase) -> Dict[str, Any]:
     def governing(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         return [r for r in rows if text(r.get("status")).lower() not in SR_NOT_GOVERNING]
 
+    # Ambiguous under the resolver: two or more governing rows of which none carries
+    # governing_since (rows written before 2026-11-20 cannot be ordered).
+    def ambiguous(rows: List[Dict[str, Any]]) -> bool:
+        ruling = governing(rows)
+        return len(ruling) > 1 and not any(r.get("governing_since") for r in ruling)
+
     ambiguous_by_org: Dict[str, int] = {}
     shadowed = 0
     lost_fallback_by_org: Dict[str, int] = {}
     for (org, project, package), rows in scopes.items():
         ruling = governing(rows)
-        if len(ruling) > 1:
+        if ambiguous(rows):
             ambiguous_by_org[org] = ambiguous_by_org.get(org, 0) + 1
         latest = max(rows, key=lambda r: str(r.get("updated_at") or ""))
         if ruling and latest not in ruling:

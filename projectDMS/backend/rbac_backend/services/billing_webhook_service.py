@@ -244,13 +244,6 @@ class BillingWebhookService:
             update["governing_since"] = now
         update.update({"updated_at": now, "updated_by": f"system:webhook:{self.provider}"})
         await db.subscriptions.update_one({"_id": subscription["_id"]}, {"$set": update})
-        if becomes_governing:
-            # A paid upgrade checkout replaces the subscription it upgrades (entitlement review
-            # F1): one governing subscription per tier, never two (which would be ambiguous).
-            from .monetization_service import supersede_in_tier
-
-            await supersede_in_tier(db, {**subscription, **update}, actor_id=f"system:webhook:{self.provider}",
-                                    audit_service=AuditEventService(db))
 
         # Billing record (financial audit trail).
         record_status = "paid" if event.event_type == "payment.succeeded" else (
