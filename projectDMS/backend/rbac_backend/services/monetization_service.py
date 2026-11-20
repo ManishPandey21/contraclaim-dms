@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from bson import ObjectId
+from pymongo.errors import DuplicateKeyError
 
 from ..core.config import settings
 from ..core.database import get_database
@@ -48,6 +49,26 @@ class SubscriptionScopeChangeRefused(ValueError):
 
 class SubscriptionScopeConflict(Exception):
     """The subscription's stored scope is not the one the caller authorised against."""
+
+
+#: The subscription's payment identity (owner decision 2026-11-20). The billing webhook finds
+#: the subscription a payment event applies to by ``payment_gateway_subscription_id``, so
+#: whoever can write it can redirect another subscription's payment events (activation
+#: included). Only checkout binds it, from the gateway's own response; ordinary create and
+#: update never set, replace or clear it.
+PROTECTED_GATEWAY_FIELDS: Tuple[str, str, str] = (
+    "payment_gateway_subscription_id",
+    "payment_gateway_customer_id",
+    "payment_provider",
+)
+
+
+class GatewayIdentityChangeRefused(ValueError):
+    """An ordinary create or update tried to set, replace or clear a gateway binding."""
+
+
+class GatewayIdentityConflict(Exception):
+    """The gateway subscription id is already bound to another subscription."""
 
 
 def scope_text(value: Any) -> Optional[str]:
@@ -572,6 +593,11 @@ class MonetizationService:
         db = await self._get_db()
         now = datetime.utcnow()
         doc = payload.model_dump(mode="json")
+        if any(scope_text(doc.get(field)) for field in PROTECTED_GATEWAY_FIELDS):
+            # Gateway identity is bound only by checkout, from the gateway's response.
+            raise GatewayIdentityChangeRefused("A payment gateway binding cannot be set when creating a subscription")
+        for field in PROTECTED_GATEWAY_FIELDS:
+            doc.pop(field, None)
 
         # Compute current billing period boundaries
         if not doc.get("current_period_start"):
@@ -646,6 +672,10 @@ class MonetizationService:
         )
 
         now = datetime.utcnow()
+        gateway_id = scope_text(gateway_sub.gateway_subscription_id)
+        if gateway_id and await db.subscriptions.find_one({"payment_gateway_subscription_id": gateway_id}, {"_id": 1}):
+            # One gateway subscription, one local subscription: never a second binding.
+            raise GatewayIdentityConflict("The gateway subscription is already bound to a subscription")
         doc = {
             "organization_id": str(organization_id),
             "project_id": str(project_id) if project_id else None,
@@ -657,12 +687,18 @@ class MonetizationService:
             "payment_provider": str(settings.PAYMENT_PROVIDER),
             "payment_gateway_customer_id": customer.gateway_customer_id,
             "payment_gateway_subscription_id": gateway_sub.gateway_subscription_id,
+            # Provenance of the binding: the webhook trusts only checkout-bound identities.
+            "payment_gateway_bound_by": "checkout",
+            "payment_gateway_bound_at": now,
             "created_at": now,
             "updated_at": now,
             "created_by": getattr(current_user, "id", None),
             "updated_by": getattr(current_user, "id", None),
         }
-        result = await db.subscriptions.insert_one(doc)
+        try:
+            result = await db.subscriptions.insert_one(doc)
+        except DuplicateKeyError as exc:  # the unique index (migration 20261124_0001), when present
+            raise GatewayIdentityConflict("The gateway subscription is already bound to a subscription") from exc
 
         await self.audit_service.emit(
             action="subscription.checkout_started",
@@ -718,6 +754,13 @@ class MonetizationService:
                         "The organisation, project and package of a subscription cannot be changed by an update"
                     )
                 update_doc.pop(field)
+        for field in PROTECTED_GATEWAY_FIELDS:
+            if field in update_doc:
+                if scope_text(update_doc[field]) != scope_text(before.get(field)):
+                    raise GatewayIdentityChangeRefused(
+                        "The payment gateway binding of a subscription cannot be set, replaced or cleared by an update"
+                    )
+                update_doc.pop(field)
         update_doc["updated_at"] = datetime.utcnow()
         update_doc["updated_by"] = getattr(current_user, "id", None)
         # Compare-and-set: the write applies only while the stored scope is the one read
@@ -727,6 +770,7 @@ class MonetizationService:
             {
                 "_id": lookup,
                 **{field: before.get(field) for field in SUBSCRIPTION_SCOPE_FIELDS},
+                "payment_gateway_subscription_id": before.get("payment_gateway_subscription_id"),
             },
             {"$set": update_doc},
         )

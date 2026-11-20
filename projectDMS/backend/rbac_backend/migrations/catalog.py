@@ -155,6 +155,10 @@ from .v20261123_0001_skill_eval_runs_indexes import DESCRIPTION as SKILL_EVAL_RU
 from .v20261123_0001_skill_eval_runs_indexes import NAME as SKILL_EVAL_RUNS_NAME
 from .v20261123_0001_skill_eval_runs_indexes import VERSION as SKILL_EVAL_RUNS_VERSION
 from .v20261123_0001_skill_eval_runs_indexes import upgrade as upgrade_skill_eval_runs
+from .v20261124_0001_subscription_gateway_identity_unique import DESCRIPTION as GATEWAY_IDENTITY_DESCRIPTION
+from .v20261124_0001_subscription_gateway_identity_unique import NAME as GATEWAY_IDENTITY_NAME
+from .v20261124_0001_subscription_gateway_identity_unique import VERSION as GATEWAY_IDENTITY_VERSION
+from .v20261124_0001_subscription_gateway_identity_unique import upgrade as upgrade_gateway_identity
 
 
 MIGRATIONS = [
@@ -349,5 +353,11 @@ MIGRATIONS = [
         name=SKILL_EVAL_RUNS_NAME,
         description=SKILL_EVAL_RUNS_DESCRIPTION,
         upgrade=upgrade_skill_eval_runs,
+    ),
+    Migration(
+        version=GATEWAY_IDENTITY_VERSION,
+        name=GATEWAY_IDENTITY_NAME,
+        description=GATEWAY_IDENTITY_DESCRIPTION,
+        upgrade=upgrade_gateway_identity,
     ),
 ]

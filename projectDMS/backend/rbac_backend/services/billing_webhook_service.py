@@ -11,6 +11,7 @@ provider's event id (unique index). A replayed event is a no-op.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from datetime import datetime
@@ -61,12 +62,21 @@ class BillingWebhookService:
         db = await self._get_db()
 
         # 3) Idempotency — unique insert on event_id; replays are no-ops.
+        # The provider signs the body, not the event-id header, so a captured signed body
+        # replayed under a new event id used to be processed again (an old
+        # payment.succeeded re-activating a cancelled subscription). The body's own hash is
+        # a second idempotency key (unique index: migration 20261124_0001).
         now = datetime.utcnow()
+        body_sha256 = hashlib.sha256(raw_body).hexdigest()
+        if await db.billing_webhook_events.find_one({"provider": self.provider, "body_sha256": body_sha256}, {"_id": 1}):
+            logger.info("Replayed billing webhook body ignored: %s", event.event_id)
+            return {"status": "duplicate", "event_id": event.event_id}
         try:
             await db.billing_webhook_events.insert_one(
                 {
                     "event_id": event.event_id,
                     "provider": self.provider,
+                    "body_sha256": body_sha256,
                     "event_type": event.event_type,
                     "gateway_subscription_id": event.gateway_subscription_id,
                     "received_at": now,
@@ -92,9 +102,22 @@ class BillingWebhookService:
 
         subscription = None
         if event.gateway_subscription_id:
-            subscription = await db.subscriptions.find_one(
+            # Identity before state: the gateway id must name exactly one subscription, bound
+            # by checkout for this provider. Two bindings (possible before 2026-11-20, when an
+            # ordinary create or update could write the id) are ambiguous: nothing is changed
+            # and the refusal is audited for a person to resolve.
+            bound = await db.subscriptions.find(
                 {"payment_gateway_subscription_id": event.gateway_subscription_id}
-            )
+            ).to_list(length=2)
+            if len(bound) > 1:
+                return await self._refuse_binding(db, event, "ambiguous_gateway_binding", bound)
+            subscription = bound[0] if bound else None
+            if subscription is not None:
+                provider = str(subscription.get("payment_provider") or "").lower()
+                if provider and provider != str(self.provider).lower():
+                    return await self._refuse_binding(db, event, "gateway_provider_mismatch", [subscription])
+                if subscription.get("payment_gateway_bound_by") not in (None, "checkout"):
+                    return await self._refuse_binding(db, event, "gateway_binding_not_from_checkout", [subscription])
         if not subscription:
             logger.warning(
                 "Webhook %s references unknown gateway subscription %s",
@@ -192,6 +215,30 @@ class BillingWebhookService:
             "subscription_id": str(subscription["_id"]),
             "applied": {k: v for k, v in update.items() if k in {"status", "billing_status"}},
         }
+
+    async def _refuse_binding(self, db: Any, event: WebhookEvent, reason: str, subscriptions: Any) -> Dict[str, Any]:
+        """A payment event whose gateway binding cannot be trusted changes nothing; the refusal
+        is audited (per subscription named) for admin review."""
+        logger.error("Billing webhook %s refused: %s (gateway subscription %s)", event.event_id, reason, event.gateway_subscription_id)
+        audit = AuditEventService(db)
+        for subscription in subscriptions:
+            await audit.emit(
+                action="billing.webhook.binding_refused",
+                actor_id=f"system:webhook:{self.provider}",
+                resource_type="subscription",
+                resource_id=str(subscription.get("_id")),
+                organization_id=str(subscription.get("organization_id", "")),
+                project_id=subscription.get("project_id"),
+                result="failure",
+                reason=reason,
+                metadata={
+                    "requires_admin_review": True,
+                    "event_id": event.event_id,
+                    "event_type": event.event_type,
+                    "gateway_subscription_id": event.gateway_subscription_id,
+                },
+            )
+        return {"matched": False, "refused": reason}
 
     async def _expected_charge(self, db: Any, subscription: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Authoritative expected charge for the subscription's plan + period.

@@ -29,6 +29,9 @@ from ..models.rbac_monetization import (
 )
 from ..services.allocation_service import AllocationService
 from ..services.monetization_service import (
+    PROTECTED_GATEWAY_FIELDS,
+    GatewayIdentityChangeRefused,
+    GatewayIdentityConflict,
     MonetizationService,
     SubscriptionScopeChangeRefused,
     SubscriptionScopeConflict,
@@ -870,9 +873,42 @@ async def get_subscription(
     return (await _minimise_rows(current_user, [sub]))[0]
 
 
+class SubscriptionCreateRequest(SubscriptionCreate):
+    """The create body, with unknown keys captured (not ignored) so a gateway binding sent
+    under any spelling is seen and refused (owner decision 2026-11-20)."""
+
+    model_config = ConfigDict(extra="allow")
+
+
+def _gateway_keys_attempted(payload: BaseModel, stored: Optional[Dict[str, Any]] = None) -> bool:
+    """Whether the body tries to set, replace or clear a gateway binding: a protected model
+    field that differs from the stored value (or is set at all, on create), or any other key
+    that names a gateway identity, whatever its value (mass assignment is refused, never
+    silently dropped)."""
+    for field in PROTECTED_GATEWAY_FIELDS:
+        if field in payload.model_fields_set:
+            value = getattr(payload, field, None)
+            if stored is None:
+                if scope_text(value):
+                    return True
+            elif scope_text(value) != scope_text(stored.get(field)):
+                return True
+    for key in (payload.model_extra or {}):
+        normalised = _scope_key(key)
+        if "gateway" in normalised or normalised in {"paymentprovider", "provider"}:
+            return True
+    return False
+
+
+_GATEWAY_CHANGE_REFUSED = (
+    "A subscription's payment gateway binding is set only by checkout; it cannot be set, "
+    "replaced or cleared here"
+)
+
+
 @router.post("/subscriptions", response_model=Dict[str, Any])
 async def create_subscription(
-    payload: SubscriptionCreate,
+    payload: SubscriptionCreateRequest,
     request: Request,
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy_service),
@@ -885,7 +921,13 @@ async def create_subscription(
         project_id=payload.project_id,
         resource_type="subscription",
     )
-    return await MonetizationService().create_subscription(payload, current_user)
+    if _gateway_keys_attempted(payload):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_GATEWAY_CHANGE_REFUSED)
+    create = SubscriptionCreate(**payload.model_dump(include=set(SubscriptionCreate.model_fields)))
+    try:
+        return await MonetizationService().create_subscription(create, current_user)
+    except GatewayIdentityChangeRefused as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_GATEWAY_CHANGE_REFUSED) from exc
 
 
 class CheckoutRequest(BaseModel):
@@ -921,6 +963,8 @@ async def start_subscription_checkout(
             customer_name=payload.customer_name,
             customer_email=payload.customer_email,
         )
+    except GatewayIdentityConflict as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -965,11 +1009,15 @@ async def update_subscription(
         attempted += [value for key, value in extra.items() if _scope_key(key) in _SCOPE_FIELD_SPELLINGS[field]]
         if any(scope_text(value) != stored_scope[index] for value in attempted):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_SCOPE_CHANGE_REFUSED)
+    if _gateway_keys_attempted(payload, subscription):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_GATEWAY_CHANGE_REFUSED)
     update = SubscriptionUpdate(**payload.model_dump(include=set(SubscriptionUpdate.model_fields) & payload.model_fields_set))
     try:
         return await service.update_subscription(
             subscription_id, update, current_user, expected_scope=stored_scope
         )
+    except GatewayIdentityChangeRefused as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_GATEWAY_CHANGE_REFUSED) from exc
     except SubscriptionScopeChangeRefused as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_SCOPE_CHANGE_REFUSED) from exc
     except SubscriptionScopeConflict as exc:

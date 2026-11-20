@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -168,7 +169,9 @@ class NoOpPaymentGateway(PaymentGatewayInterface):
     async def create_subscription(
         self, *, gateway_customer_id: str, plan_code: str, billing_period: str, metadata: Optional[Dict[str, Any]] = None
     ) -> GatewaySubscription:
-        gateway_id = f"noop_sub_{gateway_customer_id}_{plan_code}"
+        # Unique per call: one gateway subscription id binds exactly one local subscription
+        # (2026-11-20), and two checkouts for the same plan (two projects) are two subscriptions.
+        gateway_id = f"noop_sub_{gateway_customer_id}_{plan_code}_{uuid.uuid4().hex[:16]}"
         logger.info("NoOpPaymentGateway: create_subscription(%s)", gateway_id)
         return GatewaySubscription(
             gateway_subscription_id=gateway_id,
