@@ -127,9 +127,12 @@ def test_flag_off_keeps_todays_behaviour(monkeypatch) -> None:
                     assert await _status(env, persona, "GET", path) == 200, (persona, path)
             # reports:view reaches subscription.usage.view (single subscription read).
             assert await _status(env, "def4_reporter", "GET", f"/subscriptions/sub-{ORG_A}") == 200
-            # Role-scoped listing returns full rows, financial fields included.
+            # Decision 4 (2026-11-20, both flag states): a project-tier caller's subscription
+            # listing is operational only; an organisation member keeps full rows.
             rows = (await env.client.get(f"{BASE}/subscriptions", headers=_headers("project_admin"))).json()
-            assert any(FINANCIAL_KEYS & set(row) for row in rows)
+            assert rows and not any(FINANCIAL_KEYS & set(row) for row in rows), rows
+            org_rows = (await env.client.get(f"{BASE}/subscriptions", headers=_headers("org_admin"))).json()
+            assert any(FINANCIAL_KEYS & set(row) for row in org_rows)
             # Project Admin may start a checkout for their project by role name (today).
             checkout = await _status(
                 env, "project_admin", "POST", "/subscriptions/checkout",
@@ -205,7 +208,9 @@ def test_flag_on_project_admin_sees_status_not_finance(monkeypatch) -> None:
             # Only their project: not the organisation's subscription, not the sibling project's.
             assert [row["id"] for row in rows] == [PROJECT_SUB], rows
             assert not (FINANCIAL_KEYS & set(rows[0])), rows[0]
-            assert rows[0]["status"] == "active" and rows[0]["plan_code"] == "dms_enterprise"
+            # Decision 4: status and expiry; no plan or add-on commercial detail.
+            assert rows[0]["status"] == "active" and rows[0]["current_period_end"].startswith("2027-01-01")
+            assert "plan_code" not in rows[0] and "active_add_ons" not in rows[0]
             # The organisation administrator sees full rows of the organisation.
             admin_rows = (await env.client.get(f"{BASE}/subscriptions", headers=_headers("org_admin"))).json()
             assert {row["id"] for row in admin_rows} >= {PROJECT_SUB, "sub-proj-a2", f"sub-{ORG_A}"}
@@ -241,14 +246,18 @@ def test_flag_on_effective_services_are_scoped_and_minimal(monkeypatch) -> None:
 
             user = await effective("project_user")
             assert set(user["projects"]) == {PROJ_A1}, user
-            assert set(user["projects"][PROJ_A1]) <= {"source", "status", "dms_enabled", "drafting_enabled", "features"}
+            assert set(user["projects"][PROJ_A1]) <= {"source", "status", "dms_enabled", "drafting_enabled", "features",
+                                                       "current_period_end", "trial", "trial_ends_at"}
             assert "plan_code" not in user["projects"][PROJ_A1]
             admin = await effective("project_admin")
             assert set(admin["projects"]) == {PROJ_A1}
             # The organisation entry stays operational-only for a project administrator.
             assert "plan_code" not in admin["organizations"].get(ORG_A, {}), admin["organizations"]
-            assert admin["projects"][PROJ_A1].get("plan_code") == "dms_enterprise", "status holders see the plan"
+            # Decision 4 (2026-11-20): Project Admin gets the minimum-disclosure view even with
+            # subscription.status.view: status, feature indicators, expiry; no plan detail.
+            assert "plan_code" not in admin["projects"][PROJ_A1]
             assert "billing_status" not in admin["projects"][PROJ_A1]
+            assert str(admin["projects"][PROJ_A1].get("current_period_end", "")).startswith("2027-01-01")
             org_admin = await effective("org_admin")
             assert set(org_admin["organizations"]) == {ORG_A}
             assert {PROJ_A1, PROJ_A2} <= set(org_admin["projects"])

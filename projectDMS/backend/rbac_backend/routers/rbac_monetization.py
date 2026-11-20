@@ -118,12 +118,15 @@ SUBSCRIPTION_STATUS_FIELDS = (
     "id", "organization_id", "project_id", "plan_code", "status", "starts_at", "ends_at",
     "current_period_end", "trial", "trial_ends_at", "active_add_ons",
 )
-#: Service availability a user needs to use the application (Decision 2).
-OPERATIONAL_SERVICE_FIELDS = ("source", "status", "dms_enabled", "drafting_enabled", "features")
+#: Service availability a user needs to use the application (Decision 2), with expiry
+#: (decision 4, 2026-11-20). ``features`` is reduced to boolean indicators.
+OPERATIONAL_SERVICE_FIELDS = (
+    "source", "status", "dms_enabled", "drafting_enabled", "features", "current_period_end", "trial", "trial_ends_at",
+)
 #: Plus what a subscription-status holder sees (Decision 1: subscription, entitlements, expiry).
+#: A project-tier caller is cut further to the operational view (decision 4).
 STATUS_SERVICE_FIELDS = OPERATIONAL_SERVICE_FIELDS + (
-    "plan_code", "plan_name", "current_period_end", "trial", "trial_ends_at", "active_add_ons",
-    "inherited_from_organization_id",
+    "plan_code", "plan_name", "active_add_ons", "inherited_from_organization_id",
 )
 
 
@@ -133,6 +136,98 @@ def _explicit_billing_policy() -> bool:
 
 def _only(row: Dict[str, Any], fields: tuple) -> Dict[str, Any]:
     return {key: row.get(key) for key in fields if key in row}
+
+
+# ---------------------------------------------------------------------------
+# Operational minimum disclosure (owner decision 4, 2026-11-20). Applies in both
+# BILLING_EXPLICIT_PERMISSIONS states: it narrows what is shown, it activates nothing.
+#
+# A Project Admin or Project User (a project-tier role without organisation-wide scope in
+# the organisation concerned) sees, for their own projects only: service status, enabled
+# feature indicators and expiry. Never prices, billing status or period, payment-gateway
+# ids, raw entitlement_overrides, add-on or plan commercial detail, audit fields, or any
+# other organisation's or project's data.
+# ---------------------------------------------------------------------------
+
+#: A subscription row, as a project-tier caller sees it.
+PROJECT_TIER_SUBSCRIPTION_FIELDS = (
+    "id", "organization_id", "project_id", "status", "starts_at", "ends_at",
+    "current_period_end", "trial", "trial_ends_at",
+)
+#: An effective service state, as a project-tier caller sees it (``features`` is added,
+#: reduced to boolean indicators by ``feature_indicators``).
+PROJECT_TIER_SERVICE_FIELDS = (
+    "source", "status", "dms_enabled", "drafting_enabled", "current_period_end", "trial", "trial_ends_at",
+)
+
+
+def feature_indicators(features: Any) -> Dict[str, bool]:
+    """Feature flags as booleans only. The merged plan features carry the subscription's
+    raw ``entitlement_overrides``, which may hold limits, prices or negotiated terms: a
+    non-boolean value is dropped, never shown."""
+    if not isinstance(features, dict):
+        return {}
+    return {str(key): value for key, value in features.items() if isinstance(value, bool)}
+
+
+def _operational_state(state: Dict[str, Any]) -> Dict[str, Any]:
+    reduced = _only(state, PROJECT_TIER_SERVICE_FIELDS)
+    reduced["features"] = feature_indicators(state.get("features"))
+    return reduced
+
+
+def _operational_subscription(row: Dict[str, Any]) -> Dict[str, Any]:
+    return _only(row, PROJECT_TIER_SUBSCRIPTION_FIELDS)
+
+
+async def _project_tier_in(current_user: CurrentUser, organization_id: Optional[str]) -> bool:
+    """Whether the caller answers as Project Admin / Project User in this organisation: a
+    project-tier role and no organisation-wide scope there. Super Admin never."""
+    scope = ScopeService()
+    if scope.is_superadmin(current_user):
+        return False
+    if not (scope.role_names(current_user) & PROJECT_SUBSCRIPTION_VIEW_ROLES):
+        return False
+    return not await scope.has_organization_wide_scope(current_user, organization_id=organization_id)
+
+
+async def _minimise_rows(current_user: CurrentUser, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    cache: Dict[str, bool] = {}
+    result = []
+    for row in rows:
+        org = str(row.get("organization_id") or "")
+        if org not in cache:
+            cache[org] = await _project_tier_in(current_user, org or None)
+        result.append(_operational_subscription(row) if cache[org] else row)
+    return result
+
+
+async def _minimise_effective(
+    current_user: CurrentUser, effective: Dict[str, Any], project_orgs: Dict[str, str]
+) -> Dict[str, Any]:
+    cache: Dict[str, bool] = {}
+
+    async def tier(org: str) -> bool:
+        if org not in cache:
+            cache[org] = await _project_tier_in(current_user, org or None)
+        return cache[org]
+
+    organizations = {}
+    for org, state in (effective.get("organizations") or {}).items():
+        organizations[org] = _operational_state(state) if await tier(str(org)) else state
+    projects = {}
+    for project, state in (effective.get("projects") or {}).items():
+        projects[project] = _operational_state(state) if await tier(project_orgs.get(str(project), "")) else state
+    return {**effective, "organizations": organizations, "projects": projects}
+
+
+def _project_orgs(settings_payload: Dict[str, Any]) -> Dict[str, str]:
+    return {
+        str(project.get("id") or project.get("_id") or ""): str(
+            project.get("organization_id") or project.get("organizationId") or ""
+        )
+        for project in settings_payload.get("projects", [])
+    }
 
 
 async def _granted_in(
@@ -381,7 +476,9 @@ async def get_plan_settings(
         )
         if not full_orgs:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Subscription history permission required")
-        return await service.get_plan_settings(organization_ids=sorted(full_orgs), project_ids=None)
+        return await _minimise_plan_settings(
+            current_user, await service.get_plan_settings(organization_ids=sorted(full_orgs), project_ids=None)
+        )
 
     organization_ids, project_ids = await _subscription_scope_filters(current_user)
     if not organization_ids and not project_ids:
@@ -389,10 +486,35 @@ async def get_plan_settings(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No subscription scope available",
         )
-    return await service.get_plan_settings(
+    payload = await service.get_plan_settings(
         organization_ids=organization_ids,
         project_ids=project_ids,
     )
+    return await _minimise_plan_settings(current_user, payload)
+
+
+async def _minimise_plan_settings(current_user: CurrentUser, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Decision 4 for /plan-settings: a project-tier caller's subscriptions and service
+    states are cut to the operational view, and organisations and projects to identity."""
+    tiers = {str(org.get("id") or org.get("_id") or ""): await _project_tier_in(current_user, str(org.get("id") or org.get("_id") or "") or None)
+             for org in payload.get("organizations", []) or []}
+    if not any(tiers.values()):
+        return payload
+    project_orgs = _project_orgs(payload)
+    identity = ("id", "name", "organization_id", "is_active")
+    return {
+        **payload,
+        "organizations": [
+            _only(org, identity) if tiers.get(str(org.get("id") or org.get("_id") or "")) else org
+            for org in payload.get("organizations", []) or []
+        ],
+        "projects": [
+            _only(project, identity) if tiers.get(project_orgs.get(str(project.get("id") or project.get("_id") or ""), "")) else project
+            for project in payload.get("projects", []) or []
+        ],
+        "subscriptions": await _minimise_rows(current_user, list(payload.get("subscriptions", []) or [])),
+        "effective": await _minimise_effective(current_user, payload.get("effective", {}) or {}, project_orgs),
+    }
 
 
 @router.get("/plan-settings/effective-services", response_model=Dict[str, Any])
@@ -426,20 +548,19 @@ async def get_effective_plan_services(
         )
 
     effective = settings.get("effective", {})
-    return {
-        "effective": {
-            "organizations": {
-                org_id: state
-                for org_id, state in (effective.get("organizations") or {}).items()
-                if org_id in allowed_orgs
-            },
-            "projects": {
-                project_id: state
-                for project_id, state in (effective.get("projects") or {}).items()
-                if project_id in allowed_projects
-            },
-        }
+    scoped = {
+        "organizations": {
+            org_id: state
+            for org_id, state in (effective.get("organizations") or {}).items()
+            if org_id in allowed_orgs
+        },
+        "projects": {
+            project_id: state
+            for project_id, state in (effective.get("projects") or {}).items()
+            if project_id in allowed_projects
+        },
     }
+    return {"effective": await _minimise_effective(current_user, scoped, project_orgs)}
 
 
 async def _minimal_effective_services(current_user: CurrentUser, settings_payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -469,9 +590,12 @@ async def _minimal_effective_services(current_user: CurrentUser, settings_payloa
     def cut(state: Dict[str, Any], full: bool, status_view: bool) -> Dict[str, Any]:
         if full:
             return dict(state)
-        return _only(state, STATUS_SERVICE_FIELDS if status_view else OPERATIONAL_SERVICE_FIELDS)
+        reduced = _only(state, STATUS_SERVICE_FIELDS if status_view else OPERATIONAL_SERVICE_FIELDS)
+        # Decision 4: indicators only; raw entitlement_overrides values never leave here.
+        reduced["features"] = feature_indicators(state.get("features"))
+        return reduced
 
-    return {
+    minimised = await _minimise_effective(current_user, {
         "organizations": {
             org: cut(state, org in full_orgs, org in status_orgs)
             for org, state in (effective.get("organizations") or {}).items()
@@ -482,7 +606,8 @@ async def _minimal_effective_services(current_user: CurrentUser, settings_payloa
             for project, state in (effective.get("projects") or {}).items()
             if project in projects
         },
-    }
+    }, project_orgs)
+    return minimised
 
 
 @router.put("/plan-settings/scope", response_model=Dict[str, Any])
@@ -613,20 +738,20 @@ async def list_subscriptions(
     if organization_id:
         if str(organization_id) not in {str(org_id) for org_id in allowed_orgs or []}:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Subscription scope denied")
-        return await MonetizationService().list_subscriptions(
+        return await _minimise_rows(current_user, await MonetizationService().list_subscriptions(
             organization_id=organization_id,
             project_ids=allowed_projects,
-        )
+        ))
 
     if not allowed_orgs and not allowed_projects:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No organization scope available for subscription usage",
         )
-    return await MonetizationService().list_subscriptions(
+    return await _minimise_rows(current_user, await MonetizationService().list_subscriptions(
         organization_ids=allowed_orgs,
         project_ids=allowed_projects,
-    )
+    ))
 
 
 async def _explicit_subscription_list(
@@ -666,7 +791,7 @@ async def _explicit_subscription_list(
             visible.append(row)
         elif status_view:
             visible.append(_only(row, SUBSCRIPTION_STATUS_FIELDS))
-    return visible
+    return await _minimise_rows(current_user, visible)
 
 
 @router.get("/subscriptions/{subscription_id}", response_model=Dict[str, Any])
@@ -687,7 +812,7 @@ async def get_subscription(
         project_id=sub.get("project_id"),
         resource_type="subscription",
     )
-    return sub
+    return (await _minimise_rows(current_user, [sub]))[0]
 
 
 @router.post("/subscriptions", response_model=Dict[str, Any])
