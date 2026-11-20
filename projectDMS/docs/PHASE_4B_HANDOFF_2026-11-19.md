@@ -223,8 +223,8 @@ It is the main code-side blocker to DEF-4 activation, and it needs no production
 | F3 package scope (`8eefa27`, `f09d9be`) | Yes | Yes | Yes: run 44765102151 (Gitleaks red, known) | No | No |
 | Gateway identity protection (`da322ae`, `7cabfdf`, `f64ac9f`) | Yes | Yes (26 real-Mongo) | Yes: run 44786462934 on `51c192e` (backend 8,436; real-Mongo 1,183 in 89 modules; Gitleaks red, known) | No | No |
 | Migration `20261124_0001` | Yes, not run anywhere but empty DBs | Gate 6 fresh install 33/33 (sandbox-CA caveat) | Yes: run 44786462934 (gate-6 pin 33) | No | No |
-| Entitlement resolution and lifecycle guard (`5740b06` to `6fc0705`) | Yes | Yes (38 real-Mongo) | Yes: run 44789094291 on `b51de70` (Gitleaks red, known) | No | No |
-| P-05 `subscription_security_impact` | Yes (read-only) | Yes | Yes: run 44789094291 on `b51de70` (Gitleaks red, known) | No | Not run on production |
+| Entitlement resolution and lifecycle guard (`5740b06` to `6fc0705`) | Yes | Yes (38 real-Mongo) | Yes: run 44791457632 on `0cb99f0` (Gitleaks red, known) | No | No |
+| P-05 `subscription_security_impact` | Yes (read-only) | Yes | Yes: run 44791457632 on `0cb99f0` (Gitleaks red, known) | No | Not run on production |
 | Gateway re-binding | Design only | - | - | No | No |
 | Package transfer | Design only | - | - | No | No |
 
@@ -233,7 +233,7 @@ It is the main code-side blocker to DEF-4 activation, and it needs no production
 - **CI run 44786462934 on `51c192e`** (gateway code, entitlement to `d37824e`, Gate 6 pins 33): backend 8,436 passed, 1,278 skipped, 4 xfailed; exhibit confinement 20; real MongoDB "all 89 module(s) ran: 1183 test case(s)", 1,183 passed; frontend (lint, unit, mocked Playwright, build), dependency scan and Docker build/scan passed; Gitleaks failed on the 2 known findings.
 - **CI run 44789094291 on `b51de70`** (all remediation code): backend 8,436 passed, 1,290 skipped, 4 xfailed; exhibit confinement 20; real MongoDB "all 89 module(s) ran: 1195 test case(s)", 1,195 passed; frontend, dependency scan and Docker build/scan passed; Gitleaks failed on the 2 known findings.
 - **Local, quiet worktree at `6fc0705`** (real Redis on 6390, replica set on 27018): real MongoDB 89 CI modules, 1,196 passed, 0 failed, 0 skipped; full backend suite 9,616 passed, 375 skipped, 4 xfailed, 0 failed. `pre-commit run mypy --all-files` passed; ruff unchanged from the previous head on every touched file.
-- **Later heads:** `6fc0705` (test-only) and `0cb99f0` and after (docs-only) carry the same code as `b51de70`; their runs (44791174786, 44791457632, and the run on this commit) were in progress when this was written and are reported in the final report.
+- **Final code, CI run 44791457632 on `0cb99f0`** (same code as `6fc0705`; later commits are docs-only): backend 8,436 passed, 1,291 skipped, 4 xfailed; exhibit confinement 20; real MongoDB "all 89 module(s) ran: 1196 test case(s)", 1,196 passed, none skipped; frontend (lint, unit, mocked Playwright, build), dependency scan and Docker build/scan passed; **Gitleaks failed** on the 2 known findings.
 - CI success is not security approval.
 
 **Next dependency-ready work** is unchanged: the M1 shadow-mode evaluator behind `BUILT_IN_ROLE_ASSIGNMENTS`, default `off`. The open billing items above need owner decisions first.

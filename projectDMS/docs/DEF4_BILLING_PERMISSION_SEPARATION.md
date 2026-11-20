@@ -804,7 +804,7 @@ Gitleaks failed in both runs, on the 2 known findings. Locally on `f09d9be`: 1,1
 
 P-05 `subscription_security_impact` counts each case. **Read it before release.**
 
-**CI (§14 and §15 code):** run 44789094291 on `b51de70`: backend 8,436 passed; real MongoDB 1,195 passed across 89 modules, none skipped; frontend, dependency scan and Docker passed; Gitleaks red on the 2 known findings. Local quiet worktree at `6fc0705`: real MongoDB 1,196 passed; backend 9,616 passed, 0 failed. Not security approval.
+**CI (§14 and §15 code):** run 44791457632 on `0cb99f0` (final code): backend 8,436 passed; real MongoDB 1,196 passed across 89 modules, none skipped; frontend, dependency scan and Docker passed; Gitleaks red on the 2 known findings. Local quiet worktree at `6fc0705`: real MongoDB 1,196 passed; backend 9,616 passed, 0 failed. Not security approval.
 
 ## 15. Gateway identity protection (owner decision 2026-11-20, immediate)
 
