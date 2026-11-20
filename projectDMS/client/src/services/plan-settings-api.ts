@@ -129,18 +129,27 @@ export async function getPlanSettings(): Promise<PlanSettingsResponse> {
   return data;
 }
 
+/**
+ * A plan change is a durable server operation (R6-7): it cancels the old gateway
+ * subscriptions before installing the new plan. Pass the same `idempotencyKey` when retrying
+ * a failed change so the server continues that operation instead of starting another; one is
+ * generated when none is given.
+ */
 export async function updatePlanSettingsScope(
   payload: PlanSettingsScopePayload,
-  options?: { stepUpToken?: string }
+  options?: { stepUpToken?: string; idempotencyKey?: string }
 ): Promise<PlanSettingsResponse> {
+  const idempotencyKey =
+    options?.idempotencyKey ??
+    (typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const headers: Record<string, string> = { "Idempotency-Key": idempotencyKey };
+  if (options?.stepUpToken) headers["X-Step-Up-Token"] = options.stepUpToken;
   const { data } = await api.put<PlanSettingsResponse>(
     "/rbac-monetization/plan-settings/scope",
     payload,
-    {
-      headers: options?.stepUpToken
-        ? { "X-Step-Up-Token": options.stepUpToken }
-        : undefined,
-    }
+    { headers }
   );
   return data;
 }

@@ -109,7 +109,31 @@ class FakeCollection:
                 count += 1
         return type("FakeResult", (), {"modified_count": count})()
 
+    async def find_one_and_update(self, filter_doc, update_doc, upsert=False, return_document=None):
+        # Operators ($or, ...) are ignored like the other fakes' range operators.
+        plain = {key: value for key, value in filter_doc.items() if not key.startswith("$")}
+        for d in self.data:
+            if self._matches(d, plain):
+                before = dict(d)
+                d.update(update_doc.get("$set", {}))
+                return d if return_document else before
+        if upsert:
+            self.data.append({"_id": filter_doc.get("_id"), **update_doc.get("$set", {})})
+        return None
+
+    async def delete_one(self, query):
+        self.deleted.append(query)
+        for index, d in enumerate(self.data):
+            if self._matches(d, query or {}):
+                del self.data[index]
+                return type("FakeResult", (), {"deleted_count": 1})()
+        return type("FakeResult", (), {"deleted_count": 0})()
+
     async def insert_one(self, doc):
+        from pymongo.errors import DuplicateKeyError
+
+        if "_id" in doc and any(d.get("_id") == doc["_id"] for d in self.data):
+            raise DuplicateKeyError("duplicate _id")
         inserted_id = doc.get("_id", f"inserted_{len(self.data) + 1}")
         saved = {**doc, "_id": inserted_id}
         self.inserted.append(saved)
@@ -141,6 +165,12 @@ class FakeDB:
         self.billing_records = FakeCollection()
         self.plans = FakeCollection()
         self.audit_events = FakeCollection()
+
+    def __getitem__(self, name):
+        # db["collection"], as Motor allows (the durable operation store uses it).
+        if not hasattr(self, name):
+            setattr(self, name, FakeCollection())
+        return getattr(self, name)
 
 
 @pytest.mark.asyncio

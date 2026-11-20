@@ -28,6 +28,7 @@ from ..models.rbac_monetization import (
     UsageEventCreate,
 )
 from ..services.allocation_service import AllocationService
+from ..services.subscription_operations import IdempotencyKeyReused, OperationConflict
 from ..services.monetization_service import (
     PROTECTED_GATEWAY_FIELDS,
     GatewayIdentityChangeRefused,
@@ -36,6 +37,7 @@ from ..services.monetization_service import (
     SubscriptionScopeChangeRefused,
     GatewayOperationFailed,
     SubscriptionNotGoverning,
+    SubscriptionOperationIncomplete,
     SubscriptionReactivationRefused,
     TrialConversionRefused,
     SubscriptionScopeConflict,
@@ -674,13 +676,80 @@ async def update_plan_settings_scope(
         project_id=payload.project_id,
         resource_type="plan_settings",
     )
+    key = (request.headers.get("Idempotency-Key") or "").strip() or None
+    if key is not None and len(key) > 128:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Idempotency-Key is longer than 128 characters")
     try:
-        return await MonetizationService().update_plan_settings_scope(payload, current_user)
+        return await MonetizationService().update_plan_settings_scope(payload, current_user, idempotency_key=key)
+    except (OperationConflict, IdempotencyKeyReused) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except SubscriptionOperationIncomplete as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"message": str(exc), "operation_id": exc.operation_id},
+        ) from exc
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
+
+
+@router.get("/plan-settings/operations", response_model=List[Dict[str, Any]])
+async def list_open_subscription_operations(
+    organization_id: Optional[str] = Query(default=None),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """R6-7: unfinished gateway-consistent operations (cancellations the gateway has not
+    confirmed, subscriptions changed meanwhile, operations interrupted) for review. Super
+    Admin only, as Plan Settings changes are."""
+    if not ScopeService().is_superadmin(current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only superadmins can review plan operations")
+    return await MonetizationService().list_open_subscription_operations(organization_id)
+
+
+@router.post("/plan-settings/operations/{operation_id}/retry", response_model=Dict[str, Any])
+async def retry_subscription_operation(
+    operation_id: str,
+    request: Request,
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
+):
+    """R6-7: continue an unfinished plan-settings operation where it stopped (confirmed
+    gateway cancellations are not repeated). Same authority as the change itself."""
+    if not ScopeService().is_superadmin(current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only superadmins can retry plan operations")
+    await require_step_up(request, current_user, action="subscription.entitlement.manage")
+    service = MonetizationService()
+    stored = await service.get_subscription_operation(operation_id)
+    if not stored:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Operation not found")
+    await policy.authorize(
+        current_user,
+        Permissions.SUBSCRIPTION_ENTITLEMENT_MANAGE,
+        organization_id=stored["organization_id"],
+        project_id=stored.get("project_id"),
+        resource_type="plan_settings",
+    )
+    asked = stored.get("request") or {}
+    payload = PlanSettingsScopeUpdate(
+        organization_id=stored["organization_id"], project_id=stored.get("project_id"), mode=asked.get("mode"),
+        plan_code=None if asked.get("mode") != "plan" else asked.get("plan_code"),
+        billing_period=asked.get("billing_period"), status=asked.get("status") or "active",
+    )
+    try:
+        return await service.update_plan_settings_scope(payload, current_user, resume_operation_id=operation_id)
+    except (OperationConflict, IdempotencyKeyReused) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except SubscriptionOperationIncomplete as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={"message": str(exc), "operation_id": exc.operation_id},
+        ) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Operation not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------

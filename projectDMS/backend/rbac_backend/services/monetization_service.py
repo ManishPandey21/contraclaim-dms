@@ -80,6 +80,17 @@ class SubscriptionReactivationRefused(Exception):
     """A reactivation that would revive an ended, replaced or ineligible subscription (R6-6)."""
 
 
+class SubscriptionOperationIncomplete(Exception):
+    """A durable operation stopped with work unresolved (R6-7); retry or review it."""
+
+    def __init__(self, operation_id: str, unresolved: int) -> None:
+        super().__init__(
+            f"The gateway did not confirm every cancellation ({unresolved} unresolved); the replacement was not "
+            f"installed. Retry operation {operation_id}, or resolve it from the review queue"
+        )
+        self.operation_id = operation_id
+
+
 class GatewayOperationFailed(Exception):
     """The payment gateway did not complete an operation; nothing was changed locally."""
 
@@ -2113,92 +2124,222 @@ class MonetizationService:
         self,
         payload: PlanSettingsScopeUpdate,
         current_user: Any,
+        *,
+        idempotency_key: Optional[str] = None,
+        resume_operation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """Replace (plan / no-service) or remove (inherit) a scope's subscriptions - with the
+        gateway kept consistent (R6-7, owner decision 2026-11-21).
+
+        Before, the scope's rows were cancelled with one ``update_many`` and the gateway was
+        never told, so a paid gateway subscription kept billing unnoticed. Now, as a durable
+        operation (``services.subscription_operations``):
+
+        1. the intent is recorded first, under the caller's idempotency key (a retry finds
+           the same operation; a completed one is not repeated; the same key with a different
+           request is refused), and the scope is locked against other plan changes;
+        2. every affected subscription (not yet cancelled) is listed in the operation;
+        3. each gateway-bound one is cancelled through the provider API (at the end of the
+           paid cycle: no further charge, no refund);
+        4. the result is recorded per subscription: confirmed, or failed (exception class);
+        5. a subscription is cancelled locally only when its gateway cancellation is
+           confirmed or it has no gateway binding (compare-and-set on its status, so a
+           subscription changed meanwhile is left alone and flagged);
+        6. if any gateway cancellation failed or a row changed meanwhile, the new plan is
+           **not** installed and the operation is ``needs_review``: a retry (same key, or the
+           operation's retry) continues where it stopped without repeating confirmed calls;
+        7. unfinished operations are listed for administrators (``open_operations``).
+
+        The replacement plan is installed only once every old subscription is resolved, with
+        an id derived from the operation, so a retry cannot install it twice.
+        """
+        from . import subscription_operations as ops
+        from .subscription_resolution import GOVERNING_STATUSES
+
         db = await self._get_db()
         org_id = str(payload.organization_id)
         project_id = str(payload.project_id) if payload.project_id else None
         await self._validate_plan_settings_scope(db, org_id, project_id)
 
+        plan_code: Optional[str] = None
+        billing_period = payload.billing_period or "monthly"
         if payload.mode == PlanSettingsMode.INHERIT:
             if not project_id:
                 raise ValueError("inherit mode is valid only for project scope")
-            await db.subscriptions.update_many(
-                self._subscription_scope_query(org_id, project_id),
-                {
-                    "$set": {
-                        "status": "cancelled",
-                        "billing_status": "inactive",
-                        "updated_at": datetime.utcnow(),
-                        "updated_by": getattr(current_user, "id", None),
-                    }
-                },
-            )
-            await self.audit_service.emit(
-                action="subscription.project_override_removed",
-                actor_id=getattr(current_user, "id", None),
-                resource_type="subscription",
-                organization_id=org_id,
-                project_id=project_id,
-            )
-            return await self.get_plan_settings()
+        else:
+            plan_code = "no_service_override" if payload.mode == PlanSettingsMode.NO_SERVICE else payload.plan_code
+            if not plan_code:
+                raise ValueError("plan_code is required for plan mode")
+            if not await self.validate_plan_code(plan_code):
+                raise ValueError(f"Plan '{plan_code}' not found or inactive")
+            if billing_period not in {period.value for period in BillingPeriod}:
+                raise ValueError(f"Unsupported billing period '{billing_period}'")
+        status_value = payload.status.value if hasattr(payload.status, "value") else str(payload.status)
+        request = {"mode": str(getattr(payload.mode, "value", payload.mode)), "plan_code": plan_code,
+                   "billing_period": billing_period if plan_code else None, "status": status_value}
+        kind = "plan_settings_inherit" if payload.mode == PlanSettingsMode.INHERIT else "plan_settings_replacement"
+        actor = getattr(current_user, "id", None)
 
-        plan_code = payload.plan_code
-        if payload.mode == PlanSettingsMode.NO_SERVICE:
-            plan_code = "no_service_override"
-        if not plan_code:
-            raise ValueError("plan_code is required for plan mode")
-        if not await self.validate_plan_code(plan_code):
-            raise ValueError(f"Plan '{plan_code}' not found or inactive")
+        if resume_operation_id:
+            stored_op = await db[ops.OPERATIONS].find_one(
+                {"_id": resume_operation_id, "organization_id": org_id, "project_id": project_id}
+            )
+            if not stored_op:
+                raise LookupError("Operation not found")
+            if stored_op.get("request") != request:
+                raise ops.IdempotencyKeyReused("The retry must repeat the operation's own request")
+            op = await self._resume_operation(db, stored_op)
+        else:
+            op = await ops.begin(db, kind=kind, organization_id=org_id, project_id=project_id,
+                                 idempotency_key=idempotency_key, request=request, requested_by=actor)
+        if op.get("status") == "completed":
+            return {**await self.get_plan_settings(), "operation": self._operation_summary(op)}
+        op_id = op["_id"]
+        await ops.lock_scope(db, org_id, project_id, op_id)
+        try:
+            items = list(op.get("items") or [])
+            known = {item["subscription_id"] for item in items}
+            for row in await db.subscriptions.find(
+                {**self._subscription_scope_query(org_id, project_id), "status": {"$ne": "cancelled"},
+                 "created_by_operation": {"$ne": op_id}}
+            ).to_list(length=None):
+                if str(row["_id"]) not in known:
+                    items.append({"subscription_id": str(row["_id"]), "status_before": row.get("status"),
+                                  "gateway_bound": bool(scope_text(row.get("payment_gateway_subscription_id"))),
+                                  "gateway": "pending", "attempts": 0, "last_error": None, "local": "unchanged"})
+            await ops.save_items(db, op_id, items)
 
-        billing_period = payload.billing_period or "monthly"
-        allowed_periods = {period.value for period in BillingPeriod}
-        if billing_period not in allowed_periods:
-            raise ValueError(f"Unsupported billing period '{billing_period}'")
-        now = datetime.utcnow()
-        query = self._subscription_scope_query(org_id, project_id)
-        await db.subscriptions.update_many(
-            query,
-            {
-                "$set": {
-                    "status": "cancelled",
-                    "billing_status": "inactive",
-                    "updated_at": now,
-                    "updated_by": getattr(current_user, "id", None),
+            for item in items:
+                if item["local"] == "cancelled":
+                    continue
+                row = await db.subscriptions.find_one({"_id": self._lookup_id(item["subscription_id"])})
+                if row is None:
+                    item["local"] = "changed_meanwhile"
+                    continue
+                if item["gateway"] in {"pending", "failed"}:
+                    if not item["gateway_bound"]:
+                        item["gateway"] = "not_bound"
+                    else:
+                        item["attempts"] += 1
+                        try:
+                            await self._gateway().cancel_subscription(
+                                gateway_subscription_id=row["payment_gateway_subscription_id"], immediate=False)
+                            item["gateway"], item["last_error"] = "confirmed", None
+                        except Exception as exc:  # recorded, retried later; never treated as done
+                            item["gateway"], item["last_error"] = "failed", type(exc).__name__
+                        await ops.save_items(db, op_id, items)
+                if item["gateway"] not in {"confirmed", "not_bound"}:
+                    continue
+                now = datetime.utcnow()
+                changed = await db.subscriptions.update_one(
+                    {"_id": row["_id"], "status": item["status_before"]},
+                    {"$set": {"status": "cancelled", "billing_status": "inactive", "cancelled_at": now,
+                              "cancellation_reason": "replaced_by_plan_settings", "auto_renew": False,
+                              "cancellation_operation_id": op_id, "updated_at": now, "updated_by": actor}},
+                )
+                if changed.matched_count:
+                    item["local"] = "cancelled"
+                    await self._record_history(
+                        subscription_id=item["subscription_id"], organization_id=org_id, project_id=project_id,
+                        change_type=SubscriptionChangeType.CANCELLATION, from_status=item["status_before"],
+                        to_status="cancelled", changed_by=actor,
+                        metadata={"operation_id": op_id, "gateway": item["gateway"], "reason": "replaced_by_plan_settings"},
+                    )
+                else:
+                    item["local"] = "changed_meanwhile"
+                await ops.save_items(db, op_id, items)
+
+            unresolved = [item for item in items if item["local"] != "cancelled"]
+            if unresolved:
+                await ops.finish(db, op_id, "needs_review", items=items)
+                await self.audit_service.emit(
+                    action="subscription.plan_settings_operation_needs_review",
+                    actor_id=actor, resource_type="subscription_operation", resource_id=op_id,
+                    organization_id=org_id, project_id=project_id, result="failure",
+                    reason="gateway_cancellation_incomplete",
+                    metadata={"requires_admin_review": True, "unresolved": len(unresolved), "items": len(items)},
+                )
+                raise SubscriptionOperationIncomplete(op_id, len(unresolved))
+
+            result: Dict[str, Any] = {}
+            if plan_code:
+                now = datetime.utcnow()
+                doc = {
+                    "_id": f"{op_id}:plan", "organization_id": org_id, "project_id": project_id, "package_id": None,
+                    "plan_code": plan_code, "billing_period": billing_period, "status": status_value,
+                    # Set by an administrator, not paid at the gateway (never "active" billing, R6-5).
+                    "billing_status": "plan_settings",
+                    "entitlement_overrides": {}, "trial": False, "pilot": False, "auto_renew": False,
+                    "active_add_ons": [], "current_period_start": now,
+                    "current_period_end": self._compute_period_end(now, billing_period),
+                    "created_by_operation": op_id, "created_at": now, "updated_at": now,
+                    "created_by": actor, "updated_by": actor,
                 }
-            },
-        )
-        doc = {
-            "organization_id": org_id,
-            "project_id": project_id,
-            "package_id": None,
-            "plan_code": plan_code,
-            "billing_period": billing_period,
-            "status": payload.status.value if hasattr(payload.status, "value") else str(payload.status),
-            "billing_status": "active",
-            "entitlement_overrides": {},
-            "trial": False,
-            "pilot": False,
-            "auto_renew": True,
-            "active_add_ons": [],
-            "current_period_start": now,
-            "current_period_end": self._compute_period_end(now, billing_period),
-            "created_at": now,
-            "updated_at": now,
-            "created_by": getattr(current_user, "id", None),
-            "updated_by": getattr(current_user, "id", None),
-        }
-        from .subscription_resolution import GOVERNING_STATUSES
+                if status_value.strip().lower() in GOVERNING_STATUSES:
+                    doc["governing_since"] = now
+                try:
+                    await db.subscriptions.insert_one(doc)
+                    await self.audit_service.emit(
+                        action="subscription.scope_plan_set", actor_id=actor, resource_type="subscription",
+                        resource_id=doc["_id"], organization_id=org_id, project_id=project_id, after=doc,
+                        metadata={"operation_id": op_id},
+                    )
+                except DuplicateKeyError:
+                    pass  # installed by an earlier attempt of this operation
+                result["new_subscription_id"] = doc["_id"]
+            else:
+                await self.audit_service.emit(
+                    action="subscription.project_override_removed", actor_id=actor, resource_type="subscription",
+                    organization_id=org_id, project_id=project_id, metadata={"operation_id": op_id},
+                )
+            await ops.finish(db, op_id, "completed", result=result, items=items)
+            done = await db[ops.OPERATIONS].find_one({"_id": op_id})
+            return {**await self.get_plan_settings(), "operation": self._operation_summary(done or {})}
+        finally:
+            await ops.unlock_scope(db, org_id, project_id, op_id)
 
-        if str(doc.get("status") or "").strip().lower() in GOVERNING_STATUSES:
-            doc["governing_since"] = now
-        result = await db.subscriptions.insert_one(doc)
-        await self.audit_service.emit(
-            action="subscription.scope_plan_set",
-            actor_id=getattr(current_user, "id", None),
-            resource_type="subscription",
-            resource_id=str(result.inserted_id),
-            organization_id=org_id,
-            project_id=project_id,
-            after=doc,
+    async def _resume_operation(self, db: Any, op: Dict[str, Any]) -> Dict[str, Any]:
+        """Resume an unfinished operation by id (administrator retry)."""
+        from pymongo import ReturnDocument
+
+        from . import subscription_operations as ops
+
+        if op.get("status") == "completed":
+            return op
+        now = datetime.utcnow()
+        resumed = await db[ops.OPERATIONS].find_one_and_update(
+            {"_id": op["_id"], "$or": [{"status": "needs_review"}, {"lease_until": {"$lt": now}}]},
+            {"$set": {"status": "in_progress", "lease_until": now + ops.LEASE, "updated_at": now},
+             "$inc": {"attempts": 1}},
+            return_document=ReturnDocument.AFTER,
         )
-        return await self.get_plan_settings()
+        if resumed is None:
+            raise ops.OperationConflict("This operation is already in progress")
+        return resumed
+
+    @staticmethod
+    def _operation_summary(op: Dict[str, Any]) -> Dict[str, Any]:
+        items = op.get("items") or []
+        return {
+            "id": op.get("_id"), "kind": op.get("kind"), "status": op.get("status"), "attempts": op.get("attempts"),
+            "items": [{key: item.get(key) for key in ("subscription_id", "gateway_bound", "gateway", "local",
+                                                      "attempts", "last_error")} for item in items],
+            "result": op.get("result") or {},
+        }
+
+    async def get_subscription_operation(self, operation_id: str) -> Optional[Dict[str, Any]]:
+        from . import subscription_operations as ops
+
+        db = await self._get_db()
+        return await db[ops.OPERATIONS].find_one({"_id": str(operation_id)})
+
+    async def list_open_subscription_operations(self, organization_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Unfinished durable operations for the administrator review queue (R6-7)."""
+        from . import subscription_operations as ops
+
+        db = await self._get_db()
+        return [
+            {**self._operation_summary({**row, "_id": row["id"]}), "organization_id": row.get("organization_id"),
+             "project_id": row.get("project_id"), "request": row.get("request"), "updated_at": row.get("updated_at")}
+            for row in await ops.open_operations(db, organization_id)
+        ]

@@ -371,8 +371,15 @@ def test_f2_concurrent_plan_settings_writes_resolve_deterministically(monkeypatc
                 await MonetizationService(env.db).update_plan_settings_scope(
                     PlanSettingsScopeUpdate(organization_id=ORG, mode=PlanSettingsMode.PLAN, plan_code=plan), actor)
 
+            from rbac_backend.services.subscription_operations import OperationConflict
+
             for _ in range(10):
-                await asyncio.gather(set_plan("dms_starter"), set_plan("dms_professional"), set_plan("dms_enterprise"))
+                # R6-7: plan-settings changes of one scope are serialised (scope lock); a
+                # concurrent one is refused, never interleaved. At least one lands each round.
+                outcomes = await asyncio.gather(set_plan("dms_starter"), set_plan("dms_professional"),
+                                                set_plan("dms_enterprise"), return_exceptions=True)
+                assert all(o is None or isinstance(o, OperationConflict) for o in outcomes), outcomes
+                assert any(o is None for o in outcomes), outcomes
                 rows = await env.db.subscriptions.find({"organization_id": ORG, "project_id": None}).to_list(length=None)
                 latest = max(_governing(rows), key=lambda r: (r["governing_since"], str(r["_id"])))
                 allowed, reason, diagnostic = await _check(env, project=None)
@@ -458,7 +465,11 @@ def test_r1_mixed_concurrent_writers_never_lock_a_tier_out(monkeypatch) -> None:
                         SubscriptionCreate(organization_id=ORG, plan_code="dms_enterprise"), actor))
                     writers.append(MonetizationService(env.db).update_plan_settings_scope(
                         PlanSettingsScopeUpdate(organization_id=ORG, mode=PlanSettingsMode.PLAN, plan_code="dms_starter"), actor))
-                await asyncio.gather(*writers)
+                from rbac_backend.services.subscription_operations import OperationConflict
+
+                outcomes = await asyncio.gather(*writers, return_exceptions=True)
+                # Plan-settings writers of one scope are serialised (R6-7): the losers are refused.
+                assert all(not isinstance(o, BaseException) or isinstance(o, OperationConflict) for o in outcomes), outcomes
                 rows = await env.db.subscriptions.find({"organization_id": ORG, "project_id": None}).to_list(length=None)
                 latest = max(_governing(rows), key=lambda r: (r["governing_since"], str(r["_id"])))
                 allowed, reason, diagnostic = await _check(env, project=None)
