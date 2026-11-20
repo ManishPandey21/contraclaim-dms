@@ -34,6 +34,7 @@ from ..services.monetization_service import (
     GatewayIdentityConflict,
     MonetizationService,
     SubscriptionScopeChangeRefused,
+    SubscriptionNotGoverning,
     SubscriptionScopeConflict,
     scope_text,
     subscription_scope,
@@ -1084,6 +1085,8 @@ async def upgrade_subscription(
     )
     try:
         return await service.upgrade_subscription(subscription_id, payload, current_user)
+    except SubscriptionNotGoverning as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -1110,6 +1113,8 @@ async def downgrade_subscription(
     )
     try:
         return await service.downgrade_subscription(subscription_id, payload, current_user)
+    except SubscriptionNotGoverning as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -1185,6 +1190,8 @@ async def change_billing_period(
     )
     try:
         return await service.change_billing_period(subscription_id, payload, current_user)
+    except SubscriptionNotGoverning as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -1210,6 +1217,8 @@ async def add_subscription_addon(
     )
     try:
         return await service.add_addon(subscription_id, payload, current_user)
+    except SubscriptionNotGoverning as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -1235,6 +1244,8 @@ async def remove_subscription_addon(
     )
     try:
         return await service.remove_addon(subscription_id, payload, current_user)
+    except SubscriptionNotGoverning as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 

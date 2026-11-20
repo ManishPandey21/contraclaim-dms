@@ -247,6 +247,12 @@ def test_the_p05_subscription_security_reading_counts_the_impact(monkeypatch) ->
                 _sub("r-p2-due", status="past_due", project=P2, updated_at=old),  # no fallback any more
                 _sub("r-p2-cancel", status="cancelled", project=P2, updated_at=new),  # shadowed r-p2-due before
                 _sub("r-odd", status="mystery", project="proj-ent-3"),
+                # N5: ended rows never govern, so two of them are not ambiguous ...
+                _sub("r-end-a", status="active", project="proj-ent-7", ends_at=old - timedelta(days=1)),
+                _sub("r-end-b", status="active", project="proj-ent-7", ends_at=old - timedelta(days=1)),
+                # ... and an unreadable stamp does not order a pair (still ambiguous).
+                _sub("r-bad-a", status="active", project="proj-ent-8", governing_since="not a date"),
+                _sub("r-bad-b", status="active", project="proj-ent-8"),
                 _sub("r-gw-1", status="cancelled", project="proj-ent-4", payment_gateway_subscription_id="gw-dup",
                      payment_provider="razorpay", payment_gateway_customer_id="c1"),
                 _sub("r-gw-2", status="cancelled", project="proj-ent-5", payment_gateway_subscription_id="gw-dup",
@@ -266,7 +272,7 @@ def test_the_p05_subscription_security_reading_counts_the_impact(monkeypatch) ->
                 assert sync_db["subscriptions"].count_documents({}) == before
             finally:
                 client.close()
-            assert reading["ambiguous_scopes_by_organization"].get(ORG) == 1, reading
+            assert reading["ambiguous_scopes_by_organization"].get(ORG) == 2, reading
             assert reading["blocking_project_scopes_by_organization"].get(ORG) == 1
             assert reading["scopes_previously_shadowed_by_a_non_governing_row"] >= 1
             assert reading["unknown_status_rows"] >= 1
@@ -503,5 +509,137 @@ def test_r3_trials_and_future_rows_never_displace_a_working_subscription_for_goo
                                                   {"$set": {"trial_ends_at": now - timedelta(hours=1)}})
             allowed, reason, diagnostic = await _check(env)
             assert (allowed, reason, diagnostic["subscription_id"]) == (True, "dms_entitlement", "paid")
+
+    _run(scenario())
+
+
+# ---------------------------------------------------------------------------------------
+# Re-review of d37824e, N1/N2: plan, billing-period and add-on changes are refused on a row
+# that does not govern its scope, before the gateway is touched.
+# ---------------------------------------------------------------------------------------
+
+
+def _record_gateway_calls(monkeypatch: Any) -> list:
+    from rbac_backend.services.monetization_service import MonetizationService
+
+    calls: list = []
+
+    async def recorded(self: Any, sub: Dict[str, Any], **kwargs: Any) -> None:
+        calls.append((str(sub.get("id") or sub.get("_id")), kwargs))
+
+    monkeypatch.setattr(MonetizationService, "_gateway_change", recorded)
+    return calls
+
+
+def test_n1_lifecycle_changes_on_an_outranked_row_are_refused_before_the_gateway(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            from rbac_backend.models.rbac_monetization import (
+                AddOnActionRequest,
+                ChangeBillingPeriodRequest,
+                UpgradeDowngradeRequest,
+            )
+            from rbac_backend.services.monetization_service import MonetizationService, SubscriptionNotGoverning
+
+            calls = _record_gateway_calls(monkeypatch)
+            now = datetime.utcnow()
+            await _seed(env, _sub("shadowed", status="active", plan="dms_starter", governing_since=now - timedelta(days=9)),
+                        _sub("newest", status="trial", plan="dms_starter", governing_since=now - timedelta(days=1)))
+            service = MonetizationService(env.db)
+            actor = SimpleNamespace(id="ent-actor")
+            before = await env.db.subscriptions.find_one({"_id": "shadowed"})
+            attempts = [
+                service.upgrade_subscription("shadowed", UpgradeDowngradeRequest(new_plan_code="dms_enterprise",
+                                                                                  effective_immediately=True), actor),
+                service.downgrade_subscription("shadowed", UpgradeDowngradeRequest(new_plan_code="dms_starter"), actor),
+                service.change_billing_period("shadowed", ChangeBillingPeriodRequest(new_billing_period="annual"), actor),
+                service.add_addon("shadowed", AddOnActionRequest(add_on_code="anything"), actor),
+                service.remove_addon("shadowed", AddOnActionRequest(add_on_code="anything"), actor),
+            ]
+            for attempt in attempts:
+                with pytest.raises(SubscriptionNotGoverning, match="outranked by subscription newest"):
+                    await attempt
+            after = await env.db.subscriptions.find_one({"_id": "shadowed"})
+            assert after == before, "a refused change writes nothing"
+            assert calls == [], "the gateway is never asked to bill an outranked row"
+            assert (await env.db.subscription_history.count_documents({"subscription_id": "shadowed"})) == 0
+            # The governing row is changed normally, and keeps governing.
+            await service.upgrade_subscription("newest", UpgradeDowngradeRequest(new_plan_code="dms_enterprise",
+                                                                                  effective_immediately=True), actor)
+            assert [sid for sid, _ in calls] == ["newest"]
+            assert (await _check(env, project=None))[2]["subscription_id"] == "newest"
+
+    _run(scenario())
+
+
+def test_n2_an_upgrade_never_revives_a_cancelled_or_pending_row(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            from rbac_backend.models.rbac_monetization import UpgradeDowngradeRequest
+            from rbac_backend.services.monetization_service import MonetizationService, SubscriptionNotGoverning
+
+            calls = _record_gateway_calls(monkeypatch)
+            now = datetime.utcnow()
+            await _seed(env, _sub("current", status="active", plan="dms_starter", governing_since=now - timedelta(days=2)),
+                        _sub("old", status="cancelled", plan="dms_starter"),
+                        _sub("unpaid", status="pending", plan="dms_starter"))
+            service = MonetizationService(env.db)
+            for row in ("old", "unpaid"):
+                with pytest.raises(SubscriptionNotGoverning, match="reactivate it first"):
+                    await service.upgrade_subscription(row, UpgradeDowngradeRequest(new_plan_code="dms_enterprise",
+                                                                                     effective_immediately=True),
+                                                       SimpleNamespace(id="ent-actor"))
+            assert {r["_id"]: r["status"] async for r in env.db.subscriptions.find({"organization_id": ORG})} == {
+                "current": "active", "old": "cancelled", "unpaid": "pending"}
+            assert calls == []
+            assert (await _check(env, project=None))[2]["subscription_id"] == "current"
+
+    _run(scenario())
+
+
+def test_n1_an_unorderable_tier_refuses_changes_and_a_scheduled_row_may_be_amended(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            from rbac_backend.models.rbac_monetization import ChangeBillingPeriodRequest
+            from rbac_backend.services.monetization_service import MonetizationService, SubscriptionNotGoverning
+
+            _record_gateway_calls(monkeypatch)
+            now = datetime.utcnow()
+            await _seed(env, _sub("legacy-a", status="active", project=P1), _sub("legacy-b", status="active", project=P1),
+                        _sub("scheduled", status="active", project=P2, governing_since=now,
+                             starts_at=now + timedelta(days=5)),
+                        _sub("p2-now", status="active", project=P2, governing_since=now - timedelta(days=1)))
+            service = MonetizationService(env.db)
+            actor = SimpleNamespace(id="ent-actor")
+            with pytest.raises(SubscriptionNotGoverning, match="cannot be ordered"):
+                await service.change_billing_period("legacy-a", ChangeBillingPeriodRequest(new_billing_period="annual"), actor)
+            await service.change_billing_period("scheduled", ChangeBillingPeriodRequest(new_billing_period="annual"), actor)
+            assert (await env.db.subscriptions.find_one({"_id": "scheduled"}))["billing_period"] == "annual"
+            # A project row is not outranked by the organisation row (another tier).
+            await env.db.subscriptions.insert_one(_sub("org-row", status="active", governing_since=now))
+            await service.change_billing_period("p2-now", ChangeBillingPeriodRequest(new_billing_period="annual"), actor)
+
+    _run(scenario())
+
+
+def test_n1_the_route_answers_409_and_changes_nothing(monkeypatch) -> None:
+    from rbac_backend.routers import rbac_monetization
+    from rbac_backend.tests.integration.test_gateway_identity_protection_mongo import BASE, _headers
+
+    monkeypatch.setattr(rbac_monetization.monetization_mutation_limiter, "max_requests", 10_000)
+
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            calls = _record_gateway_calls(monkeypatch)
+            now = datetime.utcnow()
+            await _seed(env, _sub("shadowed", status="active", plan="dms_starter", governing_since=now - timedelta(days=9)),
+                        _sub("newest", status="active", plan="dms_starter", governing_since=now - timedelta(days=1)))
+            response = await env.client.post(f"{BASE}/subscriptions/shadowed/upgrade",
+                                             json={"new_plan_code": "dms_enterprise", "effective_immediately": True},
+                                             headers=_headers("superadmin", action="subscription.upgrade"))
+            assert response.status_code == 409, response.text
+            assert "outranked" in response.json()["detail"]
+            assert (await env.db.subscriptions.find_one({"_id": "shadowed"}))["plan_code"] == "dms_starter"
+            assert calls == []
 
     _run(scenario())

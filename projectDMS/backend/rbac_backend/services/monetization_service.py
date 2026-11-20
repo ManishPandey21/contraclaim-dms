@@ -71,6 +71,12 @@ class GatewayIdentityConflict(Exception):
     """The gateway subscription id is already bound to another subscription."""
 
 
+class SubscriptionNotGoverning(Exception):
+    """A plan, billing-period or add-on change aimed at a subscription that does not govern
+    its scope (entitlement re-review N1/N2): it would change the plan, and possibly the
+    gateway price, without changing what the customer is entitled to."""
+
+
 #: Subscription date fields stored as BSON dates, never as ISO strings (entitlement review F3:
 #: ``model_dump(mode="json")`` stored strings, which date range queries never matched).
 SUBSCRIPTION_DATE_FIELDS = (
@@ -827,11 +833,53 @@ class MonetizationService:
     # Subscription Lifecycle
     # ------------------------------------------------------------------
 
+    async def _assert_governs_its_scope(self, sub: Dict[str, Any], operation: str) -> None:
+        """Refuse a lifecycle change on a row that is not the one its tier selects.
+
+        Several governing rows may coexist in a tier and the most recently activated governs
+        (``services.subscription_resolution``). Changing the plan of an outranked row would
+        bill (``_gateway_change``) for a plan the customer does not receive (re-review N1),
+        and upgrading a cancelled row used to revive it over the current plan (N2). Both
+        are refused before the gateway is touched; the caller changes the governing row, or
+        reactivates the old one explicitly. Rows not yet started are not outranked by
+        anything and are allowed (a scheduled replacement may be amended).
+        """
+        from .subscription_resolution import GOVERNING_STATUSES, classify, select_subscription
+
+        status = str(sub.get("status") or "").strip().lower()
+        if status not in GOVERNING_STATUSES:
+            raise SubscriptionNotGoverning(
+                f"Cannot {operation} a subscription in status '{status or 'unknown'}'; reactivate it first"
+            )
+        if classify(sub, datetime.utcnow()) == "not_started":
+            return
+        db = await self._get_db()
+        rows = await db.subscriptions.find({"organization_id": sub.get("organization_id")}).to_list(length=None)
+        project, package = scope_text(sub.get("project_id")), scope_text(sub.get("package_id"))
+        resolution = select_subscription(
+            rows, organization_id=sub.get("organization_id"), project_id=project, package_id=package,
+        )
+        own_tier = "package" if package else ("project" if project else "organization")
+        selected = resolution.subscription
+        selected_id = str((selected or {}).get("_id") or (selected or {}).get("id") or "")
+        own_id = str(sub.get("id") or sub.get("_id") or "")
+        if resolution.reason == "ambiguous_subscriptions" and resolution.tier == own_tier:
+            raise SubscriptionNotGoverning(
+                f"Cannot {operation}: the {own_tier} scope holds several governing subscriptions "
+                "that cannot be ordered; resolve them first"
+            )
+        if resolution.tier == own_tier and selected_id and selected_id != own_id:
+            raise SubscriptionNotGoverning(
+                f"Cannot {operation}: this subscription is outranked by subscription {selected_id}, "
+                "which governs the same scope"
+            )
+
     async def upgrade_subscription(self, subscription_id: str, request: UpgradeDowngradeRequest, current_user: Any) -> Dict[str, Any]:
         """Upgrade subscription to a higher-tier plan."""
         sub = await self.get_subscription_by_id(subscription_id)
         if not sub:
             raise ValueError("Subscription not found")
+        await self._assert_governs_its_scope(sub, "upgrade")
 
         old_plan = await self.get_plan_by_code(sub["plan_code"])
         new_plan = await self.get_plan_by_code(request.new_plan_code)
@@ -875,6 +923,7 @@ class MonetizationService:
         sub = await self.get_subscription_by_id(subscription_id)
         if not sub:
             raise ValueError("Subscription not found")
+        await self._assert_governs_its_scope(sub, "downgrade")
 
         old_plan = await self.get_plan_by_code(sub["plan_code"])
         new_plan = await self.get_plan_by_code(request.new_plan_code)
@@ -911,6 +960,7 @@ class MonetizationService:
         sub = await self.get_subscription_by_id(subscription_id)
         if not sub:
             raise ValueError("Subscription not found")
+        await self._assert_governs_its_scope(sub, "change the billing period of")
 
         update = SubscriptionUpdate(billing_period=request.new_billing_period)
         await self._gateway_change(sub, new_billing_period=request.new_billing_period)
@@ -1058,6 +1108,7 @@ class MonetizationService:
         sub = await self.get_subscription_by_id(subscription_id)
         if not sub:
             raise ValueError("Subscription not found")
+        await self._assert_governs_its_scope(sub, "add an add-on to")
 
         addon = await self.get_addon_by_code(request.add_on_code)
         if not addon:
@@ -1090,6 +1141,7 @@ class MonetizationService:
         sub = await self.get_subscription_by_id(subscription_id)
         if not sub:
             raise ValueError("Subscription not found")
+        await self._assert_governs_its_scope(sub, "remove an add-on from")
 
         current_addons = list(sub.get("active_add_ons") or [])
         if request.add_on_code not in current_addons:

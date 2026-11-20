@@ -750,14 +750,46 @@ def _read_subscription_security_impact(db: ReadOnlyDatabase) -> Dict[str, Any]:
             elif not text(row.get("payment_gateway_customer_id")):
                 counts["gateway_bindings_without_customer"] += 1
 
-    def governing(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        return [r for r in rows if text(r.get("status")).lower() not in SR_NOT_GOVERNING]
+    now = datetime.utcnow()
 
-    # Ambiguous under the resolver: two or more governing rows of which none carries
-    # governing_since (rows written before 2026-11-20 cannot be ordered).
+    def instant(value: Any) -> Any:
+        # As the resolver reads it: None when absent, "unreadable" when present but unparseable.
+        if value is None or value == "":
+            return None
+        if isinstance(value, datetime):
+            moment = value
+        elif isinstance(value, str):
+            try:
+                moment = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+            except ValueError:
+                return "unreadable"
+        else:
+            return "unreadable"
+        return moment.astimezone(timezone.utc).replace(tzinfo=None) if moment.tzinfo else moment
+
+    def governing(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        # Period-aware like the resolver (re-review N5): rows not started, ended or with an
+        # expired trial do not govern; an unreadable bound governs (and denies).
+        ruling = []
+        for r in rows:
+            status = text(r.get("status")).lower()
+            starts, ends = instant(r.get("starts_at")), instant(r.get("ends_at"))
+            trial_end = instant(r.get("trial_ends_at"))
+            if "unreadable" in (starts, ends) or (status == "trial" and trial_end == "unreadable"):
+                ruling.append(r)
+                continue
+            if (starts is not None and starts > now) or (ends is not None and ends < now):
+                continue
+            if status in SR_NOT_GOVERNING or (status == "trial" and trial_end is not None and trial_end < now):
+                continue
+            ruling.append(r)
+        return ruling
+
+    # Ambiguous under the resolver: two or more governing rows of which none carries a
+    # readable governing_since (rows written before 2026-11-20 cannot be ordered).
     def ambiguous(rows: List[Dict[str, Any]]) -> bool:
         ruling = governing(rows)
-        return len(ruling) > 1 and not any(r.get("governing_since") for r in ruling)
+        return len(ruling) > 1 and not any(isinstance(instant(r.get("governing_since")), datetime) for r in ruling)
 
     ambiguous_by_org: Dict[str, int] = {}
     shadowed = 0
