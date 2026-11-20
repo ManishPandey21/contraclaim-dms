@@ -421,6 +421,27 @@ Records: `docs/DEF4_BILLING_PERMISSION_SEPARATION.md` §14 and §15; `docs/SECUR
 
 **Open owner decisions from this pass:** R6-5 trial conversion without payment; R6-6 reactivation and double billing (with checkout `replaces_subscription_id`); R6-7 plan-settings gateway cancel; R6-8 plan fields on `PUT`; legacy gateway bindings without provenance; F7 client profile selector.
 
+
+## Subscription lifecycle closure, R6-5 to R6-8 (tenth pass, 2026-11-21)
+
+Records: DEF-4 §16; security report (tenth pass). Commits: `1b731f6` (R6-8), `4a3e6ce` (R6-5), `58455e7` (R6-6), `5f95334` (R6-7), `80186b7` (lifecycle consistency), `a4cd266` (P-05), `53ed2a6` / `b7165f0` / `b7d59a9` (review 7), `5255dd5` (review 8), `918b41f` (review 9); docs `0437020`, `024b1b4`, `566fe2f`, `897fe22` and this commit.
+
+
+| Item | Implemented | Locally verified | CI-verified (exact head) | Security-approved | Production-accepted |
+|---|---|---|---|---|---|
+| R6-8 PUT allowlist + direct create (F1) | Yes | Yes | Pending exact-head run | No | No |
+| R6-5 trial conversion (+F2-F4, R5, A3/A4, R9) | Yes | Yes | Pending exact-head run | No | No |
+| R6-6 reactivation (+R8-1, B1, C6, R9-7) | Yes | Yes | Pending exact-head run | No | No |
+| R6-7 durable cancellation (+R7, C1-C5) | Yes | Yes | Pending exact-head run | No | No |
+| Gateway/database consistency for lifecycle changes | Yes | Yes | Pending exact-head run | No | No |
+| P-05 `payment_integrity_impact` | Yes (read-only) | Yes | Pending exact-head run | No | Not run on production |
+| Checkout replacement safeguard | Design only (§16.7) | - | - | No | No |
+| Gate 6 fresh install, migration `20261124_0001` | Yes | 33/33 (sandbox-CA caveat; not production evidence) | Pin verified in CI on `0cb99f0` | No | No |
+
+**Previous-pass CI, recorded accurately:** run 44791457632 on `0cb99f0` (final code of the ninth pass): backend 8,436; real MongoDB 1,196 in 89 modules, none skipped; frontend, dependency scan, Docker passed; Gitleaks red on the 2 known findings. Exact-head CI for this pass: pending (recorded when the run on the final head completes).
+
+**Owner decisions opened by this pass:** authorise the checkout replacement workflow (§16.7); whether an amount mismatch on renewal stops service; remediation of legacy binding classes after P-05 (§16.6).
+
 ## CI evidence
 
 - This session is told when a CI check fails on the pull request. It is not told when one passes, and it did not query run results. "No failure reported" therefore means only that; it is not a recorded green run.

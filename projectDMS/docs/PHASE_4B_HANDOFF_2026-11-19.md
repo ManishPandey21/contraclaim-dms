@@ -238,6 +238,25 @@ It is the main code-side blocker to DEF-4 activation, and it needs no production
 
 **Next dependency-ready work** is unchanged: the M1 shadow-mode evaluator behind `BUILT_IN_ROLE_ASSIGNMENTS`, default `off`. The open billing items above need owner decisions first.
 
+## Tenth pass (subscription lifecycle closure R6-5 to R6-8, 2026-11-21)
+
+- **R6-8, R6-5, R6-6, R6-7 fixed** in separately reviewable commits (each defect reproduced on real MongoDB before its fix), plus gateway/database consistency for lifecycle changes and a read-only P-05 payment-integrity reading.
+- **Three further independent reviews** found and drove fixes for 4 pre-existing payment bypasses (1 Critical, 3 High), 2 more High pre-existing paths, and the defects the fixes introduced; the last review found none High.
+- **Behaviour changes for tenants:** direct subscription creation, changes to unbilled plans, priced add-ons, trial extensions and no-charge conversions are Super Admin only; Razorpay-bound plans change by checkout (old plan keeps billing until cancelled - warning returned); one trial per scope.
+
+| Item | Implemented | Locally verified | CI-verified (exact head) | Security-approved | Production-accepted |
+|---|---|---|---|---|---|
+| R6-8 PUT allowlist + direct create (F1) | Yes | Yes | Pending exact-head run | No | No |
+| R6-5 trial conversion (+F2-F4, R5, A3/A4, R9) | Yes | Yes | Pending exact-head run | No | No |
+| R6-6 reactivation (+R8-1, B1, C6, R9-7) | Yes | Yes | Pending exact-head run | No | No |
+| R6-7 durable cancellation (+R7, C1-C5) | Yes | Yes | Pending exact-head run | No | No |
+| Gateway/database consistency for lifecycle changes | Yes | Yes | Pending exact-head run | No | No |
+| P-05 `payment_integrity_impact` | Yes (read-only) | Yes | Pending exact-head run | No | Not run on production |
+| Checkout replacement safeguard | Design only (§16.7) | - | - | No | No |
+| Gate 6 fresh install, migration `20261124_0001` | Yes | 33/33 (sandbox-CA caveat; not production evidence) | Pin verified in CI on `0cb99f0` | No | No |
+
+**Next dependency-ready action:** run P-05 `payment_integrity_impact` (read-only, with authorised access) to measure legacy bindings, duplicates, overlaps and ungated cancellations; then the owner decides the binding remediation (§16.6) and whether to authorise the checkout replacement (§16.7). M1 shadow-mode evaluator remains the next code item.
+
 ## Blockers before production authorisation
 
 1. P-01 to P-16 production readings with authorised read-only access (AQ-11). This includes:

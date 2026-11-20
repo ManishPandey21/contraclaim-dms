@@ -538,3 +538,47 @@ CI run 44765102151 on `f09d9be`: backend 8,435 passed; real MongoDB 1,132 passed
 - Plan, period and add-on changes on non-governing, blocked or restricted rows now answer 409.
 - Migration `20261124_0001` raises (and blocks later migrations) while duplicate gateway ids, webhook bodies or payment records exist: read P-05 first.
 - Gateway-bound subscriptions created through the old `PUT` remain trusted until classified.
+
+## Subscription lifecycle security closure, R6-5 to R6-8 (owner decision 2026-11-21, tenth pass)
+
+Full record: `docs/DEF4_BILLING_PERMISSION_SEPARATION.md` §16. **Nothing here is security approval or production acceptance.** Nothing was deployed, migrated, re-granted, rebound, refunded or cancelled at any gateway; no payment operation was run.
+
+### Baseline (recorded accurately)
+
+- **Final-code CI of the previous pass:** run 44791457632 on `0cb99f0` - backend 8,436 passed; real MongoDB 1,196 passed across 89 modules, none skipped; frontend, dependency scan and Docker passed; **Gitleaks failed** on its 2 known findings. Later docs-only heads (`11295e7`, `9e1a6bb`) carried the same code.
+- **Gate 6:** fresh install 33/33 for migration `20261124_0001` (run `gate6-20261120t174311z-13219`, image with one sandbox proxy-CA layer, recorded in `docs/GATE_6_FRESH_INSTALL_EVIDENCE.md`). It is fresh-install evidence only, **not** production migration evidence. No migration was added in this pass (the new collections are unique by `_id`), so the 33-migration pin stands.
+
+### Verdict per ticket (evidence: each defect reproduced on real MongoDB at the commit before its fix)
+
+| Ticket | Commit(s) | Verdict |
+|---|---|---|
+| R6-8 `PUT /subscriptions/{id}` | `1b731f6`; sibling create route `53ed2a6` (F1) | **Fixed.** Allowlist only (`admin_note`, `cancellation_reason`; overrides Super Admin); every commercial, lifecycle, identity, scope and precedence field refused under any spelling; direct creation Super Admin only and never "paid" |
+| R6-5 trial conversion | `4a3e6ce`; `53ed2a6` (F2-F4); `b7165f0` (R5-1..3); `5255dd5` (A3/A4); `918b41f` (R9-2/3/8/9) | **Fixed.** Running, governing trials only; priced plans through payment-confirmed checkout; free plans `not_billed`; no-charge conversion Super Admin with reason and audit; trials bounded, one per scope, never over a subscription |
+| R6-6 reactivation | `58455e7`; `b7165f0` (R8-1, R6-2/3); `5255dd5` (B1, C6); `918b41f` (R9-7) | **Fixed.** Cancelled, in-period, gateway-confirmed, nothing else governing or pending; never a trial; unbilled or administratively cancelled ones Super Admin only; under the scope lease |
+| R6-7 gateway-consistent cancellation | `5f95334`; `b7d59a9` (R7-1..5); `5255dd5` (C1-C5) | **Fixed.** Durable operation with idempotency key, scope lease with per-attempt fencing, gateway cancellation before local, review queue and retry, provider reconciliation |
+| Gateway/database consistency (item 6) | `80186b7`; `b7d59a9` (G-1..3); `5255dd5` (A1/A2, B2/B3, C3); `918b41f` (R9-4/5/6/10) | **Fixed within scope.** Lifecycle changes are durable operations; unknown gateway outcomes listed; in-place plan change only where the gateway can make it; checkout serialised per scope. **Checkout replacement not implemented** (needs separate authorisation, §16.7) |
+| Legacy bindings / P-05 | `a4cd266` | **Implemented, read-only;** counts not yet measured on production |
+
+### Independent reviews (agents, not the authorised security review)
+
+Review 7 (cold, given the code): 4 pre-existing payment bypasses (F1 Critical, F2-F4 High) and 13 introduced or adjacent defects. Review 8: 2 further High pre-existing paths (A1 in-place upgrade on Razorpay, A2 unbilled plans) and 11 others. Review 9: none High; 10 Medium/Low fixed, 2 Info recorded. Tables with origin (introduced / pre-existing) in DEF-4 §16.8-16.10.
+
+### Coverage asked for
+
+Real HTTP and real MongoDB throughout; concurrent requests (same and different keys, checkouts, trials, conversions, reactivations, plan settings); cross-tenant and revoked permissions (403); gateway failures, timeouts and unknown outcomes; signed-webhook replay; audit and history assertions; mutation testing per fix (all mutants killed except two recorded as equivalent).
+
+### Remaining payment-integrity risks (open)
+
+| Risk | Severity | Owner |
+|---|---|---|
+| Checkout over a paid plan bills both until the old one is cancelled (warning returned; replacement design §16.7 not implemented) | Medium | Owner authorisation of the replacement workflow |
+| Amount mismatch on renewal marks billing for review but does not stop service | Medium | Owner decision (webhook behaviour) |
+| Legacy gateway bindings without provenance are still trusted by the webhook until classified | Medium until measured | P-05 then owner decision (§16.6) |
+| Cancelled gateway-bound subscriptions without gateway evidence (pre-R6-7 plan settings) may still bill | Unknown until measured | P-05 then provider reconciliation |
+| Razorpay cycle-end cancels are not recognised by reconciliation (R9-11) | Info | Adapter work |
+| Gateway adapters have no request timeout (a hang beyond the 60 s lease is refused locally and listed, not prevented) | Low | Configuration |
+| Gitleaks 2 historical findings; picomatch R5 | - | Authorised security review |
+
+### Production impact still awaiting measurement (P-05 `payment_integrity_impact`, read-only)
+
+Gateway bindings by class (verified checkout / verified reconciliation / conflicting / unverified); duplicate payment groups (block the migration's index); payments refused for review; overlapping governing scopes and gateway-bound overlaps; cancelled bound subscriptions without gateway evidence; governing rows without activation dates; operations needing review; conversions awaiting payment; no-charge conversions. Plus behaviour changes for tenants: in-place plan changes on Razorpay-bound subscriptions now 409 (checkout instead); unbilled plans changed only by Super Admin; one trial per scope.
