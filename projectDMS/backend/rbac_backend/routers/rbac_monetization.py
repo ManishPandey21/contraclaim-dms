@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.config import settings
 from ..core.permissions import Permissions
@@ -745,10 +745,20 @@ async def start_subscription_checkout(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
+class SubscriptionUpdateRequest(SubscriptionUpdate):
+    """The ordinary update body. ``organization_id`` and any other key are captured (not
+    ignored, as SubscriptionUpdate would) so an attempted scope change is seen and refused
+    (L3); they are never written."""
+
+    model_config = ConfigDict(extra="allow")
+
+    organization_id: Optional[str] = None
+
+
 @router.put("/subscriptions/{subscription_id}", response_model=Dict[str, Any])
 async def update_subscription(
     subscription_id: str,
-    payload: SubscriptionUpdate,
+    payload: SubscriptionUpdateRequest,
     request: Request,
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy_service),
@@ -766,21 +776,18 @@ async def update_subscription(
         subscription_id=subscription_id,
     )
     stored_scope = subscription_scope(subscription)
-    # SubscriptionUpdate has no organization_id (and ignores unknown keys), so read the body
-    # itself: an organisation or project named there must equal the stored one. Omitted is
+    # An organisation or project named in the body must equal the stored one. Omitted is
     # unchanged; the same value is a no-op; anything else, explicit null included, is refused.
-    try:
-        body = await request.json()
-    except Exception:
-        body = None
-    if isinstance(body, dict):
-        for index, keys in enumerate((("organization_id", "organizationId"), ("project_id", "projectId"))):
-            for key in keys:
-                if key in body and scope_text(body[key]) != stored_scope[index]:
-                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_SCOPE_CHANGE_REFUSED)
+    extra = payload.model_extra or {}
+    for index, (field, camel) in enumerate((("organization_id", "organizationId"), ("project_id", "projectId"))):
+        attempted = [getattr(payload, field)] if field in payload.model_fields_set else []
+        attempted += [extra[camel]] if camel in extra else []
+        if any(scope_text(value) != stored_scope[index] for value in attempted):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_SCOPE_CHANGE_REFUSED)
+    update = SubscriptionUpdate(**payload.model_dump(include=set(SubscriptionUpdate.model_fields) & payload.model_fields_set))
     try:
         return await service.update_subscription(
-            subscription_id, payload, current_user, expected_scope=(stored_scope[0] or "", stored_scope[1])
+            subscription_id, update, current_user, expected_scope=(stored_scope[0] or "", stored_scope[1])
         )
     except SubscriptionScopeChangeRefused as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_SCOPE_CHANGE_REFUSED) from exc
