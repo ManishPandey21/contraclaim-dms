@@ -292,6 +292,7 @@ def read_roles(db: ReadOnlyDatabase) -> Dict[str, Any]:
         reviewer_roles=by_key,
         custom_role_compatibility=_read_custom_role_compatibility(db),
         billing_permission_impact=_read_billing_permission_impact(db),
+        built_in_role_scope_impact=_read_built_in_role_scope_impact(db),
     )
 
 
@@ -414,6 +415,150 @@ def _read_billing_permission_impact(db: ReadOnlyDatabase) -> Dict[str, Any]:
             key: sorted(set(names) - {str(n) for n in (roles.get(key) or {}).get("permissions") or []})
             for key, names in sorted(DEF4_TARGET_ROLE_GRANTS.items())
         },
+    }
+
+
+#: M1: built-in role keys, inlined so the reading runs on old images
+#: (tests/test_claim_arbitration_readonly_readings.py keeps it equal to
+#: services.role_grants.BUILT_IN_ROLE_KEYS). Their grants carry no organisation or project.
+M1_BUILT_IN_ROLE_KEYS = frozenset({
+    "superadmin", "superuser", "orgadmin", "orguser", "projectadmin", "projectuser", "user",
+    "contraclaim_expert_drafter", "contraclaim_expert_reviewer", "contraclaim_drafting_manager",
+    "contract_expert", "contractmgr_org", "doccontroller", "reporter", "settings_manager",
+    "limited_user", "contraclaim_billing_admin",
+    # Reviewer keys (core.permissions.REVIEWER_ROLE_KEYS).
+    "arbitration_case_preparation_expert", "chief_contract_expert", "contract_reviewer",
+    "delay_planning_expert", "delay_reviewer", "export_authorizer", "legal_reviewer",
+    "quantum_reviewer", "senior_legal_approver",
+})
+_M1_ORG_WIDE = frozenset({"orgadmin", "orguser"})
+_M1_PROJECT_TIER = frozenset({"projectadmin", "projectuser"})
+_M1_PLATFORM = frozenset({"superadmin", "superuser"})
+
+
+def _m1_key(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _read_built_in_role_scope_impact(db: ReadOnlyDatabase) -> Dict[str, Any]:
+    """M1: who a per-assignment scope for built-in roles would affect, before anyone decides.
+
+    Counts only; organisation ids are listed, never user names or emails. A built-in role
+    applies today wherever the user's membership reaches (``organization_id``,
+    ``organizations``, active ``organization_memberships`` rows; projects from ``projects``
+    and active ``project_memberships`` rows). Per active, non-platform user holding a
+    built-in role: how many organisations it reaches, whether an organisation-wide role
+    (orgadmin, orguser) reaches organisations beyond the primary one, whether organisation-
+    wide and project-tier roles are mixed (the organisation-wide one then counts in the
+    project's organisation too), whether built-in and custom roles are mixed, and whether a
+    project lies outside the primary organisation.
+
+    Proposed scoped re-grant (not applied): each built-in role is assigned in the primary
+    organisation; a project-tier role is assigned on each project it is held for there.
+    Every other organisation the user reaches with a built-in role needs an explicit owner
+    decision (assign there, or drop the reach), counted as ``assignments_needing_a_decision``.
+
+    Approximations, stated: role keys are compared lowercased (no alias resolution; keys
+    that are not recognised are counted); a project with no readable organisation counts as
+    outside the primary organisation.
+    """
+    roles = {str(row["_id"]): row for row in db["roles"].find({}, {"is_system": 1, "scope": 1, "is_active": 1})}
+
+    def built_in(key: str) -> bool:
+        role = roles.get(key) or {}
+        return _m1_key(key) in M1_BUILT_IN_ROLE_KEYS or role.get("is_system") is True or _m1_key(role.get("scope")) == "system"
+
+    project_org = {
+        str(row["_id"]): str(row.get("organization_id") or row.get("organizationId") or "")
+        for row in db["projects"].find({}, {"organization_id": 1, "organizationId": 1})
+    }
+    active = {"status": {"$in": ["active", None]}}
+    org_rows: Dict[str, set] = {}
+    for row in db["organization_memberships"].find(active, {"user_id": 1, "organization_id": 1}):
+        if row.get("organization_id"):
+            org_rows.setdefault(str(row.get("user_id")), set()).add(str(row["organization_id"]))
+    project_rows: Dict[str, set] = {}
+    for row in db["project_memberships"].find(active, {"user_id": 1, "project_id": 1}):
+        if row.get("project_id"):
+            project_rows.setdefault(str(row.get("user_id")), set()).add(str(row["project_id"]))
+
+    counts = {
+        "active_users_read": 0,
+        "users_with_built_in_roles": 0,
+        "users_reaching_more_than_one_organisation": 0,
+        "org_wide_role_reaching_a_secondary_organisation": 0,
+        "mixed_org_wide_and_project_tier_roles": 0,
+        "mixed_built_in_and_custom_roles": 0,
+        "billing_admin_reaching_more_than_one_organisation": 0,
+        "projects_outside_the_primary_organisation": 0,
+        "users_with_no_primary_organisation": 0,
+        "unrecognised_role_keys": 0,
+    }
+    affected_by_org: Dict[str, int] = {}
+    proposed: Dict[str, int] = {}
+    needing_decision = 0
+    affected_users = 0
+    for user in db["users"].find({}, {"roles": 1, "organization_id": 1, "organizations": 1, "projects": 1,
+                                     "disabled": 1, "is_active": 1}):
+        if user.get("disabled") or user.get("is_active") is False:
+            continue
+        counts["active_users_read"] += 1
+        keys = [str(key) for key in (user.get("roles") or []) if key is not None]
+        lowered = {_m1_key(key) for key in keys}
+        if lowered & _M1_PLATFORM:
+            continue
+        held_built_in = {_m1_key(key) for key in keys if built_in(key) and (roles.get(key) or {}).get("is_active") is not False}
+        counts["unrecognised_role_keys"] += sum(1 for key in keys if key not in roles and _m1_key(key) not in M1_BUILT_IN_ROLE_KEYS)
+        if not held_built_in:
+            continue
+        counts["users_with_built_in_roles"] += 1
+        uid = str(user.get("_id"))
+        primary = str(user.get("organization_id") or "") or None
+        organisations = {str(o) for o in (user.get("organizations") or []) if o} | org_rows.get(uid, set())
+        if primary:
+            organisations.add(primary)
+        else:
+            counts["users_with_no_primary_organisation"] += 1
+        projects = {str(p) for p in (user.get("projects") or []) if p} | project_rows.get(uid, set())
+        outside = {p for p in projects if project_org.get(p, "") != (primary or "\x00")}
+        secondary = organisations - ({primary} if primary else set())
+        flags = []
+        if len(organisations) > 1:
+            counts["users_reaching_more_than_one_organisation"] += 1
+            flags.append("multi")
+        if held_built_in & _M1_ORG_WIDE and secondary:
+            counts["org_wide_role_reaching_a_secondary_organisation"] += 1
+            flags.append("org_wide_secondary")
+        if held_built_in & _M1_ORG_WIDE and held_built_in & _M1_PROJECT_TIER:
+            counts["mixed_org_wide_and_project_tier_roles"] += 1
+            flags.append("mixed_tier")
+        if any(not built_in(key) for key in keys):
+            counts["mixed_built_in_and_custom_roles"] += 1
+            flags.append("mixed_custom")
+        if "contraclaim_billing_admin" in held_built_in and len(organisations) > 1:
+            counts["billing_admin_reaching_more_than_one_organisation"] += 1
+        if outside:
+            counts["projects_outside_the_primary_organisation"] += 1
+            flags.append("outside_projects")
+        if not ({"multi", "org_wide_secondary", "mixed_tier", "outside_projects"} & set(flags)):
+            continue
+        affected_users += 1
+        for org in organisations:
+            affected_by_org[org] = affected_by_org.get(org, 0) + 1
+        for key in sorted(held_built_in):
+            if key in _M1_PROJECT_TIER:
+                inside = len(projects - outside)
+                proposed[f"{key}@project"] = proposed.get(f"{key}@project", 0) + inside
+                needing_decision += len(outside)
+            elif primary:
+                proposed[f"{key}@organisation"] = proposed.get(f"{key}@organisation", 0) + 1
+            needing_decision += len(secondary) if key not in _M1_PROJECT_TIER else 0
+    return {
+        **counts,
+        "affected_users": affected_users,
+        "affected_users_by_organization": dict(sorted(affected_by_org.items())),
+        "proposed_scoped_assignments": dict(sorted(proposed.items())),
+        "assignments_needing_a_decision": needing_decision,
     }
 
 

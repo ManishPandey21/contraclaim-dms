@@ -194,3 +194,19 @@ def test_def4_inline_grants_and_alias_reach_match_the_application() -> None:
     for legacy, reach in module.DEF4_ALIAS_REACH.items():
         billing = {name for name in equivalent_permissions(legacy) if name.startswith(("billing.", "subscription."))}
         assert billing == set(reach), (legacy, billing)
+
+
+def test_m1_inline_built_in_role_keys_match_the_application() -> None:
+    """The P-05 M1 reading runs on old images, so it inlines the built-in role keys; they
+    must equal services.role_grants.BUILT_IN_ROLE_KEYS."""
+    import importlib.util
+    from pathlib import Path
+
+    from rbac_backend.services.role_grants import BUILT_IN_ROLE_KEYS
+
+    path = Path(__file__).resolve().parents[3] / "scripts" / "claim_arbitration_readonly_readings.py"
+    spec = importlib.util.spec_from_file_location("readings_m1", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert set(module.M1_BUILT_IN_ROLE_KEYS) == set(BUILT_IN_ROLE_KEYS)
