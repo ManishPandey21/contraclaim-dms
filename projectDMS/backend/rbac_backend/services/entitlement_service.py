@@ -271,6 +271,7 @@ class EntitlementService:
         organization_id: Optional[str],
         project_id: Optional[str] = None,
         package_id: Optional[str] = None,
+        now: Optional[datetime] = None,
     ) -> Resolution:
         """The governing subscription of a scope and why (``services.subscription_resolution``):
         status-aware, most specific tier first, never by ``updated_at``; ambiguity fails closed."""
@@ -295,7 +296,7 @@ class EntitlementService:
                 organization_id=organization_id,
                 project_id=project_id,
                 package_id=package_id,
-                now=datetime.utcnow(),
+                now=now or datetime.utcnow(),
             )
         self.last_resolution = resolution.diagnostic()
         return resolution

@@ -755,6 +755,7 @@ class MonetizationService:
         current_user: Any,
         *,
         expected_scope: Optional[Tuple[Optional[str], ...]] = None,
+        expected_state: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Update a subscription; its organisation, project and package never change here
         (L3; package: F3).
@@ -777,6 +778,9 @@ class MonetizationService:
             raise TypeError("expected_scope must name the organisation, project and package")
         if expected_scope is not None and stored_scope != tuple(scope_text(value) for value in expected_scope):
             raise SubscriptionScopeConflict("The subscription's scope changed; reload and try again")
+        if expected_state is not None and any(before.get(f) != v for f, v in expected_state.items()):
+            # A lifecycle change decided on a state that has since changed (R6-3).
+            raise SubscriptionNotGoverning("The subscription changed while this change was being made; reload and try again")
         update_doc = payload.model_dump(mode="json", exclude_unset=True)
         for index, field in enumerate(SUBSCRIPTION_SCOPE_FIELDS):
             if field in update_doc:
@@ -811,9 +815,12 @@ class MonetizationService:
                 "_id": lookup,
                 **{field: before.get(field) for field in SUBSCRIPTION_SCOPE_FIELDS},
                 "payment_gateway_subscription_id": before.get("payment_gateway_subscription_id"),
+                **(expected_state or {}),
             },
             {"$set": update_doc},
         )
+        if result.matched_count == 0 and expected_state is not None:
+            raise SubscriptionNotGoverning("The subscription changed while this change was being made; reload and try again")
         if result.matched_count == 0:
             raise SubscriptionScopeConflict("The subscription's scope changed; reload and try again")
         saved = await db.subscriptions.find_one({"_id": lookup})
@@ -833,53 +840,69 @@ class MonetizationService:
     # Subscription Lifecycle
     # ------------------------------------------------------------------
 
-    async def _assert_governs_its_scope(self, sub: Dict[str, Any], operation: str) -> None:
-        """Refuse a lifecycle change on a row that is not the one its tier selects.
+    #: Fields a lifecycle change is decided on; the write is compare-and-set on them (R6-3).
+    LIFECYCLE_STATE_FIELDS = ("status", "plan_code", "billing_period", "active_add_ons", "governing_since")
+
+    async def _assert_governs_its_scope(self, sub: Dict[str, Any], operation: str) -> Dict[str, Any]:
+        """Refuse a lifecycle change on a row that is not the one enforcement selects.
 
         Several governing rows may coexist in a tier and the most recently activated governs
-        (``services.subscription_resolution``). Changing the plan of an outranked row would
-        bill (``_gateway_change``) for a plan the customer does not receive (re-review N1),
-        and upgrading a cancelled row used to revive it over the current plan (N2). Both
-        are refused before the gateway is touched; the caller changes the governing row, or
-        reactivates the old one explicitly. Rows not yet started are not outranked by
-        anything and are allowed (a scheduled replacement may be amended).
+        (``services.subscription_resolution``). Changing the plan of a row that does not
+        govern would bill (``_gateway_change``) for a plan the customer does not receive
+        (re-review N1), and upgrading a cancelled row used to revive it (N2). The row must be
+        a working subscription (eligible status: an upgrade must not lift a payment block or
+        an archive/offboarding restriction, review R6-4) and must be the subscription
+        enforcement itself selects for its scope (``EntitlementService.resolve_subscription``,
+        the same query and rule, R6-2/R6-9). A row not yet started is judged at its start
+        (R6-1). Refused before the gateway is touched. Returns the stored state the decision
+        was made on, for the compare-and-set write (R6-3).
         """
-        from .subscription_resolution import GOVERNING_STATUSES, classify, select_subscription
+        from .entitlement_service import EntitlementService
+        from .subscription_resolution import ELIGIBLE_STATUSES, classify
 
         status = str(sub.get("status") or "").strip().lower()
-        if status not in GOVERNING_STATUSES:
+        if status not in ELIGIBLE_STATUSES:
             raise SubscriptionNotGoverning(
-                f"Cannot {operation} a subscription in status '{status or 'unknown'}'; reactivate it first"
+                f"Cannot {operation} a subscription in status '{status or 'unknown'}'; "
+                "only an active, pilot or trial subscription can be changed (reactivate or settle it first)"
             )
-        if classify(sub, datetime.utcnow()) == "not_started":
-            return
         db = await self._get_db()
-        rows = await db.subscriptions.find({"organization_id": sub.get("organization_id")}).to_list(length=None)
-        project, package = scope_text(sub.get("project_id")), scope_text(sub.get("package_id"))
-        resolution = select_subscription(
-            rows, organization_id=sub.get("organization_id"), project_id=project, package_id=package,
+        stored = await db.subscriptions.find_one({"_id": self._lookup_id(str(sub.get("id") or sub.get("_id") or ""))})
+        if not stored:
+            raise ValueError("Subscription not found")
+        moment = datetime.utcnow()
+        if classify(stored, moment) == "not_started":
+            starts_at = stored.get("starts_at")
+            if isinstance(starts_at, datetime):
+                moment = starts_at.replace(tzinfo=None) if starts_at.tzinfo is None else starts_at.astimezone(timezone.utc).replace(tzinfo=None)
+        resolution = await EntitlementService(db).resolve_subscription(
+            organization_id=scope_text(stored.get("organization_id")),
+            project_id=scope_text(stored.get("project_id")),
+            package_id=scope_text(stored.get("package_id")),
+            now=moment,
         )
-        own_tier = "package" if package else ("project" if project else "organization")
-        selected = resolution.subscription
-        selected_id = str((selected or {}).get("_id") or (selected or {}).get("id") or "")
-        own_id = str(sub.get("id") or sub.get("_id") or "")
-        if resolution.reason == "ambiguous_subscriptions" and resolution.tier == own_tier:
+        selected = resolution.subscription or {}
+        selected_id = str(selected.get("_id") or selected.get("id") or "")
+        if selected_id and selected_id == str(stored.get("_id")):
+            return {field: stored.get(field) for field in self.LIFECYCLE_STATE_FIELDS}
+        if resolution.reason == "ambiguous_subscriptions":
             raise SubscriptionNotGoverning(
-                f"Cannot {operation}: the {own_tier} scope holds several governing subscriptions "
-                "that cannot be ordered; resolve them first"
+                f"Cannot {operation}: the scope holds several governing subscriptions that cannot be ordered; resolve them first"
             )
-        if resolution.tier == own_tier and selected_id and selected_id != own_id:
+        if selected_id:
             raise SubscriptionNotGoverning(
-                f"Cannot {operation}: this subscription is outranked by subscription {selected_id}, "
-                "which governs the same scope"
+                f"Cannot {operation}: this subscription is outranked by subscription {selected_id}, which governs the same scope"
             )
+        raise SubscriptionNotGoverning(
+            f"Cannot {operation}: this subscription does not govern its scope ({classify(stored, moment)})"
+        )
 
     async def upgrade_subscription(self, subscription_id: str, request: UpgradeDowngradeRequest, current_user: Any) -> Dict[str, Any]:
         """Upgrade subscription to a higher-tier plan."""
         sub = await self.get_subscription_by_id(subscription_id)
         if not sub:
             raise ValueError("Subscription not found")
-        await self._assert_governs_its_scope(sub, "upgrade")
+        state = await self._assert_governs_its_scope(sub, "upgrade")
 
         old_plan = await self.get_plan_by_code(sub["plan_code"])
         new_plan = await self.get_plan_by_code(request.new_plan_code)
@@ -902,7 +925,7 @@ class MonetizationService:
         )
         # Propagate to the gateway first; if it fails, the local state is untouched.
         await self._gateway_change(sub, new_plan_code=request.new_plan_code, new_billing_period=billing_period)
-        result = await self.update_subscription(subscription_id, update, current_user)
+        result = await self.update_subscription(subscription_id, update, current_user, expected_state=state)
 
         await self._record_history(
             subscription_id=subscription_id,
@@ -923,7 +946,7 @@ class MonetizationService:
         sub = await self.get_subscription_by_id(subscription_id)
         if not sub:
             raise ValueError("Subscription not found")
-        await self._assert_governs_its_scope(sub, "downgrade")
+        state = await self._assert_governs_its_scope(sub, "downgrade")
 
         old_plan = await self.get_plan_by_code(sub["plan_code"])
         new_plan = await self.get_plan_by_code(request.new_plan_code)
@@ -940,7 +963,7 @@ class MonetizationService:
             billing_period=billing_period,
         )
         await self._gateway_change(sub, new_plan_code=request.new_plan_code, new_billing_period=billing_period)
-        result = await self.update_subscription(subscription_id, update, current_user)
+        result = await self.update_subscription(subscription_id, update, current_user, expected_state=state)
 
         await self._record_history(
             subscription_id=subscription_id,
@@ -960,11 +983,11 @@ class MonetizationService:
         sub = await self.get_subscription_by_id(subscription_id)
         if not sub:
             raise ValueError("Subscription not found")
-        await self._assert_governs_its_scope(sub, "change the billing period of")
+        state = await self._assert_governs_its_scope(sub, "change the billing period of")
 
         update = SubscriptionUpdate(billing_period=request.new_billing_period)
         await self._gateway_change(sub, new_billing_period=request.new_billing_period)
-        result = await self.update_subscription(subscription_id, update, current_user)
+        result = await self.update_subscription(subscription_id, update, current_user, expected_state=state)
 
         await self._record_history(
             subscription_id=subscription_id,
@@ -1108,7 +1131,7 @@ class MonetizationService:
         sub = await self.get_subscription_by_id(subscription_id)
         if not sub:
             raise ValueError("Subscription not found")
-        await self._assert_governs_its_scope(sub, "add an add-on to")
+        state = await self._assert_governs_its_scope(sub, "add an add-on to")
 
         addon = await self.get_addon_by_code(request.add_on_code)
         if not addon:
@@ -1124,7 +1147,7 @@ class MonetizationService:
 
         current_addons.append(request.add_on_code)
         update = SubscriptionUpdate(active_add_ons=current_addons)
-        result = await self.update_subscription(subscription_id, update, current_user)
+        result = await self.update_subscription(subscription_id, update, current_user, expected_state=state)
 
         await self._record_history(
             subscription_id=subscription_id,
@@ -1141,7 +1164,7 @@ class MonetizationService:
         sub = await self.get_subscription_by_id(subscription_id)
         if not sub:
             raise ValueError("Subscription not found")
-        await self._assert_governs_its_scope(sub, "remove an add-on from")
+        state = await self._assert_governs_its_scope(sub, "remove an add-on from")
 
         current_addons = list(sub.get("active_add_ons") or [])
         if request.add_on_code not in current_addons:
@@ -1149,7 +1172,7 @@ class MonetizationService:
 
         current_addons.remove(request.add_on_code)
         update = SubscriptionUpdate(active_add_ons=current_addons)
-        result = await self.update_subscription(subscription_id, update, current_user)
+        result = await self.update_subscription(subscription_id, update, current_user, expected_state=state)
 
         await self._record_history(
             subscription_id=subscription_id,

@@ -585,7 +585,7 @@ def test_n2_an_upgrade_never_revives_a_cancelled_or_pending_row(monkeypatch) -> 
                         _sub("unpaid", status="pending", plan="dms_starter"))
             service = MonetizationService(env.db)
             for row in ("old", "unpaid"):
-                with pytest.raises(SubscriptionNotGoverning, match="reactivate it first"):
+                with pytest.raises(SubscriptionNotGoverning, match="only an active, pilot or trial subscription"):
                     await service.upgrade_subscription(row, UpgradeDowngradeRequest(new_plan_code="dms_enterprise",
                                                                                      effective_immediately=True),
                                                        SimpleNamespace(id="ent-actor"))
@@ -640,6 +640,123 @@ def test_n1_the_route_answers_409_and_changes_nothing(monkeypatch) -> None:
             assert response.status_code == 409, response.text
             assert "outranked" in response.json()["detail"]
             assert (await env.db.subscriptions.find_one({"_id": "shadowed"}))["plan_code"] == "dms_starter"
+            assert calls == []
+
+    _run(scenario())
+
+
+# ---------------------------------------------------------------------------------------
+# Review of b9ab8b3 (R6): the guard mirrors enforcement exactly.
+# ---------------------------------------------------------------------------------------
+
+
+def test_r6_1_a_scheduled_row_is_judged_at_its_start(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            from rbac_backend.models.rbac_monetization import UpgradeDowngradeRequest
+            from rbac_backend.services.monetization_service import MonetizationService, SubscriptionNotGoverning
+
+            calls = _record_gateway_calls(monkeypatch)
+            now = datetime.utcnow()
+            # Scheduled row stamped before the current one: once it starts the current one still governs.
+            await _seed(env, _sub("sched", status="active", plan="dms_starter", starts_at=now + timedelta(days=5),
+                                  governing_since=now - timedelta(days=10)),
+                        _sub("current", status="active", plan="dms_starter", governing_since=now - timedelta(days=1)))
+            with pytest.raises(SubscriptionNotGoverning, match="outranked by subscription current"):
+                await MonetizationService(env.db).upgrade_subscription(
+                    "sched", UpgradeDowngradeRequest(new_plan_code="dms_enterprise"), SimpleNamespace(id="ent-actor"))
+            assert calls == []
+
+    _run(scenario())
+
+
+def test_r6_2_an_ended_or_expired_row_is_refused_whatever_its_tier_holds(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            from rbac_backend.models.rbac_monetization import UpgradeDowngradeRequest
+            from rbac_backend.services.monetization_service import MonetizationService, SubscriptionNotGoverning
+
+            calls = _record_gateway_calls(monkeypatch)
+            now = datetime.utcnow()
+            await _seed(env, _sub("org-row", status="active", governing_since=now - timedelta(days=3)),
+                        _sub("p1-ended", status="active", plan="dms_starter", project=P1, ends_at=now - timedelta(days=1)),
+                        _sub("p2-trial", status="trial", plan="dms_starter", project=P2,
+                             trial_ends_at=now - timedelta(days=1)))
+            service = MonetizationService(env.db)
+            for row, why in (("p1-ended", "outranked by subscription org-row"), ("p2-trial", "outranked by subscription org-row")):
+                with pytest.raises(SubscriptionNotGoverning, match=why):
+                    await service.upgrade_subscription(row, UpgradeDowngradeRequest(new_plan_code="dms_enterprise"),
+                                                       SimpleNamespace(id="ent-actor"))
+            await env.db.subscriptions.delete_one({"_id": "org-row"})
+            with pytest.raises(SubscriptionNotGoverning, match=r"does not govern its scope \(ended\)"):
+                await service.upgrade_subscription("p1-ended", UpgradeDowngradeRequest(new_plan_code="dms_enterprise"),
+                                                   SimpleNamespace(id="ent-actor"))
+            assert calls == []
+
+    _run(scenario())
+
+
+def test_r6_3_a_change_decided_on_a_stale_state_is_refused(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            from rbac_backend.models.rbac_monetization import UpgradeDowngradeRequest
+            from rbac_backend.services.monetization_service import MonetizationService, SubscriptionNotGoverning
+
+            now = datetime.utcnow()
+            await _seed(env, _sub("current", status="active", plan="dms_starter", governing_since=now - timedelta(days=1)))
+            service = MonetizationService(env.db)
+
+            async def cancel_in_the_window(self: Any, sub: Dict[str, Any], **kwargs: Any) -> None:
+                # A concurrent cancel commits after the guard and before the write.
+                await env.db.subscriptions.update_one({"_id": "current"}, {"$set": {"status": "cancelled"}})
+
+            monkeypatch.setattr(MonetizationService, "_gateway_change", cancel_in_the_window)
+            with pytest.raises(SubscriptionNotGoverning, match="changed while this change was being made"):
+                await service.upgrade_subscription("current", UpgradeDowngradeRequest(new_plan_code="dms_enterprise",
+                                                                                       effective_immediately=True),
+                                                   SimpleNamespace(id="ent-actor"))
+            row = await env.db.subscriptions.find_one({"_id": "current"})
+            assert (row["status"], row["plan_code"]) == ("cancelled", "dms_starter"), "not revived, not re-stamped"
+            assert row["governing_since"] < datetime.utcnow() - timedelta(hours=12)
+
+    _run(scenario())
+
+
+@pytest.mark.parametrize("status", ["past_due", "paused", "archive", "offboarding"])
+def test_r6_4_an_upgrade_never_lifts_a_payment_block_or_restriction(monkeypatch, status: str) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            from rbac_backend.models.rbac_monetization import UpgradeDowngradeRequest
+            from rbac_backend.services.monetization_service import MonetizationService, SubscriptionNotGoverning
+
+            calls = _record_gateway_calls(monkeypatch)
+            await _seed(env, _sub("held", status=status, plan="dms_starter", governing_since=datetime.utcnow()))
+            with pytest.raises(SubscriptionNotGoverning, match="only an active, pilot or trial subscription"):
+                await MonetizationService(env.db).upgrade_subscription(
+                    "held", UpgradeDowngradeRequest(new_plan_code="dms_enterprise", effective_immediately=True),
+                    SimpleNamespace(id="ent-actor"))
+            assert (await env.db.subscriptions.find_one({"_id": "held"}))["status"] == status
+            assert calls == []
+
+    _run(scenario())
+
+
+def test_r6_9_a_row_enforcement_cannot_see_is_refused(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            from bson import ObjectId
+
+            from rbac_backend.models.rbac_monetization import ChangeBillingPeriodRequest
+            from rbac_backend.services.monetization_service import MonetizationService, SubscriptionNotGoverning
+
+            calls = _record_gateway_calls(monkeypatch)
+            org_oid = ObjectId()
+            await _seed(env)
+            await env.db.subscriptions.insert_one({**_sub("oid-org", status="active", governing_since=datetime.utcnow()),
+                                                   "organization_id": org_oid})
+            with pytest.raises(SubscriptionNotGoverning, match="does not govern its scope"):
+                await MonetizationService(env.db).change_billing_period(
+                    "oid-org", ChangeBillingPeriodRequest(new_billing_period="annual"), SimpleNamespace(id="ent-actor"))
             assert calls == []
 
     _run(scenario())
