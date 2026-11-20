@@ -304,6 +304,7 @@ jobs:
             backend/rbac_backend/tests/integration/test_def4_standing_and_pricing_matrix_mongo.py
             backend/rbac_backend/tests/integration/test_f3_subscription_package_scope_mongo.py
             backend/rbac_backend/tests/integration/test_gateway_identity_protection_mongo.py
+            backend/rbac_backend/tests/integration/test_entitlement_resolution_mongo.py
           )
           python -m pytest -q -rs --junitxml=real-mongo-relationships.xml "${suites[@]}" \
             | tee real-mongo-relationships.log

@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional, Tuple
 from ..core.config import settings
 from ..core.database import get_database
 from ..core.permissions import CLIENT_DMS_PERMISSIONS
+from .subscription_resolution import Resolution, select_subscription
 
 
 WRITE_PERMISSIONS = {
@@ -256,11 +257,40 @@ class EntitlementService:
 
     def __init__(self, db: Any = None) -> None:
         self.db = db
+        #: The last resolution this instance made (diagnostic evidence for the policy audit).
+        self.last_resolution: Optional[Dict[str, Any]] = None
 
     async def _get_db(self) -> Any:
         if self.db is not None:
             return self.db
         return await get_database()
+
+    async def resolve_subscription(
+        self,
+        *,
+        organization_id: Optional[str],
+        project_id: Optional[str] = None,
+        package_id: Optional[str] = None,
+    ) -> Resolution:
+        """The governing subscription of a scope and why (``services.subscription_resolution``):
+        status-aware, most specific tier first, never by ``updated_at``; ambiguity fails closed."""
+        if not organization_id:
+            resolution = select_subscription([], organization_id=None)
+        else:
+            db = await self._get_db()
+            scope = [None, ""] + ([str(project_id)] if project_id else [])
+            candidates = await db.subscriptions.find(
+                {"organization_id": str(organization_id), "project_id": {"$in": scope}}
+            ).to_list(length=None)
+            resolution = select_subscription(
+                candidates,
+                organization_id=organization_id,
+                project_id=project_id,
+                package_id=package_id,
+                now=datetime.utcnow(),
+            )
+        self.last_resolution = resolution.diagnostic()
+        return resolution
 
     async def _active_subscription(
         self,
@@ -269,23 +299,11 @@ class EntitlementService:
         project_id: Optional[str] = None,
         package_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        if not organization_id:
-            return None
-        db = await self._get_db()
-        now = datetime.utcnow()
-        scope_or = [
-            {"organization_id": str(organization_id), "project_id": str(project_id or ""), "package_id": str(package_id or "")},
-            {"organization_id": str(organization_id), "project_id": str(project_id or ""), "package_id": {"$in": [None, ""]}},
-            {"organization_id": str(organization_id), "project_id": {"$in": [None, ""]}, "package_id": {"$in": [None, ""]}},
-        ]
-        query = {
-            "$or": scope_or,
-            "$and": [
-                {"$or": [{"starts_at": {"$exists": False}}, {"starts_at": None}, {"starts_at": {"$lte": now}}]},
-                {"$or": [{"ends_at": {"$exists": False}}, {"ends_at": None}, {"ends_at": {"$gte": now}}]},
-            ],
-        }
-        return await db.subscriptions.find_one(query, sort=[("project_id", -1), ("updated_at", -1)])
+        """The governing subscription, or ``None`` (none, or ambiguous)."""
+        resolution = await self.resolve_subscription(
+            organization_id=organization_id, project_id=project_id, package_id=package_id
+        )
+        return resolution.subscription
 
     async def _plan_features(self, plan_code: Optional[str]) -> Dict[str, Any]:
         if not plan_code:
@@ -427,15 +445,20 @@ class EntitlementService:
                 return True, "legacy_no_subscription_records"
             return False, "no_subscription_records"
 
-        subscription = await self._active_subscription(
+        resolution = await self.resolve_subscription(
             organization_id=organization_id,
             project_id=project_id,
             package_id=package_id,
         )
+        subscription = resolution.subscription
+        if resolution.reason == "ambiguous_subscriptions":
+            return False, "ambiguous_subscriptions"
         if not subscription:
             return False, "no_active_subscription"
 
         status = str(subscription.get("status") or "").lower()
+        if resolution.status_class == "unknown":
+            return False, "subscription_status_unknown"
         features = await self._subscription_features(subscription)
 
         if status in self.ARCHIVE_STATUSES:

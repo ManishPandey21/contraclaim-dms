@@ -248,6 +248,8 @@ class PolicyService:
 
         granted = False
         reason = "denied"
+        if hasattr(self.entitlement_service, "last_resolution"):
+            self.entitlement_service.last_resolution = None  # never a previous call's evidence
         try:
             metered_quantity = max(1, int(meter_quantity))
         except Exception:
@@ -444,6 +446,8 @@ class PolicyService:
                         "permission": permission,
                         "meter_event_type": meter_event_type,
                         "meter_quantity": metered_quantity if meter_event_type else None,
+                        # The subscription that decided the entitlement, and why (2026-11-20).
+                        "entitlement": getattr(self.entitlement_service, "last_resolution", None),
                     },
                 )
 

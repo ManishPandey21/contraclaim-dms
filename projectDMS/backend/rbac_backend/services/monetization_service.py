@@ -1586,44 +1586,42 @@ class MonetizationService:
                     if self._org_id_from_project(project) in scoped_org_ids
                 ]
 
-        active_subscriptions = [
-            row
-            for row in subscriptions
-            if str(row.get("status") or "").lower() in {"trial", "pilot", "active"}
-        ]
+        # The same selection enforcement uses (services.subscription_resolution): status-aware,
+        # most specific tier first, never the most recently updated row; an ambiguous scope
+        # is shown as such, not as one arbitrary plan.
+        from .subscription_resolution import select_subscription
+
+        now = datetime.utcnow()
+
+        def state_for(resolution: Any, source: str) -> Dict[str, Any]:
+            if resolution.reason == "ambiguous_subscriptions":
+                state = self._service_state(None, plan_by_code, "none")
+                state["status"] = "ambiguous"
+                return state
+            subscription = resolution.subscription
+            state = self._service_state(subscription, plan_by_code, source if subscription else "none")
+            if subscription is not None and resolution.status_class != "eligible":
+                # Enforcement refuses (blocking, unknown) or restricts (archive, offboarding):
+                # the display does not claim the service is available.
+                state["drafting_enabled"] = False
+                if resolution.status_class in {"blocking", "unknown"}:
+                    state["dms_enabled"] = False
+            return state
 
         effective: Dict[str, Any] = {"organizations": {}, "projects": {}}
         for org in organizations:
             org_id = str(org.get("id") or org.get("_id") or "")
-            org_sub = next(
-                (
-                    sub
-                    for sub in active_subscriptions
-                    if self._active_subscription_match(sub, org_id, None)
-                ),
-                None,
-            )
-            effective["organizations"][org_id] = self._service_state(
-                org_sub, plan_by_code, "organization" if org_sub else "none"
-            )
+            resolution = select_subscription(subscriptions, organization_id=org_id, now=now)
+            effective["organizations"][org_id] = state_for(resolution, "organization")
 
         for project in projects:
             project_id = str(project.get("id") or project.get("_id") or "")
             org_id = self._org_id_from_project(project)
-            project_sub = next(
-                (
-                    sub
-                    for sub in active_subscriptions
-                    if self._active_subscription_match(sub, org_id, project_id)
-                ),
-                None,
-            )
-            if project_sub:
-                effective["projects"][project_id] = self._service_state(
-                    project_sub, plan_by_code, "project"
-                )
+            resolution = select_subscription(subscriptions, organization_id=org_id, project_id=project_id, now=now)
+            if resolution.tier == "project" or resolution.reason == "ambiguous_subscriptions":
+                effective["projects"][project_id] = state_for(resolution, "project")
             else:
-                inherited = dict(effective["organizations"].get(org_id) or self._service_state(None, plan_by_code, "none"))
+                inherited = state_for(resolution, "organization")
                 inherited["source"] = "inherited" if inherited.get("plan_code") else "none"
                 inherited["inherited_from_organization_id"] = org_id if inherited.get("plan_code") else None
                 effective["projects"][project_id] = inherited
