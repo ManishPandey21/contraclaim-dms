@@ -996,3 +996,24 @@ The reviewer was given the code, not these conclusions. Within their own routes 
 | G-3 | A gateway timeout was recorded as "nothing changed" | Low | Introduced | `b7d59a9`: an unknown outcome is listed, audited and retried by the same key |
 
 Tests: `test_payment_bypass_closure_mongo.py` (5), `test_lifecycle_review7_mongo.py` (6), and additions to the R6-7 and consistency suites; mutants 12/12, 10/10 and 8/8. Two earlier tests changed for stated reasons: a checkout test needed its own scope (R5-1), and an upgrade-by-checkout webhook now carries the plan's real price (the money check had been silently skipped because no plan was seeded).
+
+### 16.9 Independent re-review of the review-7 fixes (review 8) and its fixes (`5255dd5`)
+
+All 13 findings were reproduced on real MongoDB at `024b1b4` and fixed in `5255dd5` (13 tests, `test_lifecycle_review8_mongo.py`; 18/18 mutants).
+
+| # | Finding | Severity | Origin | Fix |
+|---|---|---|---|---|
+| A1 | In-place upgrade of a Razorpay-bound plan recorded though Razorpay cannot change a plan in place: enterprise service at the starter price | High | Pre-existing | Adapters declare `supports_in_place_plan_change` (Razorpay, Stripe: no); plan and period changes on such a binding are refused - buy through checkout |
+| A2 | Tenants upgraded manual, administrative or no-charge plans, and to zero-priced plans | High | Pre-existing | Changes to plans not billed through the gateway, and zero-priced targets, need Super Admin; targets must be active and priced for the period |
+| A3 / A4 | Concurrent first trials; a new trial after an in-place conversion | Low / Info | Introduced | Atomic, permanent per-scope trial marker (`subscription_trial_markers`, unique by `_id`) |
+| B1 | A tenant revived a withdrawn administrative grant | Medium | Pre-existing | A tenant resumes only a gateway-paid subscription not cancelled administratively; anything else is Super Admin's |
+| B2 | Concurrent checkouts each created a pending purchase | Medium | Introduced | Checkout holds the scope lease across check, gateway call and insert |
+| B3 | An abandoned checkout blocked the scope for ever | Low | Introduced | After 48 h it is cancelled at the gateway first, then locally; if the gateway does not confirm, the scope stays blocked |
+| B4 | A paid conversion did not close its trial when the claim never recorded the checkout | Low | Introduced | Matched on the checkout's `converts_trial_id` |
+| C1 / C4 | A refused retry hid a review item; a refused plan-settings attempt stayed "in progress" | Medium / Low | Introduced | The operation is left as it was (review item stays listed; a fresh one is `failed`) |
+| C2 | Two attempts of one operation both held the scope | Medium | Introduced | Per-attempt fencing tokens on the lock and on every save, finish and renewal |
+| C3 | A retry after the period changed was misread as key reuse | Low | Introduced | The key binds what the caller asked; a changed target after a confirmed gateway call goes to review |
+| C5 | An unanswered cancel that did reach the provider could never complete | Low | Introduced | The provider's status is read first (`fetch_subscription_status`) |
+| C6 | Reactivation and conversion ran outside the scope lease | Low | Pre-existing | They take it |
+
+**Recorded, not changed:** an amount mismatch on renewal marks billing for review but does not stop service (pre-existing webhook behaviour; an owner decision). **Behaviour change to note:** a Razorpay customer changes plan by buying the new plan through checkout; the old subscription keeps billing until it is cancelled - the replacement safeguard in §16.7 (design only, needs authorisation) is what removes that overlap.
