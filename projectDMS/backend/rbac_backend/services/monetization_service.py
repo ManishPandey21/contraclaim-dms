@@ -932,8 +932,109 @@ class MonetizationService:
             f"Cannot {operation}: this subscription does not govern its scope ({classify(stored, moment)})"
         )
 
-    async def upgrade_subscription(self, subscription_id: str, request: UpgradeDowngradeRequest, current_user: Any) -> Dict[str, Any]:
+    async def _replay_if_completed(self, kind: str, subscription_id: str, idempotency_key: Optional[str],
+                                   asked: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """With an idempotency key, a repeat of a completed change answers with the
+        subscription as it now is - before any validation that the completed change itself
+        made untrue (an upgrade is no longer "to a higher tier" once applied). The same key
+        with a different request is refused."""
+        from . import subscription_operations as ops
+
+        if not idempotency_key:
+            return None
+        sub = await self.get_subscription_by_id(subscription_id)
+        if not sub:
+            return None
+        db = await self._get_db()
+        sub_id = str(sub.get("id") or sub.get("_id"))
+        op_id = ops.operation_id(str(sub.get("organization_id") or ""), scope_text(sub.get("project_id")),
+                                 f"{kind}:{sub_id}:{idempotency_key}")
+        op = await db[ops.OPERATIONS].find_one({"_id": op_id, "status": "completed"})
+        if not op:
+            return None
+        target = ((op.get("request") or {}).get("target")) or {}
+        if any(value is not None and target.get(key) != value for key, value in asked.items()):
+            raise ops.IdempotencyKeyReused("This idempotency key was used for a different request")
+        return {**sub, "operation": self._operation_summary(op)}
+
+    async def _gateway_then_local(
+        self,
+        *,
+        kind: str,
+        sub: Dict[str, Any],
+        target: Dict[str, Any],
+        gateway_call: Any,
+        local_call: Any,
+        current_user: Any,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """A lifecycle change that must reach the gateway and the database, as a durable
+        operation (gateway/database consistency design, owner decision 2026-11-21).
+
+        The gateway is changed first, so a gateway failure leaves the database untouched
+        (operation ``failed``: nothing to reconcile, retryable). If the database write is then
+        refused (a concurrent change, R6-3), the two systems disagree: the operation is
+        ``needs_review`` with the exact subscription, the state before and the target,
+        audited for an administrator; it is never reported as done. With an idempotency key, a
+        repeat of a completed change returns the subscription without calling the gateway
+        again, and a retry after ``needs_review`` does not repeat a confirmed gateway call.
+        No cross-system atomicity is claimed and nothing is refunded or cancelled elsewhere.
+        """
+        from . import subscription_operations as ops
+
+        db = await self._get_db()
+        sub_id = str(sub.get("id") or sub.get("_id"))
+        org = str(sub.get("organization_id") or "")
+        project = scope_text(sub.get("project_id"))
+        actor = getattr(current_user, "id", None)
+        op = await ops.begin(
+            db, kind=kind, organization_id=org, project_id=project,
+            idempotency_key=f"{kind}:{sub_id}:{idempotency_key}" if idempotency_key else None,
+            request={"subscription_id": sub_id, "target": target}, requested_by=actor,
+        )
+        if op.get("status") == "completed":
+            current = await self.get_subscription_by_id(sub_id)
+            return {**(current or {}), "operation": self._operation_summary(op)}
+        bound = bool(scope_text(sub.get("payment_gateway_subscription_id")))
+        items = op.get("items") or [{
+            "subscription_id": sub_id, "gateway_bound": bound, "gateway": "pending", "attempts": 0,
+            "last_error": None, "local": "unchanged", "target": target,
+            "before": {key: sub.get(key) for key in ("status", "plan_code", "billing_period", "active_add_ons")},
+        }]
+        item = items[0]
+        if item["gateway"] not in {"confirmed", "not_bound"}:
+            item["attempts"] += 1
+            try:
+                await gateway_call()
+            except Exception as exc:
+                item["gateway"], item["last_error"] = "failed", type(exc).__name__
+                await ops.finish(db, op["_id"], "failed", items=items)
+                if isinstance(exc, (ValueError, SubscriptionNotGoverning)):
+                    raise
+                raise GatewayOperationFailed("The payment gateway did not apply the change; nothing was changed") from exc
+            item["gateway"], item["last_error"] = ("confirmed" if bound else "not_bound"), None
+            await ops.save_items(db, op["_id"], items)
+        try:
+            result = await local_call()
+        except Exception:
+            item["local"] = "refused"
+            disagree = item["gateway"] == "confirmed"
+            await ops.finish(db, op["_id"], "needs_review" if disagree else "failed", items=items)
+            if disagree:
+                await self._review_event(sub, f"subscription.{kind}_needs_reconciliation", current_user,
+                                         reason="gateway_changed_local_refused")
+            raise
+        item["local"] = "applied"
+        await ops.finish(db, op["_id"], "completed", result={"subscription_id": sub_id}, items=items)
+        return result
+
+    async def upgrade_subscription(
+        self, subscription_id: str, request: UpgradeDowngradeRequest, current_user: Any, *, idempotency_key: Optional[str] = None
+    ) -> Dict[str, Any]:
         """Upgrade subscription to a higher-tier plan."""
+        replay = await self._replay_if_completed("upgrade", subscription_id, idempotency_key, {"plan_code": request.new_plan_code, "billing_period": request.billing_period})
+        if replay is not None:
+            return replay
         sub = await self.get_subscription_by_id(subscription_id)
         if not sub:
             raise ValueError("Subscription not found")
@@ -959,8 +1060,14 @@ class MonetizationService:
             current_period_end=self._compute_period_end(now, billing_period) if request.effective_immediately else None,
         )
         # Propagate to the gateway first; if it fails, the local state is untouched.
-        await self._gateway_change(sub, new_plan_code=request.new_plan_code, new_billing_period=billing_period)
-        result = await self.update_subscription(subscription_id, update, current_user, expected_state=state)
+        result = await self._gateway_then_local(
+            kind="upgrade", sub=sub, current_user=current_user, idempotency_key=idempotency_key,
+            target={"plan_code": request.new_plan_code, "billing_period": billing_period},
+            gateway_call=lambda: self._gateway_change(sub, new_plan_code=request.new_plan_code, new_billing_period=billing_period),
+            local_call=lambda: self.update_subscription(subscription_id, update, current_user, expected_state=state),
+        )
+        if "operation" in result:
+            return result  # a repeat of a completed change: nothing done again
 
         await self._record_history(
             subscription_id=subscription_id,
@@ -976,8 +1083,13 @@ class MonetizationService:
         )
         return result
 
-    async def downgrade_subscription(self, subscription_id: str, request: UpgradeDowngradeRequest, current_user: Any) -> Dict[str, Any]:
+    async def downgrade_subscription(
+        self, subscription_id: str, request: UpgradeDowngradeRequest, current_user: Any, *, idempotency_key: Optional[str] = None
+    ) -> Dict[str, Any]:
         """Downgrade subscription to a lower-tier plan (effective at period end)."""
+        replay = await self._replay_if_completed("downgrade", subscription_id, idempotency_key, {"plan_code": request.new_plan_code, "billing_period": request.billing_period})
+        if replay is not None:
+            return replay
         sub = await self.get_subscription_by_id(subscription_id)
         if not sub:
             raise ValueError("Subscription not found")
@@ -997,8 +1109,14 @@ class MonetizationService:
             plan_code=request.new_plan_code,
             billing_period=billing_period,
         )
-        await self._gateway_change(sub, new_plan_code=request.new_plan_code, new_billing_period=billing_period)
-        result = await self.update_subscription(subscription_id, update, current_user, expected_state=state)
+        result = await self._gateway_then_local(
+            kind="downgrade", sub=sub, current_user=current_user, idempotency_key=idempotency_key,
+            target={"plan_code": request.new_plan_code, "billing_period": billing_period},
+            gateway_call=lambda: self._gateway_change(sub, new_plan_code=request.new_plan_code, new_billing_period=billing_period),
+            local_call=lambda: self.update_subscription(subscription_id, update, current_user, expected_state=state),
+        )
+        if "operation" in result:
+            return result
 
         await self._record_history(
             subscription_id=subscription_id,
@@ -1013,16 +1131,27 @@ class MonetizationService:
         )
         return result
 
-    async def change_billing_period(self, subscription_id: str, request: ChangeBillingPeriodRequest, current_user: Any) -> Dict[str, Any]:
+    async def change_billing_period(
+        self, subscription_id: str, request: ChangeBillingPeriodRequest, current_user: Any, *, idempotency_key: Optional[str] = None
+    ) -> Dict[str, Any]:
         """Switch billing cadence (takes effect at next renewal)."""
+        replay = await self._replay_if_completed("period_change", subscription_id, idempotency_key, {"billing_period": request.new_billing_period})
+        if replay is not None:
+            return replay
         sub = await self.get_subscription_by_id(subscription_id)
         if not sub:
             raise ValueError("Subscription not found")
         state = await self._assert_governs_its_scope(sub, "change the billing period of")
 
         update = SubscriptionUpdate(billing_period=request.new_billing_period)
-        await self._gateway_change(sub, new_billing_period=request.new_billing_period)
-        result = await self.update_subscription(subscription_id, update, current_user, expected_state=state)
+        result = await self._gateway_then_local(
+            kind="period_change", sub=sub, current_user=current_user, idempotency_key=idempotency_key,
+            target={"billing_period": request.new_billing_period},
+            gateway_call=lambda: self._gateway_change(sub, new_billing_period=request.new_billing_period),
+            local_call=lambda: self.update_subscription(subscription_id, update, current_user, expected_state=state),
+        )
+        if "operation" in result:
+            return result
 
         await self._record_history(
             subscription_id=subscription_id,
@@ -1035,8 +1164,13 @@ class MonetizationService:
         )
         return result
 
-    async def cancel_subscription(self, subscription_id: str, request: CancelSubscriptionRequest, current_user: Any) -> Dict[str, Any]:
+    async def cancel_subscription(
+        self, subscription_id: str, request: CancelSubscriptionRequest, current_user: Any, *, idempotency_key: Optional[str] = None
+    ) -> Dict[str, Any]:
         """Cancel a subscription (immediately or at period end)."""
+        replay = await self._replay_if_completed("cancellation", subscription_id, idempotency_key, {"status": "cancelled", "immediate": bool(request.immediate)})
+        if replay is not None:
+            return replay
         sub = await self.get_subscription_by_id(subscription_id)
         if not sub:
             raise ValueError("Subscription not found")
@@ -1053,8 +1187,14 @@ class MonetizationService:
             update.ends_at = now
 
         # Cancel on the gateway so it stops billing; abort locally if that fails.
-        await self._gateway_cancel(sub, immediate=bool(request.immediate))
-        result = await self.update_subscription(subscription_id, update, current_user)
+        result = await self._gateway_then_local(
+            kind="cancellation", sub=sub, current_user=current_user, idempotency_key=idempotency_key,
+            target={"status": "cancelled", "immediate": bool(request.immediate)},
+            gateway_call=lambda: self._gateway_cancel(sub, immediate=bool(request.immediate)),
+            local_call=lambda: self.update_subscription(subscription_id, update, current_user),
+        )
+        if "operation" in result:
+            return result
 
         await self._record_history(
             subscription_id=subscription_id,

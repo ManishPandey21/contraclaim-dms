@@ -1196,6 +1196,16 @@ _SCOPE_CHANGE_REFUSED = (
 # Subscription Lifecycle Endpoints
 # ---------------------------------------------------------------------------
 
+
+def _idempotency_key(request: Request) -> Optional[str]:
+    """The caller's ``Idempotency-Key`` (gateway/database consistency design): a retried
+    lifecycle change with the same key is not applied twice."""
+    key = (request.headers.get("Idempotency-Key") or "").strip()
+    if len(key) > 128:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Idempotency-Key is longer than 128 characters")
+    return key or None
+
+
 @router.post("/subscriptions/{subscription_id}/upgrade", response_model=Dict[str, Any])
 async def upgrade_subscription(
     subscription_id: str,
@@ -1217,9 +1227,13 @@ async def upgrade_subscription(
         subscription_id=subscription_id,
     )
     try:
-        return await service.upgrade_subscription(subscription_id, payload, current_user)
+        return await service.upgrade_subscription(subscription_id, payload, current_user, idempotency_key=_idempotency_key(request))
     except SubscriptionNotGoverning as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except (OperationConflict, IdempotencyKeyReused) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except GatewayOperationFailed as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -1245,9 +1259,13 @@ async def downgrade_subscription(
         subscription_id=subscription_id,
     )
     try:
-        return await service.downgrade_subscription(subscription_id, payload, current_user)
+        return await service.downgrade_subscription(subscription_id, payload, current_user, idempotency_key=_idempotency_key(request))
     except SubscriptionNotGoverning as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except (OperationConflict, IdempotencyKeyReused) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except GatewayOperationFailed as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -1273,7 +1291,11 @@ async def cancel_subscription(
         subscription_id=subscription_id,
     )
     try:
-        return await service.cancel_subscription(subscription_id, payload, current_user)
+        return await service.cancel_subscription(subscription_id, payload, current_user, idempotency_key=_idempotency_key(request))
+    except (OperationConflict, IdempotencyKeyReused) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except GatewayOperationFailed as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -1326,9 +1348,13 @@ async def change_billing_period(
         subscription_id=subscription_id,
     )
     try:
-        return await service.change_billing_period(subscription_id, payload, current_user)
+        return await service.change_billing_period(subscription_id, payload, current_user, idempotency_key=_idempotency_key(request))
     except SubscriptionNotGoverning as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except (OperationConflict, IdempotencyKeyReused) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except GatewayOperationFailed as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 

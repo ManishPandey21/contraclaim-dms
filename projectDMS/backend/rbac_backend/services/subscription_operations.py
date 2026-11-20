@@ -14,7 +14,8 @@ until it is completed or resolved. Nothing here claims cross-system atomicity.
     kind              e.g. "plan_settings_replacement", "plan_settings_inherit"
     fingerprint       sha256 of the request: the same key with a different request is refused
     organization_id / project_id / requested_by / created_at / updated_at
-    status            in_progress | completed | needs_review
+    status            in_progress | completed | needs_review | failed (nothing changed anywhere;
+                      retryable, not listed for review)
     lease_until       an in-progress operation older than this may be resumed (crash recovery)
     request           what was asked (no secrets, no personal data)
     items             one per affected subscription: subscription_id, status_before,
@@ -95,7 +96,7 @@ async def begin(db: Any, *, kind: str, organization_id: str, project_id: Optiona
     if existing.get("status") == "completed":
         return existing
     resumed = await db[OPERATIONS].find_one_and_update(
-        {"_id": op_id, "$or": [{"status": "needs_review"}, {"lease_until": {"$lt": now}}]},
+        {"_id": op_id, "$or": [{"status": {"$in": ["needs_review", "failed"]}}, {"lease_until": {"$lt": now}}]},
         {"$set": {"status": "in_progress", "lease_until": now + LEASE, "updated_at": now}, "$inc": {"attempts": 1}},
         return_document=ReturnDocument.AFTER,
     )
