@@ -38,8 +38,8 @@ MIGRATIONS = RBAC_BACKEND / "migrations"
 #: applied all 22 to an empty, disposable mongo:8.0 on 2026-11-14; run
 #: `gate6-20261118t082257z-1668` applied all 32 on 2026-11-18. All are
 #: recorded in docs/GATE_6_FRESH_INSTALL_EVIDENCE.md.
-MIGRATIONS_PROVEN_ON_A_FRESH_DATABASE = 32
-FRESH_INSTALL_RUN_ID = "gate6-20261118t082257z-1668"
+MIGRATIONS_PROVEN_ON_A_FRESH_DATABASE = 33
+FRESH_INSTALL_RUN_ID = "gate6-20261120t174311z-13219"
 
 
 def _gate6_bullets():
