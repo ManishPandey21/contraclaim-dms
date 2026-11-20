@@ -528,8 +528,12 @@ async def get_effective_plan_services(
     if _explicit_billing_policy():
         return {"effective": await _minimal_effective_services(current_user, settings)}
 
-    if await PolicyService().has_permission(current_user, Permissions.SUBSCRIPTION_ENTITLEMENT_MANAGE):
-        return {"effective": settings.get("effective", {})}
+    # A holder of subscription.entitlement.manage (the tenant billing administrator) used to
+    # get every organisation's full service state here. It now sees its own organisations
+    # and their projects, like an organisation administrator (decision 4: the feature-status
+    # endpoint is never a route to another tenant's billing; M4: the tenant billing
+    # administrator acts within their organisation). Super Admin is unchanged, above.
+    entitlement_manager = await PolicyService().has_permission(current_user, Permissions.SUBSCRIPTION_ENTITLEMENT_MANAGE)
 
     allowed_orgs = await scope.client_organization_ids(current_user)
     allowed_projects = await scope.client_project_ids(current_user)
@@ -540,7 +544,7 @@ async def get_effective_plan_services(
         )
         for project in settings.get("projects", [])
     }
-    if roles & {"orgadmin", "orguser"}:
+    if entitlement_manager or roles & {"orgadmin", "orguser"}:
         allowed_projects.update(
             project_id
             for project_id, org_id in project_orgs.items()

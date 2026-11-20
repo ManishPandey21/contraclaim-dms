@@ -191,3 +191,25 @@ def test_feature_indicators_drop_every_non_boolean_value() -> None:
         "a": True, "b": False,
     }
     assert feature_indicators(None) == {} and feature_indicators(["a"]) == {}
+
+
+@pytest.mark.parametrize("flag", [False, True])
+def test_the_tenant_billing_administrator_sees_only_its_organisations_service_state(monkeypatch, flag: bool) -> None:
+    """Before, any holder of subscription.entitlement.manage (the tenant billing administrator)
+    got every organisation's full service state from the feature-status endpoint with the
+    flag off. Now its own organisations and their projects only, in both states."""
+
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            _flag(monkeypatch, flag)
+            await _seed(env)
+            await _user(env.db, "d4_tenant_billing", ["contraclaim_billing_admin"], organization_id=ORG_A)
+            effective = (await _get(env, "d4_tenant_billing", "/plan-settings/effective-services")).json()["effective"]
+            assert set(effective["organizations"]) == {ORG_A}, effective["organizations"].keys()
+            assert PROJ_B1 not in effective["projects"]
+            assert "gw-d4-secret" not in json.dumps(effective, default=str)
+            # Super Admin still sees every organisation.
+            everyone = (await _get(env, "superadmin", "/plan-settings/effective-services")).json()["effective"]
+            assert {ORG_A, ORG_B} <= set(everyone["organizations"])
+
+    _run(scenario())
