@@ -1017,3 +1017,23 @@ All 13 findings were reproduced on real MongoDB at `024b1b4` and fixed in `5255d
 | C6 | Reactivation and conversion ran outside the scope lease | Low | Pre-existing | They take it |
 
 **Recorded, not changed:** an amount mismatch on renewal marks billing for review but does not stop service (pre-existing webhook behaviour; an owner decision). **Behaviour change to note:** a Razorpay customer changes plan by buying the new plan through checkout; the old subscription keeps billing until it is cancelled - the replacement safeguard in §16.7 (design only, needs authorisation) is what removes that overlap.
+
+### 16.10 Independent review 9 of `5255dd5` and its fixes (`918b41f`)
+
+No High finding: no route left a tenant billing administrator paid, extended or revived service, a priced add-on, a free plan or `billing_status=active` without payment. The Medium and Low findings were reproduced on real MongoDB at `566fe2f` and fixed in `918b41f` (9 tests, `test_lifecycle_review9_mongo.py`; 12/12 mutants).
+
+| # | Finding | Severity | Origin | Fix |
+|---|---|---|---|---|
+| R9-1 | Checkout over a paid plan: both bill until the old one is cancelled by hand | Medium (documented regression of A1) | Introduced | Checkout answers with a warning; the overlap ends only with the §16.7 replacement (design only) |
+| R9-2 | A tenant checked out a zero-priced plan; any payment activated it | Medium (conditional) | Pre-existing | Checkout sells only active plans priced for the period (zero-priced: Super Admin); the webhook never activates a plan whose expected charge is zero |
+| R9-3 | A failed trial creation locked the scope out of trials for ever | Medium | Introduced | Marker removed on failure; Super Admin may grant a further trial (audited) |
+| R9-4 | An "abandoned" checkout the provider shows paid was cancelled | Low-Medium | Introduced | Provider status read first; then refused and listed, never cancelled |
+| R9-5 | A checkout whose lease lapsed during a slow gateway call was recorded beside another | Low-Medium | Introduced | Lease re-checked after the gateway call; otherwise not recorded, listed |
+| R9-6 | A binding of another provider was changed under the configured one | Low | Introduced | Refused |
+| R9-7 | Administrative cancellation recognised by an editable field | Low | Introduced | `cancelled_administratively` (not writable by an ordinary update) |
+| R9-8 / R9-9 | Stale conversion checkouts blocked conversion | Low | Introduced | Reset when cancelled or stale; conversion expires abandoned checkouts too |
+| R9-10 | Gateway failure at checkout was a 500 | Low | Pre-existing | 502, scope released |
+| R9-11 | Razorpay cycle-end cancels keep provider status `active`, so reconciliation reads only immediate cancels | Info | Introduced | Recorded |
+| R9-12 | Free add-ons on unbilled plans need Super Admin | Info | Introduced (A2) | Recorded as intended |
+
+**Four independent reviews of this pass, in sum:** review 7 (cold, on R6-5 to R6-8 and lifecycle consistency) found 4 pre-existing payment bypasses (1 Critical, 3 High) and 13 introduced or adjacent defects; review 8 found 2 more High pre-existing paths and 11 others; review 9 found none High. Every finding was reproduced at the commit before its fix and fixed in its own commit with tests and mutants, except those recorded above.
