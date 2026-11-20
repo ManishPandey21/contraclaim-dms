@@ -22,6 +22,25 @@ from ..services.usage_metering_service import QuotaExceededError, UsageMeteringS
 #: Roles whose authority is bound to assigned projects, never to a whole organisation.
 PROJECT_TIER_ROLE_KEYS = frozenset({"projectadmin", "projectuser"})
 
+#: Built-in roles that stand for the whole of a member organisation for billing visibility
+#: (decision 4, 2026-11-20). Anyone else (Project Admin / User, limited user, a plain user,
+#: a custom project role) is project-level there.
+ORGANISATION_LEVEL_BILLING_ROLE_KEYS = frozenset(
+    {"orgadmin", "orguser", "contractmgr_org", "doccontroller", "reporter", "settings_manager", "contraclaim_billing_admin"}
+)
+
+#: Financial reads that a project-level caller never receives (decision 4), whatever alias
+#: would otherwise grant them with BILLING_EXPLICIT_PERMISSIONS off.
+ORGANISATION_FINANCIAL_VIEW_PERMISSIONS = frozenset(
+    {
+        Permissions.BILLING_PLAN_VIEW,
+        Permissions.BILLING_RECORD_VIEW,
+        Permissions.BILLING_INVOICE_VIEW,
+        Permissions.BILLING_INVOICE_DOWNLOAD,
+        Permissions.SUBSCRIPTION_HISTORY_VIEW,
+    }
+)
+
 
 class PolicyService:
     """Central deny-by-default authorization policy."""
@@ -75,6 +94,32 @@ class PolicyService:
             organization_id=organization_id,
             project_id=project_id,
         )
+
+    async def has_organisation_level_standing(self, current_user: Any, organization_id: Optional[str]) -> bool:
+        """Decision 4: whether the caller stands for the whole of ``organization_id`` for billing
+        visibility: a member holding an organisation-level built-in role
+        (ORGANISATION_LEVEL_BILLING_ROLE_KEYS), or a custom role of that organisation with no
+        project. Super Admin always. (Built-in roles are still global: M1.)"""
+        if self.scope_service.is_superadmin(current_user):
+            return True
+        if not organization_id:
+            return False
+        if str(organization_id) not in await self.scope_service.client_organization_ids(current_user):
+            return False
+        if self.scope_service.role_names(current_user) & ORGANISATION_LEVEL_BILLING_ROLE_KEYS:
+            return True
+        return await self.permission_service.holds_organisation_level_custom_role(
+            str(getattr(current_user, "id", "") or ""), str(organization_id)
+        )
+
+    async def _organisation_of(self, organization_id: Optional[str], project_id: Optional[str]) -> Optional[str]:
+        if organization_id:
+            return str(organization_id)
+        if not project_id:
+            return None
+        db = self.db if self.db is not None else await self.permission_service._get_db()
+        resolved, _ = await self.permission_service.resolve_request_scope(db, None, project_id)
+        return resolved
 
     async def _may_answer_at_organisation_level(self, current_user: Any, organization_id: Optional[str]) -> bool:
         """DEF-4: a project-tier user (Project Admin / Project User) answers a billing check
@@ -322,6 +367,19 @@ class PolicyService:
                 if not explicit_only and self.scope_service.is_superadmin(current_user):
                     return await _allow("superadmin")
                 if domain == "billing":
+                    if (
+                        (organization_id or project_id)
+                        and not settings.BILLING_EXPLICIT_PERMISSIONS
+                        and permission in ORGANISATION_FINANCIAL_VIEW_PERMISSIONS
+                        and not await self.has_organisation_level_standing(
+                            current_user, await self._organisation_of(organization_id, project_id)
+                        )
+                    ):
+                        # Decision 4: a project-level caller (Project Admin / User and the like)
+                        # never receives financial detail. The legacy alias still grants the
+                        # name; the organisation-level billing views are refused here.
+                        reason = "organisation_billing_standing_required"
+                        return await self._deny(reason)
                     if organization_id or project_id:
                         if await self.scope_service.is_client_scope_allowed(
                             current_user,
@@ -389,6 +447,7 @@ class PolicyService:
             "quota_exceeded": "Usage quota is exhausted for this project or organization",
             "platform_admin_required": "Platform administration permission is required for this action",
             "platform_permission_unscoped": "This platform action does not take an organization or project scope",
+            "organisation_billing_standing_required": "Billing detail is available to organisation-level roles only",
             "unsupported_permission_domain": "Permission is not supported by the central authorization policy",
         }
         raise HTTPException(

@@ -1109,6 +1109,36 @@ class PermissionService:
             logger.error(f"Platform grant check failed for user {user_id}: {exc}")
             return False
 
+    async def holds_organisation_level_custom_role(self, user_id: str, organization_id: str) -> bool:
+        """Whether one of the user's custom roles applies to the whole of ``organization_id``
+        (a role of that organisation with no project, held by a member). Project roles and
+        platform roles do not count; a read error is a refusal."""
+        if not user_id or not organization_id:
+            return False
+        try:
+            db = await self._get_db()
+            try:
+                user_query_id: Any = ObjectId(user_id)
+            except Exception:
+                user_query_id = user_id
+            user_doc = await db.users.find_one({"_id": user_query_id})
+            if not user_doc:
+                return False
+            grants, _ = await self.scoped_grants(db, user_doc)
+        except Exception as exc:
+            logger.error(f"Organisation-level role check failed for user {user_id}: {exc}")
+            return False
+        for grant in grants:
+            scope = grant.get("scope")
+            if (
+                isinstance(scope, Mapping)
+                and not scope.get("platform")
+                and not scope.get("project_id")
+                and str(scope.get("organization_id") or "") == str(organization_id)
+            ):
+                return True
+        return False
+
     @staticmethod
     def primary_organisation(user_doc: Dict[str, Any]) -> Optional[str]:
         """The organisation a permission-only gate is judged in for custom roles (review R-4)."""

@@ -213,3 +213,63 @@ def test_the_tenant_billing_administrator_sees_only_its_organisations_service_st
             assert {ORG_A, ORG_B} <= set(everyone["organizations"])
 
     _run(scenario())
+
+
+FINANCIAL_PATHS = (
+    f"/billing/summary/{ORG_A}",
+    f"/billing/history/{ORG_A}",
+    f"/billing/records/{ORG_A}",
+    f"/billing/review-queue/{ORG_A}",
+    f"/subscriptions/{SUB_A1}/history",
+    f"/subscriptions/{SUB_A1}/invoice-preview",
+)
+
+
+def test_project_level_callers_never_reach_the_financial_routes_with_the_flag_off(monkeypatch) -> None:
+    """Independent review H1: the legacy organizations:read alias, which Project Admin and
+    Project User carry, let them read the organisation's billing summary (gateway ids, raw
+    overrides, sibling projects) and their project's invoice preview. The alias still grants
+    the name; PolicyService now refuses organisation financial views without organisation-
+    level standing. Organisation-level roles keep them."""
+
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            _flag(monkeypatch, False)
+            await _seed(env)
+            for persona in ("project_user", "project_admin"):
+                for path in FINANCIAL_PATHS:
+                    response = await _get(env, persona, path)
+                    assert response.status_code == 403, (persona, path, response.status_code)
+                    _assert_no_secrets(response.text, f"{persona} {path}")
+            for path in FINANCIAL_PATHS[:4]:
+                assert (await _get(env, "org_user", path)).status_code == 200, path
+                assert (await _get(env, "org_admin", path)).status_code == 200, path
+
+    _run(scenario())
+
+
+@pytest.mark.parametrize("flag", [False, True])
+def test_the_cut_is_decided_by_standing_not_by_project_role_names(monkeypatch, flag: bool) -> None:
+    """Independent review M: a limited user, or a user holding only a custom project role
+    with the usage view, received full rows (gateway id, raw overrides). Every caller without
+    organisation-level standing now gets the operational view."""
+
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            _flag(monkeypatch, flag)
+            await _seed(env)
+            await env.db.roles.insert_one(_role("d4-usage-only-a1", ["subscription.usage.view"], organization_id=ORG_A, project_id=PROJ_A1))
+            await _user(env.db, "d4_limited", ["limited_user"], organization_id=ORG_A, projects=[PROJ_A1])
+            await _user(env.db, "d4_custom_project", ["d4-usage-only-a1"], organization_id=ORG_A, projects=[PROJ_A1])
+            for persona in ("d4_limited", "d4_custom_project"):
+                for path in ("/subscriptions", f"/subscriptions/{SUB_A1}", "/plan-settings", "/plan-settings/effective-services"):
+                    response = await _get(env, persona, path)
+                    if response.status_code == 200:
+                        _assert_no_secrets(response.json(), f"{persona} {path} flag={flag}")
+                    else:
+                        assert response.status_code in (403, 404), (persona, path, response.status_code)
+                for path in FINANCIAL_PATHS:
+                    response = await _get(env, persona, path)
+                    assert response.status_code in (403, 404), (persona, path, response.status_code)
+
+    _run(scenario())

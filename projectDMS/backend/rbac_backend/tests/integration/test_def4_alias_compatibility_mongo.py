@@ -61,7 +61,10 @@ def test_ordinary_members_read_their_organisations_billing_through_the_alias(mon
                     f"/api/rbac-monetization/billing/review-queue/{ORG_A}",  # billing.plan.view via organizations:read
                 ):
                     response = await env.client.get(path, headers=headers)
-                    assert response.status_code == 200, (persona, path, response.status_code, response.text[:200])
+                    # Decision 4 (2026-11-20): the alias still grants the name, but a project-level
+                    # caller never receives the organisation's financial detail.
+                    expected = 200 if persona == "org_user" else 403
+                    assert response.status_code == expected, (persona, path, response.status_code, response.text[:200])
                 # Never another organisation's.
                 foreign = await env.client.get(f"/api/rbac-monetization/billing/records/{ORG_B}", headers=headers)
                 assert foreign.status_code == 403, (persona, foreign.text[:200])

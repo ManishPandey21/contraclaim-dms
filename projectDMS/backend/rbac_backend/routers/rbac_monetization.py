@@ -181,14 +181,22 @@ def _operational_subscription(row: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def _project_tier_in(current_user: CurrentUser, organization_id: Optional[str]) -> bool:
-    """Whether the caller answers as Project Admin / Project User in this organisation: a
-    project-tier role and no organisation-wide scope there. Super Admin never."""
+    """Whether the caller gets only the operational view in this organisation (decision 4).
+
+    Flag off: anyone without organisation-level standing there
+    (``PolicyService.has_organisation_level_standing``): Project Admin / User, a limited or
+    plain user, a custom project role. Decided by standing, never by the presence of a
+    project role name, so an unlisted project-level role fails closed (independent review).
+    Flag on: grants already cut every list; Project Admin / User are cut further, as
+    decision 4 requires even with subscription.status.view. Super Admin never."""
     scope = ScopeService()
     if scope.is_superadmin(current_user):
         return False
-    if not (scope.role_names(current_user) & PROJECT_SUBSCRIPTION_VIEW_ROLES):
-        return False
-    return not await scope.has_organization_wide_scope(current_user, organization_id=organization_id)
+    if _explicit_billing_policy():
+        if not (scope.role_names(current_user) & PROJECT_SUBSCRIPTION_VIEW_ROLES):
+            return False
+        return not await scope.has_organization_wide_scope(current_user, organization_id=organization_id)
+    return not await PolicyService().has_organisation_level_standing(current_user, organization_id)
 
 
 async def _minimise_rows(current_user: CurrentUser, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -816,6 +824,24 @@ async def get_subscription(
         project_id=sub.get("project_id"),
         resource_type="subscription",
     )
+    if _explicit_billing_policy() and not ScopeService().is_superadmin(current_user):
+        # subscription.usage.view admits the read; what is shown follows the explicit grants
+        # in this scope, as in the list (independent review: a custom project role holding
+        # only the usage view received the full row).
+        org = str(sub.get("organization_id") or "")
+        project = str(sub.get("project_id") or "") or None
+        projects = {project} if project else set()
+        full_orgs, full_projects = await _granted_in(
+            policy, current_user, Permissions.SUBSCRIPTION_HISTORY_VIEW, organizations={org}, projects=projects
+        )
+        status_orgs, status_projects = await _granted_in(
+            policy, current_user, Permissions.SUBSCRIPTION_STATUS_VIEW, organizations={org}, projects=projects
+        )
+        if not (org in full_orgs or (project and project in full_projects)):
+            if org in status_orgs or (project and project in status_projects):
+                sub = _only(sub, SUBSCRIPTION_STATUS_FIELDS)
+            else:
+                sub = _operational_subscription(sub)
     return (await _minimise_rows(current_user, [sub]))[0]
 
 

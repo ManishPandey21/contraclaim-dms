@@ -122,9 +122,14 @@ def test_flag_off_keeps_todays_behaviour(monkeypatch) -> None:
         async with _env(monkeypatch) as env:
             _flag(monkeypatch, False)
             await _seed(env)
-            for persona in ("org_admin", "org_user", "project_user", "def4_contract_manager", "def4_custom_orgread"):
+            for persona in ("org_admin", "org_user", "def4_contract_manager", "def4_custom_orgread"):
                 for path in READS:
                     assert await _status(env, persona, "GET", path) == 200, (persona, path)
+            # Decision 4 (2026-11-20, both states): project-level callers never read financial
+            # detail, though the alias still grants them the name.
+            for persona in ("project_user", "project_admin"):
+                for path in READS:
+                    assert await _status(env, persona, "GET", path) == 403, (persona, path)
             # reports:view reaches subscription.usage.view (single subscription read).
             assert await _status(env, "def4_reporter", "GET", f"/subscriptions/sub-{ORG_A}") == 200
             # Decision 4 (2026-11-20, both flag states): a project-tier caller's subscription

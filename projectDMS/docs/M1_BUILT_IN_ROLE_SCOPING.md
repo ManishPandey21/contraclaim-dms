@@ -147,7 +147,7 @@ Counted by `grep` at `5ccd918`, excluding tests:
 **Checks:**
 
 - The built-in keys are inlined so the reading runs on old images. A parity test keeps them equal to `role_grants.BUILT_IN_ROLE_KEYS`.
-- A real-MongoDB test asserts that the reading writes nothing and leaks no names.
+- **No writes:** guaranteed by the `ReadOnlyCollection`/`ReadOnlyDatabase` allow-list the reading runs through (reads only; `aggregate` without `$out`/`$merge`). The real-MongoDB test also checks that the document counts are unchanged and that no names leak.
 
 **Status: not read in production** (pending AQ-11 access).
 
