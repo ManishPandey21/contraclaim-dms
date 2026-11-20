@@ -360,7 +360,7 @@ The owner acknowledged the DEF-4 implementation and the M2, M3 and L2 fixes as c
 
 - Super Admin;
 - a member holding `orgadmin`, `orguser`, `contractmgr_org`, `doccontroller`, `reporter`, `settings_manager` or `contraclaim_billing_admin`;
-- a member holding a custom role of that organisation with no project.
+- a member holding a custom role of that organisation, with no project, **that itself grants the view in question**. An unrelated organisation role (for example, one holding only `tags:read`) confers nothing: re-review N1, fixed in the N1 fix commit.
 
 Callers without standing include Project Admin, Project User, a limited user, a plain user, and anyone holding only a custom project role. With the flag on, lists are first cut by the explicit grants. Project Admin and Project User are then cut further, even when they hold `subscription.status.view`.
 
@@ -416,6 +416,16 @@ The first round found no Critical issues, and M4, L3 and the M1 reading were sou
 | **Low 4:** L3 silently drops other spellings (`organisation_id`, `org_id`) instead of refusing them. They are never written. | Low | Recorded. |
 | **Low 5:** the M1 doc overstated what its test proves about "no writes". | Low | **Corrected.** |
 
-Re-review of `d0eb1db`: *pending; recorded below when it reports.*
+**Re-review of `d0eb1db`** (real-MongoDB probe: 11 personas × 8 routes, both flag states). H1 and the Medium are closed. One new finding:
+
+- **N1 (Medium):** any custom organisation role conferred standing, so a Project User given, say, a `tags:read` organisation role regained full billing through the `projectuser` alias.
+  - **Fixed:** standing from a custom organisation role now requires that role to grant the financial view itself. Test `test_an_unrelated_organisation_role_gives_a_project_user_no_billing_standing`, both states; the mutant is killed.
+
+Recorded Lows from the re-review:
+
+1. **M1-E3 residual:** standing uses global built-in role names. Already documented as M1.
+2. **Pre-existing:** with the flag off, the billing admin and custom organisation billing roles get `scope_denied` on a **project-scoped** subscription's single read, history and invoice preview, because they are not assigned to the project. Org admin and org user are unaffected. This is not caused by this pass and is recorded for the owner.
+3. **Flag on:** an explicit project-scoped `subscription.history.view` grant shows full detail for that project. Only the `projectadmin`/`projectuser` role names are cut further. This follows the explicit grant, so it is intended; **owner to confirm**.
+4. **Flag on:** organisation users need the grant step (unchanged; by design).
 
 **CI:** *pending; recorded below.*

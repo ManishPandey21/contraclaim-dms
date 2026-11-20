@@ -273,3 +273,33 @@ def test_the_cut_is_decided_by_standing_not_by_project_role_names(monkeypatch, f
                     assert response.status_code in (403, 404), (persona, path, response.status_code)
 
     _run(scenario())
+
+
+@pytest.mark.parametrize("flag", [False, True])
+def test_an_unrelated_organisation_role_gives_a_project_user_no_billing_standing(monkeypatch, flag: bool) -> None:
+    """Re-review N1: a Project User given a narrow organisation role (tags only) regained
+    full billing through the projectuser alias. Standing from a custom organisation role
+    now requires that role itself to grant the financial view; one that does keeps it."""
+
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            _flag(monkeypatch, flag)
+            await _seed(env)
+            await env.db.roles.insert_many([
+                _role("d4-org-tags", ["tags:read"], organization_id=ORG_A),
+                _role("d4-org-orgread", ["organizations:read"], organization_id=ORG_A),
+            ])
+            await _user(env.db, "d4_pu_tags", ["projectuser", "d4-org-tags"], organization_id=ORG_A, projects=[PROJ_A1])
+            for path in FINANCIAL_PATHS:
+                response = await _get(env, "d4_pu_tags", path)
+                assert response.status_code in (403, 404), (path, response.status_code)
+            for path in ("/subscriptions", f"/subscriptions/{SUB_A1}", "/plan-settings", "/plan-settings/effective-services"):
+                response = await _get(env, "d4_pu_tags", path)
+                if response.status_code == 200:
+                    _assert_no_secrets(response.json(), f"tags {path} flag={flag}")
+            if not flag:
+                # A custom organisation role that itself grants the view keeps organisation standing.
+                await _user(env.db, "d4_pu_orgread", ["projectuser", "d4-org-orgread"], organization_id=ORG_A, projects=[PROJ_A1])
+                assert (await _get(env, "d4_pu_orgread", f"/billing/summary/{ORG_A}")).status_code == 200
+
+    _run(scenario())

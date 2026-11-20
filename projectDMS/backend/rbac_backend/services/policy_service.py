@@ -95,11 +95,17 @@ class PolicyService:
             project_id=project_id,
         )
 
-    async def has_organisation_level_standing(self, current_user: Any, organization_id: Optional[str]) -> bool:
+    async def has_organisation_level_standing(
+        self,
+        current_user: Any,
+        organization_id: Optional[str],
+        permission: str = Permissions.SUBSCRIPTION_HISTORY_VIEW,
+    ) -> bool:
         """Decision 4: whether the caller stands for the whole of ``organization_id`` for billing
         visibility: a member holding an organisation-level built-in role
         (ORGANISATION_LEVEL_BILLING_ROLE_KEYS), or a custom role of that organisation with no
-        project. Super Admin always. (Built-in roles are still global: M1.)"""
+        project that itself grants ``permission`` (an unrelated organisation role does not,
+        re-review N1). Super Admin always. (Built-in roles are still global: M1.)"""
         if self.scope_service.is_superadmin(current_user):
             return True
         if not organization_id:
@@ -109,7 +115,7 @@ class PolicyService:
         if self.scope_service.role_names(current_user) & ORGANISATION_LEVEL_BILLING_ROLE_KEYS:
             return True
         return await self.permission_service.holds_organisation_level_custom_role(
-            str(getattr(current_user, "id", "") or ""), str(organization_id)
+            str(getattr(current_user, "id", "") or ""), str(organization_id), permission
         )
 
     async def _organisation_of(self, organization_id: Optional[str], project_id: Optional[str]) -> Optional[str]:
@@ -372,7 +378,7 @@ class PolicyService:
                         and not settings.BILLING_EXPLICIT_PERMISSIONS
                         and permission in ORGANISATION_FINANCIAL_VIEW_PERMISSIONS
                         and not await self.has_organisation_level_standing(
-                            current_user, await self._organisation_of(organization_id, project_id)
+                            current_user, await self._organisation_of(organization_id, project_id), permission
                         )
                     ):
                         # Decision 4: a project-level caller (Project Admin / User and the like)

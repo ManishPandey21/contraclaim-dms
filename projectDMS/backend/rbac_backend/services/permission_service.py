@@ -1109,12 +1109,15 @@ class PermissionService:
             logger.error(f"Platform grant check failed for user {user_id}: {exc}")
             return False
 
-    async def holds_organisation_level_custom_role(self, user_id: str, organization_id: str) -> bool:
+    async def holds_organisation_level_custom_role(self, user_id: str, organization_id: str, permission: str) -> bool:
         """Whether one of the user's custom roles applies to the whole of ``organization_id``
-        (a role of that organisation with no project, held by a member). Project roles and
-        platform roles do not count; a read error is a refusal."""
-        if not user_id or not organization_id:
+        (a role of that organisation with no project, held by a member) **and itself grants
+        ``permission``** (by name or a one-hop equivalent). An unrelated organisation role
+        confers nothing (re-review N1). Project and platform roles do not count; a read error
+        is a refusal."""
+        if not user_id or not organization_id or not permission:
             return False
+        wanted = set(equivalent_permissions(permission) or set()) | {permission}
         try:
             db = await self._get_db()
             try:
@@ -1135,6 +1138,7 @@ class PermissionService:
                 and not scope.get("platform")
                 and not scope.get("project_id")
                 and str(scope.get("organization_id") or "") == str(organization_id)
+                and wanted & set(grant.get("names") or [])
             ):
                 return True
         return False
