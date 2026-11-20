@@ -508,6 +508,14 @@ CI run 44765102151 on `f09d9be`: backend 8,435 passed; real MongoDB 1,132 passed
 | Stale writes | Compare-and-set on scope and gateway id; checkout `DuplicateKeyError` | Compare-and-set on scope, gateway id and decided lifecycle state |
 | Webhook replay | Event id and body hash (unique index), order baseline, payment dedupe | Activation stamps only from a non-governing state |
 
+**Verification evidence (ninth pass):**
+
+- **CI run 44786462934 on `51c192e`** (gateway code, entitlement to `d37824e`, Gate 6 pins 33): backend 8,436 passed, 1,278 skipped, 4 xfailed; exhibit confinement 20; real MongoDB "all 89 module(s) ran: 1183 test case(s)", 1,183 passed; frontend (lint, unit, mocked Playwright, build), dependency scan and Docker build/scan passed; Gitleaks failed on the 2 known findings.
+- **CI run 44789094291 on `b51de70`** (all remediation code): backend 8,436 passed, 1,290 skipped, 4 xfailed; exhibit confinement 20; real MongoDB "all 89 module(s) ran: 1195 test case(s)", 1,195 passed; frontend, dependency scan and Docker build/scan passed; Gitleaks failed on the 2 known findings.
+- **Local, quiet worktree at `6fc0705`** (real Redis on 6390, replica set on 27018): real MongoDB 89 CI modules, 1,196 passed, 0 failed, 0 skipped; full backend suite 9,616 passed, 375 skipped, 4 xfailed, 0 failed. `pre-commit run mypy --all-files` passed; ruff unchanged from the previous head on every touched file.
+- **Later heads:** `6fc0705` (test-only) and `0cb99f0` and after (docs-only) carry the same code as `b51de70`; their runs (44791174786, 44791457632, and the run on this commit) were in progress when this was written and are reported in the final report.
+- CI success is not security approval.
+
 ### Remaining security findings (open)
 
 | Finding | Severity | Origin | Owner |
