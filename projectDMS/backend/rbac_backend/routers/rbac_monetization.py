@@ -36,6 +36,7 @@ from ..services.monetization_service import (
     SubscriptionScopeChangeRefused,
     GatewayOperationFailed,
     SubscriptionNotGoverning,
+    SubscriptionReactivationRefused,
     TrialConversionRefused,
     SubscriptionScopeConflict,
     scope_text,
@@ -1228,6 +1229,10 @@ async def reactivate_subscription(
     )
     try:
         return await service.reactivate_subscription(subscription_id, current_user)
+    except SubscriptionReactivationRefused as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except GatewayOperationFailed as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 

@@ -374,17 +374,24 @@ async def test_cancel_calls_gateway_and_updates_local() -> None:
 
 
 @pytest.mark.asyncio
-async def test_reactivate_calls_gateway() -> None:
+async def test_reactivate_without_a_paid_period_is_refused_before_the_gateway() -> None:
+    """R6-6: a cancelled subscription with no recorded paid period is a new purchase, never a
+    revival; the gateway is not asked to bill again. The resume path (period, replacement,
+    gateway confirmation, concurrency) is proven on real MongoDB in
+    tests/integration/test_r6_6_reactivation_mongo.py."""
+    from rbac_backend.services.monetization_service import SubscriptionReactivationRefused
+
     db = FakeDB()
     db.subscriptions.data = [{
         "_id": "sub_3", "organization_id": "org_1", "status": "cancelled",
         "plan_code": "dms_pro", "payment_gateway_subscription_id": "gw_3",
     }]
     gw = _FakeGateway()
-    await MonetizationService(db, gateway=gw).reactivate_subscription("sub_3", SimpleNamespace(id="u1"))
-    assert ("reactivate", "gw_3") in gw.calls
+    with pytest.raises(SubscriptionReactivationRefused):
+        await MonetizationService(db, gateway=gw).reactivate_subscription("sub_3", SimpleNamespace(id="u1"))
+    assert gw.calls == []
     sub = await db.subscriptions.find_one({"_id": "sub_3"})
-    assert sub["status"] == "active"
+    assert sub["status"] == "cancelled"
 
 
 @pytest.mark.asyncio

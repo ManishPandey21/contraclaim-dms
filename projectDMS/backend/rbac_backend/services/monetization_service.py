@@ -76,6 +76,10 @@ class TrialConversionRefused(Exception):
     that does not govern its scope (R6-5)."""
 
 
+class SubscriptionReactivationRefused(Exception):
+    """A reactivation that would revive an ended, replaced or ineligible subscription (R6-6)."""
+
+
 class GatewayOperationFailed(Exception):
     """The payment gateway did not complete an operation; nothing was changed locally."""
 
@@ -114,6 +118,14 @@ def subscription_scope(document: Dict[str, Any]) -> Tuple[Optional[str], Optiona
     """(organisation, project, package) of a stored or normalised subscription, as text
     (``None`` and the empty string are the same "none", as entitlement resolution reads them)."""
     return tuple(scope_text(document.get(field)) for field in SUBSCRIPTION_SCOPE_FIELDS)  # type: ignore[return-value]
+
+
+def _dotted(doc: Dict[str, Any], path: str) -> Any:
+    """``doc[a][b]`` for ``"a.b"`` (as a MongoDB filter reads it); ``None`` when absent."""
+    value: Any = doc
+    for part in path.split("."):
+        value = value.get(part) if isinstance(value, dict) else None
+    return value
 
 
 class MonetizationService:
@@ -790,7 +802,7 @@ class MonetizationService:
             raise TypeError("expected_scope must name the organisation, project and package")
         if expected_scope is not None and stored_scope != tuple(scope_text(value) for value in expected_scope):
             raise SubscriptionScopeConflict("The subscription's scope changed; reload and try again")
-        if expected_state is not None and any(before.get(f) != v for f, v in expected_state.items()):
+        if expected_state is not None and any(_dotted(before, f) != v for f, v in expected_state.items()):
             # A lifecycle change decided on a state that has since changed (R6-3).
             raise SubscriptionNotGoverning("The subscription changed while this change was being made; reload and try again")
         update_doc = payload.model_dump(mode="json", exclude_unset=True)
@@ -1045,34 +1057,157 @@ class MonetizationService:
         )
         return result
 
+    #: Gateway statuses that confirm a resumed subscription (R6-6).
+    GATEWAY_ACTIVE_STATUSES = frozenset({"active", "authenticated"})
+
     async def reactivate_subscription(self, subscription_id: str, current_user: Any) -> Dict[str, Any]:
-        """Reactivate a cancelled subscription (if still within billing period)."""
-        sub = await self.get_subscription_by_id(subscription_id)
-        if not sub:
+        """Resume a cancelled subscription inside the period it already paid for (R6-6).
+
+        Rules (owner decision 2026-11-21), all checked before the gateway is asked:
+
+        - only a ``cancelled`` subscription, and not a trial closed by its paid conversion;
+        - its paid period is known and has not ended (``ends_at`` and ``current_period_end``
+          readable, the earliest still in the future); otherwise the customer buys anew
+          through checkout - an expired subscription is never revived;
+        - nothing else governs its own scope and no replacement checkout is pending there
+          (reviving it would bill two subscriptions for one entitlement);
+        - one reactivation at a time (claimed by compare-and-set on the cancelled row);
+        - a gateway-bound subscription resumes only when the gateway confirms an active
+          subscription; a gateway failure or any other status changes nothing locally (502 /
+          409, audited for review). An unbound subscription (billed outside the gateway)
+          resumes with ``billing_status = "manual"``.
+
+        Whether an *older* subscription resumes when the governing one is cancelled: one that
+        was never cancelled still governs by latest activation (it never stopped billing - the
+        overlap P-05 counts); a cancelled one resumes only through this operation and these
+        rules. Archive and offboarding are not ``cancelled`` and are refused.
+        """
+        import uuid
+
+        from .entitlement_service import EntitlementService
+        from .subscription_resolution import _UNREADABLE, _instant
+
+        db = await self._get_db()
+        lookup = self._lookup_id(subscription_id)
+        stored = await db.subscriptions.find_one({"_id": lookup})
+        if not stored:
             raise ValueError("Subscription not found")
-        if sub.get("status") != "cancelled":
-            raise ValueError("Only cancelled subscriptions can be reactivated")
+        sub_id = str(stored["_id"])
+        status = str(stored.get("status") or "").strip().lower()
+        if status != "cancelled":
+            raise SubscriptionReactivationRefused(f"Only a cancelled subscription can be reactivated (status '{status or 'unknown'}')")
+        if stored.get("cancellation_reason") == "converted_to_paid":
+            raise SubscriptionReactivationRefused("This trial was converted to a paid subscription; it cannot be reactivated")
+        if (stored.get("reactivation") or {}).get("state") == "starting":
+            raise SubscriptionReactivationRefused("A reactivation of this subscription is already in progress")
+        now = datetime.utcnow()
+        bounds = [_instant(stored.get("ends_at")), _instant(stored.get("current_period_end"))]
+        if any(bound is _UNREADABLE for bound in bounds):
+            raise SubscriptionReactivationRefused("The paid period of this subscription cannot be read; start a new purchase")
+        known = [bound for bound in bounds if bound is not None]
+        if not known:
+            raise SubscriptionReactivationRefused("No paid period is recorded for this subscription; start a new purchase")
+        if min(known) <= now:
+            raise SubscriptionReactivationRefused("The paid period of this subscription has ended; start a new purchase")
+
+        org, project, package = (scope_text(stored.get(field)) for field in SUBSCRIPTION_SCOPE_FIELDS)
+        resolution = await EntitlementService(db).resolve_subscription(
+            organization_id=org, project_id=project, package_id=package
+        )
+        own_tier = "package" if package else ("project" if project else "organization")
+        if resolution.tier == own_tier and resolution.reason == "ambiguous_subscriptions":
+            raise SubscriptionReactivationRefused("Several subscriptions govern this scope; resolve them first")
+        if resolution.tier == own_tier and resolution.subscription is not None:
+            raise SubscriptionReactivationRefused(
+                f"Subscription {resolution.subscription.get('_id')} governs this scope; reactivating this one would bill both"
+            )
+        same_scope = {"organization_id": stored.get("organization_id"), "project_id": stored.get("project_id"),
+                      "package_id": stored.get("package_id"), "_id": {"$ne": stored["_id"]}}
+        if await db.subscriptions.find_one({**same_scope, "status": "pending",
+                                             "payment_gateway_subscription_id": {"$type": "string", "$gt": ""}}, {"_id": 1}):
+            raise SubscriptionReactivationRefused("A replacement purchase for this scope is awaiting payment")
+
+        attempt = uuid.uuid4().hex
+        claimed = await db.subscriptions.find_one_and_update(
+            {"_id": stored["_id"], "status": stored.get("status"), "reactivation.state": {"$ne": "starting"}},
+            {"$set": {"reactivation": {"state": "starting", "attempt": attempt, "requested_at": now,
+                                       "requested_by": getattr(current_user, "id", None)}}},
+        )
+        if claimed is None:
+            raise SubscriptionReactivationRefused("This subscription changed or is being reactivated; reload")
+
+        async def release(state: str, **details: Any) -> None:
+            await db.subscriptions.update_one(
+                {"_id": stored["_id"], "reactivation.attempt": attempt},
+                {"$set": {"reactivation.state": state, "reactivation.finished_at": datetime.utcnow(),
+                          **{f"reactivation.{key}": value for key, value in details.items()}}},
+            )
+
+        bound = bool(scope_text(stored.get("payment_gateway_subscription_id")))
+        if bound:
+            try:
+                resumed = await self._gateway().reactivate_subscription(
+                    gateway_subscription_id=stored["payment_gateway_subscription_id"]
+                )
+            except Exception as exc:
+                await release("failed", error=type(exc).__name__)
+                await self._review_event(stored, "subscription.reactivation_gateway_failed", current_user,
+                                         reason=type(exc).__name__)
+                raise GatewayOperationFailed("The payment gateway did not resume the subscription; nothing was changed") from exc
+            gateway_status = str(getattr(resumed, "status", "") or "").strip().lower()
+            if gateway_status not in self.GATEWAY_ACTIVE_STATUSES:
+                await release("refused_by_gateway", gateway_status=gateway_status)
+                await self._review_event(stored, "subscription.reactivation_gateway_unconfirmed", current_user,
+                                         reason=gateway_status or "unknown")
+                raise SubscriptionReactivationRefused(
+                    f"The payment gateway reports the subscription as '{gateway_status or 'unknown'}'; it was not reactivated"
+                )
 
         update = SubscriptionUpdate(
             status="active",
-            billing_status="active",
+            billing_status="active" if bound else "manual",
             cancelled_at=None,
             cancellation_reason=None,
             auto_renew=True,
         )
-        await self._gateway_reactivate(sub)
-        result = await self.update_subscription(subscription_id, update, current_user)
-
+        expected = {field: stored.get(field) for field in self.LIFECYCLE_STATE_FIELDS}
+        expected["reactivation.attempt"] = attempt
+        try:
+            result = await self.update_subscription(sub_id, update, current_user, expected_state=expected)
+        except SubscriptionNotGoverning as exc:
+            await release("failed", error="local_state_changed")
+            if bound:
+                # The gateway resumed but the local write was refused: surfaced for a person.
+                await self._review_event(stored, "subscription.reactivation_needs_reconciliation", current_user,
+                                         reason="gateway_resumed_local_refused")
+            raise SubscriptionReactivationRefused(str(exc)) from exc
+        await release("completed")
         await self._record_history(
-            subscription_id=subscription_id,
-            organization_id=sub["organization_id"],
-            project_id=sub.get("project_id"),
+            subscription_id=sub_id,
+            organization_id=stored["organization_id"],
+            project_id=stored.get("project_id"),
             change_type=SubscriptionChangeType.REACTIVATION,
             from_status="cancelled",
             to_status="active",
             changed_by=getattr(current_user, "id", None),
+            metadata={"gateway_confirmed": bound, "billing_status": "active" if bound else "manual"},
         )
         return result
+
+    async def _review_event(self, sub: Dict[str, Any], action: str, current_user: Any, *, reason: str) -> None:
+        """An audited event an administrator must review (billing review queue)."""
+        await self.audit_service.emit(
+            action=action,
+            actor_id=getattr(current_user, "id", None),
+            resource_type="subscription",
+            resource_id=str(sub.get("_id") or sub.get("id")),
+            organization_id=str(sub.get("organization_id") or ""),
+            project_id=scope_text(sub.get("project_id")),
+            result="failure",
+            reason=reason,
+            metadata={"requires_admin_review": True,
+                      "gateway_subscription_id": sub.get("payment_gateway_subscription_id")},
+        )
 
     async def start_trial(self, request: StartTrialRequest, current_user: Any) -> Dict[str, Any]:
         """Create a trial subscription for an org/project."""
