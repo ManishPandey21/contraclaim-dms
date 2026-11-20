@@ -264,7 +264,7 @@ const Sidebar = () => {
       path: "/admin/billing-catalog",
       icon: <PackageOpen size={20} />,
       label: "Billing Catalog",
-      permission: "billing.plan.manage",
+      permission: "platform.pricing.manage",
     },
     {
       path: "/admin/legal-words",

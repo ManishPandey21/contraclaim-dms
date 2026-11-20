@@ -510,6 +510,13 @@ async def update_plan_settings_scope(
 
 # ---------------------------------------------------------------------------
 # Plan CRUD (admin)
+#
+# M4 (owner decision 2026-11-20): the plan, price and add-on catalogue is global, shared by
+# every tenant. Writes need Super Admin or platform.pricing.manage on a platform role, never
+# billing.plan.manage: a tenant billing administrator keeps that for their own organisation's
+# billing operations (for example POST /billing-records, which is scoped). Step-up is
+# unchanged (action "billing.plan.manage", the token the client already requests), and the
+# policy decision and the write are both audited.
 # ---------------------------------------------------------------------------
 
 @router.post("/plans", response_model=Dict[str, Any])
@@ -520,7 +527,7 @@ async def upsert_plan(
     policy: PolicyService = Depends(get_policy_service),
 ):
     await require_step_up(request, current_user, action="billing.plan.manage")
-    await policy.authorize(current_user, Permissions.BILLING_PLAN_MANAGE, resource_type="plan", resource_id=payload.code)
+    await policy.authorize(current_user, Permissions.PLATFORM_PRICING_MANAGE, resource_type="plan", resource_id=payload.code)
     return await MonetizationService().upsert_plan(payload, current_user)
 
 
@@ -533,8 +540,11 @@ async def update_plan(
     policy: PolicyService = Depends(get_policy_service),
 ):
     await require_step_up(request, current_user, action="billing.plan.manage")
-    await policy.authorize(current_user, Permissions.BILLING_PLAN_MANAGE, resource_type="plan", resource_id=plan_id)
-    return await MonetizationService().update_plan(plan_id, payload, current_user)
+    await policy.authorize(current_user, Permissions.PLATFORM_PRICING_MANAGE, resource_type="plan", resource_id=plan_id)
+    try:
+        return await MonetizationService().update_plan(plan_id, payload, current_user)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -557,7 +567,7 @@ async def create_addon(
     policy: PolicyService = Depends(get_policy_service),
 ):
     await require_step_up(request, current_user, action="billing.plan.manage")
-    await policy.authorize(current_user, Permissions.BILLING_PLAN_MANAGE, resource_type="addon", resource_id=payload.code)
+    await policy.authorize(current_user, Permissions.PLATFORM_PRICING_MANAGE, resource_type="addon", resource_id=payload.code)
     return await MonetizationService().upsert_addon(payload, current_user)
 
 
@@ -570,8 +580,11 @@ async def update_addon(
     policy: PolicyService = Depends(get_policy_service),
 ):
     await require_step_up(request, current_user, action="billing.plan.manage")
-    await policy.authorize(current_user, Permissions.BILLING_PLAN_MANAGE, resource_type="addon", resource_id=addon_id)
-    return await MonetizationService().update_addon(addon_id, payload, current_user)
+    await policy.authorize(current_user, Permissions.PLATFORM_PRICING_MANAGE, resource_type="addon", resource_id=addon_id)
+    try:
+        return await MonetizationService().update_addon(addon_id, payload, current_user)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------

@@ -66,7 +66,7 @@ The guard test `client/src/config/__tests__/routeInventory.test.ts` fails when a
 | `/bank-guarantees` | BankGuaranteeRegisterPage | `dms.bankguarantee.view` or `dms.document.view` | Yes | RoleGuard. |
 | `/ipc-bills` | IPCBillRegisterPage | `dms.ipc.view` or `dms.document.view` | Yes | RoleGuard. |
 | `/concerns` | ConcernsPage | `concerns:read` | Yes | RoleGuard. |
-| `/admin/billing-catalog` | BillingCatalogPage | `billing.plan.manage` or `system:admin` | Yes | RoleGuard. |
+| `/admin/billing-catalog` | BillingCatalogPage | `platform.pricing.manage` or `system:admin` | Yes | RoleGuard. M4 (2026-11-20): the catalogue is global; Super Admin or a platform role only. |
 | `/retrieval-console` | RetrievalConsolePage | `dms.document.view` | Yes | RoleGuard. |
 | `/observability` | ObservabilityPage | `reports:view` or `system:admin` | Yes | RoleGuard. |
 | `/letter-templates` | LetterTemplatePage | `letter_templates:read` | Yes | |

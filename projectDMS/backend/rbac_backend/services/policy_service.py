@@ -7,6 +7,7 @@ from fastapi import HTTPException, status
 from ..core.config import settings
 from ..core.permissions import (
     LEGACY_BILLING_VIEW_ALIASES,
+    PLATFORM_GRANT_ONLY_PERMISSIONS,
     SUPERADMIN_EXCLUDED_PERMISSIONS,
     Permissions,
     is_billing_permission,
@@ -119,6 +120,12 @@ class PolicyService:
             )
         if self.scope_service.is_superadmin(current_user):
             return True
+        if permission in PLATFORM_GRANT_ONLY_PERMISSIONS:
+            # M4: a platform-scoped grant only; never a tenant role, alias, wildcard or
+            # administrator name, and never through billing.plan.manage.
+            return await self.permission_service.user_holds_platform_grant(
+                str(getattr(current_user, "id", "") or ""), permission
+            )
         if settings.BILLING_EXPLICIT_PERMISSIONS and is_billing_permission(permission):
             # DEF-4 target policy: the name itself, granted on a role that applies here. Not
             # through organizations:read / orgs:view / reports:view, a wildcard, or an
@@ -228,6 +235,19 @@ class PolicyService:
         # Privileged legal material (plan D-12): no status confers it.
         explicit_only = permission in SUPERADMIN_EXCLUDED_PERMISSIONS
         try:
+            if permission in PLATFORM_GRANT_ONLY_PERMISSIONS:
+                # M4: global (platform) administration. Not a tenant action: no organisation or
+                # project scope, entitlement or tenant role applies, and a scoped call is refused
+                # rather than read as a tenant grant.
+                if organization_id or project_id:
+                    reason = "platform_permission_unscoped"
+                    return await self._deny(reason)
+                if self.scope_service.is_superadmin(current_user):
+                    return await _allow("superadmin")
+                if await self.permission_service.user_holds_platform_grant(str(actor_id), permission):
+                    return await _allow("platform_grant")
+                reason = "platform_admin_required"
+                return await self._deny(reason)
             if explicit_only:
                 if not await self.has_explicit_grant(
                     current_user, permission, organization_id=organization_id, project_id=project_id
@@ -368,6 +388,7 @@ class PolicyService:
             "quota_scope_required": "A valid organization scope is required for metered usage",
             "quota_exceeded": "Usage quota is exhausted for this project or organization",
             "platform_admin_required": "Platform administration permission is required for this action",
+            "platform_permission_unscoped": "This platform action does not take an organization or project scope",
             "unsupported_permission_domain": "Permission is not supported by the central authorization policy",
         }
         raise HTTPException(

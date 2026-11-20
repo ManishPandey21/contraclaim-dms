@@ -3,7 +3,7 @@
 import logging
 import re
 from datetime import datetime
-from typing import Dict, Any, Iterable, List, Optional, Tuple
+from typing import Dict, Any, Iterable, List, Mapping, Optional, Tuple
 from uuid import uuid4
 import json
 
@@ -15,6 +15,7 @@ from ..core.database import get_database
 from ..core.permissions import (
     CANONICAL_PERMISSIONS,
     LEGACY_BILLING_VIEW_ALIASES,
+    PLATFORM_GRANT_ONLY_PERMISSIONS,
     SUPERADMIN_EXCLUDED_PERMISSIONS,
     equivalent_permissions,
     is_billing_permission,
@@ -880,7 +881,12 @@ class PermissionService:
                 # (``dms.admin`` passing ``dms.*``) is not advertised, because a
                 # ``require_permission`` gate does not apply it.
                 granted = passes(candidate)
-                if granted and candidate in SUPERADMIN_EXCLUDED_PERMISSIONS:
+                if candidate in PLATFORM_GRANT_ONLY_PERMISSIONS:
+                    # M4: only a platform-scoped grant, as PolicyService applies it; a wildcard
+                    # or tenant role that lists the name does not advertise it.
+                    named = {candidate} | await self._catalogue_spellings(db, {candidate})
+                    granted = self._platform_held(grants, named)
+                elif granted and candidate in SUPERADMIN_EXCLUDED_PERMISSIONS:
                     lookup_keys = self.checks_satisfied_by(candidate)
                     named = lookup_keys | await self._catalogue_spellings(db, lookup_keys)
                     granted = self._explicitly_held(grants, named, **scope)
@@ -1060,6 +1066,48 @@ class PermissionService:
             logger.error(f"Explicit permission check failed for user {user_id}: {exc}")
             return False
         return False
+
+    @staticmethod
+    def _platform_held(grants: List[Dict[str, Any]], named: set) -> bool:
+        """A platform-scoped grant (a custom role with no organisation or project, held by a
+        user bound to no organisation) names one of ``named``; ``*`` never counts. Built-in
+        roles (scope ``None``) and organisation or project roles never count (M4)."""
+        for grant in grants:
+            scope = grant.get("scope")
+            if not (isinstance(scope, Mapping) and scope.get("platform") is True):
+                continue
+            held = set(grant.get("names") or [])
+            held.discard("*")
+            if held & named:
+                return True
+        return False
+
+    async def user_holds_platform_grant(self, user_id: str, permission_name: str) -> bool:
+        """Whether ``permission_name`` is held by name on a platform-scoped role (M4).
+
+        For PLATFORM_GRANT_ONLY_PERMISSIONS: no Super Admin, wildcard, alias or
+        administrator shortcut, no cache, and a read error is a refusal. A platform role
+        applies only to a user with no organisation (``role_grants.role_grant_scope``), so
+        no tenant account, whatever its roles, can hold one.
+        """
+        permission_key = (permission_name or "").strip()
+        if not permission_key or not user_id:
+            return False
+        try:
+            db = await self._get_db()
+            try:
+                user_query_id: Any = ObjectId(user_id)
+            except Exception:
+                user_query_id = user_id
+            user_doc = await db.users.find_one({"_id": user_query_id})
+            if not user_doc:
+                return False
+            named = {permission_key} | await self._catalogue_spellings(db, {permission_key})
+            grants, _ = await self.scoped_grants(db, user_doc)
+            return self._platform_held(grants, named)
+        except Exception as exc:
+            logger.error(f"Platform grant check failed for user {user_id}: {exc}")
+            return False
 
     @staticmethod
     def primary_organisation(user_doc: Dict[str, Any]) -> Optional[str]:

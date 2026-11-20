@@ -161,6 +161,18 @@ BILLING_PERMISSIONS: List[str] = [
     "subscription.offboarding_export",
 ]
 
+#: Platform administration (M4, owner decision 2026-11-20): the global plan, price and
+#: add-on catalogue is shared by every tenant, so it is administered only by Super Admin or
+#: by a platform user holding this name on a platform role (a custom role with no
+#: organisation or project, which counts only for a user bound to no organisation). It is
+#: never satisfied by an alias, a wildcard, an administrator name or a tenant role.
+PLATFORM_PERMISSIONS: List[str] = [
+    "platform.pricing.manage",
+]
+
+#: Permissions held only through a platform-scoped grant (see PLATFORM_PERMISSIONS).
+PLATFORM_GRANT_ONLY_PERMISSIONS: frozenset = frozenset(PLATFORM_PERMISSIONS)
+
 ROLE_MANAGEMENT_PERMISSIONS: List[str] = [
     "roles:read",
     "roles:create",
@@ -174,6 +186,7 @@ CANONICAL_PERMISSIONS: List[str] = [
     *CLIENT_DMS_PERMISSIONS,
     *DRAFTING_PERMISSIONS,
     *BILLING_PERMISSIONS,
+    *PLATFORM_PERMISSIONS,
     *ROLE_MANAGEMENT_PERMISSIONS,
 ]
 
@@ -331,6 +344,8 @@ class Permissions:
 
     BILLING_PLAN_VIEW = "billing.plan.view"
     BILLING_PLAN_MANAGE = "billing.plan.manage"
+    #: Global plan, price and add-on catalogue writes (M4): Super Admin or a platform grant only.
+    PLATFORM_PRICING_MANAGE = "platform.pricing.manage"
     BILLING_INVOICE_VIEW = "billing.invoice.view"
     BILLING_INVOICE_DOWNLOAD = "billing.invoice.download"
     SUBSCRIPTION_ENTITLEMENT_MANAGE = "subscription.entitlement.manage"
@@ -455,6 +470,7 @@ LEGACY_PERMISSION_ALIASES: Dict[str, List[str]] = {
     "subscription.usage.view": ["reports:view"],
     "subscription.archive_access": [],
     "subscription.offboarding_export": [],
+    "platform.pricing.manage": [],
 }
 
 #: Older spellings of names that are still checked today (`orgs:view` is

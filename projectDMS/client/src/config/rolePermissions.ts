@@ -223,6 +223,8 @@ export const PERMISSION_ALIASES: Record<string, string[]> = {
   "subscription.usage.view": ["reports:view"],
   "subscription.archive_access": [],
   "subscription.offboarding_export": [],
+  // M4: global plan, price and add-on catalogue writes; Super Admin or a platform role only.
+  "platform.pricing.manage": [],
   "organizations:read": ["orgs:view"],
   "organizations:create": ["orgs:create"],
   "organizations:update": ["orgs:edit"],
@@ -339,7 +341,8 @@ export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   "/insurance": ["dms.insurance.view", "dms.document.view"],
   "/ipc-bills": ["dms.ipc.view", "dms.document.view"],
   "/concerns": ["concerns:read"],
-  "/admin/billing-catalog": ["billing.plan.manage", "system:admin"],
+  // M4: the catalogue is global; a tenant billing.plan.manage no longer edits it.
+  "/admin/billing-catalog": ["platform.pricing.manage", "system:admin"],
   "/retrieval-console": ["dms.document.view"],
   "/observability": ["reports:view", "system:admin"],
   // Contract Master (backend dms.contract.master.view aliased to projects:read).

@@ -435,7 +435,8 @@ const PermissionsPage = () => {
       icon: Lock,
       permissions: [
         { id: "billing.plan.view", name: "View Plans" },
-        { id: "billing.plan.manage", name: "Manage Plans" },
+        { id: "billing.plan.manage", name: "Manage Billing Records (organisation)" },
+        { id: "platform.pricing.manage", name: "Manage Global Pricing Catalogue (platform only)" },
         { id: "subscription.entitlement.manage", name: "Manage Entitlements" },
         { id: "subscription.usage.view", name: "View Usage" },
         { id: "subscription.archive_access", name: "Archive Access" },

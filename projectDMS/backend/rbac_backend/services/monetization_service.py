@@ -443,8 +443,19 @@ class MonetizationService:
         update_doc = payload.model_dump(mode="json", exclude_unset=True)
         update_doc["updated_at"] = datetime.utcnow()
         update_doc["updated_by"] = getattr(current_user, "id", None)
+        before = await db.plans.find_one({"_id": lookup})
+        if before is None:
+            raise LookupError("Plan not found")
         await db.plans.update_one({"_id": lookup}, {"$set": update_doc})
         saved = await db.plans.find_one({"_id": lookup})
+        await self.audit_service.emit(
+            action="billing.plan.updated",
+            actor_id=getattr(current_user, "id", None),
+            resource_type="plan",
+            resource_id=str(plan_id),
+            before=before,
+            after=saved,
+        )
         return self._normalize(saved)
 
     # ------------------------------------------------------------------
@@ -476,6 +487,13 @@ class MonetizationService:
             upsert=True,
         )
         saved = await db.addons.find_one({"code": payload.code})
+        await self.audit_service.emit(
+            action="billing.addon.upserted",
+            actor_id=getattr(current_user, "id", None),
+            resource_type="addon",
+            resource_id=payload.code,
+            after=saved,
+        )
         return self._normalize(saved)
 
     async def update_addon(self, addon_id: str, payload: AddOnUpdate, current_user: Any) -> Dict[str, Any]:
@@ -484,8 +502,19 @@ class MonetizationService:
         update_doc = payload.model_dump(mode="json", exclude_unset=True)
         update_doc["updated_at"] = datetime.utcnow()
         update_doc["updated_by"] = getattr(current_user, "id", None)
+        before = await db.addons.find_one({"_id": lookup})
+        if before is None:
+            raise LookupError("Add-on not found")
         await db.addons.update_one({"_id": lookup}, {"$set": update_doc})
         saved = await db.addons.find_one({"_id": lookup})
+        await self.audit_service.emit(
+            action="billing.addon.updated",
+            actor_id=getattr(current_user, "id", None),
+            resource_type="addon",
+            resource_id=str(addon_id),
+            before=before,
+            after=saved,
+        )
         return self._normalize(saved)
 
     # ------------------------------------------------------------------

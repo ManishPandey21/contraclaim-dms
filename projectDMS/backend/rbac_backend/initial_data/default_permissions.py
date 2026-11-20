@@ -180,6 +180,7 @@ DEFAULT_PERMISSIONS = [
     {"_id": "drafting.admin", "name": "Administer Drafting"},
     {"_id": "billing.plan.view", "name": "View Billing Plans"},
     {"_id": "billing.plan.manage", "name": "Manage Billing Plans"},
+    {"_id": "platform.pricing.manage", "name": "Manage Global Pricing Catalogue (platform)"},
     {"_id": "subscription.entitlement.manage", "name": "Manage Subscription Entitlements"},
     {"_id": "subscription.usage.view", "name": "View Subscription Usage"},
     {"_id": "subscription.archive_access", "name": "Access Archive Subscription"},
