@@ -1006,7 +1006,24 @@ async def create_subscription(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_GATEWAY_CHANGE_REFUSED)
     if payload.model_extra:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unknown fields: {', '.join(sorted(payload.model_extra))}")
+    # Review-7 F1: creating a subscription directly is an administrative act, not a purchase.
+    # A tenant buys through checkout (or starts a trial); only a Super Admin creates one here,
+    # and even then "active" billing is never written without payment confirmation.
+    if not ScopeService().is_superadmin(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Subscriptions are bought through checkout or started as a trial; only a Super Admin creates one directly",
+        )
+    if "billing_status" in payload.model_fields_set and str(payload.billing_status).strip().lower() == "active":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="billing_status 'active' is set only by payment confirmation; use 'manual' for a manually invoiced subscription",
+        )
+    if not await MonetizationService().validate_plan_code(payload.plan_code):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Plan '{payload.plan_code}' not found or inactive")
     create = SubscriptionCreate(**payload.model_dump(include=set(SubscriptionCreate.model_fields)))
+    if "billing_status" not in payload.model_fields_set:
+        create.billing_status = "manual"
     try:
         return await MonetizationService().create_subscription(create, current_user)
     except GatewayIdentityChangeRefused as exc:
@@ -1379,7 +1396,8 @@ async def add_subscription_addon(
         subscription_id=subscription_id,
     )
     try:
-        return await service.add_addon(subscription_id, payload, current_user)
+        return await service.add_addon(subscription_id, payload, current_user,
+                                       manual_billing_authorised=ScopeService().is_superadmin(current_user))
     except SubscriptionNotGoverning as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except ValueError as exc:
@@ -1479,7 +1497,10 @@ async def start_trial(
         resource_type="subscription",
     )
     try:
-        return await MonetizationService().start_trial(payload, current_user)
+        return await MonetizationService().start_trial(
+            payload, current_user, extended_trial_authorised=ScopeService().is_superadmin(current_user))
+    except TrialConversionRefused as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 

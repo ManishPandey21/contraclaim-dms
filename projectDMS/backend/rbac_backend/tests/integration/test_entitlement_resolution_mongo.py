@@ -555,7 +555,7 @@ def test_n1_lifecycle_changes_on_an_outranked_row_are_refused_before_the_gateway
             calls = _record_gateway_calls(monkeypatch)
             now = datetime.utcnow()
             await _seed(env, _sub("shadowed", status="active", plan="dms_starter", governing_since=now - timedelta(days=9)),
-                        _sub("newest", status="trial", plan="dms_starter", governing_since=now - timedelta(days=1)))
+                        _sub("newest", status="active", plan="dms_starter", governing_since=now - timedelta(days=1)))
             service = MonetizationService(env.db)
             actor = SimpleNamespace(id="ent-actor")
             before = await env.db.subscriptions.find_one({"_id": "shadowed"})
@@ -694,7 +694,8 @@ def test_r6_2_an_ended_or_expired_row_is_refused_whatever_its_tier_holds(monkeyp
                         _sub("p2-trial", status="trial", plan="dms_starter", project=P2,
                              trial_ends_at=now - timedelta(days=1)))
             service = MonetizationService(env.db)
-            for row, why in (("p1-ended", "outranked by subscription org-row"), ("p2-trial", "outranked by subscription org-row")):
+            # An expired trial is refused as a trial (review 7 F2) before its outranking is considered.
+            for row, why in (("p1-ended", "outranked by subscription org-row"), ("p2-trial", "convert it first")):
                 with pytest.raises(SubscriptionNotGoverning, match=why):
                     await service.upgrade_subscription(row, UpgradeDowngradeRequest(new_plan_code="dms_enterprise"),
                                                        SimpleNamespace(id="ent-actor"))

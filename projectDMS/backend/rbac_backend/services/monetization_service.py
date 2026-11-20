@@ -896,6 +896,12 @@ class MonetizationService:
         from .subscription_resolution import ELIGIBLE_STATUSES, classify
 
         status = str(sub.get("status") or "").strip().lower()
+        if status == "trial":
+            # Review-7 F2/F3: a trial is not paid service; plan and add-on changes on it would
+            # grant paid features without payment. It converts through convert-trial (R6-5).
+            raise SubscriptionNotGoverning(
+                f"Cannot {operation} a trial; convert it first (a priced plan converts through a payment)"
+            )
         if status not in ELIGIBLE_STATUSES:
             raise SubscriptionNotGoverning(
                 f"Cannot {operation} a subscription in status '{status or 'unknown'}'; "
@@ -1051,11 +1057,11 @@ class MonetizationService:
         billing_period = request.billing_period or sub.get("billing_period", "monthly")
         now = datetime.utcnow()
 
+        # Review-7 F2: an upgrade changes the plan, not the payment state - status and
+        # billing_status are left as they are (only payment confirmation sets "active").
         update = SubscriptionUpdate(
             plan_code=request.new_plan_code,
             billing_period=billing_period,
-            status="active",
-            billing_status="active",
             current_period_start=now if request.effective_immediately else None,
             current_period_end=self._compute_period_end(now, billing_period) if request.effective_immediately else None,
         )
@@ -1360,8 +1366,18 @@ class MonetizationService:
                       "gateway_subscription_id": sub.get("payment_gateway_subscription_id")},
         )
 
-    async def start_trial(self, request: StartTrialRequest, current_user: Any) -> Dict[str, Any]:
-        """Create a trial subscription for an org/project."""
+    async def start_trial(
+        self, request: StartTrialRequest, current_user: Any, *, extended_trial_authorised: bool = False
+    ) -> Dict[str, Any]:
+        """Create a trial subscription for an org/project.
+
+        Review-7 F4: a trial is a bounded free period, not a way around payment. Its length is
+        at most the plan's configured trial (Super Admin may grant longer, audited); a scope
+        gets one trial (any earlier trial, running or not, refuses another) and none while a
+        subscription already governs the scope.
+        """
+        from .entitlement_service import EntitlementService
+
         plan = await self.get_plan_by_code(request.plan_code)
         if not plan:
             raise ValueError(f"Plan '{request.plan_code}' not found")
@@ -1370,7 +1386,34 @@ class MonetizationService:
         if not trial_config.get("enabled"):
             raise ValueError(f"Plan '{request.plan_code}' does not support trials")
 
-        trial_days = request.trial_days or trial_config.get("days", 14)
+        configured_days = int(trial_config.get("days", 14) or 14)
+        trial_days = request.trial_days or configured_days
+        if trial_days < 1:
+            raise ValueError("A trial lasts at least one day")
+        if trial_days > configured_days and not extended_trial_authorised:
+            raise TrialConversionRefused(
+                f"Plan '{request.plan_code}' trials last at most {configured_days} days; only a Super Admin can extend one"
+            )
+        db = await self._get_db()
+        scope = {"organization_id": str(request.organization_id),
+                 "project_id": str(request.project_id) if request.project_id else {"$in": [None, ""]},
+                 "package_id": {"$in": [None, ""]}}
+        if await db.subscriptions.find_one({**scope, "$or": [{"trial": True}, {"status": "trial"},
+                                                             {"conversion": {"$exists": True}}]}, {"_id": 1}):
+            raise TrialConversionRefused("This scope has already had a trial")
+        resolution = await EntitlementService(db).resolve_subscription(
+            organization_id=str(request.organization_id), project_id=request.project_id
+        )
+        own_tier = "project" if request.project_id else "organization"
+        if resolution.tier == own_tier and (resolution.subscription is not None or resolution.reason == "ambiguous_subscriptions"):
+            raise TrialConversionRefused("A subscription already governs this scope; a trial is not started over it")
+        if trial_days > configured_days:
+            await self.audit_service.emit(
+                action="subscription.trial_extended", actor_id=getattr(current_user, "id", None),
+                resource_type="subscription", organization_id=str(request.organization_id),
+                project_id=request.project_id,
+                metadata={"plan_code": request.plan_code, "trial_days": trial_days, "configured_days": configured_days},
+            )
         now = datetime.utcnow()
 
         payload = SubscriptionCreate(
@@ -1629,7 +1672,9 @@ class MonetizationService:
         )
         return result
 
-    async def add_addon(self, subscription_id: str, request: AddOnActionRequest, current_user: Any) -> Dict[str, Any]:
+    async def add_addon(
+        self, subscription_id: str, request: AddOnActionRequest, current_user: Any, *, manual_billing_authorised: bool = False
+    ) -> Dict[str, Any]:
         """Attach an add-on to a subscription."""
         sub = await self.get_subscription_by_id(subscription_id)
         if not sub:
@@ -1647,6 +1692,14 @@ class MonetizationService:
         current_addons = list(sub.get("active_add_ons") or [])
         if request.add_on_code in current_addons:
             raise ValueError(f"Add-on '{request.add_on_code}' is already active")
+        priced = int(addon.get("price_minor") or 0) > 0
+        if priced and not manual_billing_authorised:
+            # Review-7 F3: the gateway has no add-on charge, so a priced add-on added here is
+            # never paid for. Only Super Admin may add one, as manually invoiced, audited.
+            raise SubscriptionNotGoverning(
+                f"Add-on '{request.add_on_code}' is priced and cannot be charged through the gateway; "
+                "it is added only by a Super Admin as manually invoiced"
+            )
 
         current_addons.append(request.add_on_code)
         update = SubscriptionUpdate(active_add_ons=current_addons)
@@ -1659,7 +1712,19 @@ class MonetizationService:
             change_type=SubscriptionChangeType.ADDON_ADD,
             add_on_code=request.add_on_code,
             changed_by=getattr(current_user, "id", None),
+            metadata={"priced": priced, "billing": "manual_invoice" if priced else "free"},
         )
+        if priced:
+            await self.audit_service.emit(
+                action="subscription.priced_addon_added_manual_billing",
+                actor_id=getattr(current_user, "id", None),
+                resource_type="subscription",
+                resource_id=str(subscription_id),
+                organization_id=str(sub.get("organization_id") or ""),
+                project_id=scope_text(sub.get("project_id")),
+                metadata={"add_on_code": request.add_on_code, "price_minor": int(addon.get("price_minor") or 0),
+                          "requires_admin_review": True},
+            )
         return result
 
     async def remove_addon(self, subscription_id: str, request: AddOnActionRequest, current_user: Any) -> Dict[str, Any]:
