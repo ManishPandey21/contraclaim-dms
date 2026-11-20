@@ -760,3 +760,56 @@ def test_r6_9_a_row_enforcement_cannot_see_is_refused(monkeypatch) -> None:
             assert calls == []
 
     _run(scenario())
+
+
+def test_r6_3_the_write_itself_is_compare_and_set_on_the_decided_state(monkeypatch) -> None:
+    """The concurrent cancel lands after update_subscription has read the row (its own
+    pre-check passes), so only the database filter can refuse the write."""
+
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            from rbac_backend.models.rbac_monetization import UpgradeDowngradeRequest
+            from rbac_backend.services.monetization_service import MonetizationService, SubscriptionNotGoverning
+
+            now = datetime.utcnow()
+            await _seed(env, _sub("current", status="active", plan="dms_starter", governing_since=now - timedelta(days=1)))
+            armed = {"on": False}
+
+            class RacingSubscriptions:
+                def __init__(self, inner: Any) -> None:
+                    self._inner = inner
+
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(self._inner, name)
+
+                async def find_one(self, *args: Any, **kwargs: Any) -> Any:
+                    row = await self._inner.find_one(*args, **kwargs)
+                    if armed["on"]:
+                        armed["on"] = False
+                        await self._inner.update_one({"_id": "current"}, {"$set": {"status": "cancelled"}})
+                    return row
+
+            class RacingDb:
+                def __init__(self, inner: Any) -> None:
+                    self._inner = inner
+                    self.subscriptions = RacingSubscriptions(inner.subscriptions)
+
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(self._inner, name)
+
+                def __getitem__(self, name: str) -> Any:
+                    return self.subscriptions if name == "subscriptions" else self._inner[name]
+
+            async def arm(self: Any, sub: Dict[str, Any], **kwargs: Any) -> None:
+                armed["on"] = True  # the next read (update_subscription's) is followed by the cancel
+
+            monkeypatch.setattr(MonetizationService, "_gateway_change", arm)
+            service = MonetizationService(RacingDb(env.db))
+            with pytest.raises(SubscriptionNotGoverning, match="changed while this change was being made"):
+                await service.upgrade_subscription("current", UpgradeDowngradeRequest(new_plan_code="dms_enterprise",
+                                                                                       effective_immediately=True),
+                                                   SimpleNamespace(id="ent-actor"))
+            row = await env.db.subscriptions.find_one({"_id": "current"})
+            assert (row["status"], row["plan_code"]) == ("cancelled", "dms_starter")
+
+    _run(scenario())
