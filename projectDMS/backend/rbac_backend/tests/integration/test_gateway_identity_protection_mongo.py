@@ -387,12 +387,12 @@ def test_f2_stale_and_reactivating_events_and_repeated_payments_change_nothing(m
             # Cancelled, then a fresh payment event: never a reactivation by webhook.
             await _webhook(env, "subscription.cancelled", VICTIM_GATEWAY_ID, event_id="o4", nonce=400)
             fresh = await _webhook(env, "subscription.activated", VICTIM_GATEWAY_ID, event_id="o5", nonce=500)
-            assert fresh.json().get("refused") == "cancelled_not_reactivated_by_webhook", fresh.text
+            assert fresh.json().get("refused") == "status_not_activatable_by_webhook", fresh.text
             assert (await env.db.subscriptions.find_one({"_id": VICTIM}))["status"] == "cancelled"
             # A legacy event row with no body hash: the replayed old body is stale anyway.
             await env.db.billing_webhook_events.update_many({}, {"$unset": {"body_sha256": ""}})
             legacy = await _webhook(env, "subscription.activated", VICTIM_GATEWAY_ID, event_id="o1-again", nonce=100)
-            assert legacy.json().get("refused") in {"stale_event", "cancelled_not_reactivated_by_webhook"}, legacy.text
+            assert legacy.json().get("refused") in {"stale_event", "status_not_activatable_by_webhook"}, legacy.text
             assert (await env.db.subscriptions.find_one({"_id": VICTIM}))["status"] == "cancelled"
 
     _run(scenario())
@@ -448,5 +448,92 @@ def test_f5_unknown_keys_are_refused_never_dropped(monkeypatch) -> None:
                 env.client.cookies.clear()
                 assert post.status_code == 400, (body, post.status_code)
             assert (await env.db.subscriptions.find_one({"_id": VICTIM}))["auto_renew"] is True
+
+    _run(scenario())
+
+
+
+# --------------------------------------------------------------------------- #
+# Re-review of 7cabfdf: R1-R4
+# --------------------------------------------------------------------------- #
+
+
+def test_r1_a_refused_payment_is_still_recorded_for_review(monkeypatch) -> None:
+    """Activated and charged arrive out of order (normal for Razorpay): the late charge does
+    not change status, but the payment is in the financial trail, flagged for review."""
+
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            await _seed(env)
+            assert (await _webhook(env, "subscription.activated", VICTIM_GATEWAY_ID, event_id="r1a", nonce=501)).json()["status"] == "processed"
+            payment = {"id": "pay_r1", "subscription_id": VICTIM_GATEWAY_ID, "amount": 0, "currency": "INR"}
+            late = await _webhook(env, "subscription.charged", VICTIM_GATEWAY_ID, event_id="r1b", nonce=500, payment=payment)
+            assert late.json().get("refused") == "stale_event", late.text
+            records = await env.db.billing_records.find({"gateway_payment_id": "pay_r1"}).to_list(length=None)
+            assert len(records) == 1 and records[0]["record_status"] == "refused_stale_event" and records[0]["requires_admin_review"]
+            assert (await env.db.subscriptions.find_one({"_id": VICTIM}))["status"] == "active"
+            # The same payment again: one record only.
+            again = await _webhook(env, "subscription.charged", VICTIM_GATEWAY_ID, event_id="r1c", nonce=502, payment=payment)
+            assert again.json().get("duplicate_payment") is True
+            assert await env.db.billing_records.count_documents({"gateway_payment_id": "pay_r1"}) == 1
+
+    _run(scenario())
+
+
+@pytest.mark.parametrize("status_value,activatable", [
+    ("pending", True), ("trial", True), ("past_due", True), ("active", True),
+    ("cancelled", False), ("paused", False), ("offboarding", False), ("archive", False), ("pilot", False), ("mystery", False),
+])
+def test_r2_a_payment_activates_only_from_activatable_statuses(monkeypatch, status_value: str, activatable: bool) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            await _seed(env)
+            await env.db.subscriptions.update_one({"_id": VICTIM}, {"$set": {"status": status_value}})
+            payment = {"id": f"pay_{status_value}", "subscription_id": VICTIM_GATEWAY_ID, "amount": 0, "currency": "INR"}
+            response = await _webhook(env, "subscription.charged", VICTIM_GATEWAY_ID, event_id=f"r2-{status_value}", nonce=100, payment=payment)
+            after = (await env.db.subscriptions.find_one({"_id": VICTIM}))["status"]
+            if activatable:
+                assert response.json().get("changed") is True and after == "active", response.text
+            else:
+                assert response.json().get("refused") == "status_not_activatable_by_webhook" and after == status_value
+            # Either way the payment is recorded.
+            assert await env.db.billing_records.count_documents({"gateway_payment_id": f"pay_{status_value}"}) == 1
+
+    _run(scenario())
+
+
+def test_r3_an_old_body_cannot_be_replayed_before_the_first_new_event(monkeypatch) -> None:
+    """No high-water mark yet (no event since deploy): the last processed event of the gateway
+    id is the baseline, so a pre-deploy signed body replayed under a new id is stale."""
+
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            await _seed(env)
+            await env.db.subscriptions.update_one({"_id": VICTIM}, {"$set": {"status": "cancelled"}})
+            # A processed pre-deploy event (no body hash, no high-water mark on the subscription).
+            await env.db.billing_webhook_events.insert_one({"event_id": "legacy-1", "provider": "razorpay", "processed": True,
+                                                            "gateway_subscription_id": VICTIM_GATEWAY_ID,
+                                                            "received_at": datetime.utcnow()})
+            replay = await _webhook(env, "subscription.halted", VICTIM_GATEWAY_ID, event_id="legacy-1-again", nonce=1000)
+            assert replay.json().get("refused") == "stale_event", replay.text
+            assert (await env.db.subscriptions.find_one({"_id": VICTIM}))["status"] == "cancelled"
+
+    _run(scenario())
+
+
+def test_r4_the_refused_payload_is_redacted(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            await _seed(env)
+            payment = {"id": "pay_pii", "subscription_id": VICTIM_GATEWAY_ID, "amount": 0, "currency": "INR",
+                       "email": "payer@example.com", "contact": "+910000000000", "vpa": "payer@bank",
+                       "card": {"last4": "4242", "network": "Visa"}}
+            await env.db.subscriptions.update_one({"_id": VICTIM}, {"$set": {"status": "paused"}})
+            await _webhook(env, "subscription.charged", VICTIM_GATEWAY_ID, event_id="pii", nonce=100, payment=payment)
+            row = await env.db.billing_webhook_events.find_one({"event_id": "pii"})
+            stored = json.dumps(row["refused_payload"], default=str)
+            for secret in ("payer@example.com", "+910000000000", "payer@bank", "4242", "Visa"):
+                assert secret not in stored, secret
+            assert row["refused_payload"]["entities"]["payment"]["id"] == "pay_pii"
 
     _run(scenario())

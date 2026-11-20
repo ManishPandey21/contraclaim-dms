@@ -14,7 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from fastapi import HTTPException, status
@@ -44,6 +44,26 @@ def _event_notes(event: WebhookEvent) -> Dict[str, Any]:
     entity = (body.get("subscription") or {}).get("entity") or {}
     notes = entity.get("notes")
     return notes if isinstance(notes, dict) else {}
+
+
+#: A webhook may move a subscription to "active" only from these statuses (re-review R2).
+WEBHOOK_ACTIVATABLE_STATUSES = frozenset({"pending", "trial", "active", "past_due"})
+
+#: Entity fields kept from a refused event's payload: identity, amount, scope. Contact
+#: details, card and VPA data are dropped (re-review R4).
+_KEPT_ENTITY_FIELDS = ("id", "subscription_id", "customer_id", "plan_id", "status", "amount", "currency", "notes", "order_id")
+
+
+def _redacted(raw: Any) -> Dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    body = raw.get("payload") if isinstance(raw.get("payload"), dict) else {}
+    kept: Dict[str, Any] = {}
+    for name, wrapper in body.items():
+        entity = (wrapper or {}).get("entity") if isinstance(wrapper, dict) else None
+        if isinstance(entity, dict):
+            kept[str(name)] = {key: entity[key] for key in _KEPT_ENTITY_FIELDS if key in entity}
+    return {"event": raw.get("event"), "created_at": raw.get("created_at"), "entities": kept}
 
 
 class BillingWebhookService:
@@ -166,22 +186,36 @@ class BillingWebhookService:
         if not update:
             return {"matched": True, "changed": False}
 
-        # Order and freshness (independent review F2). An event older than the last one applied
-        # to this subscription never applies (a delayed or replayed activation after a
-        # cancellation), and no payment event re-activates a cancelled subscription:
-        # reactivation is an explicit, authorised operation, not a webhook side effect.
-        event_at = _event_time(event)
-        last_at = subscription.get("payment_last_event_at")
-        if event_at is not None and isinstance(last_at, (int, float)) and event_at < last_at:
-            return await self._refuse_binding(db, event, "stale_event", [subscription])
-        if update.get("status") == "active" and str(subscription.get("status") or "").lower() == "cancelled":
-            return await self._refuse_binding(db, event, "cancelled_not_reactivated_by_webhook", [subscription])
+        # Order and freshness (independent review F2; re-review R1-R3). These guard the
+        # **status change** only: a real payment is always recorded in billing_records (as
+        # refused, for admin review, when its status change is refused), so the financial
+        # trail is never lost.
+        # - An event older than the last one applied to this subscription changes nothing.
+        #   With no high-water mark yet (no event since deploy), the last processed event of
+        #   this gateway id stands for it, so an old signed body cannot be replayed once.
+        # - A webhook may set "active" only from pending, trial, active or past_due: never
+        #   from cancelled, paused, offboarding, archive or an unknown state (an
+        #   administrator's suspension or offboarding is not undone by the next charge).
         # One payment, one effect, whatever event id or body carried it.
         if event.gateway_payment_id and await db.billing_records.find_one(
             {"provider": self.provider, "gateway_payment_id": event.gateway_payment_id, "event_type": event.event_type},
             {"_id": 1},
         ):
             return {"matched": True, "changed": False, "duplicate_payment": True}
+        event_at = _event_time(event)
+        last_at = subscription.get("payment_last_event_at")
+        if not isinstance(last_at, (int, float)):
+            last_at = await self._last_processed_at(db, event)
+        refusal: Optional[str] = None
+        if event_at is not None and isinstance(last_at, (int, float)) and event_at < last_at:
+            refusal = "stale_event"
+        elif update.get("status") == "active" and str(subscription.get("status") or "").lower() not in WEBHOOK_ACTIVATABLE_STATUSES:
+            refusal = "status_not_activatable_by_webhook"
+        if refusal:
+            if event.gateway_payment_id or event.event_type in {"payment.succeeded", "payment.failed"}:
+                if not await self._insert_billing_record(db, subscription, event, f"refused_{refusal}", now, requires_review=True):
+                    return {"matched": True, "changed": False, "duplicate_payment": True}
+            return await self._refuse_binding(db, event, refusal, [subscription])
         if event_at is not None:
             update["payment_last_event_at"] = max(event_at, last_at) if isinstance(last_at, (int, float)) else event_at
 
@@ -207,22 +241,7 @@ class BillingWebhookService:
         record_status = "paid" if event.event_type == "payment.succeeded" else (
             "failed" if event.event_type == "payment.failed" else event.event_type
         )
-        await db.billing_records.insert_one(
-            {
-                "subscription_id": str(subscription["_id"]),
-                "organization_id": str(subscription.get("organization_id", "")),
-                "project_id": subscription.get("project_id"),
-                "provider": self.provider,
-                "event_id": event.event_id,
-                "event_type": event.event_type,
-                "gateway_payment_id": event.gateway_payment_id,
-                "gateway_subscription_id": event.gateway_subscription_id,
-                "amount_minor": event.amount_minor,
-                "currency": event.currency,
-                "record_status": record_status,
-                "created_at": now,
-            }
-        )
+        await self._insert_billing_record(db, subscription, event, record_status, now)
         if record_status == "failed":
             await AuditEventService(db).emit(
                 action="billing.webhook.payment_failed",
@@ -264,6 +283,49 @@ class BillingWebhookService:
             "applied": {k: v for k, v in update.items() if k in {"status", "billing_status"}},
         }
 
+    async def _insert_billing_record(
+        self, db: Any, subscription: Dict[str, Any], event: WebhookEvent, record_status: str, now: datetime,
+        *, requires_review: bool = False,
+    ) -> bool:
+        """One billing record per payment; False when the payment was already recorded (the
+        unique index of migration 20261124_0001 makes the dedupe hold under concurrency)."""
+        try:
+            await db.billing_records.insert_one(
+                {
+                    "subscription_id": str(subscription["_id"]),
+                    "organization_id": str(subscription.get("organization_id", "")),
+                    "project_id": subscription.get("project_id"),
+                    "provider": self.provider,
+                    "event_id": event.event_id,
+                    "event_type": event.event_type,
+                    "gateway_payment_id": event.gateway_payment_id,
+                    "gateway_subscription_id": event.gateway_subscription_id,
+                    "amount_minor": event.amount_minor,
+                    "currency": event.currency,
+                    "record_status": record_status,
+                    "requires_admin_review": requires_review,
+                    "created_at": now,
+                }
+            )
+        except DuplicateKeyError:
+            return False
+        return True
+
+    async def _last_processed_at(self, db: Any, event: WebhookEvent) -> Optional[float]:
+        """The receipt time of the last event processed for this gateway id (seconds), the
+        order baseline for a subscription that has no high-water mark yet."""
+        if not event.gateway_subscription_id:
+            return None
+        row = await db.billing_webhook_events.find_one(
+            {"gateway_subscription_id": event.gateway_subscription_id, "processed": True,
+             "event_id": {"$ne": event.event_id}},
+            sort=[("received_at", -1)],
+        )
+        received = (row or {}).get("received_at")
+        if isinstance(received, datetime):
+            return received.replace(tzinfo=timezone.utc).timestamp() if received.tzinfo is None else received.timestamp()
+        return None
+
     async def _refuse_binding(self, db: Any, event: WebhookEvent, reason: str, subscriptions: Any) -> Dict[str, Any]:
         """A payment event whose gateway binding cannot be trusted changes nothing; the refusal
         is audited (per subscription named) for admin review."""
@@ -290,7 +352,7 @@ class BillingWebhookService:
         # be refused the same way), so its payload is the only copy (review F6).
         await db.billing_webhook_events.update_one(
             {"event_id": event.event_id},
-            {"$set": {"refused": reason, "refused_payload": event.raw}},
+            {"$set": {"refused": reason, "refused_payload": _redacted(event.raw)}},
         )
         return {"matched": False, "refused": reason}
 

@@ -58,7 +58,7 @@ class _FakeColl:
         self.docs.append(dict(doc))
         return SimpleNamespace(inserted_id=f"id-{len(self.docs)}")
 
-    async def find_one(self, query, projection=None):
+    async def find_one(self, query, projection=None, sort=None):
         for d in self.docs:
             if all(d.get(k) == v for k, v in query.items()):
                 return dict(d)

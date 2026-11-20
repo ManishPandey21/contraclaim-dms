@@ -11,7 +11,9 @@ guarantee behind them:
 - ``subscriptions``: a partial unique index on ``payment_gateway_subscription_id`` (non-empty
   strings only; subscriptions with no gateway binding are not covered);
 - ``billing_webhook_events``: a partial unique index on (``provider``, ``body_sha256``), so a
-  signed body replayed under a new event-id header is refused even under concurrency.
+  signed body replayed under a new event-id header is refused even under concurrency;
+- ``billing_records``: a partial unique index on (``provider``, ``gateway_payment_id``,
+  ``event_type``), so one gateway payment has one record under concurrency.
 
 Duplicates: a dry run reports them as warnings (so ``--fail-on-warning`` stops a deploy). An
 apply with duplicates present **raises**, so the runner records nothing and the migration
@@ -41,6 +43,15 @@ GATEWAY_INDEX: Dict[str, Any] = {
     "name": "subscription_gateway_identity_unique",
     "unique": True,
     "partialFilterExpression": {"payment_gateway_subscription_id": {"$type": "string", "$gt": ""}},
+}
+PAYMENT_RECORD_INDEX: Dict[str, Any] = {
+    # One billing record per gateway payment and event type (re-review R3: the webhook's
+    # payment dedupe is check-then-insert without it).
+    "collection": "billing_records",
+    "keys": [("provider", 1), ("gateway_payment_id", 1), ("event_type", 1)],
+    "name": "billing_record_gateway_payment_unique",
+    "unique": True,
+    "partialFilterExpression": {"gateway_payment_id": {"$type": "string", "$gt": ""}},
 }
 WEBHOOK_BODY_INDEX: Dict[str, Any] = {
     "collection": "billing_webhook_events",
@@ -88,6 +99,17 @@ async def upgrade(db: Any, dry_run: bool) -> MigrationResult:
         )
     else:
         clean.append(WEBHOOK_BODY_INDEX)
+    payment_duplicates = await duplicate_groups(
+        db, "billing_records", {"provider": "$provider", "payment": "$gateway_payment_id", "type": "$event_type"},
+        {"gateway_payment_id": {"$type": "string", "$gt": ""}},
+    )
+    if payment_duplicates:
+        warnings.append(
+            f"billing_records: {payment_duplicates} gateway payment(s) were recorded more than once; "
+            "the unique index is not created until they are reviewed"
+        )
+    else:
+        clean.append(PAYMENT_RECORD_INDEX)
     if warnings and not dry_run:
         raise RuntimeError(
             "subscription_gateway_identity_unique: " + "; ".join(warnings)
