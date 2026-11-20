@@ -279,16 +279,18 @@ def test_concurrent_checkouts_of_one_gateway_id_bind_once_with_the_index(monkeyp
             monkeypatch.setattr(module, "get_payment_gateway", lambda *a, **k: _Fixed())
             actor = type("Actor", (), {"id": "gw-actor"})()
 
-            async def checkout() -> str:
+            async def checkout(project: str) -> str:
                 try:
                     await MonetizationService(env.db).start_checkout(
-                        organization_id=ORG_A, project_id=PROJ_A1, plan_code="dms_enterprise",
+                        organization_id=ORG_A, project_id=project, plan_code="dms_enterprise",
                         billing_period="monthly", current_user=actor)
                     return "bound"
                 except GatewayIdentityConflict:
                     return "refused"
 
-            outcomes = sorted(await asyncio.gather(checkout(), checkout()))
+            # Two scopes (one scope's checkouts are serialised by its lease since review 8 B2), so
+            # both reach the gateway together and only the binding check / unique index decides.
+            outcomes = sorted(await asyncio.gather(checkout(PROJ_A1), checkout("gw-proj-race")))
             assert outcomes == ["bound", "refused"], outcomes
             assert await env.db.subscriptions.count_documents({"payment_gateway_subscription_id": "sub_rzp_race"}) == 1
 

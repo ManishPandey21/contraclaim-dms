@@ -152,7 +152,10 @@ def test_f3_priced_add_ons_need_super_admin_and_are_audited(monkeypatch, gateway
             await env.db.subscriptions.insert_one({
                 "_id": "pb-pro", "organization_id": ORG_A, "project_id": PROJ_A1, "package_id": None,
                 "plan_code": "dms_professional", "billing_period": "monthly", "status": "active", "billing_status": "active",
-                "governing_since": now - timedelta(days=3), "active_add_ons": []})
+                "governing_since": now - timedelta(days=3), "active_add_ons": [],
+                # Paid through the gateway, so the priced-add-on rule (not review 8 A2) decides.
+                "payment_provider": "noop", "payment_gateway_subscription_id": "gw_pb_pro",
+                "payment_gateway_bound_by": "checkout"})
             body = {"add_on_code": "addon_priority_support"}
             refused = await _call(env, "POST", "/subscriptions/pb-pro/add-ons/add", body, "subscription.addon.manage",
                                   "pb_billing", billing)

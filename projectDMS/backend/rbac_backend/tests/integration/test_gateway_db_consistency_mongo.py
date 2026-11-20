@@ -218,7 +218,7 @@ def test_an_operation_completed_while_a_repeat_was_starting_is_not_applied_again
             result = await service._gateway_then_local(
                 kind="upgrade", sub=sub, target={"plan_code": "dms_professional", "billing_period": "monthly"},
                 gateway_call=gateway_call, local_call=local_call, current_user=SimpleNamespace(id="gdc"),
-                idempotency_key="up-race")
+                idempotency_key="up-race", asked={"plan_code": "dms_professional", "billing_period": None})
             assert ran == [] and result["operation"]["status"] == "completed"
 
     _run(scenario())

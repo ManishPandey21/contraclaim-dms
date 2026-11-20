@@ -1255,7 +1255,8 @@ async def upgrade_subscription(
         subscription_id=subscription_id,
     )
     try:
-        return await service.upgrade_subscription(subscription_id, payload, current_user, idempotency_key=_idempotency_key(request))
+        return await service.upgrade_subscription(subscription_id, payload, current_user, idempotency_key=_idempotency_key(request),
+            manual_billing_authorised=ScopeService().is_superadmin(current_user))
     except SubscriptionNotGoverning as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except (OperationConflict, IdempotencyKeyReused) as exc:
@@ -1287,7 +1288,8 @@ async def downgrade_subscription(
         subscription_id=subscription_id,
     )
     try:
-        return await service.downgrade_subscription(subscription_id, payload, current_user, idempotency_key=_idempotency_key(request))
+        return await service.downgrade_subscription(subscription_id, payload, current_user, idempotency_key=_idempotency_key(request),
+            manual_billing_authorised=ScopeService().is_superadmin(current_user))
     except SubscriptionNotGoverning as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except (OperationConflict, IdempotencyKeyReused) as exc:
@@ -1347,7 +1349,8 @@ async def reactivate_subscription(
         subscription_id=subscription_id,
     )
     try:
-        return await service.reactivate_subscription(subscription_id, current_user)
+        return await service.reactivate_subscription(
+            subscription_id, current_user, manual_billing_authorised=ScopeService().is_superadmin(current_user))
     except SubscriptionReactivationRefused as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except GatewayOperationFailed as exc:
@@ -1376,7 +1379,8 @@ async def change_billing_period(
         subscription_id=subscription_id,
     )
     try:
-        return await service.change_billing_period(subscription_id, payload, current_user, idempotency_key=_idempotency_key(request))
+        return await service.change_billing_period(subscription_id, payload, current_user, idempotency_key=_idempotency_key(request),
+            manual_billing_authorised=ScopeService().is_superadmin(current_user))
     except SubscriptionNotGoverning as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except (OperationConflict, IdempotencyKeyReused) as exc:

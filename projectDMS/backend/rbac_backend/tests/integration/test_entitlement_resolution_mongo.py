@@ -564,10 +564,10 @@ def test_n1_lifecycle_changes_on_an_outranked_row_are_refused_before_the_gateway
             before = await env.db.subscriptions.find_one({"_id": "shadowed"})
             attempts = [
                 service.upgrade_subscription("shadowed", UpgradeDowngradeRequest(new_plan_code="dms_enterprise",
-                                                                                  effective_immediately=True), actor),
-                service.downgrade_subscription("shadowed", UpgradeDowngradeRequest(new_plan_code="dms_starter"), actor),
-                service.change_billing_period("shadowed", ChangeBillingPeriodRequest(new_billing_period="annual"), actor),
-                service.add_addon("shadowed", AddOnActionRequest(add_on_code="anything"), actor),
+                                                                                  effective_immediately=True), actor, manual_billing_authorised=True),
+                service.downgrade_subscription("shadowed", UpgradeDowngradeRequest(new_plan_code="dms_starter"), actor, manual_billing_authorised=True),
+                service.change_billing_period("shadowed", ChangeBillingPeriodRequest(new_billing_period="annual"), actor, manual_billing_authorised=True),
+                service.add_addon("shadowed", AddOnActionRequest(add_on_code="anything"), actor, manual_billing_authorised=True),
                 service.remove_addon("shadowed", AddOnActionRequest(add_on_code="anything"), actor),
             ]
             for attempt in attempts:
@@ -579,7 +579,7 @@ def test_n1_lifecycle_changes_on_an_outranked_row_are_refused_before_the_gateway
             assert (await env.db.subscription_history.count_documents({"subscription_id": "shadowed"})) == 0
             # The governing row is changed normally, and keeps governing.
             await service.upgrade_subscription("newest", UpgradeDowngradeRequest(new_plan_code="dms_enterprise",
-                                                                                  effective_immediately=True), actor)
+                                                                                  effective_immediately=True), actor, manual_billing_authorised=True)
             assert [sid for sid, _ in calls] == ["newest"]
             assert (await _check(env, project=None))[2]["subscription_id"] == "newest"
 
@@ -602,7 +602,7 @@ def test_n2_an_upgrade_never_revives_a_cancelled_or_pending_row(monkeypatch) -> 
                 with pytest.raises(SubscriptionNotGoverning, match="only an active, pilot or trial subscription"):
                     await service.upgrade_subscription(row, UpgradeDowngradeRequest(new_plan_code="dms_enterprise",
                                                                                      effective_immediately=True),
-                                                       SimpleNamespace(id="ent-actor"))
+                                                       SimpleNamespace(id="ent-actor"), manual_billing_authorised=True)
             assert {r["_id"]: r["status"] async for r in env.db.subscriptions.find({"organization_id": ORG})} == {
                 "current": "active", "old": "cancelled", "unpaid": "pending"}
             assert calls == []
@@ -626,12 +626,12 @@ def test_n1_an_unorderable_tier_refuses_changes_and_a_scheduled_row_may_be_amend
             service = MonetizationService(env.db)
             actor = SimpleNamespace(id="ent-actor")
             with pytest.raises(SubscriptionNotGoverning, match="cannot be ordered"):
-                await service.change_billing_period("legacy-a", ChangeBillingPeriodRequest(new_billing_period="annual"), actor)
-            await service.change_billing_period("scheduled", ChangeBillingPeriodRequest(new_billing_period="annual"), actor)
+                await service.change_billing_period("legacy-a", ChangeBillingPeriodRequest(new_billing_period="annual"), actor, manual_billing_authorised=True)
+            await service.change_billing_period("scheduled", ChangeBillingPeriodRequest(new_billing_period="annual"), actor, manual_billing_authorised=True)
             assert (await env.db.subscriptions.find_one({"_id": "scheduled"}))["billing_period"] == "annual"
             # A project row is not outranked by the organisation row (another tier).
             await env.db.subscriptions.insert_one(_sub("org-row", status="active", governing_since=now))
-            await service.change_billing_period("p2-now", ChangeBillingPeriodRequest(new_billing_period="annual"), actor)
+            await service.change_billing_period("p2-now", ChangeBillingPeriodRequest(new_billing_period="annual"), actor, manual_billing_authorised=True)
 
     _run(scenario())
 
@@ -678,7 +678,7 @@ def test_r6_1_a_scheduled_row_is_judged_at_its_start(monkeypatch) -> None:
                         _sub("current", status="active", plan="dms_starter", governing_since=now - timedelta(days=1)))
             with pytest.raises(SubscriptionNotGoverning, match="outranked by subscription current"):
                 await MonetizationService(env.db).upgrade_subscription(
-                    "sched", UpgradeDowngradeRequest(new_plan_code="dms_enterprise"), SimpleNamespace(id="ent-actor"))
+                    "sched", UpgradeDowngradeRequest(new_plan_code="dms_enterprise"), SimpleNamespace(id="ent-actor"), manual_billing_authorised=True)
             assert calls == []
 
     _run(scenario())
@@ -701,11 +701,11 @@ def test_r6_2_an_ended_or_expired_row_is_refused_whatever_its_tier_holds(monkeyp
             for row, why in (("p1-ended", "outranked by subscription org-row"), ("p2-trial", "convert it first")):
                 with pytest.raises(SubscriptionNotGoverning, match=why):
                     await service.upgrade_subscription(row, UpgradeDowngradeRequest(new_plan_code="dms_enterprise"),
-                                                       SimpleNamespace(id="ent-actor"))
+                                                       SimpleNamespace(id="ent-actor"), manual_billing_authorised=True)
             await env.db.subscriptions.delete_one({"_id": "org-row"})
             with pytest.raises(SubscriptionNotGoverning, match=r"does not govern its scope \(ended\)"):
                 await service.upgrade_subscription("p1-ended", UpgradeDowngradeRequest(new_plan_code="dms_enterprise"),
-                                                   SimpleNamespace(id="ent-actor"))
+                                                   SimpleNamespace(id="ent-actor"), manual_billing_authorised=True)
             assert calls == []
 
     _run(scenario())
@@ -729,7 +729,7 @@ def test_r6_3_a_change_decided_on_a_stale_state_is_refused(monkeypatch) -> None:
             with pytest.raises(SubscriptionNotGoverning, match="changed while this change was being made"):
                 await service.upgrade_subscription("current", UpgradeDowngradeRequest(new_plan_code="dms_enterprise",
                                                                                        effective_immediately=True),
-                                                   SimpleNamespace(id="ent-actor"))
+                                                   SimpleNamespace(id="ent-actor"), manual_billing_authorised=True)
             row = await env.db.subscriptions.find_one({"_id": "current"})
             assert (row["status"], row["plan_code"]) == ("cancelled", "dms_starter"), "not revived, not re-stamped"
             assert row["governing_since"] < datetime.utcnow() - timedelta(hours=12)
@@ -749,7 +749,7 @@ def test_r6_4_an_upgrade_never_lifts_a_payment_block_or_restriction(monkeypatch,
             with pytest.raises(SubscriptionNotGoverning, match="only an active, pilot or trial subscription"):
                 await MonetizationService(env.db).upgrade_subscription(
                     "held", UpgradeDowngradeRequest(new_plan_code="dms_enterprise", effective_immediately=True),
-                    SimpleNamespace(id="ent-actor"))
+                    SimpleNamespace(id="ent-actor"), manual_billing_authorised=True)
             assert (await env.db.subscriptions.find_one({"_id": "held"}))["status"] == status
             assert calls == []
 
@@ -771,7 +771,7 @@ def test_r6_9_a_row_enforcement_cannot_see_is_refused(monkeypatch) -> None:
                                                    "organization_id": org_oid})
             with pytest.raises(SubscriptionNotGoverning, match="does not govern its scope"):
                 await MonetizationService(env.db).change_billing_period(
-                    "oid-org", ChangeBillingPeriodRequest(new_billing_period="annual"), SimpleNamespace(id="ent-actor"))
+                    "oid-org", ChangeBillingPeriodRequest(new_billing_period="annual"), SimpleNamespace(id="ent-actor"), manual_billing_authorised=True)
             assert calls == []
 
     _run(scenario())
@@ -823,7 +823,7 @@ def test_r6_3_the_write_itself_is_compare_and_set_on_the_decided_state(monkeypat
             with pytest.raises(SubscriptionNotGoverning, match="changed while this change was being made"):
                 await service.upgrade_subscription("current", UpgradeDowngradeRequest(new_plan_code="dms_enterprise",
                                                                                        effective_immediately=True),
-                                                   SimpleNamespace(id="ent-actor"))
+                                                   SimpleNamespace(id="ent-actor"), manual_billing_authorised=True)
             row = await env.db.subscriptions.find_one({"_id": "current"})
             assert (row["status"], row["plan_code"]) == ("cancelled", "dms_starter")
 

@@ -87,6 +87,9 @@ async def begin(db: Any, *, kind: str, organization_id: str, project_id: Optiona
         "requested_by": requested_by, "created_at": now, "updated_at": now,
         "status": "in_progress", "lease_until": now + LEASE, "attempts": 1,
         "request": request, "items": [], "result": {},
+        # Fencing token of the current attempt (review 8 C2): the scope lock and every write
+        # of this operation are checked against it, so a superseded attempt cannot write.
+        "token": uuid.uuid4().hex,
     }
     try:
         await db[OPERATIONS].insert_one(doc)
@@ -97,14 +100,36 @@ async def begin(db: Any, *, kind: str, organization_id: str, project_id: Optiona
         raise IdempotencyKeyReused("This idempotency key was used for a different request")
     if existing.get("status") == "completed":
         return existing
+    return await resume(db, existing)
+
+
+async def resume(db: Any, existing: Dict[str, Any]) -> Dict[str, Any]:
+    """Take over an unfinished operation with a new attempt token. ``prior_status`` (not
+    stored) lets the caller put it back if it cannot proceed (review 8 C1/C4)."""
+    now = datetime.utcnow()
     resumed = await db[OPERATIONS].find_one_and_update(
-        {"_id": op_id, "$or": [{"status": {"$in": ["needs_review", "failed"]}}, {"lease_until": {"$lt": now}}]},
-        {"$set": {"status": "in_progress", "lease_until": now + LEASE, "updated_at": now}, "$inc": {"attempts": 1}},
+        {"_id": existing["_id"], "$or": [{"status": {"$in": ["needs_review", "failed"]}}, {"lease_until": {"$lt": now}}]},
+        {"$set": {"status": "in_progress", "lease_until": now + LEASE, "updated_at": now, "token": uuid.uuid4().hex},
+         "$inc": {"attempts": 1}},
         return_document=ReturnDocument.AFTER,
     )
     if resumed is None:
         raise OperationConflict("This operation is already in progress")
+    resumed["prior_status"] = existing.get("status")
     return resumed
+
+
+async def step_back(db: Any, op: Dict[str, Any]) -> None:
+    """An attempt that could not start (the scope is held elsewhere) leaves the operation as
+    it found it: a resumed operation keeps its earlier status (a review item stays listed),
+    a fresh one is ``failed`` (nothing was done)."""
+    previous = op.get("prior_status") or "failed"
+    if previous in {"in_progress", "completed"}:
+        previous = "needs_review" if previous == "in_progress" else previous
+    await db[OPERATIONS].update_one(
+        {"_id": op["_id"], "token": op.get("token")},
+        {"$set": {"status": previous, "lease_until": None, "updated_at": datetime.utcnow()}},
+    )
 
 
 async def lock_scope(db: Any, organization_id: str, project_id: Optional[str], op_id: str) -> None:
@@ -123,36 +148,45 @@ class LeaseLost(OperationConflict):
     """Another operation took the scope after this one's lease lapsed."""
 
 
-async def renew(db: Any, organization_id: str, project_id: Optional[str], op_id: str) -> None:
-    """Extend this operation's scope lease and its own lease, fenced on still holding the
-    scope (review 7 R7-1): an operation that lost the scope stops before its next external
-    call instead of working alongside the new holder."""
+async def renew(db: Any, organization_id: str, project_id: Optional[str], op_id: str, token: Optional[str] = None) -> None:
+    """Extend this attempt's scope lease and the operation's lease, fenced on the attempt's
+    token (review 7 R7-1, review 8 C2): an attempt that lost the scope - to another operation
+    or to a later attempt of the same one - stops before its next external call."""
     now = datetime.utcnow()
+    holder = token or op_id
     held = await db[LOCKS].update_one(
-        {"_id": scope_key(organization_id, project_id), "holder": op_id},
+        {"_id": scope_key(organization_id, project_id), "holder": holder},
         {"$set": {"lease_until": now + LEASE, "updated_at": now}},
     )
-    if held.matched_count == 0:
-        raise LeaseLost("This operation lost its scope to another operation; it stopped and is listed for review")
-    await db[OPERATIONS].update_one({"_id": op_id}, {"$set": {"lease_until": now + LEASE, "updated_at": now}})
+    mine = await db[OPERATIONS].update_one(
+        {"_id": op_id, **({"token": token} if token else {})},
+        {"$set": {"lease_until": now + LEASE, "updated_at": now}},
+    )
+    if held.matched_count == 0 or mine.matched_count == 0:
+        raise LeaseLost("This attempt lost its scope; it stopped before its next gateway call")
 
 
 async def unlock_scope(db: Any, organization_id: str, project_id: Optional[str], op_id: str) -> None:
     await db[LOCKS].delete_one({"_id": scope_key(organization_id, project_id), "holder": op_id})
 
 
-async def save_items(db: Any, op_id: str, items: List[Dict[str, Any]]) -> None:
-    await db[OPERATIONS].update_one({"_id": op_id}, {"$set": {"items": items, "updated_at": datetime.utcnow()}})
+async def save_items(db: Any, op_id: str, items: List[Dict[str, Any]], token: Optional[str] = None) -> None:
+    saved = await db[OPERATIONS].update_one({"_id": op_id, **({"token": token} if token else {})},
+                                            {"$set": {"items": items, "updated_at": datetime.utcnow()}})
+    if token and saved.matched_count == 0:
+        raise LeaseLost("A later attempt took over this operation; this attempt stopped")
 
 
 async def finish(db: Any, op_id: str, status: str, *, result: Optional[Dict[str, Any]] = None,
-                 items: Optional[List[Dict[str, Any]]] = None) -> None:
+                 items: Optional[List[Dict[str, Any]]] = None, token: Optional[str] = None) -> None:
     update: Dict[str, Any] = {"status": status, "updated_at": datetime.utcnow(), "lease_until": None}
     if result is not None:
         update["result"] = result
     if items is not None:
         update["items"] = items
-    await db[OPERATIONS].update_one({"_id": op_id}, {"$set": update})
+    done = await db[OPERATIONS].update_one({"_id": op_id, **({"token": token} if token else {})}, {"$set": update})
+    if token and done.matched_count == 0:
+        raise LeaseLost("A later attempt took over this operation; this attempt's outcome was not recorded")
 
 
 async def open_operations(db: Any, organization_id: Optional[str] = None, limit: int = 200) -> List[Dict[str, Any]]:
@@ -168,5 +202,5 @@ async def open_operations(db: Any, organization_id: Optional[str] = None, limit:
 
 __all__ = [
     "IdempotencyKeyReused", "LeaseLost", "OperationConflict", "begin", "finish", "lock_scope", "open_operations",
-    "operation_id", "renew", "save_items", "unlock_scope",
+    "operation_id", "renew", "resume", "save_items", "step_back", "unlock_scope",
 ]

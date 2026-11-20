@@ -80,6 +80,14 @@ class TrialConversionRefused(Exception):
 #: its outcome) and may be taken over by a later attempt (review 7 R5-2, R6-2).
 CLAIM_STALE_AFTER = timedelta(minutes=10)
 
+#: A checkout still unpaid after this is treated as abandoned (review 8 B3): the next checkout
+#: for the scope cancels it at the gateway first, so it can never be paid later alongside.
+PENDING_CHECKOUT_TTL = timedelta(hours=48)
+
+#: One document per scope that has ever had a trial (``_id`` = scope key; review 8 A3/A4):
+#: the insert is the atomic "first trial" gate, and it outlives conversions and cancellations.
+TRIAL_MARKERS = "subscription_trial_markers"
+
 
 class PurchaseInProgress(Exception):
     """A paid purchase for the scope is already awaiting payment (review 7 R5-1)."""
@@ -723,7 +731,32 @@ class MonetizationService:
         }
         if exclude is not None:
             query["_id"] = {"$ne": exclude}
-        return await db.subscriptions.find_one(query, {"_id": 1, "converts_trial_id": 1})
+        return await db.subscriptions.find_one(
+            query, {"_id": 1, "converts_trial_id": 1, "created_at": 1, "payment_gateway_subscription_id": 1,
+                    "organization_id": 1, "project_id": 1})
+
+    async def _expire_abandoned_checkout(self, db: Any, pending: Dict[str, Any], current_user: Any) -> None:
+        """Review 8 B3: cancel an abandoned checkout at the gateway first (so it can never be
+        paid later beside the new one), then locally; a gateway failure keeps it blocking."""
+        try:
+            await self._gateway().cancel_subscription(
+                gateway_subscription_id=pending["payment_gateway_subscription_id"], immediate=True)
+        except Exception as exc:
+            raise PurchaseInProgress(
+                "An earlier, unpaid purchase for this scope could not be cancelled at the gateway; retry later"
+            ) from exc
+        now = datetime.utcnow()
+        await db.subscriptions.update_one(
+            {"_id": pending["_id"], "status": "pending"},
+            {"$set": {"status": "cancelled", "billing_status": "inactive", "cancelled_at": now,
+                      "cancellation_reason": "checkout_abandoned", "updated_at": now,
+                      "updated_by": getattr(current_user, "id", None)}},
+        )
+        await self.audit_service.emit(
+            action="subscription.checkout_abandoned_cancelled", actor_id=getattr(current_user, "id", None),
+            resource_type="subscription", resource_id=str(pending["_id"]),
+            organization_id=str(pending.get("organization_id") or ""), project_id=scope_text(pending.get("project_id")),
+        )
 
     async def _assert_period_priced(self, plan_code: str, billing_period: str) -> None:
         """Review 7 R5-3: a period the plan does not price would fall back to the monthly price."""
@@ -743,6 +776,7 @@ class MonetizationService:
         customer_name: Optional[str] = None,
         customer_email: Optional[str] = None,
         converts_trial_id: Optional[str] = None,
+        scope_lock_holder: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Provision a customer + subscription on the payment gateway and create a
         local subscription in ``pending`` state. The webhook flips it to ``active``
@@ -752,10 +786,43 @@ class MonetizationService:
         if not await self.validate_plan_code(plan_code):
             raise ValueError(f"Plan '{plan_code}' not found")
         await self._assert_period_priced(plan_code, billing_period)
-        if await self._pending_purchase(db, str(organization_id), str(project_id) if project_id else None):
-            # Review 7 R5-1: two checkouts awaiting payment for one scope would both activate
-            # and both bill. The pending one is paid or abandoned first.
-            raise PurchaseInProgress("A purchase for this scope is already awaiting payment")
+        import uuid
+
+        from . import subscription_operations as ops
+
+        scope_project = str(project_id) if project_id else None
+        holder = scope_lock_holder or f"checkout:{uuid.uuid4().hex}"
+        if scope_lock_holder is None:
+            # Review 8 B2: the pending-purchase check and the gateway call are one step per
+            # scope; concurrent checkouts cannot all pass the check.
+            try:
+                await ops.lock_scope(db, str(organization_id), scope_project, holder)
+            except ops.OperationConflict as exc:
+                raise PurchaseInProgress("Another purchase or plan change for this scope is in progress") from exc
+        try:
+            return await self._start_checkout_locked(
+                db, organization_id=organization_id, project_id=project_id, plan_code=plan_code,
+                billing_period=billing_period, current_user=current_user, customer_name=customer_name,
+                customer_email=customer_email, converts_trial_id=converts_trial_id,
+            )
+        finally:
+            if scope_lock_holder is None:
+                await ops.unlock_scope(db, str(organization_id), scope_project, holder)
+
+    async def _start_checkout_locked(
+        self, db: Any, *, organization_id: str, project_id: Optional[str], plan_code: str, billing_period: str,
+        current_user: Any, customer_name: Optional[str], customer_email: Optional[str], converts_trial_id: Optional[str],
+    ) -> Dict[str, Any]:
+        scope_project = str(project_id) if project_id else None
+        pending = await self._pending_purchase(db, str(organization_id), scope_project)
+        if pending is not None:
+            created = pending.get("created_at")
+            if isinstance(created, datetime) and created < datetime.utcnow() - PENDING_CHECKOUT_TTL:
+                await self._expire_abandoned_checkout(db, pending, current_user)
+            else:
+                # Review 7 R5-1: two checkouts awaiting payment for one scope would both
+                # activate and both bill. The pending one is paid or abandoned first.
+                raise PurchaseInProgress("A purchase for this scope is already awaiting payment")
 
         gateway = get_payment_gateway()
         customer = await gateway.create_customer(
@@ -973,6 +1040,16 @@ class MonetizationService:
             f"Cannot {operation}: this subscription does not govern its scope ({classify(stored, moment)})"
         )
 
+    async def _provider_shows_cancelled(self, sub: Dict[str, Any]) -> bool:
+        gid = scope_text(sub.get("payment_gateway_subscription_id"))
+        if not gid:
+            return False
+        try:
+            status = await self._gateway().fetch_subscription_status(gateway_subscription_id=gid)
+        except Exception:
+            return False
+        return str(status or "").strip().lower() in {"cancelled", "completed", "expired"}
+
     async def _replay_if_completed(self, kind: str, subscription_id: str, idempotency_key: Optional[str],
                                    asked: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """With an idempotency key, a repeat of a completed change answers with the
@@ -993,7 +1070,8 @@ class MonetizationService:
         op = await db[ops.OPERATIONS].find_one({"_id": op_id, "status": "completed"})
         if not op:
             return None
-        target = ((op.get("request") or {}).get("target")) or {}
+        stored = op.get("request") or {}
+        target = stored.get("asked") or stored.get("target") or {}
         if any(value is not None and target.get(key) != value for key, value in asked.items()):
             raise ops.IdempotencyKeyReused("This idempotency key was used for a different request")
         return {**sub, "operation": self._operation_summary(op)}
@@ -1008,6 +1086,7 @@ class MonetizationService:
         local_call: Any,
         current_user: Any,
         idempotency_key: Optional[str] = None,
+        asked: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """A lifecycle change that must reach the gateway and the database, as a durable
         operation (gateway/database consistency design, owner decision 2026-11-21).
@@ -1031,11 +1110,16 @@ class MonetizationService:
         op = await ops.begin(
             db, kind=kind, organization_id=org, project_id=project,
             idempotency_key=f"{kind}:{sub_id}:{idempotency_key}" if idempotency_key else None,
-            request={"subscription_id": sub_id, "target": target}, requested_by=actor,
+            # Review 8 C3: the key is bound to what the caller asked, not to values derived
+            # from the subscription's current state (which a retry may see changed).
+            # (The derived target is kept per item, not in the fingerprinted request.)
+            request={"subscription_id": sub_id, "asked": asked if asked is not None else target},
+            requested_by=actor,
         )
         if op.get("status") == "completed":
             current = await self.get_subscription_by_id(sub_id)
             return {**(current or {}), "operation": self._operation_summary(op)}
+        token = op.get("token")
         bound = bool(scope_text(sub.get("payment_gateway_subscription_id")))
         items = op.get("items") or [{
             "subscription_id": sub_id, "gateway_bound": bound, "gateway": "pending", "attempts": 0,
@@ -1043,13 +1127,25 @@ class MonetizationService:
             "before": {key: sub.get(key) for key in ("status", "plan_code", "billing_period", "active_add_ons")},
         }]
         item = items[0]
+        if item.get("target") != target and item["gateway"] == "confirmed":
+            # Review 8 C3: the gateway already applied the stored target; this retry would apply
+            # a different one locally. Left for a person, never guessed.
+            await ops.step_back(db, op)
+            raise SubscriptionNotGoverning(
+                "The subscription changed since the gateway applied this change; resolve it from the review queue"
+            )
         # Review 7 G-1: a lifecycle change holds the scope like a plan-settings operation.
         try:
-            await ops.lock_scope(db, org, project, op["_id"])
+            await ops.lock_scope(db, org, project, token or op["_id"])
         except ops.OperationConflict:
-            await ops.finish(db, op["_id"], "failed", items=items)
+            await ops.step_back(db, op)  # review 8 C1: a review item stays listed
             raise
         try:
+            if item["gateway"] == "unknown" and kind == "cancellation" and await self._provider_shows_cancelled(sub):
+                # Review 8 C5: the earlier, unanswered cancel did reach the provider; repeating it
+                # would fail there for ever. Reconciled from the provider's own state.
+                item["gateway"], item["last_error"] = "confirmed", None
+                await ops.save_items(db, op["_id"], items, token=token)
             if item["gateway"] not in {"confirmed", "not_bound"}:
                 item["attempts"] += 1
                 try:
@@ -1057,7 +1153,7 @@ class MonetizationService:
                 except Exception as exc:
                     if isinstance(exc, (ValueError, SubscriptionNotGoverning)):
                         item["gateway"], item["last_error"] = "failed", type(exc).__name__
-                        await ops.finish(db, op["_id"], "failed", items=items)
+                        await ops.finish(db, op["_id"], "failed", items=items, token=token)
                         raise
                     # Review 7 G-3: only a refused connection proves nothing reached the
                     # gateway. A timeout or any other error may have been applied there:
@@ -1065,7 +1161,7 @@ class MonetizationService:
                     known_not_applied = isinstance(exc, ConnectionRefusedError)
                     item["gateway"] = "failed" if known_not_applied else "unknown"
                     item["last_error"] = type(exc).__name__
-                    await ops.finish(db, op["_id"], "failed" if known_not_applied else "needs_review", items=items)
+                    await ops.finish(db, op["_id"], "failed" if known_not_applied else "needs_review", items=items, token=token)
                     if not known_not_applied:
                         await self._review_event(sub, f"subscription.{kind}_gateway_outcome_unknown", current_user,
                                                  reason=type(exc).__name__)
@@ -1074,25 +1170,59 @@ class MonetizationService:
                         + ("" if known_not_applied else " - the gateway outcome is unknown and is listed for review")
                     ) from exc
                 item["gateway"], item["last_error"] = ("confirmed" if bound else "not_bound"), None
-                await ops.save_items(db, op["_id"], items)
+                await ops.save_items(db, op["_id"], items, token=token)
             try:
                 result = await local_call()
             except Exception:
                 item["local"] = "refused"
                 disagree = item["gateway"] == "confirmed"
-                await ops.finish(db, op["_id"], "needs_review" if disagree else "failed", items=items)
+                await ops.finish(db, op["_id"], "needs_review" if disagree else "failed", items=items, token=token)
                 if disagree:
                     await self._review_event(sub, f"subscription.{kind}_needs_reconciliation", current_user,
                                              reason="gateway_changed_local_refused")
                 raise
             item["local"] = "applied"
-            await ops.finish(db, op["_id"], "completed", result={"subscription_id": sub_id}, items=items)
+            await ops.finish(db, op["_id"], "completed", result={"subscription_id": sub_id}, items=items, token=token)
             return result
         finally:
-            await ops.unlock_scope(db, org, project, op["_id"])
+            await ops.unlock_scope(db, org, project, token or op["_id"])
+
+    def _assert_commercial_change_allowed(self, sub: Dict[str, Any], operation: str, *,
+                                          manual_billing_authorised: bool, plan_change: bool) -> None:
+        """Review 8 A1/A2: a change of what the customer pays for happens only where it is paid.
+
+        - Gateway-bound: the change must really reach the provider. An adapter that cannot
+          change a plan or period in place (Razorpay) refuses here - the new plan is bought
+          through checkout - instead of the database recording a plan the gateway never bills.
+        - Not bound (manual, administrative, no-charge or free): only a Super Admin changes it;
+          a tenant cannot turn an administrative grant into a bigger one.
+        """
+        bound = bool(scope_text(sub.get("payment_gateway_subscription_id")))
+        if bound:
+            if plan_change and not getattr(self._gateway(), "supports_in_place_plan_change", True):
+                raise SubscriptionNotGoverning(
+                    f"Cannot {operation} in place: the payment gateway cannot change this subscription's plan or "
+                    "period; buy the new plan through checkout"
+                )
+        elif not manual_billing_authorised:
+            raise SubscriptionNotGoverning(
+                f"Cannot {operation}: this subscription is not billed through the payment gateway "
+                "(manual, administrative or no-charge); only a Super Admin can change it"
+            )
+
+    async def _assert_target_plan_sold(self, plan: Dict[str, Any], billing_period: str, *,
+                                       manual_billing_authorised: bool) -> None:
+        """Review 8 A2: the target plan must be active and sold for the period; a zero-priced
+        target (free service) only by a Super Admin."""
+        if not plan.get("is_active", True):
+            raise ValueError(f"Plan '{plan.get('code')}' is not available")
+        await self._assert_period_priced(str(plan.get("code")), billing_period)
+        if self._period_price(plan, billing_period) == 0 and not manual_billing_authorised:
+            raise SubscriptionNotGoverning(f"Plan '{plan.get('code')}' is not sold for a price; only a Super Admin assigns it")
 
     async def upgrade_subscription(
-        self, subscription_id: str, request: UpgradeDowngradeRequest, current_user: Any, *, idempotency_key: Optional[str] = None
+        self, subscription_id: str, request: UpgradeDowngradeRequest, current_user: Any, *, idempotency_key: Optional[str] = None,
+        manual_billing_authorised: bool = False
     ) -> Dict[str, Any]:
         """Upgrade subscription to a higher-tier plan."""
         replay = await self._replay_if_completed("upgrade", subscription_id, idempotency_key, {"plan_code": request.new_plan_code, "billing_period": request.billing_period})
@@ -1102,6 +1232,8 @@ class MonetizationService:
         if not sub:
             raise ValueError("Subscription not found")
         state = await self._assert_governs_its_scope(sub, "upgrade")
+        self._assert_commercial_change_allowed(sub, "upgrade", manual_billing_authorised=manual_billing_authorised,
+                                               plan_change=True)
 
         old_plan = await self.get_plan_by_code(sub["plan_code"])
         new_plan = await self.get_plan_by_code(request.new_plan_code)
@@ -1112,6 +1244,7 @@ class MonetizationService:
 
         proration = self._calculate_proration(sub, old_plan, new_plan, request.billing_period)
         billing_period = request.billing_period or sub.get("billing_period", "monthly")
+        await self._assert_target_plan_sold(new_plan, billing_period, manual_billing_authorised=manual_billing_authorised)
         now = datetime.utcnow()
 
         # Review-7 F2: an upgrade changes the plan, not the payment state - status and
@@ -1125,6 +1258,7 @@ class MonetizationService:
         # Propagate to the gateway first; if it fails, the local state is untouched.
         result = await self._gateway_then_local(
             kind="upgrade", sub=sub, current_user=current_user, idempotency_key=idempotency_key,
+            asked={"plan_code": request.new_plan_code, "billing_period": request.billing_period},
             target={"plan_code": request.new_plan_code, "billing_period": billing_period},
             gateway_call=lambda: self._gateway_change(sub, new_plan_code=request.new_plan_code, new_billing_period=billing_period),
             local_call=lambda: self.update_subscription(subscription_id, update, current_user, expected_state=state),
@@ -1147,7 +1281,8 @@ class MonetizationService:
         return result
 
     async def downgrade_subscription(
-        self, subscription_id: str, request: UpgradeDowngradeRequest, current_user: Any, *, idempotency_key: Optional[str] = None
+        self, subscription_id: str, request: UpgradeDowngradeRequest, current_user: Any, *, idempotency_key: Optional[str] = None,
+        manual_billing_authorised: bool = False
     ) -> Dict[str, Any]:
         """Downgrade subscription to a lower-tier plan (effective at period end)."""
         replay = await self._replay_if_completed("downgrade", subscription_id, idempotency_key, {"plan_code": request.new_plan_code, "billing_period": request.billing_period})
@@ -1157,6 +1292,8 @@ class MonetizationService:
         if not sub:
             raise ValueError("Subscription not found")
         state = await self._assert_governs_its_scope(sub, "downgrade")
+        self._assert_commercial_change_allowed(sub, "downgrade", manual_billing_authorised=manual_billing_authorised,
+                                               plan_change=True)
 
         old_plan = await self.get_plan_by_code(sub["plan_code"])
         new_plan = await self.get_plan_by_code(request.new_plan_code)
@@ -1166,6 +1303,7 @@ class MonetizationService:
             raise ValueError("Target plan must be a lower tier for downgrade")
 
         billing_period = request.billing_period or sub.get("billing_period", "monthly")
+        await self._assert_target_plan_sold(new_plan, billing_period, manual_billing_authorised=manual_billing_authorised)
 
         # Downgrades take effect at end of current period
         update = SubscriptionUpdate(
@@ -1174,6 +1312,7 @@ class MonetizationService:
         )
         result = await self._gateway_then_local(
             kind="downgrade", sub=sub, current_user=current_user, idempotency_key=idempotency_key,
+            asked={"plan_code": request.new_plan_code, "billing_period": request.billing_period},
             target={"plan_code": request.new_plan_code, "billing_period": billing_period},
             gateway_call=lambda: self._gateway_change(sub, new_plan_code=request.new_plan_code, new_billing_period=billing_period),
             local_call=lambda: self.update_subscription(subscription_id, update, current_user, expected_state=state),
@@ -1195,7 +1334,8 @@ class MonetizationService:
         return result
 
     async def change_billing_period(
-        self, subscription_id: str, request: ChangeBillingPeriodRequest, current_user: Any, *, idempotency_key: Optional[str] = None
+        self, subscription_id: str, request: ChangeBillingPeriodRequest, current_user: Any, *, idempotency_key: Optional[str] = None,
+        manual_billing_authorised: bool = False
     ) -> Dict[str, Any]:
         """Switch billing cadence (takes effect at next renewal)."""
         replay = await self._replay_if_completed("period_change", subscription_id, idempotency_key, {"billing_period": request.new_billing_period})
@@ -1205,10 +1345,13 @@ class MonetizationService:
         if not sub:
             raise ValueError("Subscription not found")
         state = await self._assert_governs_its_scope(sub, "change the billing period of")
+        self._assert_commercial_change_allowed(sub, "change the billing period of", manual_billing_authorised=manual_billing_authorised,
+                                               plan_change=True)
 
         update = SubscriptionUpdate(billing_period=request.new_billing_period)
         result = await self._gateway_then_local(
             kind="period_change", sub=sub, current_user=current_user, idempotency_key=idempotency_key,
+            asked={"billing_period": request.new_billing_period},
             target={"billing_period": request.new_billing_period},
             gateway_call=lambda: self._gateway_change(sub, new_billing_period=request.new_billing_period),
             local_call=lambda: self.update_subscription(subscription_id, update, current_user, expected_state=state),
@@ -1252,6 +1395,7 @@ class MonetizationService:
         # Cancel on the gateway so it stops billing; abort locally if that fails.
         result = await self._gateway_then_local(
             kind="cancellation", sub=sub, current_user=current_user, idempotency_key=idempotency_key,
+            asked={"status": "cancelled", "immediate": bool(request.immediate)},
             target={"status": "cancelled", "immediate": bool(request.immediate)},
             gateway_call=lambda: self._gateway_cancel(sub, immediate=bool(request.immediate)),
             local_call=lambda: self.update_subscription(subscription_id, update, current_user),
@@ -1274,7 +1418,33 @@ class MonetizationService:
     #: Gateway statuses that confirm a resumed subscription (R6-6).
     GATEWAY_ACTIVE_STATUSES = frozenset({"active", "authenticated"})
 
-    async def reactivate_subscription(self, subscription_id: str, current_user: Any) -> Dict[str, Any]:
+    async def reactivate_subscription(
+        self, subscription_id: str, current_user: Any, *, manual_billing_authorised: bool = False
+    ) -> Dict[str, Any]:
+        """Reactivation under the scope lease (review 8 C6): a plan-settings replacement or a
+        checkout cannot be installed between its checks and its write."""
+        import uuid
+
+        from . import subscription_operations as ops
+
+        db = await self._get_db()
+        stored = await db.subscriptions.find_one({"_id": self._lookup_id(subscription_id)})
+        if not stored:
+            raise ValueError("Subscription not found")
+        org, project = str(stored.get("organization_id") or ""), scope_text(stored.get("project_id"))
+        holder = f"reactivation:{uuid.uuid4().hex}"
+        try:
+            await ops.lock_scope(db, org, project, holder)
+        except ops.OperationConflict as exc:
+            raise SubscriptionReactivationRefused("Another purchase or plan change for this scope is in progress") from exc
+        try:
+            return await self._reactivate_subscription_locked(subscription_id, current_user, manual_billing_authorised)
+        finally:
+            await ops.unlock_scope(db, org, project, holder)
+
+    async def _reactivate_subscription_locked(
+        self, subscription_id: str, current_user: Any, manual_billing_authorised: bool
+    ) -> Dict[str, Any]:
         """Resume a cancelled subscription inside the period it already paid for (R6-6).
 
         Rules (owner decision 2026-11-21), all checked before the gateway is asked:
@@ -1315,6 +1485,17 @@ class MonetizationService:
         # update cannot write (``trial``, ``conversion``), not on ``cancellation_reason``.
         if stored.get("trial") is True or stored.get("conversion") or stored.get("cancellation_reason") == "converted_to_paid":
             raise SubscriptionReactivationRefused("A trial is not reactivated; start a purchase instead")
+        if not manual_billing_authorised:
+            # Review 8 B1: only a subscription the customer paid through the gateway is resumed
+            # by a tenant. A manual, administrative or no-charge one - or one an administrator
+            # cancelled (plan settings, an abandoned checkout) - is Super Admin's to restore.
+            if not scope_text(stored.get("payment_gateway_subscription_id")):
+                raise SubscriptionReactivationRefused(
+                    "This subscription is not billed through the payment gateway; only a Super Admin can restore it")
+            if stored.get("cancellation_operation_id") or stored.get("cancellation_reason") in {
+                    "replaced_by_plan_settings", "checkout_abandoned"}:
+                raise SubscriptionReactivationRefused(
+                    "This subscription was cancelled administratively; only a Super Admin can restore it")
         reactivation = stored.get("reactivation") or {}
         if reactivation.get("state") == "starting" and not self._claim_is_stale(reactivation):
             raise SubscriptionReactivationRefused("A reactivation of this subscription is already in progress")
@@ -1486,6 +1667,15 @@ class MonetizationService:
         own_tier = "project" if request.project_id else "organization"
         if resolution.tier == own_tier and (resolution.subscription is not None or resolution.reason == "ambiguous_subscriptions"):
             raise TrialConversionRefused("A subscription already governs this scope; a trial is not started over it")
+        from . import subscription_operations as ops
+
+        marker = ops.scope_key(str(request.organization_id), str(request.project_id) if request.project_id else None)
+        try:
+            await db[TRIAL_MARKERS].insert_one({"_id": marker, "plan_code": request.plan_code,
+                                                "created_at": datetime.utcnow(),
+                                                "created_by": getattr(current_user, "id", None)})
+        except DuplicateKeyError as exc:
+            raise TrialConversionRefused("This scope has already had a trial") from exc
         if trial_days > configured_days:
             await self.audit_service.emit(
                 action="subscription.trial_extended", actor_id=getattr(current_user, "id", None),
@@ -1660,6 +1850,24 @@ class MonetizationService:
             await db.subscriptions.update_one({"_id": stored["_id"], "status": stored.get("status")},
                                               {"$set": {**{f"conversion.{k}": v for k, v in outcome.items()}}})
             return self._conversion_outcome(trial_id, outcome)
+        from . import subscription_operations as ops
+
+        holder = f"conversion:{uuid.uuid4().hex}"
+        org_id, scope_project = str(stored.get("organization_id")), scope_text(stored.get("project_id"))
+        try:
+            await ops.lock_scope(db, org_id, scope_project, holder)  # review 8 C6
+        except ops.OperationConflict as exc:
+            raise TrialConversionRefused("Another purchase or plan change for this scope is in progress") from exc
+        try:
+            return await self._convert_trial_by_checkout_locked(db, stored, plan_code, billing_period, current_user, holder)
+        finally:
+            await ops.unlock_scope(db, org_id, scope_project, holder)
+
+    async def _convert_trial_by_checkout_locked(self, db: Any, stored: Dict[str, Any], plan_code: str,
+                                                billing_period: str, current_user: Any, holder: str) -> Dict[str, Any]:
+        import uuid
+
+        trial_id = str(stored["_id"])
         # Review 7 R5-1: no second purchase for a scope already awaiting a payment.
         if await self._pending_purchase(db, str(stored.get("organization_id")), scope_text(stored.get("project_id"))):
             raise TrialConversionRefused("A purchase for this scope is already awaiting payment")
@@ -1687,6 +1895,7 @@ class MonetizationService:
                 billing_period=billing_period,
                 current_user=current_user,
                 converts_trial_id=trial_id,
+                scope_lock_holder=holder,
             )
         except Exception as exc:
             await db.subscriptions.update_one(
@@ -1782,6 +1991,8 @@ class MonetizationService:
         if not sub:
             raise ValueError("Subscription not found")
         state = await self._assert_governs_its_scope(sub, "add an add-on to")
+        self._assert_commercial_change_allowed(sub, "add an add-on to", manual_billing_authorised=manual_billing_authorised,
+                                               plan_change=False)
 
         addon = await self.get_addon_by_code(request.add_on_code)
         if not addon:
@@ -2502,7 +2713,12 @@ class MonetizationService:
         if op.get("status") == "completed":
             return {**await self.get_plan_settings(), "operation": self._operation_summary(op)}
         op_id = op["_id"]
-        await ops.lock_scope(db, org_id, project_id, op_id)
+        token = op.get("token")
+        try:
+            await ops.lock_scope(db, org_id, project_id, token or op_id)
+        except ops.OperationConflict:
+            await ops.step_back(db, op)  # review 8 C4: never left "in progress" by a refused attempt
+            raise
         try:
             items = list(op.get("items") or [])
             known = {item["subscription_id"] for item in items}
@@ -2514,12 +2730,12 @@ class MonetizationService:
                     items.append({"subscription_id": str(row["_id"]), "status_before": row.get("status"),
                                   "gateway_bound": bool(scope_text(row.get("payment_gateway_subscription_id"))),
                                   "gateway": "pending", "attempts": 0, "last_error": None, "local": "unchanged"})
-            await ops.save_items(db, op_id, items)
+            await ops.save_items(db, op_id, items, token=token)
 
             for item in items:
                 if item["local"] == "cancelled":
                     continue
-                await self._renew_or_review(db, op_id, org_id, project_id, items)
+                await self._renew_or_review(db, op_id, org_id, project_id, items, token)
                 row = await db.subscriptions.find_one({"_id": self._lookup_id(item["subscription_id"])})
                 if row is None:
                     item["local"] = "changed_meanwhile"
@@ -2532,6 +2748,8 @@ class MonetizationService:
                         item["local"] = "cancelled"
                         continue
                     item["status_before"], item["local"] = row.get("status"), "unchanged"
+                if item["gateway"] == "failed" and item["gateway_bound"] and await self._provider_shows_cancelled(row):
+                    item["gateway"], item["last_error"] = "confirmed", None  # review 8 C5: it did reach the provider
                 if item["gateway"] in {"pending", "failed"}:
                     if not item["gateway_bound"]:
                         item["gateway"] = "not_bound"
@@ -2543,7 +2761,7 @@ class MonetizationService:
                             item["gateway"], item["last_error"] = "confirmed", None
                         except Exception as exc:  # recorded, retried later; never treated as done
                             item["gateway"], item["last_error"] = "failed", type(exc).__name__
-                        await ops.save_items(db, op_id, items)
+                        await ops.save_items(db, op_id, items, token=token)
                 if item["gateway"] not in {"confirmed", "not_bound"}:
                     continue
                 now = datetime.utcnow()
@@ -2563,11 +2781,11 @@ class MonetizationService:
                     )
                 else:
                     item["local"] = "changed_meanwhile"
-                await ops.save_items(db, op_id, items)
+                await ops.save_items(db, op_id, items, token=token)
 
             unresolved = [item for item in items if item["local"] != "cancelled"]
             if unresolved:
-                await ops.finish(db, op_id, "needs_review", items=items)
+                await ops.finish(db, op_id, "needs_review", items=items, token=token)
                 await self.audit_service.emit(
                     action="subscription.plan_settings_operation_needs_review",
                     actor_id=actor, resource_type="subscription_operation", resource_id=op_id,
@@ -2578,7 +2796,7 @@ class MonetizationService:
                 raise SubscriptionOperationIncomplete(op_id, len(unresolved))
 
             result: Dict[str, Any] = {}
-            await self._renew_or_review(db, op_id, org_id, project_id, items)
+            await self._renew_or_review(db, op_id, org_id, project_id, items, token)
             if plan_code:
                 now = datetime.utcnow()
                 doc = {
@@ -2609,40 +2827,34 @@ class MonetizationService:
                     action="subscription.project_override_removed", actor_id=actor, resource_type="subscription",
                     organization_id=org_id, project_id=project_id, metadata={"operation_id": op_id},
                 )
-            await ops.finish(db, op_id, "completed", result=result, items=items)
+            await ops.finish(db, op_id, "completed", result=result, items=items, token=token)
             done = await db[ops.OPERATIONS].find_one({"_id": op_id})
             return {**await self.get_plan_settings(), "operation": self._operation_summary(done or {})}
         finally:
-            await ops.unlock_scope(db, org_id, project_id, op_id)
+            await ops.unlock_scope(db, org_id, project_id, token or op_id)
 
     async def _renew_or_review(self, db: Any, op_id: str, org_id: str, project_id: Optional[str],
-                               items: List[Dict[str, Any]]) -> None:
+                               items: List[Dict[str, Any]], token: Optional[str] = None) -> None:
         from . import subscription_operations as ops
 
         try:
-            await ops.renew(db, org_id, project_id, op_id)
+            await ops.renew(db, org_id, project_id, op_id, token)
         except ops.LeaseLost:
-            await ops.finish(db, op_id, "needs_review", items=items)
+            try:
+                # Recorded only if this attempt is still the operation's current one; a later
+                # attempt that took over keeps its own record (review 8 C2).
+                await ops.finish(db, op_id, "needs_review", items=items, token=token)
+            except ops.LeaseLost:
+                pass
             raise
 
     async def _resume_operation(self, db: Any, op: Dict[str, Any]) -> Dict[str, Any]:
         """Resume an unfinished operation by id (administrator retry)."""
-        from pymongo import ReturnDocument
-
         from . import subscription_operations as ops
 
         if op.get("status") == "completed":
             return op
-        now = datetime.utcnow()
-        resumed = await db[ops.OPERATIONS].find_one_and_update(
-            {"_id": op["_id"], "$or": [{"status": "needs_review"}, {"lease_until": {"$lt": now}}]},
-            {"$set": {"status": "in_progress", "lease_until": now + ops.LEASE, "updated_at": now},
-             "$inc": {"attempts": 1}},
-            return_document=ReturnDocument.AFTER,
-        )
-        if resumed is None:
-            raise ops.OperationConflict("This operation is already in progress")
-        return resumed
+        return await ops.resume(db, op)
 
     @staticmethod
     def _operation_summary(op: Dict[str, Any]) -> Dict[str, Any]:

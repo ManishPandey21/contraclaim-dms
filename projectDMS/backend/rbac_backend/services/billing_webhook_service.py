@@ -311,7 +311,10 @@ class BillingWebhookService:
                 "status": "trial",
                 "organization_id": subscription.get("organization_id"),
                 "project_id": subscription.get("project_id"),
-                "conversion.subscription_id": str(subscription["_id"]),
+                # Review 8 B4: the conversion may never have recorded this checkout (an attempt
+                # that crashed after creating it): matched on the checkout's converts_trial_id.
+                "$or": [{"conversion.subscription_id": str(subscription["_id"])},
+                        {"conversion.state": {"$in": ["starting", "failed"]}}],
             },
             {"$set": {"status": "cancelled", "billing_status": "inactive", "cancelled_at": now,
                       "cancellation_reason": "converted_to_paid", "conversion.state": "paid",

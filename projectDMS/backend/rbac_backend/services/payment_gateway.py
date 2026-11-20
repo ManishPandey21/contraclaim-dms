@@ -95,6 +95,16 @@ class WebhookEvent:
 class PaymentGatewayInterface(ABC):
     """Contract that all payment gateway adapters must implement."""
 
+    #: Whether ``update_subscription`` really changes the plan and period the provider bills
+    #: (review 8 A1). An adapter that cannot (Razorpay changes plans by a new subscription)
+    #: says so, and an in-place upgrade is refused rather than recorded as done.
+    supports_in_place_plan_change: bool = True
+
+    async def fetch_subscription_status(self, *, gateway_subscription_id: str) -> Optional[str]:
+        """The provider's own status of a subscription, for reconciliation (review 8 C5);
+        ``None`` when the adapter cannot read it."""
+        return None
+
     @abstractmethod
     async def create_customer(
         self, *, organization_id: str, name: str, email: Optional[str] = None
@@ -264,6 +274,13 @@ class RazorpayGateway(PaymentGatewayInterface):
             ) from exc
         return razorpay.Client(auth=(self.key_id, self.key_secret))
 
+    # Razorpay cannot swap a subscription's plan in place (see update_subscription).
+    supports_in_place_plan_change = False
+
+    async def fetch_subscription_status(self, *, gateway_subscription_id: str) -> Optional[str]:
+        resp = self._client().subscription.fetch(gateway_subscription_id)
+        return str(resp.get("status") or "") or None
+
     async def create_customer(
         self, *, organization_id: str, name: str, email: Optional[str] = None
     ) -> GatewayCustomer:
@@ -396,6 +413,8 @@ class RazorpayGateway(PaymentGatewayInterface):
 
 class StripeGateway(PaymentGatewayInterface):
     """Stub kept behind the factory. Implement the SDK calls when Stripe goes live."""
+
+    supports_in_place_plan_change = False
 
     def __init__(self, *, api_key: str = "", webhook_secret: str = "") -> None:
         self.api_key = api_key
