@@ -679,4 +679,183 @@ CI run 44733660126 on `652d4e6` (fixes in `a8393ce`):
 | 6 | The `subscription.updated` audit event has no top-level `package_id` (it is in before/after) and writes `project_id` as `"None"`; `update_subscription` writes no history row. | Info | Pre-existing | Recorded |
 | 7 | `payment_gateway_subscription_id` is writable through `PUT /subscriptions/{id}`. The webhook resolves a subscription by that id, so a manager who learns another subscription's gateway id could redirect its payment events, activation included. | **Medium (security)** | Pre-existing | **Owner decision, recommended before release:** treat it as protected, written only by checkout and the gateway. |
 
-**CI on the final head:** recorded below.
+**CI:**
+
+| Run | Head | Result |
+|---|---|---|
+| 44763971619 | `aa55a22` (F3 code) | Backend: 8,435 unit, 20 exhibit, 1,131 real-MongoDB. Frontend, dependency scan and Docker green. |
+| 44765102151 | `f09d9be` (F3 review fixes) | Backend: 8,435 unit, 1,227 skipped, 4 xfailed, 20 exhibit, 1,132 real-MongoDB. Frontend: 1,015 unit, 78 mocked E2E. Dependency scan (56) and Docker green. |
+
+Gitleaks failed in both runs, on the 2 known findings. Locally on `f09d9be`: 1,132 real-MongoDB passed, 0 failed, across 87 modules with Redis on.
+
+
+## 14. Entitlement resolution (owner decision 2026-11-20)
+
+**Commits:** `5740b06`, review fixes `53c78e6`.
+
+**The defect.** `EntitlementService._active_subscription` took any subscription of the scope in its period, whatever its status, and preferred the most recently updated row. Two consequences:
+
+- An ordinary edit of a cancelled subscription could switch a scope's entitlement off.
+- A package row did not outrank a project row.
+
+**The rule now** (`services/subscription_resolution.py`, one pure function used by enforcement and by the `/plan-settings` display):
+
+- **Tiers:** package (when one is named), then project, then organisation. The first tier holding a *governing* subscription decides. `updated_at` is never consulted.
+- **Status classes:**
+
+| Class | Statuses | Effect |
+|---|---|---|
+| eligible | `active`, `pilot`, unexpired `trial` | Service per plan |
+| restricted | `archive` (read-only), `offboarding` (export-only) | Semantics unchanged; no drafting |
+| blocking | `past_due`, `paused` | Deny, **no fallback** (as before: such a project row already shadowed the organisation) |
+| unknown | Any other status | Deny (fail closed) |
+| invalid period | An unreadable `starts_at`, `ends_at` or trial end | Deny (fail closed) |
+| not governing | `pending`, `cancelled`, expired trial, not started, ended | Never shadows anything |
+
+- **Fallback, an explicit rule:** a cancelled or never-paid project subscription falls back to the organisation subscription. That is the meaning plan-settings "inherit" already gives a cancelled override.
+- **Ambiguity:** two governing subscriptions in the deciding tier deny (`ambiguous_subscriptions`) and are shown as "ambiguous".
+- **Write-side invariant (review F1).** A subscription that becomes governing records `governing_since` and supersedes every other governing subscription of its tier that became governing earlier. Superseded rows are cancelled with `superseded_by`, an audit event and a history row. This applies on:
+  - create;
+  - webhook activation;
+  - reactivation by update;
+  - plan settings.
+
+  So a paid upgrade replaces the old plan rather than locking the tier out, and racing writers converge on the latest.
+- **The same gates everywhere:**
+  - `check_permission_entitlement`;
+  - `effective_features`;
+  - `get_subscription_summary`;
+  - `assert_quota_available`, which background metering calls directly.
+- **Evidence:** the `policy.authorize` audit metadata records the selected subscription, tier, class, reason and candidates. The candidate list is capped at 10, with a total.
+
+**Data handling:**
+
+- Dates are stored as BSON dates by create and update. Before, they were ISO strings, which the old date query never matched.
+- A project id stored as an ObjectId is matched.
+- Statuses are compared stripped.
+
+**Tests:** `test_entitlement_resolution_mongo.py`, 22 tests. They cover:
+
+- the review reproduction;
+- precedence;
+- every class and the fallback rule;
+- periods, trial expiry and invalid periods;
+- archive and offboarding;
+- ambiguity;
+- display parity;
+- concurrent edits;
+- the audit evidence;
+- an upgrade checkout through a signed webhook;
+- create and reactivation supersession;
+- concurrent plan-settings writes;
+- the feature, summary and quota gates;
+- ObjectId project ids and padded statuses;
+- the P-05 reading.
+
+**Mutants:** 17 of 17 killed.
+
+**Independent review of `5740b06`:**
+
+| # | Finding | Severity | Origin | Resolution |
+|---|---|---|---|---|
+| F1 | An upgrade checkout, create or reactivation left two governing rows, so the tier was locked out | High | Introduced (ambiguity rule) | **Fixed:** write-side supersession |
+| F2 | Concurrent plan-settings writes left several active rows | Medium | Race pre-existing; lockout new | **Fixed** |
+| F3 | Unreadable dates read as unbounded; API dates stored as strings | Medium | Introduced / pre-existing | **Fixed** |
+| F4 | Features, summary and quota ignored the status class | Medium | Pre-existing | **Fixed** |
+| F5 | ObjectId project ids not matched by enforcement | Low | Pre-existing | **Fixed** |
+| F6 | Status whitespace inconsistent | Low | Introduced | **Fixed** |
+| F7 | The client profile card still picks the newest row | Low, display only | Pre-existing | Recorded |
+| F8 | Uncapped audit candidates; evidence held on the instance | Low/Info | Introduced | Cap **fixed**; instance pattern recorded |
+
+**Production impact:**
+
+- **Two or more governing rows in one tier (data already in production):** denied until a write supersedes them or a person resolves them.
+- **A past-due or paused project:** still denied, without falling back (unchanged).
+- **Rows with string or unreadable dates:** now governed by their real dates, or denied.
+
+P-05 `subscription_security_impact` counts each case. **Read it before release.**
+
+## 15. Gateway identity protection (owner decision 2026-11-20, immediate)
+
+**Commits:** `da322ae`, review fixes `7cabfdf`, re-review fixes `f64ac9f`.
+
+**The defect.** The webhook finds a payment event's subscription by `payment_gateway_subscription_id`. An entitlement manager could write that id through `PUT /subscriptions/{id}`, and also through `POST /subscriptions`, a second path found in the writer audit. A tenant user who learned another subscription's gateway id could therefore redirect its payment events, activation included.
+
+**Writers after the fix:**
+
+| Writer | Behaviour now |
+|---|---|
+| Checkout | The only binder, from the gateway's response. Records provenance (`payment_gateway_bound_by`, `payment_gateway_bound_at`). Refuses an id already bound (409). No-op gateway ids are unique per call. |
+| Ordinary create and update | Refuse to set, replace or clear the gateway subscription id, customer id or provider, for everyone. Any unrecognised key is refused (400), never dropped. |
+| Lifecycle service, plan settings, migrations, seeds | Never write it |
+
+**Webhook, in order:**
+
+1. The provider path is canonicalised and allowlisted (otherwise 404).
+2. The signature is verified (deny by default).
+3. Idempotency on the event id **and** on a SHA-256 of the signed body, so a replay under a new event-id header is a duplicate.
+4. The gateway id must name exactly one subscription, of this provider, bound by checkout or legacy.
+5. The event's customer and the checkout notes' organisation and project must match where both are present.
+6. **Order:** an event older than the last applied (with no high-water mark yet, the last processed event of that gateway id stands in) does not change status.
+7. **Activation allowlist:** a webhook sets `active` only from `pending`, `trial`, `active` or `past_due`.
+8. **One gateway payment, one effect.**
+
+Refusals are audited. A refused **payment** is still written to `billing_records` as `refused_<reason>` with `requires_admin_review`, so the financial trail is never lost. A refused event keeps a redacted payload (identity, amount, status, notes; no contact, card or VPA data).
+
+**Migration `20261124_0001` (registered, not run in any environment).** Partial unique indexes on:
+
+- `subscriptions.payment_gateway_subscription_id`;
+- `billing_webhook_events` (provider, body hash);
+- `billing_records` (provider, gateway payment id, event type).
+
+With duplicates present, a dry run warns (so `--fail-on-warning` stops a deploy) and an apply raises: nothing is recorded, and it stays pending. **It blocks later migrations until duplicates are resolved** (re-review R5). Run the dry run per environment first; no-op environments with pre-fix deterministic ids will report duplicates.
+
+**Tests:** `test_gateway_identity_protection_mongo.py`, 26 tests. They cover:
+
+- HTTP refusals across spellings, roles and Super Admin;
+- that the victim's events land only on the victim;
+- ambiguous, foreign and non-checkout bindings;
+- signature and replay, including a case-changed provider path;
+- stale and out-of-order events, and the activation status matrix;
+- refused payments recorded;
+- the payment dedupe;
+- customer and notes ownership;
+- unknown keys;
+- redaction;
+- checkout uniqueness, and a concurrent race with the index;
+- the migration through the runner.
+
+**Mutants:** 20 of 21 killed (9 on `da322ae`, 8 on `7cabfdf`, 4 on `f64ac9f`). The survivor is equivalent: the service refuses the same change with the same 400.
+
+**Independent reviews:**
+
+| # | Finding | Severity | Origin | Resolution |
+|---|---|---|---|---|
+| F1 | A mixed-case provider path replayed a signed body | Medium-High | Introduced | **Fixed** |
+| F2 | Events applied without order | Medium | Pre-existing | **Fixed** (order, activation allowlist, payment dedupe) |
+| F3 | A migration with duplicates was recorded as applied without its index | Medium | Introduced | **Fixed** (raises) |
+| F4 | Webhook ownership was not checked | Low-Medium | Pre-existing | **Fixed** (customer, notes) |
+| F5 | Exotic key spellings were dropped | Low | Introduced | **Fixed** (unknown keys refused) |
+| F6 | Unknown provider returned 500; refused events were lost | Low | Pre-existing | **Fixed** (404; payload kept) |
+| R1 | Refused payments left no billing record | Medium | Introduced | **Fixed** |
+| R2 | Payments re-activated paused, offboarding and archived subscriptions | Medium | Pre-existing | **Fixed** (allowlist) |
+| R3 | No order baseline before the first new event; dedupe could race | Low | Introduced | **Fixed** (baseline, unique index) |
+| R4 | Refused payload kept PII | Low | Introduced | **Fixed** (redacted) |
+| R5 | The migration blocks later migrations while duplicates exist | Info | Intended | Documented |
+
+**Legacy bindings.** Bindings without provenance were written before the fix, possibly through the old `PUT`. They are still trusted by the webhook. P-05 counts them. Before release, classify each from the audit trail (`subscription.checkout_started`: checkout; `subscription.created` or `updated`: unverified) and refuse the unverified ones. That is an owner decision.
+
+**Gateway re-binding: design only. Not implemented; needs separate authorisation.**
+
+- **Endpoint:** `POST /subscriptions/{id}/gateway-binding` with `{gateway_subscription_id, reason}`.
+- **Authority:** a new non-delegable permission, `billing.gateway.rebind`, held by Super Admin or a platform billing operator only. Never a tenant role.
+- **Step-up:** action `billing.gateway.rebind`.
+- **Before binding, the target id must be:**
+  - fetched from the gateway and shown to belong to this subscription's customer and organisation (notes);
+  - unbound elsewhere (the unique index).
+- **In one transaction:**
+  - compare-and-set on the old binding;
+  - set the new binding with `payment_gateway_bound_by: "rebind"` and an approval reference;
+  - write a history row and an audit event with before and after and the reason.
+- **Afterwards:** a webhook sanity probe, and admin review of refused events for the old id.
+- **Second person:** the change is approved by someone other than the requester (four-eyes).
