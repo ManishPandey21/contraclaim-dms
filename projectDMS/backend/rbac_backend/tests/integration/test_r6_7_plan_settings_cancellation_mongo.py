@@ -214,11 +214,14 @@ def test_a_subscription_changed_meanwhile_is_left_alone_and_flagged(monkeypatch,
             item = next(i for i in op["items"] if i["subscription_id"] == BOUND)
             assert (item["gateway"], item["local"], op["status"]) == ("confirmed", "changed_meanwhile", "needs_review")
             assert await _status(env, BOUND) == "past_due" and await _replacements(env) == 0
-            # A retry never repeats the confirmed gateway cancellation; the changed row stays for a person.
+            # Review 7 R7-2: a retry re-decides the changed row from its current state - the gateway
+            # already cancelled it (confirmed, never repeated), so the local cancellation follows and
+            # the operation completes instead of staying listed for ever.
             gateway.on_cancel = None
             retried = await _put(env)
-            assert retried.status_code == 502 and gateway.cancels == [(f"gw_{BOUND}", False)], retried.text[:200]
-            assert await _status(env, BOUND) == "past_due" and await _replacements(env) == 0
+            assert retried.status_code == 200 and gateway.cancels == [(f"gw_{BOUND}", False)], retried.text[:200]
+            assert await _status(env, BOUND) == "cancelled" and await _replacements(env) == 1
+            assert retried.json()["operation"]["status"] == "completed"
 
     _run(scenario())
 
@@ -262,5 +265,28 @@ def test_inherit_cancels_the_project_override_at_the_gateway_too(monkeypatch, ga
             assert response.status_code == 200, response.text[:200]
             assert gateway.cancels == [(f"gw_{BOUND}", False)]
             assert await _status(env, BOUND) == "cancelled" and await _replacements(env) == 0
+
+    _run(scenario())
+
+
+def test_an_operation_that_lost_its_scope_stops_before_its_next_gateway_call(monkeypatch, gateway) -> None:
+    """Review 7 R7-1: leases are renewed and fenced; an operation whose lease lapsed and whose
+    scope another operation took stops (listed for review) instead of working alongside it."""
+
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            await env.db.subscriptions.insert_many([_row(BOUND, bound=True), _row("r67-bound-2", bound=True)])
+
+            async def scope_taken_over(gateway_id: str) -> None:
+                if gateway_id == f"gw_{BOUND}":
+                    await env.db.subscription_operation_locks.update_one(
+                        {"_id": f"{ORG_A}|{PROJ_A1}"}, {"$set": {"holder": "op_someone_else"}})
+
+            gateway.on_cancel = scope_taken_over
+            response = await _put(env)
+            assert response.status_code == 409, response.text[:200]
+            assert len(gateway.cancels) == 1, "no gateway call after the scope was lost"
+            op = await env.db.subscription_operations.find_one({"kind": "plan_settings_replacement"})
+            assert op["status"] == "needs_review" and await _replacements(env) == 0
 
     _run(scenario())

@@ -732,12 +732,22 @@ async def retry_subscription_operation(
         project_id=stored.get("project_id"),
         resource_type="plan_settings",
     )
+    if stored.get("kind") not in {"plan_settings_replacement", "plan_settings_inherit"}:
+        # Review 7 R7-3: a lifecycle operation is resumed by repeating its own request with the
+        # same Idempotency-Key (its route re-checks authority and state); not here.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This is not a plan-settings operation; repeat the original request with its Idempotency-Key",
+        )
     asked = stored.get("request") or {}
-    payload = PlanSettingsScopeUpdate(
-        organization_id=stored["organization_id"], project_id=stored.get("project_id"), mode=asked.get("mode"),
-        plan_code=None if asked.get("mode") != "plan" else asked.get("plan_code"),
-        billing_period=asked.get("billing_period"), status=asked.get("status") or "active",
-    )
+    try:
+        payload = PlanSettingsScopeUpdate(
+            organization_id=stored["organization_id"], project_id=stored.get("project_id"), mode=asked.get("mode"),
+            plan_code=None if asked.get("mode") != "plan" else asked.get("plan_code"),
+            billing_period=asked.get("billing_period"), status=asked.get("status") or "active",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The stored operation cannot be retried") from exc
     try:
         return await service.update_plan_settings_scope(payload, current_user, resume_operation_id=operation_id)
     except (OperationConflict, IdempotencyKeyReused) as exc:

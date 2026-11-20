@@ -139,19 +139,18 @@ export async function updatePlanSettingsScope(
   payload: PlanSettingsScopePayload,
   options?: { stepUpToken?: string; idempotencyKey?: string }
 ): Promise<PlanSettingsResponse> {
-  const idempotencyKey =
-    options?.idempotencyKey ??
-    (typeof crypto !== "undefined" && "randomUUID" in crypto
-      ? crypto.randomUUID()
-      : `${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  const headers: Record<string, string> = { "Idempotency-Key": idempotencyKey };
-  if (options?.stepUpToken) headers["X-Step-Up-Token"] = options.stepUpToken;
-  const { data } = await api.put<PlanSettingsResponse>(
-    "/rbac-monetization/plan-settings/scope",
-    payload,
-    { headers }
-  );
-  return data;
+  const send = async (key: string) => {
+    const headers: Record<string, string> = { "Idempotency-Key": key };
+    if (options?.stepUpToken) headers["X-Step-Up-Token"] = options.stepUpToken;
+    const { data } = await api.put<PlanSettingsResponse>(
+      "/rbac-monetization/plan-settings/scope",
+      payload,
+      { headers }
+    );
+    return data;
+  };
+  if (options?.idempotencyKey) return send(options.idempotencyKey);
+  return withIdempotencyKey(`plan-settings:${JSON.stringify(payload)}`, send);
 }
 
 export async function getEffectivePlanServices(): Promise<
@@ -214,6 +213,38 @@ export async function getSubscription(id: string): Promise<Subscription> {
 // Subscription Lifecycle
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Idempotency keys for gateway-backed changes (R6-7 and the gateway/database design;
+// independent review 7 R7-5/G-2). A change keeps the same key until it succeeds, so retrying a
+// failed or timed-out change continues the same server operation instead of starting another
+// (and never applies a completed one twice). A different change gets a different key.
+// ---------------------------------------------------------------------------
+
+const pendingKeys = new Map<string, string>();
+
+function newKey(): string {
+  return typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+export async function withIdempotencyKey<T>(
+  signature: string,
+  run: (key: string) => Promise<T>
+): Promise<T> {
+  const key = pendingKeys.get(signature) ?? newKey();
+  pendingKeys.set(signature, key);
+  const result = await run(key);
+  pendingKeys.delete(signature);
+  return result;
+}
+
+function changeHeaders(key: string, stepUpToken?: string): Record<string, string> {
+  const headers: Record<string, string> = { "Idempotency-Key": key };
+  if (stepUpToken) headers["X-Step-Up-Token"] = stepUpToken;
+  return headers;
+}
+
 export interface UpgradeDowngradePayload {
   new_plan_code: string;
   billing_period?: string;
@@ -225,12 +256,14 @@ export async function upgradeSubscription(
   payload: UpgradeDowngradePayload,
   options?: { stepUpToken?: string }
 ): Promise<Subscription> {
-  const { data } = await api.post<Subscription>(
-    `/rbac-monetization/subscriptions/${id}/upgrade`,
-    payload,
-    { headers: options?.stepUpToken ? { "X-Step-Up-Token": options.stepUpToken } : undefined }
-  );
-  return data;
+  return withIdempotencyKey(`upgrade:${id}:${JSON.stringify(payload)}`, async (key) => {
+    const { data } = await api.post<Subscription>(
+      `/rbac-monetization/subscriptions/${id}/upgrade`,
+      payload,
+      { headers: changeHeaders(key, options?.stepUpToken) }
+    );
+    return data;
+  });
 }
 
 export async function downgradeSubscription(
@@ -238,12 +271,14 @@ export async function downgradeSubscription(
   payload: UpgradeDowngradePayload,
   options?: { stepUpToken?: string }
 ): Promise<Subscription> {
-  const { data } = await api.post<Subscription>(
-    `/rbac-monetization/subscriptions/${id}/downgrade`,
-    payload,
-    { headers: options?.stepUpToken ? { "X-Step-Up-Token": options.stepUpToken } : undefined }
-  );
-  return data;
+  return withIdempotencyKey(`downgrade:${id}:${JSON.stringify(payload)}`, async (key) => {
+    const { data } = await api.post<Subscription>(
+      `/rbac-monetization/subscriptions/${id}/downgrade`,
+      payload,
+      { headers: changeHeaders(key, options?.stepUpToken) }
+    );
+    return data;
+  });
 }
 
 export async function cancelSubscription(
@@ -251,12 +286,15 @@ export async function cancelSubscription(
   payload?: { reason?: string; immediate?: boolean },
   options?: { stepUpToken?: string }
 ): Promise<Subscription> {
-  const { data } = await api.post<Subscription>(
-    `/rbac-monetization/subscriptions/${id}/cancel`,
-    payload || {},
-    { headers: options?.stepUpToken ? { "X-Step-Up-Token": options.stepUpToken } : undefined }
-  );
-  return data;
+  const body = payload || {};
+  return withIdempotencyKey(`cancel:${id}:${JSON.stringify(body)}`, async (key) => {
+    const { data } = await api.post<Subscription>(
+      `/rbac-monetization/subscriptions/${id}/cancel`,
+      body,
+      { headers: changeHeaders(key, options?.stepUpToken) }
+    );
+    return data;
+  });
 }
 
 export async function reactivateSubscription(
@@ -276,12 +314,14 @@ export async function changeBillingPeriod(
   newPeriod: BillingPeriod,
   options?: { stepUpToken?: string }
 ): Promise<Subscription> {
-  const { data } = await api.post<Subscription>(
-    `/rbac-monetization/subscriptions/${id}/change-period`,
-    { new_billing_period: newPeriod },
-    { headers: options?.stepUpToken ? { "X-Step-Up-Token": options.stepUpToken } : undefined }
-  );
-  return data;
+  return withIdempotencyKey(`change-period:${id}:${newPeriod}`, async (key) => {
+    const { data } = await api.post<Subscription>(
+      `/rbac-monetization/subscriptions/${id}/change-period`,
+      { new_billing_period: newPeriod },
+      { headers: changeHeaders(key, options?.stepUpToken) }
+    );
+    return data;
+  });
 }
 
 // ---------------------------------------------------------------------------

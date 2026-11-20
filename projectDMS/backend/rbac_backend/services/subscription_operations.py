@@ -62,10 +62,12 @@ def fingerprint(request: Dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(request, sort_keys=True, default=str).encode()).hexdigest()
 
 
-def operation_id(organization_id: str, project_id: Optional[str], idempotency_key: Optional[str]) -> str:
+def operation_id(organization_id: str, project_id: Optional[str], idempotency_key: Optional[str], kind: str = "") -> str:
+    """Deterministic for a key: scope, kind and key are hashed together, so keys of different
+    kinds or scopes never meet (review 7 R7-4)."""
     if not idempotency_key:
         return f"op_{uuid.uuid4().hex}"
-    digest = hashlib.sha256(f"{scope_key(organization_id, project_id)}|{idempotency_key}".encode()).hexdigest()
+    digest = hashlib.sha256(f"{kind}|{scope_key(organization_id, project_id)}|{idempotency_key}".encode()).hexdigest()
     return f"op_{digest[:40]}"
 
 
@@ -78,7 +80,7 @@ async def begin(db: Any, *, kind: str, organization_id: str, project_id: Optiona
     lapsed, or that needs review, is returned for the caller to resume.
     """
     now = datetime.utcnow()
-    op_id = operation_id(organization_id, project_id, idempotency_key)
+    op_id = operation_id(organization_id, project_id, idempotency_key, kind)
     doc: Dict[str, Any] = {
         "_id": op_id, "kind": kind, "fingerprint": fingerprint(request),
         "organization_id": organization_id, "project_id": project_id,
@@ -117,6 +119,24 @@ async def lock_scope(db: Any, organization_id: str, project_id: Optional[str], o
         raise OperationConflict("Another plan change for this scope is in progress") from exc
 
 
+class LeaseLost(OperationConflict):
+    """Another operation took the scope after this one's lease lapsed."""
+
+
+async def renew(db: Any, organization_id: str, project_id: Optional[str], op_id: str) -> None:
+    """Extend this operation's scope lease and its own lease, fenced on still holding the
+    scope (review 7 R7-1): an operation that lost the scope stops before its next external
+    call instead of working alongside the new holder."""
+    now = datetime.utcnow()
+    held = await db[LOCKS].update_one(
+        {"_id": scope_key(organization_id, project_id), "holder": op_id},
+        {"$set": {"lease_until": now + LEASE, "updated_at": now}},
+    )
+    if held.matched_count == 0:
+        raise LeaseLost("This operation lost its scope to another operation; it stopped and is listed for review")
+    await db[OPERATIONS].update_one({"_id": op_id}, {"$set": {"lease_until": now + LEASE, "updated_at": now}})
+
+
 async def unlock_scope(db: Any, organization_id: str, project_id: Optional[str], op_id: str) -> None:
     await db[LOCKS].delete_one({"_id": scope_key(organization_id, project_id), "holder": op_id})
 
@@ -147,6 +167,6 @@ async def open_operations(db: Any, organization_id: Optional[str] = None, limit:
 
 
 __all__ = [
-    "IdempotencyKeyReused", "OperationConflict", "begin", "finish", "lock_scope", "open_operations",
-    "operation_id", "save_items", "unlock_scope",
+    "IdempotencyKeyReused", "LeaseLost", "OperationConflict", "begin", "finish", "lock_scope", "open_operations",
+    "operation_id", "renew", "save_items", "unlock_scope",
 ]

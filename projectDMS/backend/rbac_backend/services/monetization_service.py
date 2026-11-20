@@ -989,7 +989,7 @@ class MonetizationService:
         db = await self._get_db()
         sub_id = str(sub.get("id") or sub.get("_id"))
         op_id = ops.operation_id(str(sub.get("organization_id") or ""), scope_text(sub.get("project_id")),
-                                 f"{kind}:{sub_id}:{idempotency_key}")
+                                 f"{kind}:{sub_id}:{idempotency_key}", kind)
         op = await db[ops.OPERATIONS].find_one({"_id": op_id, "status": "completed"})
         if not op:
             return None
@@ -1043,31 +1043,53 @@ class MonetizationService:
             "before": {key: sub.get(key) for key in ("status", "plan_code", "billing_period", "active_add_ons")},
         }]
         item = items[0]
-        if item["gateway"] not in {"confirmed", "not_bound"}:
-            item["attempts"] += 1
-            try:
-                await gateway_call()
-            except Exception as exc:
-                item["gateway"], item["last_error"] = "failed", type(exc).__name__
-                await ops.finish(db, op["_id"], "failed", items=items)
-                if isinstance(exc, (ValueError, SubscriptionNotGoverning)):
-                    raise
-                raise GatewayOperationFailed("The payment gateway did not apply the change; nothing was changed") from exc
-            item["gateway"], item["last_error"] = ("confirmed" if bound else "not_bound"), None
-            await ops.save_items(db, op["_id"], items)
+        # Review 7 G-1: a lifecycle change holds the scope like a plan-settings operation.
         try:
-            result = await local_call()
-        except Exception:
-            item["local"] = "refused"
-            disagree = item["gateway"] == "confirmed"
-            await ops.finish(db, op["_id"], "needs_review" if disagree else "failed", items=items)
-            if disagree:
-                await self._review_event(sub, f"subscription.{kind}_needs_reconciliation", current_user,
-                                         reason="gateway_changed_local_refused")
+            await ops.lock_scope(db, org, project, op["_id"])
+        except ops.OperationConflict:
+            await ops.finish(db, op["_id"], "failed", items=items)
             raise
-        item["local"] = "applied"
-        await ops.finish(db, op["_id"], "completed", result={"subscription_id": sub_id}, items=items)
-        return result
+        try:
+            if item["gateway"] not in {"confirmed", "not_bound"}:
+                item["attempts"] += 1
+                try:
+                    await gateway_call()
+                except Exception as exc:
+                    if isinstance(exc, (ValueError, SubscriptionNotGoverning)):
+                        item["gateway"], item["last_error"] = "failed", type(exc).__name__
+                        await ops.finish(db, op["_id"], "failed", items=items)
+                        raise
+                    # Review 7 G-3: only a refused connection proves nothing reached the
+                    # gateway. A timeout or any other error may have been applied there:
+                    # "unknown", listed for review and reconciled against the provider.
+                    known_not_applied = isinstance(exc, ConnectionRefusedError)
+                    item["gateway"] = "failed" if known_not_applied else "unknown"
+                    item["last_error"] = type(exc).__name__
+                    await ops.finish(db, op["_id"], "failed" if known_not_applied else "needs_review", items=items)
+                    if not known_not_applied:
+                        await self._review_event(sub, f"subscription.{kind}_gateway_outcome_unknown", current_user,
+                                                 reason=type(exc).__name__)
+                    raise GatewayOperationFailed(
+                        "The payment gateway did not confirm the change; nothing was changed here"
+                        + ("" if known_not_applied else " - the gateway outcome is unknown and is listed for review")
+                    ) from exc
+                item["gateway"], item["last_error"] = ("confirmed" if bound else "not_bound"), None
+                await ops.save_items(db, op["_id"], items)
+            try:
+                result = await local_call()
+            except Exception:
+                item["local"] = "refused"
+                disagree = item["gateway"] == "confirmed"
+                await ops.finish(db, op["_id"], "needs_review" if disagree else "failed", items=items)
+                if disagree:
+                    await self._review_event(sub, f"subscription.{kind}_needs_reconciliation", current_user,
+                                             reason="gateway_changed_local_refused")
+                raise
+            item["local"] = "applied"
+            await ops.finish(db, op["_id"], "completed", result={"subscription_id": sub_id}, items=items)
+            return result
+        finally:
+            await ops.unlock_scope(db, org, project, op["_id"])
 
     async def upgrade_subscription(
         self, subscription_id: str, request: UpgradeDowngradeRequest, current_user: Any, *, idempotency_key: Optional[str] = None
@@ -2497,10 +2519,19 @@ class MonetizationService:
             for item in items:
                 if item["local"] == "cancelled":
                     continue
+                await self._renew_or_review(db, op_id, org_id, project_id, items)
                 row = await db.subscriptions.find_one({"_id": self._lookup_id(item["subscription_id"])})
                 if row is None:
                     item["local"] = "changed_meanwhile"
                     continue
+                if item["local"] == "changed_meanwhile":
+                    # Review 7 R7-2: re-decided on retry from the row as it is now - a row
+                    # cancelled meanwhile is resolved; otherwise the (possibly already
+                    # confirmed) gateway cancellation is followed by the local one.
+                    if str(row.get("status") or "").strip().lower() == "cancelled":
+                        item["local"] = "cancelled"
+                        continue
+                    item["status_before"], item["local"] = row.get("status"), "unchanged"
                 if item["gateway"] in {"pending", "failed"}:
                     if not item["gateway_bound"]:
                         item["gateway"] = "not_bound"
@@ -2547,6 +2578,7 @@ class MonetizationService:
                 raise SubscriptionOperationIncomplete(op_id, len(unresolved))
 
             result: Dict[str, Any] = {}
+            await self._renew_or_review(db, op_id, org_id, project_id, items)
             if plan_code:
                 now = datetime.utcnow()
                 doc = {
@@ -2582,6 +2614,16 @@ class MonetizationService:
             return {**await self.get_plan_settings(), "operation": self._operation_summary(done or {})}
         finally:
             await ops.unlock_scope(db, org_id, project_id, op_id)
+
+    async def _renew_or_review(self, db: Any, op_id: str, org_id: str, project_id: Optional[str],
+                               items: List[Dict[str, Any]]) -> None:
+        from . import subscription_operations as ops
+
+        try:
+            await ops.renew(db, org_id, project_id, op_id)
+        except ops.LeaseLost:
+            await ops.finish(db, op_id, "needs_review", items=items)
+            raise
 
     async def _resume_operation(self, db: Any, op: Dict[str, Any]) -> Dict[str, Any]:
         """Resume an unfinished operation by id (administrator retry)."""

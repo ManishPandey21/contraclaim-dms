@@ -41,20 +41,20 @@ def _run(coro: Any) -> Any:
 class FakeGateway:
     def __init__(self) -> None:
         self.calls: List[tuple] = []
-        self.fail = False
+        self.fail: Any = None  # an exception class to raise
         self.during: Any = None
 
     async def update_subscription(self, *, gateway_subscription_id: str, new_plan_code: Optional[str] = None,
                                   new_billing_period: Optional[str] = None) -> Any:
         if self.fail:
-            raise ConnectionError("gateway unavailable")
+            raise self.fail("gateway unavailable")
         self.calls.append(("update", gateway_subscription_id, new_plan_code, new_billing_period))
         if self.during:
             await self.during()
 
     async def cancel_subscription(self, *, gateway_subscription_id: str, immediate: bool = False) -> bool:
         if self.fail:
-            raise ConnectionError("gateway unavailable")
+            raise self.fail("gateway unavailable")
         self.calls.append(("cancel", gateway_subscription_id, immediate))
         return True
 
@@ -136,11 +136,11 @@ def test_a_refused_local_write_after_a_gateway_change_is_listed_for_review(monke
     _run(scenario())
 
 
-def test_a_gateway_failure_changes_nothing_and_is_not_a_review_item(monkeypatch, gateway) -> None:
+def test_a_refused_gateway_connection_changes_nothing_and_is_not_a_review_item(monkeypatch, gateway) -> None:
     async def scenario() -> None:
         async with _env(monkeypatch) as env:
             await _seed(env)
-            gateway.fail = True
+            gateway.fail = ConnectionRefusedError  # provably never reached the gateway
             for path, body, action in (("upgrade", UPGRADE, "subscription.upgrade"),
                                        ("cancel", {"immediate": False}, "subscription.cancel"),
                                        ("change-period", {"new_billing_period": "annual"}, "subscription.entitlement.manage")):
@@ -220,5 +220,85 @@ def test_an_operation_completed_while_a_repeat_was_starting_is_not_applied_again
                 gateway_call=gateway_call, local_call=local_call, current_user=SimpleNamespace(id="gdc"),
                 idempotency_key="up-race")
             assert ran == [] and result["operation"]["status"] == "completed"
+
+    _run(scenario())
+
+
+def test_an_unknown_gateway_outcome_is_listed_for_review_and_retried(monkeypatch, gateway) -> None:
+    """Review 7 G-3: a timeout may have been applied at the gateway - never reported as
+    "nothing changed"; listed, audited, and the same-key retry calls the gateway again."""
+
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            await _seed(env)
+            gateway.fail = TimeoutError
+            response = await _post(env, "upgrade", UPGRADE, "subscription.upgrade", key="up-unknown")
+            assert response.status_code == 502 and "unknown" in response.text, response.text[:200]
+            assert (await _row(env))["plan_code"] == "dms_starter"
+            listed = [op for op in await _open(env) if op["kind"] == "upgrade"]
+            assert len(listed) == 1 and listed[0]["items"][0]["gateway"] == "unknown"
+            assert await env.db.audit_events.count_documents(
+                {"action": "subscription.upgrade_gateway_outcome_unknown", "metadata.requires_admin_review": True}) == 1
+            gateway.fail = None
+            retried = await _post(env, "upgrade", UPGRADE, "subscription.upgrade", key="up-unknown")
+            assert retried.status_code == 200 and (await _row(env))["plan_code"] == "dms_professional"
+            assert len([c for c in gateway.calls if c[0] == "update"]) == 1
+
+    _run(scenario())
+
+
+def test_a_lifecycle_change_and_a_plan_settings_change_never_share_a_scope(monkeypatch, gateway) -> None:
+    """Review 7 G-1: while a plan-settings operation holds the scope, a lifecycle change waits (409)."""
+
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            from rbac_backend.services import subscription_operations as ops
+
+            await _seed(env)
+            await ops.lock_scope(env.db, ORG_A, PROJ_A1, "op_plan_settings_running")
+            response = await _post(env, "upgrade", UPGRADE, "subscription.upgrade", key="up-locked")
+            assert response.status_code == 409, response.text[:200]
+            assert (await _row(env))["plan_code"] == "dms_starter" and gateway.calls == []
+
+    _run(scenario())
+
+
+def test_a_lifecycle_operation_is_not_retried_through_the_plan_settings_route(monkeypatch, gateway) -> None:
+    """Review 7 R7-3: 409 with guidance, not a 500."""
+
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            await _seed(env)
+
+            async def concurrent_period_change() -> None:
+                await env.db.subscriptions.update_one({"_id": SUB}, {"$set": {"billing_period": "annual"}})
+
+            gateway.during = concurrent_period_change
+            await _post(env, "upgrade", UPGRADE, "subscription.upgrade", key="up-r73")
+            op_id = [op for op in await _open(env) if op["kind"] == "upgrade"][0]["id"]
+            response = await env.client.post(f"{BASE}/plan-settings/operations/{op_id}/retry",
+                                             headers=_headers("superadmin", None, action="subscription.entitlement.manage"))
+            assert response.status_code == 409 and "Idempotency-Key" in response.text, response.text[:200]
+
+    _run(scenario())
+
+
+def test_keys_of_different_operation_kinds_never_collide(monkeypatch, gateway) -> None:
+    """Review 7 R7-4: an operation recorded under a crafted key (here: what a plan-settings key
+    "upgrade:<sub>:k1" hashed to before the kind was part of the hash) does not take the
+    lifecycle operation's identity."""
+
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            import hashlib
+
+            await _seed(env)
+            kindless = "op_" + hashlib.sha256(f"{ORG_A}|{PROJ_A1}|upgrade:{SUB}:k1".encode()).hexdigest()[:40]
+            await env.db.subscription_operations.insert_one({
+                "_id": kindless, "kind": "plan_settings_replacement", "fingerprint": "someone-elses-request",
+                "organization_id": ORG_A, "project_id": PROJ_A1, "status": "completed", "items": [], "request": {}})
+            upgraded = await _post(env, "upgrade", UPGRADE, "subscription.upgrade", key="k1")
+            assert upgraded.status_code == 200, upgraded.text[:200]
+            assert (await _row(env))["plan_code"] == "dms_professional"
 
     _run(scenario())
