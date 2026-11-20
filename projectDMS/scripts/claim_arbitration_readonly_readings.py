@@ -293,6 +293,7 @@ def read_roles(db: ReadOnlyDatabase) -> Dict[str, Any]:
         custom_role_compatibility=_read_custom_role_compatibility(db),
         billing_permission_impact=_read_billing_permission_impact(db),
         built_in_role_scope_impact=_read_built_in_role_scope_impact(db),
+        flag_off_disclosure_impact=_read_flag_off_disclosure_impact(db),
     )
 
 
@@ -559,6 +560,120 @@ def _read_built_in_role_scope_impact(db: ReadOnlyDatabase) -> Dict[str, Any]:
         "affected_users_by_organization": dict(sorted(affected_by_org.items())),
         "proposed_scoped_assignments": dict(sorted(proposed.items())),
         "assignments_needing_a_decision": needing_decision,
+    }
+
+
+#: Decision 4 (2026-11-20): built-in roles with organisation-level billing standing, and the
+#: financial views refused to everyone else (policy_service ORGANISATION_LEVEL_BILLING_ROLE_KEYS
+#: and ORGANISATION_FINANCIAL_VIEW_PERMISSIONS; parity test in test_claim_arbitration_readonly_readings).
+D4_STANDING_ROLE_KEYS = frozenset(
+    {"orgadmin", "orguser", "contractmgr_org", "doccontroller", "reporter", "settings_manager", "contraclaim_billing_admin"}
+)
+D4_FINANCIAL_VIEWS = frozenset(
+    {"billing.plan.view", "billing.record.view", "billing.invoice.view", "billing.invoice.download", "subscription.history.view"}
+)
+#: Names that pass a financial view check today (the names and their legacy aliases).
+_D4_FINANCIAL_GRANTING = D4_FINANCIAL_VIEWS | {"organizations:read", "orgs:view"}
+
+
+def _read_flag_off_disclosure_impact(db: ReadOnlyDatabase) -> Dict[str, Any]:
+    """What the sixth pass changes with BILLING_EXPLICIT_PERMISSIONS **off** (today's default).
+
+    Counts only; organisation ids are listed, never user names or emails. Per active user who
+    is not Super Admin:
+
+    - ``project_level_users_losing_financial_reads``: users who reach an organisation financial
+      view today (by name, ``organizations:read`` or ``orgs:view``, through any role) but have
+      no organisation-level standing in their primary organisation (none of the standing
+      built-in roles, and no custom role of that organisation without a project that itself
+      grants such a view). Decision 4 refuses them billing summary, history, records, review
+      queue, receipts, subscription history and invoice previews.
+    - ``project_level_users_given_the_operational_view``: users without standing who hold any
+      role at all; their subscription and service-state reads are cut to status, feature
+      indicators and expiry.
+    - ``tenant_holders_losing_global_catalogue_writes``: non-platform users holding
+      ``billing.plan.manage`` or ``*`` (today they could edit the global plan and add-on
+      catalogue; M4 refuses them).
+    - ``platform_pricing_holders``: platform users (no organisation) holding
+      ``platform.pricing.manage`` on a platform role (custom, no organisation or project), and
+      ``platform_pricing_names_on_tenant_roles``: roles with an organisation that list it
+      (they confer nothing).
+    - ``entitlement_managers_losing_cross_org_service_state``: non-platform holders of
+      ``subscription.entitlement.manage`` (before, effective-services gave them every
+      organisation).
+
+    Approximations, stated: role references by stored key or id (no alias resolution);
+    membership by ``organization_id``, ``organizations`` and active
+    ``organization_memberships`` rows; standing judged in the primary organisation only
+    (a dual-organisation user is M1's reading).
+    """
+    roles = {
+        str(row["_id"]): row
+        for row in db["roles"].find({}, {"permissions": 1, "is_active": 1, "organization_id": 1, "project_id": 1, "is_system": 1})
+    }
+    memberships: Dict[str, set] = {}
+    for row in db["organization_memberships"].find({"status": {"$in": ["active", None]}}, {"user_id": 1, "organization_id": 1}):
+        if row.get("organization_id"):
+            memberships.setdefault(str(row.get("user_id")), set()).add(str(row["organization_id"]))
+    counts = {
+        "active_users_read": 0,
+        "project_level_users_losing_financial_reads": 0,
+        "project_level_users_given_the_operational_view": 0,
+        "tenant_holders_losing_global_catalogue_writes": 0,
+        "platform_pricing_holders": 0,
+        "entitlement_managers_losing_cross_org_service_state": 0,
+    }
+    losing_by_org: Dict[str, int] = {}
+    for user in db["users"].find({}, {"roles": 1, "organization_id": 1, "organizations": 1, "disabled": 1, "is_active": 1}):
+        if user.get("disabled") or user.get("is_active") is False:
+            continue
+        counts["active_users_read"] += 1
+        keys = [str(key) for key in (user.get("roles") or []) if key is not None]
+        lowered = {key.lower() for key in keys}
+        if "superadmin" in lowered:
+            continue
+        primary = str(user.get("organization_id") or "") or None
+        organisations = {str(o) for o in (user.get("organizations") or []) if o} | memberships.get(str(user.get("_id")), set())
+        if primary:
+            organisations.add(primary)
+        active_roles = [(key, roles.get(key) or {}) for key in keys if (roles.get(key) or {}).get("is_active") is not False]
+        held: set = set()
+        for _, role in active_roles:
+            held.update(str(name) for name in (role.get("permissions") or []))
+        standing = bool(lowered & D4_STANDING_ROLE_KEYS) or any(
+            primary
+            and str(role.get("organization_id") or "") == primary
+            and not role.get("project_id")
+            and _D4_FINANCIAL_GRANTING & {str(n) for n in (role.get("permissions") or [])}
+            for _, role in active_roles
+        )
+        if not organisations:
+            # A platform user: M4 platform grants.
+            if any(
+                not role.get("organization_id") and not role.get("project_id") and not role.get("is_system")
+                and "platform.pricing.manage" in {str(n) for n in (role.get("permissions") or [])}
+                for _, role in active_roles
+            ):
+                counts["platform_pricing_holders"] += 1
+            continue
+        if not standing:
+            if keys:
+                counts["project_level_users_given_the_operational_view"] += 1
+            if held & _D4_FINANCIAL_GRANTING or "*" in held:
+                counts["project_level_users_losing_financial_reads"] += 1
+                for org in organisations:
+                    losing_by_org[org] = losing_by_org.get(org, 0) + 1
+        if "billing.plan.manage" in held or "*" in held:
+            counts["tenant_holders_losing_global_catalogue_writes"] += 1
+        if "subscription.entitlement.manage" in held or "*" in held:
+            counts["entitlement_managers_losing_cross_org_service_state"] += 1
+    return {
+        **counts,
+        "project_level_users_losing_financial_reads_by_organization": dict(sorted(losing_by_org.items())),
+        "platform_pricing_names_on_tenant_roles": sum(
+            1 for role in roles.values()
+            if role.get("organization_id") and "platform.pricing.manage" in {str(n) for n in (role.get("permissions") or [])}
+        ),
     }
 
 

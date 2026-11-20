@@ -210,3 +210,21 @@ def test_m1_inline_built_in_role_keys_match_the_application() -> None:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     assert set(module.M1_BUILT_IN_ROLE_KEYS) == set(BUILT_IN_ROLE_KEYS)
+
+
+def test_decision4_inline_standing_roles_and_views_match_the_application() -> None:
+    import importlib.util
+    from pathlib import Path
+
+    from rbac_backend.services.policy_service import (
+        ORGANISATION_FINANCIAL_VIEW_PERMISSIONS,
+        ORGANISATION_LEVEL_BILLING_ROLE_KEYS,
+    )
+
+    path = Path(__file__).resolve().parents[3] / "scripts" / "claim_arbitration_readonly_readings.py"
+    spec = importlib.util.spec_from_file_location("readings_d4", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert set(module.D4_STANDING_ROLE_KEYS) == set(ORGANISATION_LEVEL_BILLING_ROLE_KEYS)
+    assert set(module.D4_FINANCIAL_VIEWS) == set(ORGANISATION_FINANCIAL_VIEW_PERMISSIONS)
