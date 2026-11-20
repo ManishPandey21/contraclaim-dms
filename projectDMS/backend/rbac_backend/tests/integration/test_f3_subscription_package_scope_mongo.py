@@ -45,6 +45,15 @@ def _run(coro: Any) -> Any:
     return asyncio.run(coro)
 
 
+@pytest.fixture(autouse=True)
+def _no_monetization_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests make more subscription updates a minute than the per-user limit (30)
+    allows; the limiter is not under test here (same pattern as _no_role_rate_limit)."""
+    from rbac_backend.routers import rbac_monetization
+
+    monkeypatch.setattr(rbac_monetization.monetization_mutation_limiter, "max_requests", 10_000)
+
+
 def _headers(persona: str, user_id: Optional[str] = None) -> Dict[str, str]:
     import jwt  # type: ignore[import-untyped]
 
@@ -93,6 +102,11 @@ ATTEMPTS = {
         {"package_id": "", "auto_renew": False},  # promotion by empty string
         {"package_id": "pkg-zz", "auto_renew": False},
         {"packageId": None, "auto_renew": False},
+        {"package_ID": None, "auto_renew": False},  # F3 review 1: case and separator variants
+        {"PackageId": None, "auto_renew": False},
+        {"Package-Id": "zz", "auto_renew": False},
+        {"ProjectID": None, "auto_renew": False},
+        {"Organization_Id": ORG_B, "auto_renew": False},
         {"package_id": "pkg-a", "project_id": None, "auto_renew": False},  # same package, project promoted
     ],
 }
@@ -239,5 +253,39 @@ def test_stale_reads_and_concurrent_package_changes_are_refused(monkeypatch) -> 
                 await service.update_subscription(SUB_PKG, SubscriptionUpdate(auto_renew=False), actor,
                                                   expected_scope=(ORG_A, PROJ_A1))  # type: ignore[arg-type]
             assert await _state(env, SUB_PKG) == (ORG_A, PROJ_A1, "pkg-a", True)
+
+    _run(scenario())
+
+
+def test_stored_package_shapes_missing_empty_and_objectid(monkeypatch) -> None:
+    """F3 review 2: the compare-and-set filter uses the raw stored value, so a field that is
+    absent (checkout never writes it), an empty string, or an ObjectId must each accept an
+    ordinary update and the matching no-op, and refuse a real change."""
+
+    async def scenario() -> None:
+        from bson import ObjectId
+
+        async with _env(monkeypatch) as env:
+            oid = ObjectId()
+            base = {"organization_id": ORG_A, "project_id": PROJ_A1, "plan_code": "dms_enterprise", "status": "active",
+                    "billing_status": "active", "auto_renew": True, "updated_at": datetime.utcnow()}
+            await env.db.subscriptions.insert_many([
+                {"_id": "f3-missing", **base},
+                {"_id": "f3-empty", **base, "package_id": ""},
+                {"_id": "f3-oid", **base, "package_id": oid},
+            ])
+            cases = {
+                "f3-missing": ([{"auto_renew": False}, {"package_id": None}, {"package_id": ""}], [{"package_id": "x"}]),
+                "f3-empty": ([{"auto_renew": False}, {"package_id": None}, {"package_id": ""}], [{"package_id": "x"}]),
+                "f3-oid": ([{"auto_renew": False}, {"package_id": str(oid)}], [{"package_id": None}, {"package_id": "x"}]),
+            }
+            for sub_id, (allowed, refused) in cases.items():
+                for body in allowed:
+                    assert await _put(env, "superadmin", None, sub_id, body) == 200, (sub_id, body)
+                for body in refused:
+                    assert await _put(env, "superadmin", None, sub_id, body) == 400, (sub_id, body)
+            assert "package_id" not in await env.db.subscriptions.find_one({"_id": "f3-missing"})
+            assert (await env.db.subscriptions.find_one({"_id": "f3-empty"}))["package_id"] == ""
+            assert (await env.db.subscriptions.find_one({"_id": "f3-oid"}))["package_id"] == oid
 
     _run(scenario())

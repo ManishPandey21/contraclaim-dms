@@ -39,6 +39,15 @@ def _run(coro: Any) -> Any:
     return asyncio.run(coro)
 
 
+@pytest.fixture(autouse=True)
+def _no_monetization_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The per-user limit (30 a minute) counts across modules in one process (the F3 suite
+    updates as the same personas); the limiter is not under test here."""
+    from rbac_backend.routers import rbac_monetization
+
+    monkeypatch.setattr(rbac_monetization.monetization_mutation_limiter, "max_requests", 10_000)
+
+
 def _headers(persona: str, user_id: Optional[str] = None) -> Dict[str, str]:
     import jwt  # type: ignore[import-untyped]
 

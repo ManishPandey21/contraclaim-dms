@@ -620,7 +620,8 @@ CI run 44733660126 on `652d4e6` (fixes in `a8393ce`):
 | `SubscriptionLifecycleService` (trial expiry, renewal) | No: status and period fields only |
 | `BillingWebhookService` (payment callbacks, mismatch review) | No: status, billing status, review flag |
 | `update_plan_settings_scope` (`PUT /plan-settings/scope`, Super Admin) | Cancels by scope query; inserts new rows with `package_id: None` |
-| `create_subscription`, checkout | At creation only, authorised on the organisation and project in the payload (pre-existing; see below) |
+| `create_subscription` | At creation only, from the body, authorised on the organisation and project in the payload; the package is not validated (pre-existing; see below) |
+| Checkout | Never writes the field; a checkout subscription has no `package_id` (correction: the F3 commit message said it sets it) |
 | `initial_data/demo_seed.py` | Development seed only |
 | Migrations, imports, scripts | None write it |
 
@@ -664,4 +665,18 @@ CI run 44733660126 on `652d4e6` (fixes in `a8393ce`):
 | Unknown plan or add-on codes reseed defaults on read, unaudited | Low, pre-existing | Recorded |
 | The client billing-catalogue route also admits `system:admin` (visibility only) | Low | Recorded |
 
-**Independent review of `8eefa27`** and **CI on the final head:** recorded below.
+### Independent review of `8eefa27` (agent; not the authorised review)
+
+**Verdict:** no way found to change or clear a stored package on an existing subscription. F3 is sound, with no High finding. Probes ran against real MongoDB through the production app.
+
+| # | Finding | Severity | Origin | Resolution |
+|---|---|---|---|---|
+| 1 | Case and separator variants (`package_ID`, `PackageId`, `ProjectID`, `Organization_Id`) were ignored with a 200 instead of refused. Nothing was written. | Low | Introduced | **Fixed:** keys are compared ignoring case, `_`, `-`, `.` and spaces. Tests added; the mutant is killed. |
+| 2 | No test covered a stored package that is absent, `""` or an ObjectId. Behaviour was correct, but a compare-and-set built from normalised values would have broken updates silently. | Low (test gap) | Introduced with the tests | **Tests added:** `test_stored_package_shapes_missing_empty_and_objectid`. The normalised-filter mutant is killed. |
+| 3 | Entitlement resolution (`_active_subscription`) ignores `status` and picks the most recently updated subscription. An ordinary update to a cancelled subscription in the same scope can switch a scope's entitlement off; a package row does not outrank a project row. | **Medium** | Pre-existing | **Owner decision.** Recommended: filter to `active`, `trial` and `pilot` (plus offboarding states if they must resolve), and order by specificity. |
+| 4 | Package-only subscriptions never grant anything (no caller passes a package), but `/plan-settings` shows an active one as the scope's effective service. | Low/Info | Pre-existing | Recorded |
+| 5 | Creation does not validate the package (packages are not modelled). | Low/Info | Pre-existing | Recorded |
+| 6 | The `subscription.updated` audit event has no top-level `package_id` (it is in before/after) and writes `project_id` as `"None"`; `update_subscription` writes no history row. | Info | Pre-existing | Recorded |
+| 7 | `payment_gateway_subscription_id` is writable through `PUT /subscriptions/{id}`. The webhook resolves a subscription by that id, so a manager who learns another subscription's gateway id could redirect its payment events, activation included. | **Medium (security)** | Pre-existing | **Owner decision, recommended before release:** treat it as protected, written only by checkout and the gateway. |
+
+**CI on the final head:** recorded below.

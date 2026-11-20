@@ -962,7 +962,7 @@ async def update_subscription(
     extra = payload.model_extra or {}
     for index, field in enumerate(("organization_id", "project_id", "package_id")):
         attempted = [getattr(payload, field)] if field in payload.model_fields_set else []
-        attempted += [extra[key] for key in _SCOPE_FIELD_SPELLINGS[field] if key in extra]
+        attempted += [value for key, value in extra.items() if _scope_key(key) in _SCOPE_FIELD_SPELLINGS[field]]
         if any(scope_text(value) != stored_scope[index] for value in attempted):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_SCOPE_CHANGE_REFUSED)
     update = SubscriptionUpdate(**payload.model_dump(include=set(SubscriptionUpdate.model_fields) & payload.model_fields_set))
@@ -978,13 +978,18 @@ async def update_subscription(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Subscription not found") from exc
 
 
-#: Other spellings of the scope fields a client might send; each is refused unless it equals
-#: the stored value (earlier review Low 4: they used to be dropped silently).
+#: Other spellings of the scope fields a client might send, compared after ``_scope_key``
+#: (case, "_", "-", "." and spaces ignored: ``package_ID``, ``PackageId``, ``Org-Id`` ...);
+#: each is refused unless it equals the stored value (earlier review Low 4; F3 review 1).
 _SCOPE_FIELD_SPELLINGS = {
-    "organization_id": ("organizationId", "organisation_id", "organisationId", "org_id", "orgId", "organization"),
-    "project_id": ("projectId", "project"),
-    "package_id": ("packageId", "package"),
+    "organization_id": frozenset({"organizationid", "organisationid", "orgid", "organization", "organisation", "org"}),
+    "project_id": frozenset({"projectid", "project"}),
+    "package_id": frozenset({"packageid", "package"}),
 }
+
+
+def _scope_key(key: Any) -> str:
+    return "".join(ch for ch in str(key).lower() if ch.isalnum())
 
 _SCOPE_CHANGE_REFUSED = (
     "The organisation, project and package of a subscription cannot be changed by an update; "
