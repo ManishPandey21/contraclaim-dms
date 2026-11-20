@@ -580,7 +580,11 @@ def test_a_stopped_ingest_holds_its_source_until_writes_it_sent_have_drained(
     marks: Dict[str, Any] = {}
 
     async def partitioned_once_writing(db, lease, **kwargs):
-        if "writing" not in marks or not marks["writing"].is_set():
+        # The partition covers the stopped ingest only. It used to stay up for the
+        # retries too, so the final ingest could never renew and fenced itself
+        # whenever it ran longer than SOURCE_LEASE_SELF_FENCE (a slow CI runner,
+        # run 44713207170; reproduced deterministically by delaying that ingest).
+        if not marks.get("partitioned") or "writing" not in marks or not marks["writing"].is_set():
             return None  # instant success: see the cannot-renew test
         raise AutoReconnect("partitioned from the primary (test)")
 
@@ -589,8 +593,10 @@ def test_a_stopped_ingest_holds_its_source_until_writes_it_sent_have_drained(
     async def run(db, client):
         stopped = _Ingest(db, hold=asyncio.Event())
         marks["writing"] = stopped.entered
+        marks["partitioned"] = True
         with pytest.raises(source_lease.SourceLeaseFenced):
             await asyncio.wait_for(_service(db, stopped).process_ingest_job(_payload(tmp_path, "a")), 20)
+        marks["partitioned"] = False  # the network heals; the hold, not the partition, refuses "b"
         held = await db[LEASES].find_one({})
         # The retry arrives while the hold is on: refused, nothing written, and
         # no holder - nobody owns the source, so the job waits its turn rather
