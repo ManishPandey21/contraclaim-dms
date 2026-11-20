@@ -91,11 +91,14 @@ class FakeCollection:
 
     async def update_one(self, filter_doc, update_doc):
         self.updates.append((filter_doc, update_doc))
+        matched = 0
         for d in self.data:
             if self._matches(d, filter_doc):
                 d.update(update_doc.get("$set", {}))
+                matched = 1
                 break
-        return type("FakeResult", (), {"modified_count": 1})()
+        # matched_count: the subscription compare-and-set (L3) reads it.
+        return type("FakeResult", (), {"modified_count": 1, "matched_count": matched})()
 
     async def update_many(self, filter_doc, update_doc):
         self.updates.append((filter_doc, update_doc))

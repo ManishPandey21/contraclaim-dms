@@ -28,7 +28,13 @@ from ..models.rbac_monetization import (
     UsageEventCreate,
 )
 from ..services.allocation_service import AllocationService
-from ..services.monetization_service import MonetizationService
+from ..services.monetization_service import (
+    MonetizationService,
+    SubscriptionScopeChangeRefused,
+    SubscriptionScopeConflict,
+    scope_text,
+    subscription_scope,
+)
 from ..services.policy_service import PolicyService
 from ..services.scope_service import ScopeService
 from ..services.step_up_service import require_step_up
@@ -751,6 +757,7 @@ async def update_subscription(
     await require_step_up(request, current_user, action="subscription.entitlement.manage")
     service = MonetizationService()
     subscription = await _load_subscription_or_404(service, subscription_id)
+    # Authorised against the stored scope, never a scope named in the body (L3).
     await _authorize_subscription_scope(
         policy=policy,
         current_user=current_user,
@@ -758,7 +765,35 @@ async def update_subscription(
         subscription=subscription,
         subscription_id=subscription_id,
     )
-    return await service.update_subscription(subscription_id, payload, current_user)
+    stored_scope = subscription_scope(subscription)
+    # SubscriptionUpdate has no organization_id (and ignores unknown keys), so read the body
+    # itself: an organisation or project named there must equal the stored one. Omitted is
+    # unchanged; the same value is a no-op; anything else, explicit null included, is refused.
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    if isinstance(body, dict):
+        for index, keys in enumerate((("organization_id", "organizationId"), ("project_id", "projectId"))):
+            for key in keys:
+                if key in body and scope_text(body[key]) != stored_scope[index]:
+                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_SCOPE_CHANGE_REFUSED)
+    try:
+        return await service.update_subscription(
+            subscription_id, payload, current_user, expected_scope=(stored_scope[0] or "", stored_scope[1])
+        )
+    except SubscriptionScopeChangeRefused as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_SCOPE_CHANGE_REFUSED) from exc
+    except SubscriptionScopeConflict as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Subscription not found") from exc
+
+
+_SCOPE_CHANGE_REFUSED = (
+    "The organisation and project of a subscription cannot be changed by an update; "
+    "a transfer is a separate, explicitly authorised operation"
+)
 
 
 # ---------------------------------------------------------------------------
