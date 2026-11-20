@@ -86,7 +86,11 @@ def test_a_role_saved_by_catalogue_id_advertises_the_names_it_is_granted(monkeyp
             assert violations == [], "\n".join(violations[:20])
 
             advertised = set(await service.get_effective_permission_names(by_id))
-            assert {name_of[i] for i in chosen} <= advertised
+            # M4: a platform-only permission on a tenant role neither counts nor is advertised.
+            from rbac_backend.core.permissions import PLATFORM_GRANT_ONLY_PERMISSIONS
+
+            assert {name_of[i] for i in chosen} - PLATFORM_GRANT_ONLY_PERMISSIONS <= advertised
+            assert not ({name_of[i] for i in chosen} & PLATFORM_GRANT_ONLY_PERMISSIONS & advertised)
             unchosen = {name_of[i] for i in ids if i not in chosen} - {
                 spelling for i in chosen for spelling in equivalent_permissions(name_of[i])
             }
@@ -95,7 +99,7 @@ def test_a_role_saved_by_catalogue_id_advertises_the_names_it_is_granted(monkeyp
             # What the client actually receives.
             me = await env.call("GET", "by_id", "/api/me")
             assert me.status_code == 200, me.text[:300]
-            assert {name_of[i] for i in chosen} <= set(me.json()["permissions"])
+            assert {name_of[i] for i in chosen} - PLATFORM_GRANT_ONLY_PERMISSIONS <= set(me.json()["permissions"])
 
     asyncio.run(scenario())
 

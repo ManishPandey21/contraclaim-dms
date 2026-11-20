@@ -1371,6 +1371,11 @@ class PermissionService:
         permission_key = (permission_name or "").strip()
         if not permission_key:
             return False
+        if permission_key in PLATFORM_GRANT_ONLY_PERMISSIONS:
+            # M4: the same rule as PolicyService and the advertised list - a platform-scoped
+            # grant only; never a wildcard, alias or tenant role (Super Admin is decided by
+            # the gates before this resolver).
+            return await self.user_holds_platform_grant(str(user_id), permission_key)
 
         # Held names that satisfy this check: the name, its label spellings, and
         # names it declares or that declare it - one hop, never through a shared
