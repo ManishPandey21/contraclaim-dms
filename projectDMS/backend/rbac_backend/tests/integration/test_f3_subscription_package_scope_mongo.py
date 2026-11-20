@@ -68,7 +68,7 @@ def _headers(persona: str, user_id: Optional[str] = None) -> Dict[str, str]:
 
 
 async def _seed(env: Any) -> None:
-    base = {"plan_code": "dms_enterprise", "status": "active", "billing_status": "active", "auto_renew": True,
+    base = {"plan_code": "dms_enterprise", "status": "active", "billing_status": "active", "admin_note": "kept",
             "updated_at": datetime.utcnow()}
     await env.db.subscriptions.insert_many([
         {"_id": SUB_ORG, "organization_id": ORG_A, "project_id": None, "package_id": None, **base},
@@ -86,28 +86,28 @@ async def _put(env: Any, persona: str, user_id: Optional[str], sub_id: str, body
 
 async def _state(env: Any, sub_id: str) -> tuple:
     doc = await env.db.subscriptions.find_one({"_id": sub_id})
-    return doc.get("organization_id"), doc.get("project_id"), doc.get("package_id"), doc.get("auto_renew")
+    return doc.get("organization_id"), doc.get("project_id"), doc.get("package_id"), doc.get("admin_note")
 
 
 ATTEMPTS = {
     SUB_ORG: [
-        {"package_id": "pkg-zz", "auto_renew": False},  # organisation-wide made package-only
-        {"package_id": "pkg-b", "auto_renew": False},  # another organisation's package
-        {"package_id": "no-such-package", "auto_renew": False},  # invalid reference
-        {"packageId": "pkg-zz", "auto_renew": False},
-        {"package": "pkg-zz", "auto_renew": False},
+        {"package_id": "pkg-zz", "admin_note": "changed"},  # organisation-wide made package-only
+        {"package_id": "pkg-b", "admin_note": "changed"},  # another organisation's package
+        {"package_id": "no-such-package", "admin_note": "changed"},  # invalid reference
+        {"packageId": "pkg-zz", "admin_note": "changed"},
+        {"package": "pkg-zz", "admin_note": "changed"},
     ],
     SUB_PKG: [
-        {"package_id": None, "auto_renew": False},  # promotion by explicit null
-        {"package_id": "", "auto_renew": False},  # promotion by empty string
-        {"package_id": "pkg-zz", "auto_renew": False},
-        {"packageId": None, "auto_renew": False},
-        {"package_ID": None, "auto_renew": False},  # F3 review 1: case and separator variants
-        {"PackageId": None, "auto_renew": False},
-        {"Package-Id": "zz", "auto_renew": False},
-        {"ProjectID": None, "auto_renew": False},
-        {"Organization_Id": ORG_B, "auto_renew": False},
-        {"package_id": "pkg-a", "project_id": None, "auto_renew": False},  # same package, project promoted
+        {"package_id": None, "admin_note": "changed"},  # promotion by explicit null
+        {"package_id": "", "admin_note": "changed"},  # promotion by empty string
+        {"package_id": "pkg-zz", "admin_note": "changed"},
+        {"packageId": None, "admin_note": "changed"},
+        {"package_ID": None, "admin_note": "changed"},  # F3 review 1: case and separator variants
+        {"PackageId": None, "admin_note": "changed"},
+        {"Package-Id": "zz", "admin_note": "changed"},
+        {"ProjectID": None, "admin_note": "changed"},
+        {"Organization_Id": ORG_B, "admin_note": "changed"},
+        {"package_id": "pkg-a", "project_id": None, "admin_note": "changed"},  # same package, project promoted
     ],
 }
 
@@ -138,11 +138,11 @@ def test_omitted_or_unchanged_package_is_an_ordinary_update(monkeypatch) -> None
         async with _env(monkeypatch) as env:
             await _seed(env)
             billing = await _user(env.db, "f3_ok", ["contraclaim_billing_admin"], organization_id=ORG_A, projects=[PROJ_A1])
-            assert await _put(env, "f3_ok", billing, SUB_PKG, {"auto_renew": False}) == 200
-            assert await _state(env, SUB_PKG) == (ORG_A, PROJ_A1, "pkg-a", False)
-            assert await _put(env, "f3_ok", billing, SUB_PKG, {"package_id": "pkg-a", "auto_renew": True}) == 200
-            assert await _put(env, "f3_ok", billing, SUB_ORG, {"package_id": None, "packageId": "", "auto_renew": False}) == 200
-            assert await _state(env, SUB_ORG) == (ORG_A, None, None, False)
+            assert await _put(env, "f3_ok", billing, SUB_PKG, {"admin_note": "changed"}) == 200
+            assert await _state(env, SUB_PKG) == (ORG_A, PROJ_A1, "pkg-a", "changed")
+            assert await _put(env, "f3_ok", billing, SUB_PKG, {"package_id": "pkg-a", "admin_note": "kept"}) == 200
+            assert await _put(env, "f3_ok", billing, SUB_ORG, {"package_id": None, "packageId": "", "admin_note": "changed"}) == 200
+            assert await _state(env, SUB_ORG) == (ORG_A, None, None, "changed")
             event = await env.db.audit_events.find_one({"action": "subscription.updated", "resource_id": SUB_PKG})
             assert event and event["after"]["package_id"] == "pkg-a"
 
@@ -161,11 +161,11 @@ def test_authority_follows_the_stored_scope_for_mixed_and_custom_roles(monkeypat
             mixed = await _user(env.db, "f3_mixed", ["projectuser", "f3-a1-entitlement"], organization_id=ORG_A, projects=[PROJ_A1])
             for persona, user_id in (("f3_custom_org", custom), ("f3_mixed", mixed)):
                 # Another organisation's subscription: refused by scope, whatever the body names.
-                assert await _put(env, persona, user_id, SUB_B, {"package_id": "pkg-b", "auto_renew": False}) == 403, persona
+                assert await _put(env, persona, user_id, SUB_B, {"package_id": "pkg-b", "admin_note": "changed"}) == 403, persona
                 # Its own project's package subscription: an ordinary update passes, a package change does not.
-                assert await _put(env, persona, user_id, SUB_PKG, {"auto_renew": False}) == 200, persona
+                assert await _put(env, persona, user_id, SUB_PKG, {"admin_note": "changed"}) == 200, persona
                 assert await _put(env, persona, user_id, SUB_PKG, {"package_id": None}) == 400, persona
-            assert await _state(env, SUB_B) == (ORG_B, PROJ_B1, "pkg-b", True)
+            assert await _state(env, SUB_B) == (ORG_B, PROJ_B1, "pkg-b", "kept")
             assert (await _state(env, SUB_PKG))[2] == "pkg-a"
 
     _run(scenario())
@@ -236,23 +236,23 @@ def test_stale_reads_and_concurrent_package_changes_are_refused(monkeypatch) -> 
             # Authorised against pkg-a, but the stored package is already pkg-zz.
             await env.db.subscriptions.update_one({"_id": SUB_PKG}, {"$set": {"package_id": "pkg-zz"}})
             with pytest.raises(SubscriptionScopeConflict):
-                await service.update_subscription(SUB_PKG, SubscriptionUpdate(auto_renew=False), actor,
+                await service.update_subscription(SUB_PKG, SubscriptionUpdate(admin_note="changed"), actor,
                                                   expected_scope=(ORG_A, PROJ_A1, "pkg-a"))
             await env.db.subscriptions.update_one({"_id": SUB_PKG}, {"$set": {"package_id": "pkg-a"}})
             # The package changes between the read and the write: the compare-and-set misses.
             racing = MonetizationService(_ConcurrentPackageChange(env.db, SUB_PKG, None))
             with pytest.raises(SubscriptionScopeConflict):
-                await racing.update_subscription(SUB_PKG, SubscriptionUpdate(auto_renew=False), actor,
+                await racing.update_subscription(SUB_PKG, SubscriptionUpdate(admin_note="changed"), actor,
                                                  expected_scope=(ORG_A, PROJ_A1, "pkg-a"))
-            assert (await env.db.subscriptions.find_one({"_id": SUB_PKG}))["auto_renew"] is True
+            assert (await env.db.subscriptions.find_one({"_id": SUB_PKG}))["admin_note"] == "kept"
             # Internal callers (lifecycle operations) cannot change the package either.
             await env.db.subscriptions.update_one({"_id": SUB_PKG}, {"$set": {"package_id": "pkg-a"}})
             with pytest.raises(SubscriptionScopeChangeRefused):
                 await service.update_subscription(SUB_PKG, SubscriptionUpdate(package_id=None), actor)
             with pytest.raises(TypeError):
-                await service.update_subscription(SUB_PKG, SubscriptionUpdate(auto_renew=False), actor,
+                await service.update_subscription(SUB_PKG, SubscriptionUpdate(admin_note="changed"), actor,
                                                   expected_scope=(ORG_A, PROJ_A1))  # type: ignore[arg-type]
-            assert await _state(env, SUB_PKG) == (ORG_A, PROJ_A1, "pkg-a", True)
+            assert await _state(env, SUB_PKG) == (ORG_A, PROJ_A1, "pkg-a", "kept")
 
     _run(scenario())
 
@@ -268,16 +268,16 @@ def test_stored_package_shapes_missing_empty_and_objectid(monkeypatch) -> None:
         async with _env(monkeypatch) as env:
             oid = ObjectId()
             base = {"organization_id": ORG_A, "project_id": PROJ_A1, "plan_code": "dms_enterprise", "status": "active",
-                    "billing_status": "active", "auto_renew": True, "updated_at": datetime.utcnow()}
+                    "billing_status": "active", "admin_note": "kept", "updated_at": datetime.utcnow()}
             await env.db.subscriptions.insert_many([
                 {"_id": "f3-missing", **base},
                 {"_id": "f3-empty", **base, "package_id": ""},
                 {"_id": "f3-oid", **base, "package_id": oid},
             ])
             cases = {
-                "f3-missing": ([{"auto_renew": False}, {"package_id": None}, {"package_id": ""}], [{"package_id": "x"}]),
-                "f3-empty": ([{"auto_renew": False}, {"package_id": None}, {"package_id": ""}], [{"package_id": "x"}]),
-                "f3-oid": ([{"auto_renew": False}, {"package_id": str(oid)}], [{"package_id": None}, {"package_id": "x"}]),
+                "f3-missing": ([{"admin_note": "changed"}, {"package_id": None}, {"package_id": ""}], [{"package_id": "x"}]),
+                "f3-empty": ([{"admin_note": "changed"}, {"package_id": None}, {"package_id": ""}], [{"package_id": "x"}]),
+                "f3-oid": ([{"admin_note": "changed"}, {"package_id": str(oid)}], [{"package_id": None}, {"package_id": "x"}]),
             }
             for sub_id, (allowed, refused) in cases.items():
                 for body in allowed:

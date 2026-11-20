@@ -71,7 +71,7 @@ def _headers(persona: str, user_id: Optional[str] = None, action: str = "subscri
 
 
 async def _seed(env: Any) -> None:
-    base = {"plan_code": "dms_enterprise", "billing_period": "monthly", "auto_renew": True, "updated_at": datetime.utcnow()}
+    base = {"plan_code": "dms_enterprise", "billing_period": "monthly", "auto_renew": True, "admin_note": "kept", "updated_at": datetime.utcnow()}
     await env.db.subscriptions.insert_many([
         {"_id": VICTIM, "organization_id": ORG_B, "project_id": PROJ_B1, "status": "pending", "billing_status": "pending",
          "payment_provider": "razorpay", "payment_gateway_subscription_id": VICTIM_GATEWAY_ID,
@@ -117,12 +117,12 @@ def test_an_authorised_tenant_user_cannot_redirect_another_subscriptions_payment
             billing = await _user(env.db, "gw_billing_a", ["contraclaim_billing_admin"], organization_id=ORG_A, projects=[PROJ_A1])
             for persona, user_id in (("gw_billing_a", billing), ("superadmin", None)):
                 for body in ATTEMPTS:
-                    response = await env.client.put(f"{BASE}/subscriptions/{ATTACKER}", json={**body, "auto_renew": False},
+                    response = await env.client.put(f"{BASE}/subscriptions/{ATTACKER}", json={**body, "admin_note": "changed"},
                                                     headers=_headers(persona, user_id))
                     env.client.cookies.clear()
                     assert response.status_code == 400, (persona, body, response.status_code)
             attacker = await env.db.subscriptions.find_one({"_id": ATTACKER})
-            assert "payment_gateway_subscription_id" not in attacker and attacker["auto_renew"] is True
+            assert "payment_gateway_subscription_id" not in attacker and attacker["admin_note"] == "kept"
             # Create cannot bind it either (a second binding the webhook could match).
             for body in ATTEMPTS:
                 response = await env.client.post(
@@ -154,10 +154,10 @@ def test_an_ordinary_update_that_leaves_the_binding_alone_still_works(monkeypatc
         async with _env(monkeypatch) as env:
             await _seed(env)
             response = await env.client.put(f"{BASE}/subscriptions/{VICTIM}", headers=_headers("superadmin"),
-                                            json={"auto_renew": False, "payment_gateway_subscription_id": VICTIM_GATEWAY_ID})
+                                            json={"admin_note": "changed", "payment_gateway_subscription_id": VICTIM_GATEWAY_ID})
             assert response.status_code == 200, response.text[:200]
             victim = await env.db.subscriptions.find_one({"_id": VICTIM})
-            assert victim["auto_renew"] is False and victim["payment_gateway_subscription_id"] == VICTIM_GATEWAY_ID
+            assert victim["admin_note"] == "changed" and victim["payment_gateway_subscription_id"] == VICTIM_GATEWAY_ID
 
     _run(scenario())
 
@@ -439,7 +439,7 @@ def test_f5_unknown_keys_are_refused_never_dropped(monkeypatch) -> None:
             await _seed(env)
             for body in ({"razorpay_subscription_id": VICTIM_GATEWAY_ID}, {"rzp_sub_id": "x"}, {"subscription_gw_id": "x"},
                          {"payment_customer_id": "x"}, {"nonsense": 1}):
-                put = await env.client.put(f"{BASE}/subscriptions/{VICTIM}", json={**body, "auto_renew": False},
+                put = await env.client.put(f"{BASE}/subscriptions/{VICTIM}", json={**body, "admin_note": "changed"},
                                            headers=_headers("superadmin"))
                 env.client.cookies.clear()
                 assert put.status_code == 400, (body, put.status_code)
@@ -447,7 +447,7 @@ def test_f5_unknown_keys_are_refused_never_dropped(monkeypatch) -> None:
                                              json={"organization_id": ORG_A, "plan_code": "dms_enterprise", **body})
                 env.client.cookies.clear()
                 assert post.status_code == 400, (body, post.status_code)
-            assert (await env.db.subscriptions.find_one({"_id": VICTIM}))["auto_renew"] is True
+            assert (await env.db.subscriptions.find_one({"_id": VICTIM}))["admin_note"] == "kept"
 
     _run(scenario())
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
@@ -1022,10 +1022,21 @@ async def update_subscription(
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_SCOPE_CHANGE_REFUSED)
     if _gateway_keys_attempted(payload, subscription):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_GATEWAY_CHANGE_REFUSED)
+    # R6-8: commercial, lifecycle and activation-precedence fields go through their own
+    # workflows (gateway, payment, lifecycle checks), never through this update - for every
+    # caller, under every spelling, even when the value is unchanged.
+    refused = _commercial_fields_attempted(payload)
+    if refused:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_commercial_refusal(refused))
     unknown = _unknown_keys(payload)
     if unknown:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unknown fields: {', '.join(unknown)}")
-    update = SubscriptionUpdate(**payload.model_dump(include=set(SubscriptionUpdate.model_fields) & payload.model_fields_set))
+    if "entitlement_overrides" in payload.model_fields_set and not ScopeService().is_superadmin(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Entitlement overrides grant features and quotas beyond the plan; only a Super Admin can set them",
+        )
+    update = SubscriptionUpdate(**payload.model_dump(include=set(PUT_EDITABLE_FIELDS) & payload.model_fields_set))
     try:
         return await service.update_subscription(
             subscription_id, update, current_user, expected_scope=stored_scope
@@ -1038,6 +1049,56 @@ async def update_subscription(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except LookupError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Subscription not found") from exc
+
+
+#: R6-8 (owner decision 2026-11-21): the only fields ``PUT /subscriptions/{id}`` may change.
+#: ``admin_note`` and ``cancellation_reason`` are non-commercial text; ``entitlement_overrides``
+#: (features and quotas beyond the plan) is an administrative grant kept for Super Admin only.
+#: Everything else in ``SubscriptionUpdate`` is commercial or lifecycle state and has a
+#: dedicated workflow (below); scope (L3/F3) and the gateway binding are refused above.
+PUT_EDITABLE_FIELDS = frozenset({"admin_note", "cancellation_reason", "entitlement_overrides"})
+
+#: Commercial and lifecycle fields, the workflow that owns each, and other spellings (compared
+#: after ``_scope_key``) under which they are refused rather than reported as unknown.
+_COMMERCIAL_FIELDS: Dict[str, Tuple[str, frozenset]] = {
+    "plan_code": ("POST /subscriptions/{id}/upgrade or /downgrade", frozenset({"plancode", "plan", "planid", "plancodeid"})),
+    "billing_period": ("POST /subscriptions/{id}/change-period", frozenset({"billingperiod", "period", "billingcycle", "cycle"})),
+    "active_add_ons": ("POST /subscriptions/{id}/add-ons/add or /add-ons/remove",
+                       frozenset({"activeaddons", "addons", "addoncodes", "addon"})),
+    "status": ("checkout, cancel, reactivate or convert-trial",
+               frozenset({"status", "subscriptionstatus", "lifecyclestatus", "state"})),
+    "billing_status": ("payment confirmation by the billing webhook", frozenset({"billingstatus", "paymentstatus"})),
+    "starts_at": ("checkout, start-trial or convert-trial", frozenset({"startsat", "startdate", "start"})),
+    "ends_at": ("cancel or a new purchase", frozenset({"endsat", "enddate", "end", "expiresat"})),
+    "current_period_start": ("payment confirmation by the billing webhook", frozenset({"currentperiodstart"})),
+    "current_period_end": ("payment confirmation by the billing webhook", frozenset({"currentperiodend", "periodend"})),
+    "trial": ("start-trial or convert-trial", frozenset({"trial", "istrial"})),
+    "trial_ends_at": ("start-trial or convert-trial", frozenset({"trialendsat", "trialend"})),
+    "pilot": ("plan settings", frozenset({"pilot", "ispilot"})),
+    "auto_renew": ("cancel (at period end) or reactivate, which reach the gateway", frozenset({"autorenew", "autorenewal", "renew"})),
+    "cancelled_at": ("cancel or reactivate", frozenset({"cancelledat", "canceledat"})),
+    "governing_since": ("activation (checkout payment, reactivation, plan settings)",
+                        frozenset({"governingsince", "activatedat", "activationdate", "activationprecedence"})),
+}
+
+
+def _commercial_fields_attempted(payload: BaseModel) -> List[str]:
+    """Commercial fields named in the body, as model fields or under another spelling."""
+    attempted = {field for field in _COMMERCIAL_FIELDS if field in payload.model_fields_set}
+    for key in (payload.model_extra or {}):
+        normalised = _scope_key(key)
+        for field, (_, spellings) in _COMMERCIAL_FIELDS.items():
+            if normalised == _scope_key(field) or normalised in spellings:
+                attempted.add(field)
+    return sorted(attempted)
+
+
+def _commercial_refusal(fields: List[str]) -> str:
+    owners = "; ".join(f"{field}: {_COMMERCIAL_FIELDS[field][0]}" for field in fields)
+    return (
+        "Commercial and lifecycle fields cannot be changed by an ordinary update "
+        f"(use the dedicated workflow - {owners})"
+    )
 
 
 #: Other spellings of the scope fields a client might send, compared after ``_scope_key``

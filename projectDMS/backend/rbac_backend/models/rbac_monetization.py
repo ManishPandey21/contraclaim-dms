@@ -299,6 +299,8 @@ class SubscriptionUpdate(BaseModel):
     payment_gateway_subscription_id: Optional[str] = None
     cancelled_at: Optional[datetime] = None
     cancellation_reason: Optional[str] = None
+    # A non-commercial note for administrators (R6-8 allowlist); never read by entitlement.
+    admin_note: Optional[str] = Field(default=None, max_length=1000)
 
 
 class Subscription(SubscriptionBase):

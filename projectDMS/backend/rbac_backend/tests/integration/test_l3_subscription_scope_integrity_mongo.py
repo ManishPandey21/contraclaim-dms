@@ -66,7 +66,7 @@ async def _seed(env: Any) -> None:
         await env.db.subscriptions.insert_one(
             {"_id": sub_id, "organization_id": org, "project_id": project, "package_id": None,
              "plan_code": "dms_enterprise", "status": "active", "billing_status": "active",
-             "auto_renew": True, "updated_at": datetime.utcnow()}
+             "admin_note": "kept", "updated_at": datetime.utcnow()}
         )
 
 
@@ -78,19 +78,19 @@ async def _put(env: Any, persona: str, user_id: Optional[str], sub_id: str, body
 
 async def _scope(env: Any, sub_id: str) -> tuple:
     doc = await env.db.subscriptions.find_one({"_id": sub_id})
-    return doc.get("organization_id"), doc.get("project_id"), doc.get("auto_renew")
+    return doc.get("organization_id"), doc.get("project_id"), doc.get("admin_note")
 
 
 ATTEMPTS = [
-    {"project_id": PROJ_A2, "auto_renew": False},  # sibling project
-    {"project_id": None, "auto_renew": False},  # organisation-wide promotion (explicit null)
-    {"project_id": PROJ_B1, "auto_renew": False},  # another organisation's project
-    {"project_id": "no-such-project", "auto_renew": False},
-    {"organization_id": ORG_B, "auto_renew": False},  # another organisation
-    {"organization_id": None, "auto_renew": False},
-    {"organizationId": ORG_B, "auto_renew": False},
-    {"projectId": PROJ_A2, "auto_renew": False},
-    {"organization_id": ORG_B, "project_id": PROJ_B1, "auto_renew": False},
+    {"project_id": PROJ_A2, "admin_note": "changed"},  # sibling project
+    {"project_id": None, "admin_note": "changed"},  # organisation-wide promotion (explicit null)
+    {"project_id": PROJ_B1, "admin_note": "changed"},  # another organisation's project
+    {"project_id": "no-such-project", "admin_note": "changed"},
+    {"organization_id": ORG_B, "admin_note": "changed"},  # another organisation
+    {"organization_id": None, "admin_note": "changed"},
+    {"organizationId": ORG_B, "admin_note": "changed"},
+    {"projectId": PROJ_A2, "admin_note": "changed"},
+    {"organization_id": ORG_B, "project_id": PROJ_B1, "admin_note": "changed"},
 ]
 
 
@@ -103,7 +103,7 @@ def test_scope_changes_are_refused_and_nothing_is_written(monkeypatch) -> None:
             for persona, user_id in (("l3_billing_admin", billing_admin), ("superadmin", None)):
                 for body in ATTEMPTS:
                     assert await _put(env, persona, user_id, SUB_A1, body) == 400, (persona, body)
-                    assert await _scope(env, SUB_A1) == (ORG_A, PROJ_A1, True), (persona, body)
+                    assert await _scope(env, SUB_A1) == (ORG_A, PROJ_A1, "kept"), (persona, body)
 
     _run(scenario())
 
@@ -114,11 +114,11 @@ def test_omitted_or_unchanged_scope_is_an_ordinary_update(monkeypatch) -> None:
             await _seed(env)
             billing_admin = await _user(env.db, "l3_ok_admin", ["contraclaim_billing_admin"], organization_id=ORG_A,
                                         projects=[PROJ_A1])
-            assert await _put(env, "l3_ok_admin", billing_admin, SUB_A1, {"auto_renew": False}) == 200
-            assert await _scope(env, SUB_A1) == (ORG_A, PROJ_A1, False)
-            same = {"organization_id": ORG_A, "project_id": PROJ_A1, "auto_renew": True}
+            assert await _put(env, "l3_ok_admin", billing_admin, SUB_A1, {"admin_note": "changed"}) == 200
+            assert await _scope(env, SUB_A1) == (ORG_A, PROJ_A1, "changed")
+            same = {"organization_id": ORG_A, "project_id": PROJ_A1, "admin_note": "kept"}
             assert await _put(env, "l3_ok_admin", billing_admin, SUB_A1, same) == 200
-            assert await _scope(env, SUB_A1) == (ORG_A, PROJ_A1, True)
+            assert await _scope(env, SUB_A1) == (ORG_A, PROJ_A1, "kept")
             event = await env.db.audit_events.find_one({"action": "subscription.updated", "actor_id": billing_admin})
             assert event and event["project_id"] == PROJ_A1
 
@@ -132,18 +132,18 @@ def test_authority_is_judged_on_the_stored_scope_not_the_body(monkeypatch) -> No
             billing_admin = await _user(env.db, "l3_cross_admin", ["contraclaim_billing_admin"], organization_id=ORG_A,
                                         projects=[PROJ_A1])
             # Organisation B's subscription, with a body naming organisation A: refused by scope.
-            body = {"organization_id": ORG_A, "project_id": PROJ_A1, "auto_renew": False}
+            body = {"organization_id": ORG_A, "project_id": PROJ_A1, "admin_note": "changed"}
             assert await _put(env, "l3_cross_admin", billing_admin, SUB_B1, body) == 403
-            assert await _scope(env, SUB_B1) == (ORG_B, PROJ_B1, True)
+            assert await _scope(env, SUB_B1) == (ORG_B, PROJ_B1, "kept")
             # A project-bound grant (inserted directly: the role fences would refuse it) reaches
             # its own project's subscription only, whatever the body names.
             await env.db.roles.insert_one(_role("l3-proj-a1", [STEP_UP], organization_id=ORG_A, project_id=PROJ_A1))
             project_user = await _user(env.db, "l3_project_user", ["l3-proj-a1"], organization_id=ORG_A, projects=[PROJ_A1])
-            assert await _put(env, "l3_project_user", project_user, SUB_A2, {"project_id": PROJ_A1, "auto_renew": False}) == 403
-            assert await _scope(env, SUB_A2) == (ORG_A, PROJ_A2, True)
-            assert await _put(env, "l3_project_user", project_user, SUB_A1, {"auto_renew": False}) == 200
+            assert await _put(env, "l3_project_user", project_user, SUB_A2, {"project_id": PROJ_A1, "admin_note": "changed"}) == 403
+            assert await _scope(env, SUB_A2) == (ORG_A, PROJ_A2, "kept")
+            assert await _put(env, "l3_project_user", project_user, SUB_A1, {"admin_note": "changed"}) == 200
             assert await _put(env, "l3_project_user", project_user, SUB_A1, {"project_id": None}) == 400
-            assert await _scope(env, SUB_A1) == (ORG_A, PROJ_A1, False)
+            assert await _scope(env, SUB_A1) == (ORG_A, PROJ_A1, "changed")
 
     _run(scenario())
 
@@ -183,20 +183,20 @@ def test_stale_reads_and_concurrent_scope_changes_are_refused(monkeypatch) -> No
             # Authorised against A1, but the stored scope is already A2 (a stale read).
             await env.db.subscriptions.update_one({"_id": SUB_A1}, {"$set": {"project_id": PROJ_A2}})
             with pytest.raises(SubscriptionScopeConflict):
-                await service.update_subscription(SUB_A1, SubscriptionUpdate(auto_renew=False), actor,
+                await service.update_subscription(SUB_A1, SubscriptionUpdate(admin_note="changed"), actor,
                                                   expected_scope=(ORG_A, PROJ_A1, None))
-            assert await _scope(env, SUB_A1) == (ORG_A, PROJ_A2, True)
+            assert await _scope(env, SUB_A1) == (ORG_A, PROJ_A2, "kept")
             await env.db.subscriptions.update_one({"_id": SUB_A1}, {"$set": {"project_id": PROJ_A1}})
             # The scope changes between the read and the write: the compare-and-set misses.
             racing = MonetizationService(_ConcurrentScopeChange(env.db, SUB_A1, PROJ_A2))
             with pytest.raises(SubscriptionScopeConflict):
-                await racing.update_subscription(SUB_A1, SubscriptionUpdate(auto_renew=False), actor,
+                await racing.update_subscription(SUB_A1, SubscriptionUpdate(admin_note="changed"), actor,
                                                  expected_scope=(ORG_A, PROJ_A1, None))
-            assert (await env.db.subscriptions.find_one({"_id": SUB_A1}))["auto_renew"] is True
+            assert (await env.db.subscriptions.find_one({"_id": SUB_A1}))["admin_note"] == "kept"
             # Internal callers (lifecycle operations) cannot change scope either.
             await env.db.subscriptions.update_one({"_id": SUB_A1}, {"$set": {"project_id": PROJ_A1}})
             with pytest.raises(SubscriptionScopeChangeRefused):
                 await service.update_subscription(SUB_A1, SubscriptionUpdate(project_id=None), actor)
-            assert await _scope(env, SUB_A1) == (ORG_A, PROJ_A1, True)
+            assert await _scope(env, SUB_A1) == (ORG_A, PROJ_A1, "kept")
 
     _run(scenario())
