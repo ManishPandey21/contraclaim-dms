@@ -418,3 +418,25 @@ The owner instructions are restated in `docs/DEF4_BILLING_PERMISSION_SEPARATION.
 - L3 silently drops other scope spellings instead of refusing them.
 
 **Review and CI:** the independent re-review and CI on the exact head are recorded in the DEF-4 doc §11.
+
+
+## DEF-4 security closure verification (2026-11-20, seventh pass)
+
+Full record: `docs/DEF4_BILLING_PERMISSION_SEPARATION.md` §12.
+
+**Verdicts:**
+
+- **N1 holds.** Verified in both flag states, through the routes and through `PolicyService`.
+- **`platform.pricing.manage` is consistent.** The six evaluators agree for eight personas, and only Super Admin or a platform role can write the global catalogue.
+
+**Independent review of the complete DEF-4 work** found no Critical or High issue:
+
+| Finding | Severity | Status |
+|---|---|---|
+| F1: `/plan-settings` failed open when no organisation resolved (cross-tenant, financial) | Medium | Fixed in `a8393ce` |
+| F2: effective-services widening | Low | Fixed in `a8393ce` |
+| F4: flag-on N1 inconsistency | Low | Fixed in `a8393ce` |
+| F5: test gaps | — | Closed |
+| F3: `package_id` changeable on `PUT` | Low/Medium, pre-existing | Owner decision |
+
+**CI-observed failure:** the contract-lease failure was a test defect. It was reproduced deterministically and fixed in `9a47109`. **Not security approval.**

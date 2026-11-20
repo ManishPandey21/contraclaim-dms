@@ -176,6 +176,35 @@ Open:
   - assignments (grant before revoke);
   - `BUILT_IN_ROLE_ASSIGNMENTS` shadow mode, then on.
 
+## Seventh pass (DEF-4 security closure verification, 2026-11-20)
+
+| Commit | Change |
+|---|---|
+| `c30f691` | Verification matrices and P-05 `flag_off_disclosure_impact` |
+| `9a47109` | Contract-lease test defect |
+| `a8393ce` | Review fixes F1, F2, F4; F5 tests |
+
+**CI on `a98aa94`:** run 44718392602, green except Gitleaks.
+
+**Verdicts:**
+
+- N1 holds;
+- platform pricing is consistent across all six evaluators.
+
+**Open:**
+
+- F3 (owner decision);
+- M1 remediation;
+- P-05 production reading;
+- the authorised review.
+
+**Next dependency-ready work (recommended):** the M1 remediation, step 1 of `docs/M1_BUILT_IN_ROLE_SCOPING.md` §4. This is the approved High-priority ticket.
+
+- **Build:** per-assignment built-in roles behind `BUILT_IN_ROLE_ASSIGNMENTS`, default `off`, plus a `shadow` mode that only logs disagreements.
+- **Out of scope:** writing any assignment, and any migration.
+
+It is the main code-side blocker to DEF-4 activation, and it needs no production access. The M1-E1 to M1-E5 tests flip when the `on` mode is shown safe.
+
 ## Blockers before production authorisation
 
 1. P-01 to P-16 production readings with authorised read-only access (AQ-11). This includes:

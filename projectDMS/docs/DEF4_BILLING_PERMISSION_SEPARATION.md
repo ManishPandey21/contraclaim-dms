@@ -428,4 +428,159 @@ Recorded Lows from the re-review:
 3. **Flag on:** an explicit project-scoped `subscription.history.view` grant shows full detail for that project. Only the `projectadmin`/`projectuser` role names are cut further. This follows the explicit grant, so it is intended; **owner to confirm**.
 4. **Flag on:** organisation users need the grant step (unchanged; by design).
 
-**CI:** *pending; recorded below.*
+**CI:** run 44718392602 on `a98aa94` (§12).
+
+
+## 12. Security closure verification (owner instructions 2026-11-20, seventh pass)
+
+**Starting point.** Branch `claude/zen-ptolemy-695liz`. HEAD `a98aa94` matched the remote and the working tree was clean. PR #114 is a draft, open and unmerged.
+
+### Step 1: CI on `a98aa94` (run 44718392602)
+
+| Job | Result |
+|---|---|
+| Backend lint and tests | Passed. Unit: 8,434 passed, 1,210 skipped, 4 xfailed. Exhibit confinement: 20 passed. Real MongoDB: 1,115 passed, and the every-suite-ran gate passed. |
+| Frontend lint, tests, build | Passed. Unit: 1,015 passed, 3 skipped. Mocked E2E: 78 passed; 59 deployed-stack tests skipped. |
+| Dependency scan | Passed: no known vulnerabilities, 56 checks. |
+| Docker build and image scan | Passed. |
+| Secret scan (Gitleaks) | **Failed:** "leaks found: 2", the two known historical findings (with the security owner). |
+
+**Earlier heads:**
+
+- `01cdb29` failed the upload-route gate; fixed by `e633a0f`.
+- `5ccd918` and `10714db` failed the advertised-permission parity test; fixed by `a98aa94`.
+- `10714db` also failed the contract-lease test; fixed in `9a47109` (see step 6).
+
+CI success is not security approval.
+
+### Step 2: N1 verdict (`d9f1011`): **holds**
+
+Tested in `test_def4_standing_and_pricing_matrix_mongo.py`, both flag states, through the HTTP routes and through `PolicyService.has_organisation_level_standing` and `authorize` directly.
+
+| Holder (Project User or Admin of A1, unless stated) | Flag off | Flag on |
+|---|---|---|
+| Plus a `tags:read` role of A | No standing, 403 | 403 |
+| Plus an A role granting `billing.plan.view`, `subscription.history.view`, `billing.record.view` | Standing | Allowed (since F4) |
+| Plus an A role granting `organizations:read` (legacy alias) | Standing | 403 (aliases never count with the flag on) |
+| Plus an inactive A role | No standing | 403 |
+| Plus a project-scoped A1 role | No standing | 403 |
+| Plus a B role, not a member of B | Nothing in A or B | Nothing |
+| Plus a B role, membership row for B revoked | Nothing | Nothing |
+| Plus a B role, member of A and B | Nothing in A; B's billing in B | Nothing |
+| `projectuser` and `orguser` together (mixed built-in) | Standing; global `orguser`, M1 | Per the explicit grants |
+| Custom finance role only | Standing | Allowed |
+
+**Mutants:** dropping the N1 filter fails the suite.
+
+### Step 3: platform pricing verdict (`8a45f3b`, `a98aa94`): **consistent**
+
+Eight personas: a platform user with the platform role; the same role held by a tenant; a tenant billing admin; a tenant custom role naming the permission; a tenant wildcard role; an Org Admin whose built-in role was edited to include it; a platform user with no role; a platform role holding only `*`.
+
+For each persona, all six evaluators agree:
+
+1. `PermissionService.user_has_permission`
+2. `PolicyService.has_permission`
+3. `PolicyService.authorize`
+4. `require_permission`
+5. the advertised permission list
+6. `POST /plans` with a valid step-up
+
+Only the platform user with the platform role, and Super Admin, created plans. Other behaviour:
+
+- A scoped `authorize` call is refused even for Super Admin.
+- Revoking the role, or the user joining an organisation, takes effect on the next check (no cache).
+
+**Mutants:** 6 checked. 5 are killed. The sixth, `PolicyService.has_permission`'s own branch, is equivalent: the resolver applies the same rule.
+
+### Step 4: what changes with the flag off (production impact)
+
+These apply to existing users without activating DEF-4.
+
+| Change | Who | Commit |
+|---|---|---|
+| Organisation financial views refused (billing summary, history, records, review queue, receipt, subscription history, invoice preview) | Users without organisation-level standing in that organisation: Project Admin, Project User, limited and plain users, custom project roles | `d0eb1db`, `d9f1011` |
+| Subscription and service-state reads cut to status, boolean feature indicators and expiry (`/subscriptions`, `/subscriptions/{id}`, `/plan-settings`, `/plan-settings/effective-services`) | The same users | `5ccd918`, `d0eb1db`, `a8393ce` |
+| Effective services limited to the caller's own organisations, and to projects where they stand | Tenant billing admins and custom entitlement managers | `8517f27`, `a8393ce` |
+| Global plan and add-on catalogue writes refused | Tenant billing admins and any non-platform holder of `billing.plan.manage` or `*` | `8a45f3b`, `a98aa94` |
+| `PUT /subscriptions/{id}` refuses changes to organisation or project | Every caller, Super Admin included | `01cdb29`, `e633a0f` |
+
+**The P-05 reading** `flag_off_disclosure_impact` (read-only, counts and organisation ids only):
+
+- `project_level_users_losing_financial_reads`, with a per-organisation breakdown;
+- `project_level_users_given_the_operational_view`;
+- `tenant_holders_losing_global_catalogue_writes`;
+- `platform_pricing_holders` and `platform_pricing_names_on_tenant_roles`;
+- `entitlement_managers_losing_cross_org_service_state`.
+
+**Related readings already in P-05:**
+
+- `billing_permission_impact`: legacy aliases, custom billing roles, wildcards;
+- `built_in_role_scope_impact`: mixed built-in roles, dual-organisation users.
+
+Constants are inlined, with parity tests. **Not read in production:** it needs AQ-11 authorised access.
+
+### Step 5: independent review of the complete DEF-4 work (`a6dc116..a98aa94`; agent, not the authorised review)
+
+No Critical or High finding.
+
+| Id | Severity | Location | Scenario | Introduced? | Correction | Regression test | Release impact |
+|---|---|---|---|---|---|---|---|
+| F1 | Medium | `routers/rbac_monetization.py` `_minimise_plan_settings`; `services/monetization_service.py` `get_plan_settings` | With the flag off, a user whose projects resolve to no organisation (a deleted project, or a project of a missing organisation) got every organisation, plus unminimised gateway ids and negotiated overrides from `/plan-settings` | Fail-open minimiser: yes. Unfiltered organisation list: pre-existing | **Fixed** (`a8393ce`): no resolved organisation means none; every organisation, project, row and state is judged in its own organisation | `test_f1_plan_settings_fails_closed_without_a_resolvable_organisation` (both states); 2 mutants killed | Was a blocker; fixed |
+| F2 | Low | `routers/rbac_monetization.py` effective-services widening | With the flag off, a project user holding a B entitlement role saw sibling projects in A (operational view) | Partly (the narrowing was incomplete) | **Fixed** (`a8393ce`): widening is per organisation where the caller stands | `test_f2_...`; mutant killed | Fixed |
+| F3 | Low/Medium | `services/monetization_service.py` `SUBSCRIPTION_SCOPE_FIELDS`; `PUT /subscriptions/{id}` | An entitlement manager can change `package_id`, which entitlement lookup matches on, including promoting it to null | Pre-existing; outside L3's organisation/project decision | **Owner decision:** treat `package_id` as scope (refuse, include in the compare-and-set), or accept it as entitlement-manager authority | Proposed: extend the L3 attempts | Decide before release |
+| F4 | Low | `services/policy_service.py` `_may_answer_at_organisation_level`; the router cut | With the flag on, a custom organisation finance role was cancelled by also holding `projectuser` (the flag-off N1 rule admits it) | Yes | **Fixed** (`a8393ce`): a custom role of that organisation granting the permission answers for it | `test_f4_...` (both states); 2 mutants killed | Fixed (affected activation only) |
+| F5 | Low (test gap) | M4 scoped refusal; `_platform_held` treatment of `*` | Two mutants survived | n/a | **Tests added** | `test_f5_...` | Closed |
+
+Also from the review:
+
+- **Not exercised:** Redis-on cache propagation after grant or revoke, and concurrent `PUT` races beyond the compare-and-set. The new explicit, standing and platform checks bypass the cache by construction.
+- **Run here:** `test_security_redis_mongo.py` against real Redis: 11 passed.
+
+### Step 6: verification
+
+**Local runs:**
+
+- matrix suite: 11 passed;
+- related real-MongoDB set (DEF-4, M4, L3, decision 4, M1, effective permissions, permission check): 82 passed;
+- related unit tests: 997 passed, 1 skipped;
+- Redis suite: 11 passed;
+- mypy gate passed; ruff no worse than HEAD.
+
+**Mutation testing in this pass:** 11 killed, 1 equivalent.
+
+**The contract-lease failure (CI run 44713207170) was investigated, not dismissed:**
+
+- **Cause:** a test defect. The simulated partition stayed up for the retry ingests, so the final ingest self-fenced whenever it ran past the patched 500 ms window.
+- **Reproduction:** deterministic, by delaying that ingest.
+- **Fix:** `9a47109` ends the partition with the stopped ingest. All assertions are unchanged, and no product code changed.
+- **Check:** the full file passed 3 times locally.
+
+**Full local suites and CI on the final head:** recorded below.
+
+### Stage matrix (seventh pass)
+
+| Item | Implemented | Locally verified | CI-verified | Security-approved | Production-accepted |
+|---|---|---|---|---|---|
+| M4: global pricing (platform role or Super Admin), every evaluator consistent | Yes | Yes | Yes, `a98aa94` (run 44718392602); matrix pending CI | No | No |
+| L3: subscription organisation/project scope, compare-and-set | Yes | Yes | Yes, `a98aa94` | No | No |
+| Decision 4: minimum disclosure, standing rule, N1; F1, F2, F4 fixes | Yes | Yes | N1 yes (`a98aa94`); F1/F2/F4 pending CI | No | No |
+| DEF-4 flag-on policy (flag `false`) | Yes | Yes | Yes | No | No: blocked (below) |
+| P-05 readings: billing, M1, flag-off impact | Yes | Yes | Billing and M1 yes; flag-off impact pending CI | n/a | **Not read in production** |
+| M1: per-assignment built-in roles | Audit, tests, design only | Yes | Yes | No | No |
+| F3: `package_id` on `PUT` | Not changed | — | — | — | Owner decision |
+
+### Remaining security blockers before any release
+
+1. **P-05 production reading**, including all three impact readings. It needs AQ-11 authorised read-only access.
+2. **M1:** built-in roles are global (exposures E1 to E5). The remediation must be shown safe before DEF-4 activation.
+3. **F3** owner decision.
+4. **Authorised security review**, including Gitleaks (2 findings) and the picomatch R5 assessment.
+5. Two consecutive deployed staging E2E runs.
+6. JG-5(f) legal sign-off and expert-labelled golden sets (other Phase 4b gates).
+7. A written owner acceptance and release decision.
+
+**Not done, by instruction:**
+
+- DEF-4 not activated, roles and aliases unchanged;
+- no deployment, migration or merge;
+- rollout off, skills unpublished, Phase 5 not started.
