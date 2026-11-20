@@ -386,14 +386,32 @@ export async function startTrial(
 export interface ConvertTrialPayload {
   billing_period: string;
   add_on_codes?: string[];
+  /** Super Admin only: an audited no-charge conversion of a priced plan (R6-5). */
+  no_charge_reason?: string;
 }
+
+/**
+ * A priced plan converts through a payment-confirmed checkout (R6-5): the server answers
+ * `pending_payment` with a `checkout_url`, and the trial keeps governing until the payment
+ * webhook confirms. A free plan, or an authorised no-charge conversion, returns the converted
+ * subscription itself.
+ */
+export type ConvertTrialResult =
+  | (Subscription & { status: string })
+  | {
+      status: "pending_payment";
+      converts_trial_id: string;
+      subscription_id: string;
+      checkout_url?: string | null;
+      repeated?: boolean;
+    };
 
 export async function convertTrial(
   id: string,
   payload: ConvertTrialPayload,
   options?: { stepUpToken?: string }
-): Promise<Subscription> {
-  const { data } = await api.post<Subscription>(
+): Promise<ConvertTrialResult> {
+  const { data } = await api.post<ConvertTrialResult>(
     `/rbac-monetization/subscriptions/${id}/convert-trial`,
     payload,
     { headers: options?.stepUpToken ? { "X-Step-Up-Token": options.stepUpToken } : undefined }

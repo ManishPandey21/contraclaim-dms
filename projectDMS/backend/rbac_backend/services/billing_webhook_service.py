@@ -49,6 +49,14 @@ def _event_notes(event: WebhookEvent) -> Dict[str, Any]:
 #: A webhook may move a subscription to "active" only from these statuses (re-review R2).
 WEBHOOK_ACTIVATABLE_STATUSES = frozenset({"pending", "trial", "active", "past_due"})
 
+
+def _trial_lookup(value: Any) -> Any:
+    """A stored trial id as stored: an ObjectId when it reads as one, else the string."""
+    from bson import ObjectId
+
+    text = str(value)
+    return {"$in": [text, ObjectId(text)]} if ObjectId.is_valid(text) else text
+
 #: Entity fields kept from a refused event's payload: identity, amount, scope. Contact
 #: details, card and VPA data are dropped (re-review R4).
 _KEPT_ENTITY_FIELDS = ("id", "subscription_id", "customer_id", "plan_id", "status", "amount", "currency", "notes", "order_id")
@@ -244,6 +252,8 @@ class BillingWebhookService:
             update["governing_since"] = now
         update.update({"updated_at": now, "updated_by": f"system:webhook:{self.provider}"})
         await db.subscriptions.update_one({"_id": subscription["_id"]}, {"$set": update})
+        if becomes_governing and subscription.get("converts_trial_id"):
+            await self._close_converted_trial(db, subscription, event, now)
 
         # Billing record (financial audit trail).
         record_status = "paid" if event.event_type == "payment.succeeded" else (
@@ -290,6 +300,46 @@ class BillingWebhookService:
             "subscription_id": str(subscription["_id"]),
             "applied": {k: v for k, v in update.items() if k in {"status", "billing_status"}},
         }
+
+    async def _close_converted_trial(self, db: Any, subscription: Dict[str, Any], event: WebhookEvent, now: datetime) -> None:
+        """R6-5: payment for a trial conversion confirmed. The paid subscription now governs
+        (latest activation); the trial it converts is closed (compare-and-set on it still
+        being a trial of the same scope, so a replay or a later event changes nothing)."""
+        trial = await db.subscriptions.find_one_and_update(
+            {
+                "_id": _trial_lookup(subscription["converts_trial_id"]),
+                "status": "trial",
+                "organization_id": subscription.get("organization_id"),
+                "project_id": subscription.get("project_id"),
+                "conversion.subscription_id": str(subscription["_id"]),
+            },
+            {"$set": {"status": "cancelled", "billing_status": "inactive", "cancelled_at": now,
+                      "cancellation_reason": "converted_to_paid", "conversion.state": "paid",
+                      "conversion.paid_at": now, "updated_at": now,
+                      "updated_by": f"system:webhook:{self.provider}"}},
+        )
+        if trial is None:
+            return
+        await db.subscription_history.insert_one({
+            "subscription_id": str(trial["_id"]),
+            "organization_id": str(trial.get("organization_id", "")),
+            "project_id": trial.get("project_id"),
+            "change_type": "trial_convert",
+            "from_status": "trial",
+            "to_status": "cancelled",
+            "metadata": {"paid_subscription_id": str(subscription["_id"]), "event_id": event.event_id},
+            "changed_by": f"system:webhook:{self.provider}",
+            "changed_at": now,
+        })
+        await AuditEventService(db).emit(
+            action="subscription.trial_conversion_paid",
+            actor_id=f"system:webhook:{self.provider}",
+            resource_type="subscription",
+            resource_id=str(trial["_id"]),
+            organization_id=str(trial.get("organization_id", "")),
+            project_id=trial.get("project_id"),
+            metadata={"paid_subscription_id": str(subscription["_id"]), "event_id": event.event_id},
+        )
 
     async def _insert_billing_record(
         self, db: Any, subscription: Dict[str, Any], event: WebhookEvent, record_status: str, now: datetime,

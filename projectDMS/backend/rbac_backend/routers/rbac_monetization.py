@@ -34,7 +34,9 @@ from ..services.monetization_service import (
     GatewayIdentityConflict,
     MonetizationService,
     SubscriptionScopeChangeRefused,
+    GatewayOperationFailed,
     SubscriptionNotGoverning,
+    TrialConversionRefused,
     SubscriptionScopeConflict,
     scope_text,
     subscription_scope,
@@ -1402,7 +1404,15 @@ async def convert_trial(
         subscription_id=subscription_id,
     )
     try:
-        return await service.convert_trial(subscription_id, payload, current_user)
+        return await service.convert_trial(
+            subscription_id, payload, current_user,
+            # R6-5: a no-charge conversion is a separate authority from trial management.
+            no_charge_authorised=ScopeService().is_superadmin(current_user),
+        )
+    except (TrialConversionRefused, GatewayIdentityConflict) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except GatewayOperationFailed as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 

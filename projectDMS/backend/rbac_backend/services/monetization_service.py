@@ -71,6 +71,15 @@ class GatewayIdentityConflict(Exception):
     """The gateway subscription id is already bound to another subscription."""
 
 
+class TrialConversionRefused(Exception):
+    """A trial conversion that would grant paid service without payment, or convert a trial
+    that does not govern its scope (R6-5)."""
+
+
+class GatewayOperationFailed(Exception):
+    """The payment gateway did not complete an operation; nothing was changed locally."""
+
+
 class SubscriptionNotGoverning(Exception):
     """A plan, billing-period or add-on change aimed at a subscription that does not govern
     its scope (entitlement re-review N1/N2): it would change the plan, and possibly the
@@ -680,6 +689,7 @@ class MonetizationService:
         current_user: Any,
         customer_name: Optional[str] = None,
         customer_email: Optional[str] = None,
+        converts_trial_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Provision a customer + subscription on the payment gateway and create a
         local subscription in ``pending`` state. The webhook flips it to ``active``
@@ -699,7 +709,8 @@ class MonetizationService:
             gateway_customer_id=customer.gateway_customer_id,
             plan_code=plan_code,
             billing_period=billing_period,
-            metadata={"organization_id": str(organization_id), "project_id": str(project_id or "")},
+            metadata={"organization_id": str(organization_id), "project_id": str(project_id or ""),
+                      **({"converts_trial_id": str(converts_trial_id)} if converts_trial_id else {})},
         )
 
         now = datetime.utcnow()
@@ -721,6 +732,7 @@ class MonetizationService:
             # Provenance of the binding: the webhook trusts only checkout-bound identities.
             "payment_gateway_bound_by": "checkout",
             "payment_gateway_bound_at": now,
+            **({"converts_trial_id": str(converts_trial_id)} if converts_trial_id else {}),
             "created_at": now,
             "updated_at": now,
             "created_by": getattr(current_user, "id", None),
@@ -1090,39 +1102,244 @@ class MonetizationService:
         )
         return await self.create_subscription(payload, current_user)
 
-    async def convert_trial(self, subscription_id: str, request: ConvertTrialRequest, current_user: Any) -> Dict[str, Any]:
-        """Convert a trial subscription into a paid subscription."""
-        sub = await self.get_subscription_by_id(subscription_id)
-        if not sub:
-            raise ValueError("Subscription not found")
-        if sub.get("status") != "trial":
-            raise ValueError("Only trial subscriptions can be converted")
+    #: R6-5: what a trial conversion may produce without a gateway payment.
+    NO_CHARGE_BILLING_STATUS = "no_charge_override"
+    FREE_PLAN_BILLING_STATUS = "not_billed"
+    NO_CHARGE_REASON_MIN_LENGTH = 10
 
+    def _period_price(self, plan: Dict[str, Any], billing_period: str) -> int:
+        return int((plan.get("pricing_tiers") or {}).get(billing_period, plan.get("base_price_minor", 0)) or 0)
+
+    async def convert_trial(
+        self,
+        subscription_id: str,
+        request: ConvertTrialRequest,
+        current_user: Any,
+        *,
+        no_charge_authorised: bool = False,
+    ) -> Dict[str, Any]:
+        """Convert a trial (R6-5, owner decision 2026-11-21).
+
+        A trial never becomes a paid, active subscription through a local update:
+
+        - the trial must be a running trial (not expired, ended, not started or with an
+          unreadable period) that enforcement itself selects for its scope (not outranked);
+        - the plan must exist and be active, the period supported, and every add-on must exist,
+          be active, be compatible with the plan and appear once;
+        - **priced plan:** a checkout is started for the trial's scope (``converts_trial_id``)
+          and the trial keeps governing until the billing webhook confirms payment; the paid
+          subscription then governs (latest activation) and the trial is closed. One checkout
+          per trial (claimed by compare-and-set; a repeat returns the same checkout; a gateway
+          failure releases the claim for a retry). Priced add-ons are refused here: checkout
+          does not carry them to the gateway, so they are added after conversion;
+        - **free plan** (zero price for the period, no priced add-on): converted in place with
+          ``billing_status = "not_billed"``; no payment is invented;
+        - **no-charge override** of a priced plan: only with separate authority (Super Admin,
+          decided by the route) and a written reason, audited as such, with
+          ``billing_status = "no_charge_override"``.
+
+        ``billing_status`` is never set to ``active`` here: only payment confirmation does that.
+        """
+        from .entitlement_service import EntitlementService
+        from .subscription_resolution import classify
+
+        db = await self._get_db()
+        lookup = self._lookup_id(subscription_id)
+        stored = await db.subscriptions.find_one({"_id": lookup})
+        if not stored:
+            raise ValueError("Subscription not found")
+        trial_id = str(stored["_id"])
+        status = str(stored.get("status") or "").strip().lower()
+        if status != "trial":
+            raise TrialConversionRefused(f"Only a running trial can be converted (status '{status or 'unknown'}')")
+        conversion = stored.get("conversion") or {}
+        if conversion.get("state") in {"starting", "pending_payment"}:
+            return self._conversion_outcome(trial_id, conversion)
+        now = datetime.utcnow()
+        period_class = classify(stored, now)
+        if period_class != "eligible":
+            raise TrialConversionRefused(f"This trial cannot be converted ({period_class}); start a new purchase instead")
+        resolution = await EntitlementService(db).resolve_subscription(
+            organization_id=scope_text(stored.get("organization_id")),
+            project_id=scope_text(stored.get("project_id")),
+            package_id=scope_text(stored.get("package_id")),
+        )
+        selected = str((resolution.subscription or {}).get("_id") or "")
+        if selected != trial_id:
+            raise TrialConversionRefused(
+                "This trial does not govern its scope"
+                + (f" (subscription {selected} does)" if selected else f" ({resolution.reason})")
+                + "; it cannot be converted"
+            )
+
+        plan_code = str(stored.get("plan_code") or "")
+        plan = await self.get_plan_by_code(plan_code)
+        if not plan or not plan.get("is_active", True):
+            raise TrialConversionRefused(f"Plan '{plan_code}' is not available for conversion")
+        billing_period = str(request.billing_period or "monthly")
+        if billing_period not in {period.value for period in BillingPeriod}:
+            raise ValueError(f"Unsupported billing period '{billing_period}'")
+        add_on_codes = list(request.add_on_codes or [])
+        if len(set(add_on_codes)) != len(add_on_codes):
+            raise ValueError("An add-on is named more than once")
+        add_on_prices = 0
+        for code in add_on_codes:
+            addon = await self.get_addon_by_code(code)
+            if not addon or not addon.get("is_active", True):
+                raise ValueError(f"Add-on '{code}' not found")
+            compatible = addon.get("compatible_plans") or []
+            if compatible and plan_code not in compatible:
+                raise ValueError(f"Add-on '{code}' is not compatible with plan '{plan_code}'")
+            add_on_prices += int(addon.get("price_minor") or 0)
+        price = self._period_price(plan, billing_period)
+        reason = (request.no_charge_reason or "").strip()
+
+        if reason:
+            if not no_charge_authorised:
+                raise TrialConversionRefused("A no-charge conversion needs Super Admin authority")
+            if len(reason) < self.NO_CHARGE_REASON_MIN_LENGTH:
+                raise ValueError(f"A no-charge conversion needs a reason of at least {self.NO_CHARGE_REASON_MIN_LENGTH} characters")
+            return await self._convert_trial_in_place(
+                stored, plan_code, billing_period, add_on_codes, self.NO_CHARGE_BILLING_STATUS, current_user,
+                audit_action="subscription.trial_converted_no_charge",
+                audit_metadata={"reason": reason, "authority": "superadmin", "list_price_minor": price + add_on_prices},
+            )
+        if price + add_on_prices == 0:
+            return await self._convert_trial_in_place(
+                stored, plan_code, billing_period, add_on_codes, self.FREE_PLAN_BILLING_STATUS, current_user,
+                audit_action="subscription.trial_converted_free", audit_metadata={"list_price_minor": 0},
+            )
+        if add_on_prices:
+            raise TrialConversionRefused(
+                "Priced add-ons are not charged by checkout; convert the trial first, then add them"
+            )
+        return await self._convert_trial_by_checkout(stored, plan_code, billing_period, current_user)
+
+    @staticmethod
+    def _conversion_outcome(trial_id: str, conversion: Dict[str, Any]) -> Dict[str, Any]:
+        if conversion.get("state") == "starting":
+            raise TrialConversionRefused("A conversion of this trial is already being started; retry shortly")
+        return {
+            "status": "pending_payment",
+            "converts_trial_id": trial_id,
+            "subscription_id": conversion.get("subscription_id"),
+            "gateway_subscription_id": conversion.get("gateway_subscription_id"),
+            "checkout_url": conversion.get("checkout_url"),
+            "repeated": True,
+        }
+
+    async def _convert_trial_by_checkout(self, stored: Dict[str, Any], plan_code: str, billing_period: str,
+                                         current_user: Any) -> Dict[str, Any]:
+        import uuid
+
+        db = await self._get_db()
+        trial_id = str(stored["_id"])
+        attempt = uuid.uuid4().hex
+        claimed = await db.subscriptions.find_one_and_update(
+            {"_id": stored["_id"], "status": stored.get("status"),
+             "$or": [{"conversion": {"$exists": False}}, {"conversion": None}, {"conversion.state": "failed"}]},
+            {"$set": {"conversion": {"state": "starting", "attempt": attempt, "plan_code": plan_code,
+                                     "billing_period": billing_period, "requested_by": getattr(current_user, "id", None),
+                                     "requested_at": datetime.utcnow()}}},
+        )
+        if claimed is None:
+            # Another request claimed it (or the trial changed): answer with its state.
+            current = await db.subscriptions.find_one({"_id": stored["_id"]}) or {}
+            if str(current.get("status") or "").strip().lower() != "trial":
+                raise TrialConversionRefused("This trial changed while the conversion was being started; reload")
+            return self._conversion_outcome(trial_id, current.get("conversion") or {"state": "starting"})
+        try:
+            checkout = await self.start_checkout(
+                organization_id=str(stored.get("organization_id")),
+                project_id=scope_text(stored.get("project_id")),
+                plan_code=plan_code,
+                billing_period=billing_period,
+                current_user=current_user,
+                converts_trial_id=trial_id,
+            )
+        except Exception as exc:
+            await db.subscriptions.update_one(
+                {"_id": stored["_id"], "conversion.attempt": attempt},
+                {"$set": {"conversion.state": "failed", "conversion.failed_at": datetime.utcnow(),
+                          "conversion.error": type(exc).__name__}},
+            )
+            await self.audit_service.emit(
+                action="subscription.trial_conversion_failed",
+                actor_id=getattr(current_user, "id", None),
+                resource_type="subscription",
+                resource_id=trial_id,
+                organization_id=str(stored.get("organization_id")),
+                project_id=scope_text(stored.get("project_id")),
+                result="failure",
+                reason=type(exc).__name__,
+            )
+            if isinstance(exc, (ValueError, GatewayIdentityConflict)):
+                raise
+            raise GatewayOperationFailed("The payment gateway did not start the checkout; nothing was changed") from exc
+        await db.subscriptions.update_one(
+            {"_id": stored["_id"], "conversion.attempt": attempt},
+            {"$set": {"conversion.state": "pending_payment", "conversion.subscription_id": checkout["subscription_id"],
+                      "conversion.gateway_subscription_id": checkout.get("gateway_subscription_id"),
+                      "conversion.checkout_url": checkout.get("checkout_url")}},
+        )
+        await self.audit_service.emit(
+            action="subscription.trial_conversion_checkout_started",
+            actor_id=getattr(current_user, "id", None),
+            resource_type="subscription",
+            resource_id=trial_id,
+            organization_id=str(stored.get("organization_id")),
+            project_id=scope_text(stored.get("project_id")),
+            metadata={"paid_subscription_id": checkout["subscription_id"], "plan_code": plan_code,
+                      "billing_period": billing_period},
+        )
+        return {**checkout, "status": "pending_payment", "converts_trial_id": trial_id}
+
+    async def _convert_trial_in_place(self, stored: Dict[str, Any], plan_code: str, billing_period: str,
+                                      add_on_codes: List[str], billing_status: str, current_user: Any, *,
+                                      audit_action: str, audit_metadata: Dict[str, Any]) -> Dict[str, Any]:
+        trial_id = str(stored["_id"])
         now = datetime.utcnow()
         update = SubscriptionUpdate(
             status="active",
-            billing_status="active",
-            billing_period=request.billing_period,
+            billing_status=billing_status,
+            billing_period=billing_period,
             trial=False,
             trial_ends_at=None,
-            auto_renew=True,
+            auto_renew=False,
             starts_at=now,
             ends_at=None,
             current_period_start=now,
-            current_period_end=self._compute_period_end(now, request.billing_period),
-            active_add_ons=request.add_on_codes if request.add_on_codes else None,
+            current_period_end=self._compute_period_end(now, billing_period),
+            active_add_ons=add_on_codes or None,
         )
-        result = await self.update_subscription(subscription_id, update, current_user)
-
+        # Compare-and-set on what this decision was made on: a concurrent conversion, cancel
+        # or checkout claim refuses this write instead of being overwritten.
+        expected = {field: stored.get(field) for field in self.LIFECYCLE_STATE_FIELDS}
+        expected["conversion"] = stored.get("conversion")
+        try:
+            result = await self.update_subscription(trial_id, update, current_user, expected_state=expected)
+        except SubscriptionNotGoverning as exc:
+            raise TrialConversionRefused(str(exc)) from exc
+        await self.audit_service.emit(
+            action=audit_action,
+            actor_id=getattr(current_user, "id", None),
+            resource_type="subscription",
+            resource_id=trial_id,
+            organization_id=str(stored.get("organization_id")),
+            project_id=scope_text(stored.get("project_id")),
+            metadata={**audit_metadata, "plan_code": plan_code, "billing_period": billing_period,
+                      "billing_status": billing_status, "add_on_codes": add_on_codes},
+        )
         await self._record_history(
-            subscription_id=subscription_id,
-            organization_id=sub["organization_id"],
-            project_id=sub.get("project_id"),
+            subscription_id=trial_id,
+            organization_id=stored["organization_id"],
+            project_id=stored.get("project_id"),
             change_type=SubscriptionChangeType.TRIAL_CONVERT,
             from_status="trial",
             to_status="active",
-            to_billing_period=request.billing_period,
+            to_billing_period=billing_period,
             changed_by=getattr(current_user, "id", None),
+            metadata={"billing_status": billing_status, **audit_metadata},
         )
         return result
 

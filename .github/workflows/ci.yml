@@ -300,6 +300,7 @@ jobs:
             backend/rbac_backend/tests/integration/test_m4_global_pricing_mongo.py
             backend/rbac_backend/tests/integration/test_l3_subscription_scope_integrity_mongo.py
             backend/rbac_backend/tests/integration/test_r6_8_subscription_update_allowlist_mongo.py
+            backend/rbac_backend/tests/integration/test_r6_5_trial_conversion_mongo.py
             backend/rbac_backend/tests/integration/test_operational_minimum_disclosure_mongo.py
             backend/rbac_backend/tests/integration/test_m1_cross_org_role_combinations_mongo.py
             backend/rbac_backend/tests/integration/test_def4_standing_and_pricing_matrix_mongo.py
