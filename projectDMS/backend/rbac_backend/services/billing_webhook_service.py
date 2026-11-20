@@ -27,6 +27,25 @@ from .payment_gateway import PaymentGatewayInterface, WebhookEvent, get_payment_
 logger = logging.getLogger(__name__)
 
 
+def _event_time(event: WebhookEvent) -> Optional[float]:
+    """The provider's own event time (Razorpay ``created_at``, seconds), when it sent one."""
+    raw = event.raw if isinstance(event.raw, dict) else {}
+    value = raw.get("created_at")
+    try:
+        return float(value) if value is not None and value != "" else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _event_notes(event: WebhookEvent) -> Dict[str, Any]:
+    """The scope checkout put in the gateway subscription's notes, when the event carries it."""
+    raw = event.raw if isinstance(event.raw, dict) else {}
+    body = raw.get("payload") or {}
+    entity = (body.get("subscription") or {}).get("entity") or {}
+    notes = entity.get("notes")
+    return notes if isinstance(notes, dict) else {}
+
+
 class BillingWebhookService:
     def __init__(self, db: Any = None, gateway: Optional[PaymentGatewayInterface] = None, provider: str = "noop") -> None:
         self.db = db
@@ -118,6 +137,16 @@ class BillingWebhookService:
                     return await self._refuse_binding(db, event, "gateway_provider_mismatch", [subscription])
                 if subscription.get("payment_gateway_bound_by") not in (None, "checkout"):
                     return await self._refuse_binding(db, event, "gateway_binding_not_from_checkout", [subscription])
+                # Ownership (independent review F4): the event's customer and the scope the
+                # checkout sent in its notes must agree with the subscription, where both exist.
+                stored_customer = str(subscription.get("payment_gateway_customer_id") or "")
+                if event.gateway_customer_id and stored_customer and str(event.gateway_customer_id) != stored_customer:
+                    return await self._refuse_binding(db, event, "gateway_customer_mismatch", [subscription])
+                notes = _event_notes(event)
+                for key in ("organization_id", "project_id"):
+                    noted = str(notes.get(key) or "").strip()
+                    if noted and noted != str(subscription.get(key) or "").strip():
+                        return await self._refuse_binding(db, event, "gateway_notes_scope_mismatch", [subscription])
         if not subscription:
             logger.warning(
                 "Webhook %s references unknown gateway subscription %s",
@@ -136,6 +165,25 @@ class BillingWebhookService:
         update = dict(transitions.get(event.event_type) or {})
         if not update:
             return {"matched": True, "changed": False}
+
+        # Order and freshness (independent review F2). An event older than the last one applied
+        # to this subscription never applies (a delayed or replayed activation after a
+        # cancellation), and no payment event re-activates a cancelled subscription:
+        # reactivation is an explicit, authorised operation, not a webhook side effect.
+        event_at = _event_time(event)
+        last_at = subscription.get("payment_last_event_at")
+        if event_at is not None and isinstance(last_at, (int, float)) and event_at < last_at:
+            return await self._refuse_binding(db, event, "stale_event", [subscription])
+        if update.get("status") == "active" and str(subscription.get("status") or "").lower() == "cancelled":
+            return await self._refuse_binding(db, event, "cancelled_not_reactivated_by_webhook", [subscription])
+        # One payment, one effect, whatever event id or body carried it.
+        if event.gateway_payment_id and await db.billing_records.find_one(
+            {"provider": self.provider, "gateway_payment_id": event.gateway_payment_id, "event_type": event.event_type},
+            {"_id": 1},
+        ):
+            return {"matched": True, "changed": False, "duplicate_payment": True}
+        if event_at is not None:
+            update["payment_last_event_at"] = max(event_at, last_at) if isinstance(last_at, (int, float)) else event_at
 
         # Money-safety: an activating event must carry the amount/currency the
         # plan was priced at. A mismatch never enables entitlement (entitlement
@@ -238,6 +286,12 @@ class BillingWebhookService:
                     "gateway_subscription_id": event.gateway_subscription_id,
                 },
             )
+        # Kept for the admin who resolves it: the event is acknowledged (a provider retry would
+        # be refused the same way), so its payload is the only copy (review F6).
+        await db.billing_webhook_events.update_one(
+            {"event_id": event.event_id},
+            {"$set": {"refused": reason, "refused_payload": event.raw}},
+        )
         return {"matched": False, "refused": reason}
 
     async def _expected_charge(self, db: Any, subscription: Dict[str, Any]) -> Optional[Dict[str, Any]]:

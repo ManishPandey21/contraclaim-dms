@@ -900,6 +900,14 @@ def _gateway_keys_attempted(payload: BaseModel, stored: Optional[Dict[str, Any]]
     return False
 
 
+def _unknown_keys(payload: BaseModel) -> List[str]:
+    """Keys that are neither fields of the body nor a recognised spelling of a scope field.
+    They are refused, never dropped: a client must not believe a change it sent was applied
+    (independent review F5: razorpay_subscription_id, rzp_sub_id ... were dropped with 200)."""
+    recognised = set().union(*_SCOPE_FIELD_SPELLINGS.values())
+    return sorted(key for key in (payload.model_extra or {}) if _scope_key(key) not in recognised)
+
+
 _GATEWAY_CHANGE_REFUSED = (
     "A subscription's payment gateway binding is set only by checkout; it cannot be set, "
     "replaced or cleared here"
@@ -923,6 +931,8 @@ async def create_subscription(
     )
     if _gateway_keys_attempted(payload):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_GATEWAY_CHANGE_REFUSED)
+    if payload.model_extra:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unknown fields: {', '.join(sorted(payload.model_extra))}")
     create = SubscriptionCreate(**payload.model_dump(include=set(SubscriptionCreate.model_fields)))
     try:
         return await MonetizationService().create_subscription(create, current_user)
@@ -1011,6 +1021,9 @@ async def update_subscription(
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_SCOPE_CHANGE_REFUSED)
     if _gateway_keys_attempted(payload, subscription):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_GATEWAY_CHANGE_REFUSED)
+    unknown = _unknown_keys(payload)
+    if unknown:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unknown fields: {', '.join(unknown)}")
     update = SubscriptionUpdate(**payload.model_dump(include=set(SubscriptionUpdate.model_fields) & payload.model_fields_set))
     try:
         return await service.update_subscription(

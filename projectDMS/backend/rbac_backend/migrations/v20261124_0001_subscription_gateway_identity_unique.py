@@ -13,9 +13,11 @@ guarantee behind them:
 - ``billing_webhook_events``: a partial unique index on (``provider``, ``body_sha256``), so a
   signed body replayed under a new event-id header is refused even under concurrency.
 
-A collection that already holds duplicates is reported as a warning (a property of this
-database) and its index is not created: the duplicate bindings must be resolved by a person
-(see the gateway re-binding design in docs/DEF4_BILLING_PERMISSION_SEPARATION.md). Nothing is
+Duplicates: a dry run reports them as warnings (so ``--fail-on-warning`` stops a deploy). An
+apply with duplicates present **raises**, so the runner records nothing and the migration
+stays pending until a person resolves them (gateway re-binding design, section 15 of
+docs/DEF4_BILLING_PERMISSION_SEPARATION.md); it is never marked applied without its indexes
+(independent review F3: the runner records any returned result as applied). Nothing is
 deleted, merged or rebound here. Not run in any environment by this change.
 """
 
@@ -86,6 +88,11 @@ async def upgrade(db: Any, dry_run: bool) -> MigrationResult:
         )
     else:
         clean.append(WEBHOOK_BODY_INDEX)
+    if warnings and not dry_run:
+        raise RuntimeError(
+            "subscription_gateway_identity_unique: " + "; ".join(warnings)
+            + ". Nothing was changed; resolve the duplicates, then apply again."
+        )
     return MigrationResult(
         version=VERSION,
         name=NAME,

@@ -81,16 +81,20 @@ async def _seed(env: Any) -> None:
     ])
 
 
-async def _webhook(env: Any, event: str, gateway_id: str, *, event_id: str, nonce: Optional[str] = None,
-                   secret: str = SECRET) -> Any:
-    # A real provider body is unique per event (its own id and timestamp); ``nonce`` stands
-    # for that, and a replay reuses it.
-    body = {"event": event, "created_at": nonce or event_id,
-            "payload": {"subscription": {"entity": {"id": gateway_id, "status": "active"}}}}
+async def _webhook(env: Any, event: str, gateway_id: str, *, event_id: str, nonce: Any = None,
+                   secret: str = SECRET, entity: Optional[Dict[str, Any]] = None, payment: Optional[Dict[str, Any]] = None,
+                   path: str = "razorpay", signature_header: str = "x-razorpay-signature",
+                   event_header: str = "x-razorpay-event-id") -> Any:
+    # A real provider body is unique per event (its own id and timestamp, ``created_at`` in
+    # seconds); ``nonce`` stands for that, and a replay reuses it.
+    payload: Dict[str, Any] = {"subscription": {"entity": {"id": gateway_id, "status": "active", **(entity or {})}}}
+    if payment is not None:
+        payload["payment"] = {"entity": payment}
+    body = {"event": event, "created_at": nonce if nonce is not None else event_id, "payload": payload}
     raw = json.dumps(body, sort_keys=True).encode()
     signature = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
-    response = await env.client.post("/api/billing/webhooks/razorpay", content=raw,
-                                     headers={"x-razorpay-signature": signature, "x-razorpay-event-id": event_id,
+    response = await env.client.post(f"/api/billing/webhooks/{path}", content=raw,
+                                     headers={signature_header: signature, event_header: event_id,
                                               "Content-Type": "application/json"})
     return response
 
@@ -299,12 +303,26 @@ def test_the_migration_reports_duplicate_bindings_and_creates_no_index_then(monk
             await env.db.subscriptions.update_one({"_id": ATTACKER}, {"$set": {"payment_gateway_subscription_id": VICTIM_GATEWAY_ID}})
             dry = await upgrade(env.db, dry_run=True)
             assert dry.warnings and "subscriptions: 1 gateway subscription id" in dry.warnings[0]
-            applied = await upgrade(env.db, dry_run=False)
-            assert applied.warnings
+            # Applying with duplicates refuses (the runner then records nothing; it stays pending).
+            with pytest.raises(RuntimeError):
+                await upgrade(env.db, dry_run=False)
             names = {index["name"] for index in await env.db.subscriptions.list_indexes().to_list(length=None)}
             assert "subscription_gateway_identity_unique" not in names
+            # Through the runner: the apply raises and nothing is recorded, so it stays pending.
+            from rbac_backend.migrations.catalog import MIGRATIONS
+            from rbac_backend.migrations.runner import LEDGER_COLLECTION, MigrationRunner
+
+            gateway_migration = [m for m in MIGRATIONS if m.version == "20261124_0001"]
+            with pytest.raises(RuntimeError):
+                await MigrationRunner(env.db, gateway_migration).run(apply=True)
+            assert await env.db[LEDGER_COLLECTION].count_documents({"_id": "20261124_0001"}) == 0
             # Nothing was changed or rebound.
             assert await env.db.subscriptions.count_documents({"payment_gateway_subscription_id": VICTIM_GATEWAY_ID}) == 2
+            # Once a person resolves the duplicate, the migration applies and the index exists.
+            await env.db.subscriptions.update_one({"_id": ATTACKER}, {"$unset": {"payment_gateway_subscription_id": ""}})
+            assert (await upgrade(env.db, dry_run=False)).warnings == []
+            names = {index["name"] for index in await env.db.subscriptions.list_indexes().to_list(length=None)}
+            assert "subscription_gateway_identity_unique" in names
 
     _run(scenario())
 
@@ -328,5 +346,107 @@ def test_service_level_writers_refuse_the_binding_whatever_the_caller(monkeypatc
                     SubscriptionCreate(organization_id=ORG_A, project_id=PROJ_A1, plan_code="dms_enterprise",
                                        payment_gateway_subscription_id=VICTIM_GATEWAY_ID), actor)
             assert await env.db.subscriptions.count_documents({"payment_gateway_subscription_id": VICTIM_GATEWAY_ID}) == 1
+
+    _run(scenario())
+
+
+
+# --------------------------------------------------------------------------- #
+# Independent review of da322ae: F1, F2, F4, F5, F6
+# --------------------------------------------------------------------------- #
+
+
+def test_f1_a_case_changed_provider_path_cannot_replay_a_signed_body(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            await _seed(env)
+            assert (await _webhook(env, "subscription.charged", VICTIM_GATEWAY_ID, event_id="e1", nonce=100)).json()["status"] == "processed"
+            assert (await _webhook(env, "subscription.cancelled", VICTIM_GATEWAY_ID, event_id="e2", nonce=200)).json()["status"] == "processed"
+            for path in ("RazorPay", "RAZORPAY", " razorpay"):
+                replay = await _webhook(env, "subscription.charged", VICTIM_GATEWAY_ID, event_id=f"e1-{path}", nonce=100, path=path,
+                                        signature_header="x-webhook-signature", event_header="x-webhook-event-id")
+                assert replay.status_code in (200, 400), (path, replay.status_code)
+                assert replay.status_code == 400 or replay.json()["status"] == "duplicate", (path, replay.text)
+            assert (await env.db.subscriptions.find_one({"_id": VICTIM}))["status"] == "cancelled"
+            assert (await _webhook(env, "subscription.charged", VICTIM_GATEWAY_ID, event_id="e9", path="paypal")).status_code == 404
+            assert await env.db.billing_records.count_documents({"subscription_id": VICTIM}) == 2
+
+    _run(scenario())
+
+
+def test_f2_stale_and_reactivating_events_and_repeated_payments_change_nothing(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            await _seed(env)
+            assert (await _webhook(env, "subscription.activated", VICTIM_GATEWAY_ID, event_id="o1", nonce=100)).json()["status"] == "processed"
+            assert (await _webhook(env, "subscription.halted", VICTIM_GATEWAY_ID, event_id="o2", nonce=300)).json()["status"] == "processed"
+            # A delayed activation older than the last event applied: refused.
+            late = await _webhook(env, "subscription.charged", VICTIM_GATEWAY_ID, event_id="o3", nonce=200)
+            assert late.json().get("refused") == "stale_event", late.text
+            assert (await env.db.subscriptions.find_one({"_id": VICTIM}))["billing_status"] == "past_due"
+            # Cancelled, then a fresh payment event: never a reactivation by webhook.
+            await _webhook(env, "subscription.cancelled", VICTIM_GATEWAY_ID, event_id="o4", nonce=400)
+            fresh = await _webhook(env, "subscription.activated", VICTIM_GATEWAY_ID, event_id="o5", nonce=500)
+            assert fresh.json().get("refused") == "cancelled_not_reactivated_by_webhook", fresh.text
+            assert (await env.db.subscriptions.find_one({"_id": VICTIM}))["status"] == "cancelled"
+            # A legacy event row with no body hash: the replayed old body is stale anyway.
+            await env.db.billing_webhook_events.update_many({}, {"$unset": {"body_sha256": ""}})
+            legacy = await _webhook(env, "subscription.activated", VICTIM_GATEWAY_ID, event_id="o1-again", nonce=100)
+            assert legacy.json().get("refused") in {"stale_event", "cancelled_not_reactivated_by_webhook"}, legacy.text
+            assert (await env.db.subscriptions.find_one({"_id": VICTIM}))["status"] == "cancelled"
+
+    _run(scenario())
+
+
+def test_f2_one_payment_one_effect(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            await _seed(env)
+            payment = {"id": "pay_1", "subscription_id": VICTIM_GATEWAY_ID, "amount": 0, "currency": "INR"}
+            first = await _webhook(env, "payment.captured", VICTIM_GATEWAY_ID, event_id="p1", nonce=100, payment=payment)
+            assert first.json()["status"] == "processed"
+            again = await _webhook(env, "payment.captured", VICTIM_GATEWAY_ID, event_id="p1-other", nonce=101, payment=payment)
+            assert again.json().get("duplicate_payment") is True, again.text
+            assert await env.db.billing_records.count_documents({"gateway_payment_id": "pay_1"}) == 1
+
+    _run(scenario())
+
+
+def test_f4_customer_and_checkout_scope_must_match_the_subscription(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            await _seed(env)
+            wrong_customer = await _webhook(env, "subscription.activated", VICTIM_GATEWAY_ID, event_id="c1",
+                                            entity={"customer_id": "cust_attacker"})
+            assert wrong_customer.json().get("refused") == "gateway_customer_mismatch"
+            wrong_scope = await _webhook(env, "subscription.activated", VICTIM_GATEWAY_ID, event_id="c2",
+                                         entity={"customer_id": "cust_victim", "notes": {"organization_id": ORG_A}})
+            assert wrong_scope.json().get("refused") == "gateway_notes_scope_mismatch"
+            assert (await env.db.subscriptions.find_one({"_id": VICTIM}))["status"] == "pending"
+            # F6: the refused payload is kept for the admin who resolves it.
+            row = await env.db.billing_webhook_events.find_one({"event_id": "c2"})
+            assert row["refused"] == "gateway_notes_scope_mismatch" and row["refused_payload"]["event"] == "subscription.activated"
+            ok = await _webhook(env, "subscription.activated", VICTIM_GATEWAY_ID, event_id="c3",
+                                entity={"customer_id": "cust_victim", "notes": {"organization_id": ORG_B, "project_id": PROJ_B1}})
+            assert ok.json()["status"] == "processed" and ok.json()["subscription_id"] == VICTIM
+
+    _run(scenario())
+
+
+def test_f5_unknown_keys_are_refused_never_dropped(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            await _seed(env)
+            for body in ({"razorpay_subscription_id": VICTIM_GATEWAY_ID}, {"rzp_sub_id": "x"}, {"subscription_gw_id": "x"},
+                         {"payment_customer_id": "x"}, {"nonsense": 1}):
+                put = await env.client.put(f"{BASE}/subscriptions/{VICTIM}", json={**body, "auto_renew": False},
+                                           headers=_headers("superadmin"))
+                env.client.cookies.clear()
+                assert put.status_code == 400, (body, put.status_code)
+                post = await env.client.post(f"{BASE}/subscriptions", headers=_headers("superadmin"),
+                                             json={"organization_id": ORG_A, "plan_code": "dms_enterprise", **body})
+                env.client.cookies.clear()
+                assert post.status_code == 400, (body, post.status_code)
+            assert (await env.db.subscriptions.find_one({"_id": VICTIM}))["auto_renew"] is True
 
     _run(scenario())
