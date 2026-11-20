@@ -51,7 +51,7 @@ RESTRICTED_STATUSES = frozenset({"archive", "offboarding"})
 BLOCKING_STATUSES = frozenset({"past_due", "paused"})
 NOT_GOVERNING_STATUSES = frozenset({"pending", "cancelled"})
 
-#: Statuses that govern their tier; the write side keeps at most one per tier (supersede).
+#: Statuses that govern their tier; several may coexist, and the latest ``governing_since`` wins.
 GOVERNING_STATUSES = ELIGIBLE_STATUSES | RESTRICTED_STATUSES | BLOCKING_STATUSES
 
 GOVERNING_CLASSES = frozenset({"eligible", "restricted", "blocking", "unknown", "invalid_period"})

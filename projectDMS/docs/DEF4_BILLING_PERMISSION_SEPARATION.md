@@ -691,7 +691,7 @@ Gitleaks failed in both runs, on the 2 known findings. Locally on `f09d9be`: 1,1
 
 ## 14. Entitlement resolution (owner decision 2026-11-20)
 
-**Commits:** `5740b06`, review fixes `53c78e6`.
+**Commits:** `5740b06`; review fixes `53c78e6`; redesign after re-review `d37824e` (supersession withdrawn).
 
 **The defect.** `EntitlementService._active_subscription` took any subscription of the scope in its period, whatever its status, and preferred the most recently updated row. Two consequences:
 
@@ -713,14 +713,9 @@ Gitleaks failed in both runs, on the 2 known findings. Locally on `f09d9be`: 1,1
 | not governing | `pending`, `cancelled`, expired trial, not started, ended | Never shadows anything |
 
 - **Fallback, an explicit rule:** a cancelled or never-paid project subscription falls back to the organisation subscription. That is the meaning plan-settings "inherit" already gives a cancelled override.
-- **Ambiguity:** two governing subscriptions in the deciding tier deny (`ambiguous_subscriptions`) and are shown as "ambiguous".
-- **Write-side invariant (review F1).** A subscription that becomes governing records `governing_since` and supersedes every other governing subscription of its tier that became governing earlier. Superseded rows are cancelled with `superseded_by`, an audit event and a history row. This applies on:
-  - create;
-  - webhook activation;
-  - reactivation by update;
-  - plan settings.
-
-  So a paid upgrade replaces the old plan rather than locking the tier out, and racing writers converge on the latest.
+- **Several governing subscriptions in one tier: the most recently activated governs.** `governing_since` is stamped when a row *becomes* governing: create, webhook activation from a non-governing status, an update into a governing status, and the plan-settings insert. An ordinary metadata edit never stamps it. Selection takes the latest `governing_since`; ties go to the larger id. Nothing is cancelled: a trial over a paid plan governs until it expires, then the paid plan governs again; a future-dated replacement governs from its start.
+- **Ambiguity:** two or more governing rows in the deciding tier **none of which** carries `governing_since` (rows written before 2026-11-20) cannot be ordered safely. They deny (`ambiguous_subscriptions`) and are shown as "ambiguous". P-05 counts them.
+- **Supersession withdrawn (`d37824e`).** `53c78e6` cancelled the older governing row on every activation. The re-review found that non-convergent under concurrency and harmful: a trial cancelled the paid plan it overlay, a refused or failed activation could still cancel, and cancellation is not reversible by the system (R1 to R3). It was removed; no row is cancelled by selection or by activation. The double billing an upgrade checkout can cause (old plan still active and billed) is an owner decision, recorded below, not a resolution concern.
 - **The same gates everywhere:**
   - `check_permission_entitlement`;
   - `effective_features`;
@@ -745,9 +740,9 @@ Gitleaks failed in both runs, on the 2 known findings. Locally on `f09d9be`: 1,1
 - display parity;
 - concurrent edits;
 - the audit evidence;
-- an upgrade checkout through a signed webhook;
-- create and reactivation supersession;
-- concurrent plan-settings writes;
+- an upgrade checkout through a signed webhook (new plan governs, old one untouched);
+- latest-activation ordering, ties, trial overlay and expiry, metadata edits not reordering;
+- concurrent plan-settings writes converging on one governing row;
 - the feature, summary and quota gates;
 - ObjectId project ids and padded statuses;
 - the P-05 reading.
@@ -758,7 +753,7 @@ Gitleaks failed in both runs, on the 2 known findings. Locally on `f09d9be`: 1,1
 
 | # | Finding | Severity | Origin | Resolution |
 |---|---|---|---|---|
-| F1 | An upgrade checkout, create or reactivation left two governing rows, so the tier was locked out | High | Introduced (ambiguity rule) | **Fixed:** write-side supersession |
+| F1 | An upgrade checkout, create or reactivation left two governing rows, so the tier was locked out | High | Introduced (ambiguity rule) | **Fixed** in `d37824e` by latest-activation selection (the `53c78e6` supersession was withdrawn) |
 | F2 | Concurrent plan-settings writes left several active rows | Medium | Race pre-existing; lockout new | **Fixed** |
 | F3 | Unreadable dates read as unbounded; API dates stored as strings | Medium | Introduced / pre-existing | **Fixed** |
 | F4 | Features, summary and quota ignored the status class | Medium | Pre-existing | **Fixed** |
@@ -769,7 +764,7 @@ Gitleaks failed in both runs, on the 2 known findings. Locally on `f09d9be`: 1,1
 
 **Production impact:**
 
-- **Two or more governing rows in one tier (data already in production):** denied until a write supersedes them or a person resolves them.
+- **Two or more governing rows in one tier with none stamped (data already in production):** denied (`ambiguous_subscriptions`) until a person resolves them, or until one of them is re-activated and so stamped. Where at least one is stamped, the latest governs.
 - **A past-due or paused project:** still denied, without falling back (unchanged).
 - **Rows with string or unreadable dates:** now governed by their real dates, or denied.
 
