@@ -890,3 +890,84 @@ With duplicates present, a dry run warns (so `--fail-on-warning` stops a deploy)
   - write a history row and an audit event with before and after and the reason.
 - **Afterwards:** a webhook sanity probe, and admin review of refused events for the old id.
 - **Second person:** the change is approved by someone other than the requester (four-eyes).
+
+## 16. Subscription lifecycle and payment integrity: R6-5 to R6-8 (owner decision 2026-11-21)
+
+**Status, kept separate:** implemented and locally verified on the branch; CI on the exact head is recorded in the ticket register; independent cold review recorded below; **not security-approved, not production-accepted**. Nothing was deployed, migrated, re-granted, rebound, refunded or cancelled at any gateway.
+
+Each fix was reproduced on real MongoDB at the commit before it (outputs kept with the session's evidence), then fixed in its own commit.
+
+### 16.1 R6-8 - `PUT /subscriptions/{id}` (`1b731f6`)
+
+- **Defect (reproduced at `9e1a6bb`):** Super Admin, a tenant billing administrator and a custom role with `subscription.entitlement.manage` could change plan, period, add-ons, status (reviving a cancelled subscription), `billing_status` ("paid" without payment), dates, trial and renewal flags with 200 and no gateway call; a tenant billing administrator could grant `entitlement_overrides`.
+- **Allowlist now:** `admin_note` (new, non-commercial), `cancellation_reason`; `entitlement_overrides` for Super Admin only.
+- **Refused with 400, naming the workflow:** `plan_code`, `billing_period`, `active_add_ons`, `status`, `billing_status`, `starts_at`, `ends_at`, `current_period_start/end`, `trial`, `trial_ends_at`, `pilot`, `auto_renew`, `cancelled_at`, `governing_since` - under any spelling (`planCode`, `Billing-Status`, `activatedAt` ...), even unchanged, even beside an allowed field. Scope (L3/F3) and gateway identity (§15) refusals, step-up, authorisation, compare-and-set and audit are unchanged. The service-level update is unchanged; no client uses the route.
+- **Tests:** `test_r6_8_subscription_update_allowlist_mongo.py` (5; four personas, cross-organisation, aliases, concurrency); 6/6 mutants killed.
+
+### 16.2 R6-5 - trial conversion (`4a3e6ce`)
+
+- **Defect (reproduced at `1b731f6`):** any row whose status read `trial` - expired or outranked included - became `active` with `billing_status=active`, unvalidated add-ons, no payment and no gateway call; a tenant billing administrator could do it.
+- **Rules now:**
+  - only a running trial (status `trial`, period eligible) that enforcement selects for its scope converts (else 409, unchanged);
+  - plan active, period supported, add-ons existing, active, compatible, named once (400);
+  - **priced plan:** a checkout for the trial's scope (`converts_trial_id`); the trial keeps governing; the signed webhook's payment confirmation activates the paid subscription, which then governs, and closes the trial (compare-and-set, replay-safe, history, audit). One checkout per trial (claim by compare-and-set; repeats return the same checkout); a gateway failure marks the claim failed (audited, 502) and can be retried. Priced add-ons are refused here (checkout does not charge them);
+  - **free plan:** converted in place with `billing_status = "not_billed"`;
+  - **no-charge conversion of a priced plan:** Super Admin only (authority separate from trial management), reason of at least 10 characters, `billing_status = "no_charge_override"`, audited with the list price;
+  - `billing_status = "active"` is set only by payment confirmation.
+- **Tests:** `test_r6_5_trial_conversion_mongo.py` (11); 14/15 mutants killed, the survivor equivalent (the claim compare-and-set answers a repeat the same way).
+
+### 16.3 R6-6 - reactivation (`58455e7`)
+
+- **Defect (reproduced at `4a3e6ce`):** any `cancelled` row became active with `billing_status=active` - an immediately cancelled one (period over) and an old plan while a replacement governed and billed included, re-stamped to outrank the new plan; six concurrent requests each resumed the gateway; a gateway failure was 500.
+- **Rules now** (before the gateway is asked): only `cancelled`, never a trial closed by its paid conversion; paid period recorded, readable and not over (else "start a new purchase"); nothing else governs its scope and no replacement checkout is pending there; one reactivation at a time (claim); a gateway-bound subscription resumes only when the gateway confirms an active subscription (failure 502, other status 409, both audited for review); unbound ones resume as `billing_status = "manual"`.
+- **Older subscriptions:** one never cancelled still governs when the newer one is cancelled (it never stopped billing - P-05 counts the overlap); a cancelled one resumes only through this operation.
+- **Tests:** `test_r6_6_reactivation_mongo.py` (8); 12/12 mutants killed.
+
+### 16.4 R6-7 - plan-settings cancellation (`5f95334`)
+
+- **Defect (reproduced at `58455e7`):** the scope's subscriptions were cancelled with one local `update_many`; the gateway was never told (a paid gateway subscription kept billing); a gateway outage still answered 200; nothing recorded the intent.
+- **Durable operation** (`services/subscription_operations.py`, `subscription_operations` and `subscription_operation_locks`; uniqueness by `_id`, so no migration):
+  1. intent recorded first under the `Idempotency-Key` (a completed operation is not repeated; the same key with another request is 409); scope leased (a concurrent change is 409);
+  2. affected subscriptions listed;
+  3. each gateway-bound one cancelled through the provider API at the end of the paid cycle (no further charge, no refund);
+  4. result per subscription: confirmed / failed (exception class) / not bound;
+  5. local cancellation only where confirmed or unbound, compare-and-set on status (changed meanwhile: left alone, flagged);
+  6. anything unresolved: no replacement installed, `needs_review`, audited, 502 with the operation id; a retry continues and never repeats a confirmed call;
+  7. `GET /plan-settings/operations` and `POST /plan-settings/operations/{id}/retry` (Super Admin, step-up, scope authorisation), including an operation interrupted mid-run (lapsed lease).
+- The replacement has an operation-derived id (installed once) and `billing_status = "plan_settings"`. Gateway cancellation is never marked complete because a MongoDB update succeeded.
+- **Tests:** `test_r6_7_plan_settings_cancellation_mongo.py` (7); 14/14 mutants killed.
+
+### 16.5 Gateway/database consistency for lifecycle changes (`80186b7`)
+
+Upgrade, downgrade, period change and cancel change the gateway first and the database second. Each is now a durable operation recorded before the gateway call with the exact subscription, the state before and the target:
+
+- gateway failure: `failed` (nothing changed anywhere), 502, retryable, not a review item;
+- database write refused after a gateway change (R6-3 residual): `needs_review`, listed and audited, never reported as done;
+- `Idempotency-Key`: a repeat of a completed change answers without reaching the gateway; another request under the same key is 409; a retry after review does not repeat the confirmed call.
+
+No cross-system atomicity is claimed. **Tests:** `test_gateway_db_consistency_mongo.py` (5); 10/10 mutants killed.
+
+### 16.6 Legacy gateway bindings (P-05 `payment_integrity_impact`, `a4cd266`)
+
+Read-only counts by organisation; no identifiers leave the reading; nothing is trusted, rebound, deleted or disabled by it.
+
+| Class | Rule | Proposed remediation (needs owner approval; not implemented) | Rollback | Financial reconciliation |
+|---|---|---|---|---|
+| verified_checkout | bound by checkout and a `checkout_started` audit event names it | none | - | none |
+| verified_provider_reconciliation | a person recorded `payment_gateway_reconciled_at` after checking the provider | none | - | as recorded |
+| conflicting | id bound twice, recorded as bound outside checkout, or written by an ordinary create/update | per binding: a person compares the provider's customer, notes and payments with each candidate; the wrong binding is removed through the re-binding workflow (§15, four-eyes); the webhook already refuses these | restore the binding from the audit `before` | payments since the binding are re-attributed by a person; no automatic refund |
+| unverified | none of the above | provider reconciliation per binding, then record `payment_gateway_reconciled_at`; until then optionally refuse webhook activation for them (a flag, owner decision) | clear the flag | none until reconciled |
+
+Also counted: duplicate payment groups (the migration's unique index refuses to build over them: resolve first), payments refused for review, overlapping governing scopes and gateway-bound overlaps, cancelled gateway-bound subscriptions without gateway evidence (pre-R6-7 plan-settings cancellations: check the provider - they may still bill), governing rows without activation dates, open operations, conversions awaiting payment, no-charge conversions.
+
+### 16.7 Checkout replacement safeguards - design only, needs separate owner authorisation
+
+Two subscriptions can bill one entitlement scope when a checkout buys a new plan while the old one keeps billing (the overlap P-05 counts). The safeguard, reviewed across checkout, upgrade, downgrade, cancellation and webhook flows:
+
+- **Exact identity:** checkout takes `replaces_subscription_id`; it must name a subscription of the same organisation, project and package that enforcement selects now and that is gateway-bound or explicitly unbound. Anything else is refused - an unrelated subscription is never touched.
+- **Durable operation** (the §16.4 store): `replacement` with an idempotency key, the source and target ids, before/after states.
+- **Order:** the target is created pending; on the signed payment confirmation of the target, the source is cancelled at the gateway at the end of its paid cycle, the result recorded, and only then cancelled locally (compare-and-set on its state). A gateway failure or a changed source: `needs_review`, never auto-retried into a refund.
+- **Retry:** idempotent per step; confirmed gateway calls never repeated; lease for crash recovery.
+- **Reconciliation:** a periodic read-only comparison of provider status with local status for bound subscriptions, producing review items (no automatic writes).
+- **Never:** automatic refunds, cancellation of a subscription not named, cross-organisation replacement, claims of atomicity.
+- **Not implemented:** no replacement or re-binding endpoint was added.
