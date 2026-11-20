@@ -527,7 +527,7 @@ No Critical or High finding.
 |---|---|---|---|---|---|---|---|
 | F1 | Medium | `routers/rbac_monetization.py` `_minimise_plan_settings`; `services/monetization_service.py` `get_plan_settings` | With the flag off, a user whose projects resolve to no organisation (a deleted project, or a project of a missing organisation) got every organisation, plus unminimised gateway ids and negotiated overrides from `/plan-settings` | Fail-open minimiser: yes. Unfiltered organisation list: pre-existing | **Fixed** (`a8393ce`): no resolved organisation means none; every organisation, project, row and state is judged in its own organisation | `test_f1_plan_settings_fails_closed_without_a_resolvable_organisation` (both states); 2 mutants killed | Was a blocker; fixed |
 | F2 | Low | `routers/rbac_monetization.py` effective-services widening | With the flag off, a project user holding a B entitlement role saw sibling projects in A (operational view) | Partly (the narrowing was incomplete) | **Fixed** (`a8393ce`): widening is per organisation where the caller stands | `test_f2_...`; mutant killed | Fixed |
-| F3 | Low/Medium | `services/monetization_service.py` `SUBSCRIPTION_SCOPE_FIELDS`; `PUT /subscriptions/{id}` | An entitlement manager can change `package_id`, which entitlement lookup matches on, including promoting it to null | Pre-existing; outside L3's organisation/project decision | **Owner decision:** treat `package_id` as scope (refuse, include in the compare-and-set), or accept it as entitlement-manager authority | Proposed: extend the L3 attempts | Decide before release |
+| F3 | Low/Medium | `services/monetization_service.py` `SUBSCRIPTION_SCOPE_FIELDS`; `PUT /subscriptions/{id}` | An entitlement manager can change `package_id`, which entitlement lookup matches on, including promoting it to null | Pre-existing; outside L3's organisation/project decision | **Owner decision 2026-11-20: approved.** Fixed in `8eefa27` (§13) | `test_f3_subscription_package_scope_mongo.py` | Fixed |
 | F4 | Low | `services/policy_service.py` `_may_answer_at_organisation_level`; the router cut | With the flag on, a custom organisation finance role was cancelled by also holding `projectuser` (the flag-off N1 rule admits it) | Yes | **Fixed** (`a8393ce`): a custom role of that organisation granting the permission answers for it | `test_f4_...` (both states); 2 mutants killed | Fixed (affected activation only) |
 | F5 | Low (test gap) | M4 scoped refusal; `_platform_held` treatment of `*` | Two mutants survived | n/a | **Tests added** | `test_f5_...` | Closed |
 
@@ -584,3 +584,84 @@ Also from the review:
 - DEF-4 not activated, roles and aliases unchanged;
 - no deployment, migration or merge;
 - rollout off, skills unpublished, Phase 5 not started.
+
+
+## 13. F3: package scope, and the final CI evidence for F1 to F5 (owner decision 2026-11-20, eighth pass)
+
+### CI evidence for F1, F2, F4 and F5
+
+CI run 44733660126 on `652d4e6` (fixes in `a8393ce`):
+
+| Job | Result |
+|---|---|
+| Backend lint and tests | Passed. Unit: 8,435 passed, 1,221 skipped, 4 xfailed. Exhibit confinement: 20 passed. Real MongoDB: 1,126 passed; the every-suite-ran gate passed. |
+| Frontend | Passed. 1,015 passed, 3 skipped (128 files). Mocked E2E: 78 passed; 59 deployed-stack tests skipped. |
+| Dependency scan | Passed: 56, no known vulnerabilities. |
+| Docker build and image scan | Passed. |
+| Gitleaks | **Failed:** "leaks found: 2", the known findings. |
+
+**Locally on `a8393ce`:**
+
+- backend unit: 8,409 passed, 0 failed, 135 skipped (environment-dependent), 4 xfailed;
+- real MongoDB, all 86 CI modules with Redis on: 1,126 passed, 0 failed, 0 skipped.
+
+### F3: what changed (`8eefa27`)
+
+**Why `package_id` is scope.** `EntitlementService._active_subscription` matches a subscription on organisation, project **and** package. Changing a stored `package_id` therefore moves the entitlement:
+
+- an organisation-wide subscription made package-only stops matching organisation and project checks;
+- a package subscription promoted with `null` starts matching them.
+
+**Writers audited.** These write `subscriptions.package_id`:
+
+| Writer | Writes `package_id`? |
+|---|---|
+| `MonetizationService.update_subscription` (`PUT /subscriptions/{id}` and the lifecycle operations: upgrade, downgrade, cancel, reactivate, change period, add-ons, trial conversion) | The only writer on an existing subscription. The lifecycle operations never pass it. **Now protected.** |
+| `SubscriptionLifecycleService` (trial expiry, renewal) | No: status and period fields only |
+| `BillingWebhookService` (payment callbacks, mismatch review) | No: status, billing status, review flag |
+| `update_plan_settings_scope` (`PUT /plan-settings/scope`, Super Admin) | Cancels by scope query; inserts new rows with `package_id: None` |
+| `create_subscription`, checkout | At creation only, authorised on the organisation and project in the payload (pre-existing; see below) |
+| `initial_data/demo_seed.py` | Development seed only |
+| Migrations, imports, scripts | None write it |
+
+**The rule.** `SUBSCRIPTION_SCOPE_FIELDS` is now organisation, project and package. For an ordinary update:
+
+- an omitted field is unchanged;
+- the stored value (with `None` and `""` read as the same "none", as entitlement resolution reads them) is a no-op;
+- anything else is refused with 400 for everyone, Super Admin included. That covers explicit null, the empty string, another organisation's package, an unknown package, and the spellings `packageId` and `package`.
+
+**Other spellings.** Organisation and project spellings (`organisation_id`, `org_id`, `orgId`, `organization`, `projectId`, `project`) are refused the same way. Earlier review Low 4: some of them used to be dropped silently.
+
+**Concurrency.** The service compares the stored scope with the scope the route authorised (`expected_scope` must name all three; anything else is a `TypeError`). It then writes compare-and-set on all three fields: a stale read or a concurrent package change is a 409, and nothing is written.
+
+**Effects verified:**
+
+- **Entitlement resolution:** identical before and after refused attempts. A direct write of the same change shows it would have moved the entitlement.
+- **Subscription history and audit:** a refused attempt writes no `subscription.updated` audit event and no history entry. A permitted update's audit `after` keeps the package.
+- **Invoices, billing records and service availability:** no package is ever changed by an update, so they read unchanged scope. Billing records carry organisation and project and never write the package.
+
+**Tests:** `test_f3_subscription_package_scope_mongo.py` (5 tests, in CI). They cover the organisation, project and package boundaries, custom organisation roles, mixed project roles, invalid package references, and stale and concurrent writes. **Mutants: 5 of 5 killed** (spellings, route check, compare-and-set, service refusal, stale-read check). The L3 suite now passes the full scope.
+
+### Package transfer: design only (not implemented; needs separate approval)
+
+**Shape.** A dedicated `POST /subscriptions/{id}/transfer-package` with `{target_package_id, reason}`:
+
+1. Step-up, with a new action `subscription.package.transfer`.
+2. Authority in **both** the source scope and the target package's scope. This needs a new explicit permission, `subscription.package.transfer`, non-delegable and not covered by any alias.
+3. The target package must exist, be active and belong to the subscription's organisation and project. No organisation or project change, ever.
+4. A mandatory free-text reason.
+5. One transaction: compare-and-set on the full stored scope, a `subscription_history` entry (`change_type: package_transfer`), and an audit event with before and after.
+6. Entitlement re-evaluation: compute the effective services of the source and target scopes before and after. Refuse if the target scope already has an active subscription; that conflict is resolved by the owner, never silently.
+7. Off by default behind a flag; never through the ordinary update.
+
+### Remaining authorisation gaps (recorded, not changed)
+
+| Gap | Severity | Note |
+|---|---|---|
+| `POST /subscriptions` and checkout authorise on the payload's organisation and project, not on the package at creation | Low, pre-existing | Package ownership is not modelled. Owner decision whether creation should validate it. |
+| Entitlement lookup (`_active_subscription`) does not filter on `status` | Info, pre-existing | Status is checked downstream. Recorded for the authorised review. |
+| M1: built-in roles are global (E1 to E5) | High (workstream) | Blocks DEF-4 activation |
+| Unknown plan or add-on codes reseed defaults on read, unaudited | Low, pre-existing | Recorded |
+| The client billing-catalogue route also admits `system:admin` (visibility only) | Low | Recorded |
+
+**Independent review of `8eefa27`** and **CI on the final head:** recorded below.

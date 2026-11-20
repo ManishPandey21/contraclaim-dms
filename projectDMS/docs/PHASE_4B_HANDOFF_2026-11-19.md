@@ -205,6 +205,13 @@ Open:
 
 It is the main code-side blocker to DEF-4 activation, and it needs no production access. The M1-E1 to M1-E5 tests flip when the `on` mode is shown safe.
 
+## Eighth pass (F3 package scope, 2026-11-20)
+
+- **CI for the seventh pass:** run 44733660126 on `652d4e6`, green except Gitleaks. F1, F2, F4 and F5 are CI-verified.
+- **F3 (`8eefa27`):** `package_id` is protected subscription scope, with compare-and-set on organisation, project and package, and other spellings refused. The writers are audited.
+- **Package transfer:** designed only; not implemented.
+- **Next dependency-ready work** is unchanged: the M1 shadow-mode evaluator, behind `BUILT_IN_ROLE_ASSIGNMENTS`, default `off`.
+
 ## Blockers before production authorisation
 
 1. P-01 to P-16 production readings with authorised read-only access (AQ-11). This includes:

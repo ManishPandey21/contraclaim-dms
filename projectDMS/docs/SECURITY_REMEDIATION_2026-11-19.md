@@ -440,3 +440,32 @@ Full record: `docs/DEF4_BILLING_PERMISSION_SEPARATION.md` §12.
 | F3: `package_id` changeable on `PUT` | Low/Medium, pre-existing | Owner decision |
 
 **CI-observed failure:** the contract-lease failure was a test defect. It was reproduced deterministically and fixed in `9a47109`. **Not security approval.**
+
+
+## F3 package scope (owner decision 2026-11-20, eighth pass)
+
+Full record: `docs/DEF4_BILLING_PERMISSION_SEPARATION.md` §13.
+
+**Why it mattered.** `package_id` is matched by entitlement resolution, so changing it on an ordinary update moved the entitlement. It is now protected scope alongside organisation and project:
+
+- every caller is refused, Super Admin included;
+- all spellings are refused, and explicit null is refused;
+- the write is compare-and-set on all three fields.
+
+**Writers audited:** only `update_subscription` can change it on an existing subscription.
+
+**Not implemented:** a package transfer. It is designed in §13 and needs separate approval.
+
+**CI on `652d4e6` (run 44733660126)** verified F1, F2, F4 and F5: green except Gitleaks.
+
+**Remaining gaps (recorded, not changed):**
+
+| Gap | Severity |
+|---|---|
+| Package not validated at subscription creation | Low, pre-existing |
+| Entitlement lookup ignores `status` | Info, pre-existing |
+| M1 | High workstream |
+| Reseed-on-read | Low |
+| `system:admin` on the client catalogue route | Low, visibility only |
+
+**Not security approval.**
