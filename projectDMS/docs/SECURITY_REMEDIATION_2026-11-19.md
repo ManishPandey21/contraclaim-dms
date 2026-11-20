@@ -567,6 +567,8 @@ Review 7 (cold, given the code): 4 pre-existing payment bypasses (F1 Critical, F
 
 Real HTTP and real MongoDB throughout; concurrent requests (same and different keys, checkouts, trials, conversions, reactivations, plan settings); cross-tenant and revoked permissions (403); gateway failures, timeouts and unknown outcomes; signed-webhook replay; audit and history assertions; mutation testing per fix (all mutants killed except two recorded as equivalent).
 
+**Exact-head CI for this pass:** run 44822992420 on `918b41f` (the final code; later commits `897fe22`, `8fe6e4b` and this one are docs only): backend 8,437 passed, 1,365 skipped, 4 xfailed; exhibit confinement 20; real MongoDB "all 99 module(s) ran: 1271 test case(s)", 1,271 passed, none skipped; frontend (lint, unit, mocked Playwright, build), dependency scan and Docker build/scan passed; **Gitleaks failed** on its 2 known findings. **Local, quiet worktree at `918b41f`:** real MongoDB 1,271 passed after the local Redis (which had stopped mid-run; 8 Redis-backed tests failed with connection refused) was restarted and `test_security_redis_mongo.py` rerun (11/11); full backend suite 9,683 passed + the same 8 re-run; frontend lint clean, 1,017 passed (3 skipped), build passed; mypy staged gate passed; ruff unchanged on every touched file. CI success is not security approval.
+
 ### Remaining payment-integrity risks (open)
 
 | Risk | Severity | Owner |

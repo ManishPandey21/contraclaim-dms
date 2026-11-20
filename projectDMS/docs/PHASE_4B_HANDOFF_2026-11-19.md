@@ -246,14 +246,16 @@ It is the main code-side blocker to DEF-4 activation, and it needs no production
 
 | Item | Implemented | Locally verified | CI-verified (exact head) | Security-approved | Production-accepted |
 |---|---|---|---|---|---|
-| R6-8 PUT allowlist + direct create (F1) | Yes | Yes | Pending exact-head run | No | No |
-| R6-5 trial conversion (+F2-F4, R5, A3/A4, R9) | Yes | Yes | Pending exact-head run | No | No |
-| R6-6 reactivation (+R8-1, B1, C6, R9-7) | Yes | Yes | Pending exact-head run | No | No |
-| R6-7 durable cancellation (+R7, C1-C5) | Yes | Yes | Pending exact-head run | No | No |
-| Gateway/database consistency for lifecycle changes | Yes | Yes | Pending exact-head run | No | No |
-| P-05 `payment_integrity_impact` | Yes (read-only) | Yes | Pending exact-head run | No | Not run on production |
+| R6-8 PUT allowlist + direct create (F1) | Yes | Yes | Yes: run 44822992420 on `918b41f` (final code; Gitleaks red, known) | No | No |
+| R6-5 trial conversion (+F2-F4, R5, A3/A4, R9) | Yes | Yes | Yes: run 44822992420 on `918b41f` (final code; Gitleaks red, known) | No | No |
+| R6-6 reactivation (+R8-1, B1, C6, R9-7) | Yes | Yes | Yes: run 44822992420 on `918b41f` (final code; Gitleaks red, known) | No | No |
+| R6-7 durable cancellation (+R7, C1-C5) | Yes | Yes | Yes: run 44822992420 on `918b41f` (final code; Gitleaks red, known) | No | No |
+| Gateway/database consistency for lifecycle changes | Yes | Yes | Yes: run 44822992420 on `918b41f` (final code; Gitleaks red, known) | No | No |
+| P-05 `payment_integrity_impact` | Yes (read-only) | Yes | Yes: run 44822992420 on `918b41f` (final code; Gitleaks red, known) | No | Not run on production |
 | Checkout replacement safeguard | Design only (§16.7) | - | - | No | No |
 | Gate 6 fresh install, migration `20261124_0001` | Yes | 33/33 (sandbox-CA caveat; not production evidence) | Pin verified in CI on `0cb99f0` | No | No |
+
+**Exact-head CI for this pass:** run 44822992420 on `918b41f` (the final code; later commits `897fe22`, `8fe6e4b` and this one are docs only): backend 8,437 passed, 1,365 skipped, 4 xfailed; exhibit confinement 20; real MongoDB "all 99 module(s) ran: 1271 test case(s)", 1,271 passed, none skipped; frontend (lint, unit, mocked Playwright, build), dependency scan and Docker build/scan passed; **Gitleaks failed** on its 2 known findings. **Local, quiet worktree at `918b41f`:** real MongoDB 1,271 passed after the local Redis (which had stopped mid-run; 8 Redis-backed tests failed with connection refused) was restarted and `test_security_redis_mongo.py` rerun (11/11); full backend suite 9,683 passed + the same 8 re-run; frontend lint clean, 1,017 passed (3 skipped), build passed; mypy staged gate passed; ruff unchanged on every touched file. CI success is not security approval.
 
 **Next dependency-ready action:** run P-05 `payment_integrity_impact` (read-only, with authorised access) to measure legacy bindings, duplicates, overlaps and ungated cancellations; then the owner decides the binding remediation (§16.6) and whether to authorise the checkout replacement (§16.7). M1 shadow-mode evaluator remains the next code item.
 

@@ -1037,3 +1037,5 @@ No High finding: no route left a tenant billing administrator paid, extended or 
 | R9-12 | Free add-ons on unbilled plans need Super Admin | Info | Introduced (A2) | Recorded as intended |
 
 **Four independent reviews of this pass, in sum:** review 7 (cold, on R6-5 to R6-8 and lifecycle consistency) found 4 pre-existing payment bypasses (1 Critical, 3 High) and 13 introduced or adjacent defects; review 8 found 2 more High pre-existing paths and 11 others; review 9 found none High. Every finding was reproduced at the commit before its fix and fixed in its own commit with tests and mutants, except those recorded above.
+
+**CI (§16 code):** run 44822992420 on `918b41f`: backend 8,437; real MongoDB 1,271 in 99 modules, none skipped; frontend, dependency scan, Docker passed; Gitleaks red on the 2 known findings. Not security approval.
