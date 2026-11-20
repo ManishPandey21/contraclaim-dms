@@ -1073,9 +1073,12 @@ async def start_subscription_checkout(
             current_user=current_user,
             customer_name=payload.customer_name,
             customer_email=payload.customer_email,
+            manual_billing_authorised=ScopeService().is_superadmin(current_user),
         )
-    except (GatewayIdentityConflict, PurchaseInProgress) as exc:
+    except (GatewayIdentityConflict, PurchaseInProgress, SubscriptionNotGoverning) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except GatewayOperationFailed as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 

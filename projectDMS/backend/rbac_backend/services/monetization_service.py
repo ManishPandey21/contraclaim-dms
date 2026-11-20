@@ -739,6 +739,16 @@ class MonetizationService:
         """Review 8 B3: cancel an abandoned checkout at the gateway first (so it can never be
         paid later beside the new one), then locally; a gateway failure keeps it blocking."""
         try:
+            provider_status = await self._gateway().fetch_subscription_status(
+                gateway_subscription_id=pending["payment_gateway_subscription_id"])
+        except Exception:
+            provider_status = None
+        if str(provider_status or "").strip().lower() in self.GATEWAY_ACTIVE_STATUSES:
+            # Review 9 R9-4: the customer paid and the webhook is late - never cancel it.
+            await self._review_event(pending, "subscription.pending_checkout_paid_at_provider", current_user,
+                                     reason=str(provider_status))
+            raise PurchaseInProgress("An earlier purchase for this scope appears paid at the provider; it is listed for review")
+        try:
             await self._gateway().cancel_subscription(
                 gateway_subscription_id=pending["payment_gateway_subscription_id"], immediate=True)
         except Exception as exc:
@@ -749,7 +759,8 @@ class MonetizationService:
         await db.subscriptions.update_one(
             {"_id": pending["_id"], "status": "pending"},
             {"$set": {"status": "cancelled", "billing_status": "inactive", "cancelled_at": now,
-                      "cancellation_reason": "checkout_abandoned", "updated_at": now,
+                      "cancellation_reason": "checkout_abandoned", "cancelled_administratively": True,
+                      "updated_at": now,
                       "updated_by": getattr(current_user, "id", None)}},
         )
         await self.audit_service.emit(
@@ -777,6 +788,7 @@ class MonetizationService:
         customer_email: Optional[str] = None,
         converts_trial_id: Optional[str] = None,
         scope_lock_holder: Optional[str] = None,
+        manual_billing_authorised: bool = False,
     ) -> Dict[str, Any]:
         """Provision a customer + subscription on the payment gateway and create a
         local subscription in ``pending`` state. The webhook flips it to ``active``
@@ -785,7 +797,10 @@ class MonetizationService:
         db = await self._get_db()
         if not await self.validate_plan_code(plan_code):
             raise ValueError(f"Plan '{plan_code}' not found")
-        await self._assert_period_priced(plan_code, billing_period)
+        # Review 9 R9-2: checkout sells only an active plan priced for the period (a zero-priced
+        # plan would be "paid" by any payment and activated).
+        await self._assert_target_plan_sold(await self.get_plan_by_code(plan_code) or {"code": plan_code, "is_active": False},
+                                            billing_period, manual_billing_authorised=manual_billing_authorised)
         import uuid
 
         from . import subscription_operations as ops
@@ -803,7 +818,7 @@ class MonetizationService:
             return await self._start_checkout_locked(
                 db, organization_id=organization_id, project_id=project_id, plan_code=plan_code,
                 billing_period=billing_period, current_user=current_user, customer_name=customer_name,
-                customer_email=customer_email, converts_trial_id=converts_trial_id,
+                customer_email=customer_email, converts_trial_id=converts_trial_id, holder=holder,
             )
         finally:
             if scope_lock_holder is None:
@@ -812,7 +827,10 @@ class MonetizationService:
     async def _start_checkout_locked(
         self, db: Any, *, organization_id: str, project_id: Optional[str], plan_code: str, billing_period: str,
         current_user: Any, customer_name: Optional[str], customer_email: Optional[str], converts_trial_id: Optional[str],
+        holder: str,
     ) -> Dict[str, Any]:
+        from . import subscription_operations as ops
+
         scope_project = str(project_id) if project_id else None
         pending = await self._pending_purchase(db, str(organization_id), scope_project)
         if pending is not None:
@@ -825,18 +843,34 @@ class MonetizationService:
                 raise PurchaseInProgress("A purchase for this scope is already awaiting payment")
 
         gateway = get_payment_gateway()
-        customer = await gateway.create_customer(
-            organization_id=str(organization_id),
-            name=customer_name or str(organization_id),
-            email=customer_email,
-        )
-        gateway_sub = await gateway.create_subscription(
-            gateway_customer_id=customer.gateway_customer_id,
-            plan_code=plan_code,
-            billing_period=billing_period,
-            metadata={"organization_id": str(organization_id), "project_id": str(project_id or ""),
-                      **({"converts_trial_id": str(converts_trial_id)} if converts_trial_id else {})},
-        )
+        try:
+            customer = await gateway.create_customer(
+                organization_id=str(organization_id),
+                name=customer_name or str(organization_id),
+                email=customer_email,
+            )
+            gateway_sub = await gateway.create_subscription(
+                gateway_customer_id=customer.gateway_customer_id,
+                plan_code=plan_code,
+                billing_period=billing_period,
+                metadata={"organization_id": str(organization_id), "project_id": str(project_id or ""),
+                          **({"converts_trial_id": str(converts_trial_id)} if converts_trial_id else {})},
+            )
+        except (ValueError, GatewayIdentityConflict, PurchaseInProgress):
+            raise
+        except Exception as exc:  # review 9 R9-10: a gateway failure is 502, not 500
+            raise GatewayOperationFailed("The payment gateway did not start the checkout; nothing was recorded") from exc
+        # Review 9 R9-5: a gateway call slower than the lease could let another checkout in; the
+        # lease is re-checked before recording, and a purchase made without it goes to review.
+        if not await db[ops.LOCKS].find_one({"_id": ops.scope_key(str(organization_id), scope_project), "holder": holder}):
+            await self.audit_service.emit(
+                action="subscription.checkout_lease_lost", actor_id=getattr(current_user, "id", None),
+                resource_type="subscription", organization_id=str(organization_id), project_id=scope_project,
+                result="failure", reason="lease_lost_during_gateway_call",
+                metadata={"requires_admin_review": True,
+                          "gateway_subscription_id": scope_text(gateway_sub.gateway_subscription_id)},
+            )
+            raise PurchaseInProgress("The purchase took too long and was not recorded; it is listed for review")
 
         now = datetime.utcnow()
         gateway_id = scope_text(gateway_sub.gateway_subscription_id)
@@ -877,7 +911,16 @@ class MonetizationService:
             project_id=str(project_id) if project_id else None,
             metadata={"plan_code": plan_code, "provider": str(settings.PAYMENT_PROVIDER)},
         )
+        warning = None
+        if await db.subscriptions.find_one({
+            "organization_id": str(organization_id), "project_id": scope_project if scope_project else {"$in": [None, ""]},
+            "package_id": {"$in": [None, ""]}, "status": {"$in": ["active", "pilot", "past_due"]},
+            "payment_gateway_subscription_id": {"$type": "string", "$gt": ""}}, {"_id": 1}):
+            # Review 9 R9-1: no replacement is automated (§16.7 is design only).
+            warning = ("This scope already has a paid subscription; it keeps billing until it is cancelled. "
+                       "Cancel it at the end of its period once the new plan is active.")
         return {
+            **({"warning": warning} if warning else {}),
             "subscription_id": str(result.inserted_id),
             "provider": str(settings.PAYMENT_PROVIDER),
             "gateway_subscription_id": gateway_sub.gateway_subscription_id,
@@ -1199,6 +1242,12 @@ class MonetizationService:
         """
         bound = bool(scope_text(sub.get("payment_gateway_subscription_id")))
         if bound:
+            provider = str(sub.get("payment_provider") or "").strip().lower()
+            if provider and provider != str(settings.PAYMENT_PROVIDER or "").strip().lower():
+                # Review 9 R9-6: bound to another provider than the one configured - its billing
+                # cannot be changed from here.
+                raise SubscriptionNotGoverning(
+                    f"Cannot {operation}: this subscription is billed by another payment provider ({provider})")
             if plan_change and not getattr(self._gateway(), "supports_in_place_plan_change", True):
                 raise SubscriptionNotGoverning(
                     f"Cannot {operation} in place: the payment gateway cannot change this subscription's plan or "
@@ -1492,8 +1541,8 @@ class MonetizationService:
             if not scope_text(stored.get("payment_gateway_subscription_id")):
                 raise SubscriptionReactivationRefused(
                     "This subscription is not billed through the payment gateway; only a Super Admin can restore it")
-            if stored.get("cancellation_operation_id") or stored.get("cancellation_reason") in {
-                    "replaced_by_plan_settings", "checkout_abandoned"}:
+            # Review 9 R9-7: decided on fields no ordinary update can write.
+            if stored.get("cancellation_operation_id") or stored.get("cancelled_administratively"):
                 raise SubscriptionReactivationRefused(
                     "This subscription was cancelled administratively; only a Super Admin can restore it")
         reactivation = stored.get("reactivation") or {}
@@ -1658,8 +1707,8 @@ class MonetizationService:
         scope = {"organization_id": str(request.organization_id),
                  "project_id": str(request.project_id) if request.project_id else {"$in": [None, ""]},
                  "package_id": {"$in": [None, ""]}}
-        if await db.subscriptions.find_one({**scope, "$or": [{"trial": True}, {"status": "trial"},
-                                                             {"conversion": {"$exists": True}}]}, {"_id": 1}):
+        if not extended_trial_authorised and await db.subscriptions.find_one(
+                {**scope, "$or": [{"trial": True}, {"status": "trial"}, {"conversion": {"$exists": True}}]}, {"_id": 1}):
             raise TrialConversionRefused("This scope has already had a trial")
         resolution = await EntitlementService(db).resolve_subscription(
             organization_id=str(request.organization_id), project_id=request.project_id
@@ -1669,13 +1718,20 @@ class MonetizationService:
             raise TrialConversionRefused("A subscription already governs this scope; a trial is not started over it")
         from . import subscription_operations as ops
 
-        marker = ops.scope_key(str(request.organization_id), str(request.project_id) if request.project_id else None)
+        marker: Optional[str] = ops.scope_key(str(request.organization_id), str(request.project_id) if request.project_id else None)
         try:
             await db[TRIAL_MARKERS].insert_one({"_id": marker, "plan_code": request.plan_code,
                                                 "created_at": datetime.utcnow(),
                                                 "created_by": getattr(current_user, "id", None)})
         except DuplicateKeyError as exc:
-            raise TrialConversionRefused("This scope has already had a trial") from exc
+            if not extended_trial_authorised:
+                raise TrialConversionRefused("This scope has already had a trial") from exc
+            # Review 9 R9-3: a Super Admin may grant another trial (audited).
+            await self.audit_service.emit(
+                action="subscription.trial_regranted", actor_id=getattr(current_user, "id", None),
+                resource_type="subscription", organization_id=str(request.organization_id),
+                project_id=request.project_id, metadata={"plan_code": request.plan_code})
+            marker = None
         if trial_days > configured_days:
             await self.audit_service.emit(
                 action="subscription.trial_extended", actor_id=getattr(current_user, "id", None),
@@ -1698,7 +1754,13 @@ class MonetizationService:
             trial_ends_at=now + timedelta(days=trial_days),
             auto_renew=False,
         )
-        return await self.create_subscription(payload, current_user)
+        try:
+            return await self.create_subscription(payload, current_user)
+        except Exception:
+            if marker is not None:
+                # Review 9 R9-3: a trial that was not created must not lock the scope out.
+                await db[TRIAL_MARKERS].delete_one({"_id": marker})
+            raise
 
     #: R6-5: what a trial conversion may produce without a gateway payment.
     NO_CHARGE_BILLING_STATUS = "no_charge_override"
@@ -1751,6 +1813,18 @@ class MonetizationService:
         if status != "trial":
             raise TrialConversionRefused(f"Only a running trial can be converted (status '{status or 'unknown'}')")
         conversion = stored.get("conversion") or {}
+        if conversion.get("state") == "pending_payment" and conversion.get("subscription_id"):
+            # Review 9 R9-8: the recorded checkout may have been cancelled or expired since.
+            recorded = await db.subscriptions.find_one({"_id": self._lookup_id(str(conversion["subscription_id"]))},
+                                                       {"status": 1, "created_at": 1})
+            created = (recorded or {}).get("created_at")
+            if (not recorded or recorded.get("status") != "pending"
+                    or (isinstance(created, datetime) and created < datetime.utcnow() - PENDING_CHECKOUT_TTL)):
+                await db.subscriptions.update_one({"_id": stored["_id"], "conversion.state": "pending_payment"},
+                                                  {"$set": {"conversion.state": "failed",
+                                                            "conversion.error": "checkout_no_longer_pending"}})
+                conversion = {**conversion, "state": "failed"}
+                stored = {**stored, "conversion": conversion}
         if conversion.get("state") == "pending_payment" or (
             conversion.get("state") == "starting" and not self._claim_is_stale(conversion)
         ):
@@ -1842,7 +1916,8 @@ class MonetizationService:
         trial_id = str(stored["_id"])
         # Review 7 R5-2: a checkout already created for this trial (an attempt that crashed
         # after creating it) is adopted, never duplicated.
-        adopted = await db.subscriptions.find_one({"converts_trial_id": trial_id, "status": "pending"})
+        adopted = await db.subscriptions.find_one({"converts_trial_id": trial_id, "status": "pending",
+                                                   "created_at": {"$gte": datetime.utcnow() - PENDING_CHECKOUT_TTL}})
         if adopted is not None:
             outcome = {"state": "pending_payment", "subscription_id": str(adopted["_id"]),
                        "gateway_subscription_id": adopted.get("payment_gateway_subscription_id"),
@@ -1868,9 +1943,17 @@ class MonetizationService:
         import uuid
 
         trial_id = str(stored["_id"])
-        # Review 7 R5-1: no second purchase for a scope already awaiting a payment.
-        if await self._pending_purchase(db, str(stored.get("organization_id")), scope_text(stored.get("project_id"))):
-            raise TrialConversionRefused("A purchase for this scope is already awaiting payment")
+        # Review 7 R5-1: no second purchase for a scope already awaiting a payment; an abandoned
+        # one is expired the same way checkout expires it (review 9 R9-9).
+        pending = await self._pending_purchase(db, str(stored.get("organization_id")), scope_text(stored.get("project_id")))
+        if pending is not None:
+            created = pending.get("created_at")
+            if not (isinstance(created, datetime) and created < datetime.utcnow() - PENDING_CHECKOUT_TTL):
+                raise TrialConversionRefused("A purchase for this scope is already awaiting payment")
+            try:
+                await self._expire_abandoned_checkout(db, pending, current_user)
+            except PurchaseInProgress as exc:
+                raise TrialConversionRefused(str(exc)) from exc
         attempt = uuid.uuid4().hex
         stale_before = datetime.utcnow() - CLAIM_STALE_AFTER
         claimed = await db.subscriptions.find_one_and_update(
@@ -2769,6 +2852,7 @@ class MonetizationService:
                     {"_id": row["_id"], "status": item["status_before"]},
                     {"$set": {"status": "cancelled", "billing_status": "inactive", "cancelled_at": now,
                               "cancellation_reason": "replaced_by_plan_settings", "auto_renew": False,
+                              "cancelled_administratively": True,
                               "cancellation_operation_id": op_id, "updated_at": now, "updated_by": actor}},
                 )
                 if changed.matched_count:

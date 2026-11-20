@@ -156,7 +156,8 @@ def test_r5_2_a_stale_conversion_claim_is_taken_over_and_an_orphan_checkout_adop
                 {"_id": "rv7-orphan-checkout", "organization_id": ORG_A, "project_id": "rv7-p5", "package_id": None,
                  "plan_code": "dms_starter", "status": "pending", "billing_status": "pending",
                  "converts_trial_id": "rv7-orphan", "payment_gateway_subscription_id": "sub_orphan",
-                 "payment_gateway_bound_by": "checkout", "payment_provider": "razorpay"},
+                 "payment_gateway_bound_by": "checkout", "payment_provider": "razorpay",
+                 "created_at": datetime.utcnow() - timedelta(minutes=20)},  # as checkout records it
             ])
             fresh = await _post(env, "/subscriptions/rv7-fresh/convert-trial", {"billing_period": "monthly"},
                                 "subscription.trial.manage")

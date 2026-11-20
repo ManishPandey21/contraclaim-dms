@@ -233,6 +233,9 @@ class BillingWebhookService:
         activates = update.get("status") == "active" or update.get("billing_status") == "active"
         if activates and event.amount_minor is not None:
             expected = await self._expected_charge(db, subscription)
+            if expected is not None and not expected["amount_minor"]:
+                # Review 9 R9-2: a plan not sold for a price is never "paid" into service.
+                return await self._record_mismatch(db, subscription, event, "plan is not sold for a price", now)
             if expected and expected["amount_minor"]:
                 bad: Optional[str] = None
                 if int(event.amount_minor) != expected["amount_minor"]:
