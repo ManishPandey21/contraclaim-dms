@@ -971,3 +971,28 @@ Two subscriptions can bill one entitlement scope when a checkout buys a new plan
 - **Reconciliation:** a periodic read-only comparison of provider status with local status for bound subscriptions, producing review items (no automatic writes).
 - **Never:** automatic refunds, cancellation of a subscription not named, cross-organisation replacement, claims of atomicity.
 - **Not implemented:** no replacement or re-binding endpoint was added.
+
+### 16.8 Independent cold review of the R6 commits (review 7) and its fixes
+
+The reviewer was given the code, not these conclusions. Within their own routes the five commits held (100 tests passed), but sibling routes still let a tenant billing administrator - who holds `subscription.entitlement.manage`, which the policy accepts for every `subscription.*` action - obtain paid service without payment. Every finding below was reproduced on real MongoDB at the commit before its fix (outputs kept with the session's evidence) and fixed in its own commit.
+
+| # | Finding | Severity | Origin | Fix |
+|---|---|---|---|---|
+| F1 | `POST /subscriptions` created an active, "paid" enterprise subscription to 2099 with add-ons and overrides | Critical | Pre-existing | `53ed2a6`: Super Admin only (no client uses it); plan validated; `billing_status=active` refused (default `manual`) |
+| F2 | Upgrade made a running trial `active` / `billing_status=active` | High | Pre-existing | `53ed2a6`: plan, period and add-on changes refuse trials; upgrade writes no status or billing status |
+| F3 | A priced add-on was added and never charged | High | Pre-existing | `53ed2a6`: priced add-ons only by Super Admin, as manually invoiced, audited for review |
+| F4 | 100-year trials, repeatedly, over an existing subscription | High | Pre-existing | `53ed2a6`: capped at the plan's trial length (Super Admin may extend, audited); one trial per scope; never over a governing subscription |
+| R8-1 / R6-1 | A converted (or cancelled) trial became reactivatable after `PUT` rewrote `cancellation_reason` | Medium | Introduced (R6-6 with R6-8) | `b7165f0`: a trial is never reactivated, decided on fields `PUT` cannot write |
+| R5-1 | Conversion plus checkout for one scope: both activate, both bill | Medium | Introduced | `b7165f0`: checkout and conversion refuse while a bound purchase for the scope awaits payment |
+| R5-2 / R6-2 | A crashed "starting" claim blocked conversion or reactivation for ever; a created checkout was orphaned | Low | Introduced | `b7165f0`: claims older than 10 minutes are taken over; the orphan checkout is adopted |
+| R5-3 | An unpriced period sold at the monthly price | Low | Pre-existing | `b7165f0`: only periods the plan prices |
+| R6-3 | A replacement activated during the gateway resume was not re-checked | Low | Introduced | `b7165f0`: re-check after the resume; refusal audited for reconciliation |
+| R7-1 | Leases never renewed: a slow operation could lose its scope and keep calling the gateway (4 cancels for 2 subscriptions) | Medium | Introduced | `b7d59a9`: renewal before every item, fenced on holding the scope; a loser stops and is listed |
+| R7-2 | A row changed meanwhile stayed unresolved for ever | Low | Introduced | `b7d59a9`: re-decided on retry from its current state |
+| R7-3 | Retrying a lifecycle operation through the plan-settings route was a 500 | Low | Introduced | `b7d59a9`: 409 with guidance |
+| R7-4 | Operation ids of different kinds shared one hash namespace | Info | Introduced | `b7d59a9`: kind in the hash |
+| R7-5 / G-2 | The client sent a fresh key per call, so a retry started a new operation | Low | Introduced | `b7d59a9`: one key per change until it succeeds |
+| G-1 | Lifecycle changes did not take the scope lease | Low | Introduced | `b7d59a9`: they do |
+| G-3 | A gateway timeout was recorded as "nothing changed" | Low | Introduced | `b7d59a9`: an unknown outcome is listed, audited and retried by the same key |
+
+Tests: `test_payment_bypass_closure_mongo.py` (5), `test_lifecycle_review7_mongo.py` (6), and additions to the R6-7 and consistency suites; mutants 12/12, 10/10 and 8/8. Two earlier tests changed for stated reasons: a checkout test needed its own scope (R5-1), and an upgrade-by-checkout webhook now carries the plan's real price (the money check had been silently skipped because no plan was seeded).
