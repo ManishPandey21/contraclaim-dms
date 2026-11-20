@@ -36,6 +36,7 @@ from ..services.monetization_service import (
     MonetizationService,
     SubscriptionScopeChangeRefused,
     GatewayOperationFailed,
+    PurchaseInProgress,
     SubscriptionNotGoverning,
     SubscriptionOperationIncomplete,
     SubscriptionReactivationRefused,
@@ -1063,7 +1064,7 @@ async def start_subscription_checkout(
             customer_name=payload.customer_name,
             customer_email=payload.customer_email,
         )
-    except GatewayIdentityConflict as exc:
+    except (GatewayIdentityConflict, PurchaseInProgress) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc

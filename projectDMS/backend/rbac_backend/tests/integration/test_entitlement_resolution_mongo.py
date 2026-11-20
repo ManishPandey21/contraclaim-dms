@@ -317,7 +317,10 @@ def test_f1_a_paid_upgrade_checkout_governs_without_locking_the_tier_out(monkeyp
                 organization_id=ORG, project_id=None, plan_code="dms_enterprise", billing_period="monthly",
                 current_user=SimpleNamespace(id="ent-actor"))
             body = _json.dumps({"event": "subscription.activated", "created_at": 1000,
-                                "payload": {"subscription": {"entity": {"id": checkout["gateway_subscription_id"]}}}},
+                                # The plan's real price: the webhook's money check applies once plans exist.
+                                "payload": {"subscription": {"entity": {"id": checkout["gateway_subscription_id"]}},
+                                            "payment": {"entity": {"id": "pay_up_1", "amount": 20000000,
+                                                                   "currency": "INR"}}}},
                                sort_keys=True).encode()
             signature = hmac.new(b"ent-secret", body, hashlib.sha256).hexdigest()
             response = await env.client.post("/api/billing/webhooks/razorpay", content=body,

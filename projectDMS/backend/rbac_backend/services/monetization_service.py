@@ -76,6 +76,15 @@ class TrialConversionRefused(Exception):
     that does not govern its scope (R6-5)."""
 
 
+#: A "starting" claim older than this is presumed abandoned (a crash between the claim and
+#: its outcome) and may be taken over by a later attempt (review 7 R5-2, R6-2).
+CLAIM_STALE_AFTER = timedelta(minutes=10)
+
+
+class PurchaseInProgress(Exception):
+    """A paid purchase for the scope is already awaiting payment (review 7 R5-1)."""
+
+
 class SubscriptionReactivationRefused(Exception):
     """A reactivation that would revive an ended, replaced or ineligible subscription (R6-6)."""
 
@@ -702,6 +711,27 @@ class MonetizationService:
         )
         return self._normalize(saved)
 
+    async def _pending_purchase(self, db: Any, organization_id: str, project_id: Optional[str],
+                                exclude: Optional[Any] = None) -> Optional[Dict[str, Any]]:
+        """A gateway-bound subscription of the scope still awaiting its first payment."""
+        query: Dict[str, Any] = {
+            "organization_id": organization_id,
+            "project_id": project_id if project_id else {"$in": [None, ""]},
+            "package_id": {"$in": [None, ""]},
+            "status": "pending",
+            "payment_gateway_subscription_id": {"$type": "string", "$gt": ""},
+        }
+        if exclude is not None:
+            query["_id"] = {"$ne": exclude}
+        return await db.subscriptions.find_one(query, {"_id": 1, "converts_trial_id": 1})
+
+    async def _assert_period_priced(self, plan_code: str, billing_period: str) -> None:
+        """Review 7 R5-3: a period the plan does not price would fall back to the monthly price."""
+        plan = await self.get_plan_by_code(plan_code)
+        tiers = (plan or {}).get("pricing_tiers") or {}
+        if tiers and billing_period not in tiers:
+            raise ValueError(f"Plan '{plan_code}' is not sold for the '{billing_period}' period")
+
     async def start_checkout(
         self,
         *,
@@ -721,6 +751,11 @@ class MonetizationService:
         db = await self._get_db()
         if not await self.validate_plan_code(plan_code):
             raise ValueError(f"Plan '{plan_code}' not found")
+        await self._assert_period_priced(plan_code, billing_period)
+        if await self._pending_purchase(db, str(organization_id), str(project_id) if project_id else None):
+            # Review 7 R5-1: two checkouts awaiting payment for one scope would both activate
+            # and both bill. The pending one is paid or abandoned first.
+            raise PurchaseInProgress("A purchase for this scope is already awaiting payment")
 
         gateway = get_payment_gateway()
         customer = await gateway.create_customer(
@@ -1253,9 +1288,13 @@ class MonetizationService:
         status = str(stored.get("status") or "").strip().lower()
         if status != "cancelled":
             raise SubscriptionReactivationRefused(f"Only a cancelled subscription can be reactivated (status '{status or 'unknown'}')")
-        if stored.get("cancellation_reason") == "converted_to_paid":
-            raise SubscriptionReactivationRefused("This trial was converted to a paid subscription; it cannot be reactivated")
-        if (stored.get("reactivation") or {}).get("state") == "starting":
+        # Review 7 R8-1/R6-1: a trial - converted, expired or cancelled - is never reactivated
+        # (that would turn free service into active service). Decided on fields an ordinary
+        # update cannot write (``trial``, ``conversion``), not on ``cancellation_reason``.
+        if stored.get("trial") is True or stored.get("conversion") or stored.get("cancellation_reason") == "converted_to_paid":
+            raise SubscriptionReactivationRefused("A trial is not reactivated; start a purchase instead")
+        reactivation = stored.get("reactivation") or {}
+        if reactivation.get("state") == "starting" and not self._claim_is_stale(reactivation):
             raise SubscriptionReactivationRefused("A reactivation of this subscription is already in progress")
         now = datetime.utcnow()
         bounds = [_instant(stored.get("ends_at")), _instant(stored.get("current_period_end"))]
@@ -1286,7 +1325,9 @@ class MonetizationService:
 
         attempt = uuid.uuid4().hex
         claimed = await db.subscriptions.find_one_and_update(
-            {"_id": stored["_id"], "status": stored.get("status"), "reactivation.state": {"$ne": "starting"}},
+            {"_id": stored["_id"], "status": stored.get("status"),
+             "$or": [{"reactivation.state": {"$ne": "starting"}},
+                     {"reactivation.requested_at": {"$lt": now - CLAIM_STALE_AFTER}}]},
             {"$set": {"reactivation": {"state": "starting", "attempt": attempt, "requested_at": now,
                                        "requested_by": getattr(current_user, "id", None)}}},
         )
@@ -1318,6 +1359,22 @@ class MonetizationService:
                                          reason=gateway_status or "unknown")
                 raise SubscriptionReactivationRefused(
                     f"The payment gateway reports the subscription as '{gateway_status or 'unknown'}'; it was not reactivated"
+                )
+
+            # Review 7 R6-3: a replacement may have been activated while the gateway resumed this
+            # one; then both would bill. Re-checked after the resume, before the local write.
+            again = await EntitlementService(db).resolve_subscription(
+                organization_id=org, project_id=project, package_id=package
+            )
+            replaced = (again.tier == own_tier and again.subscription is not None) or bool(
+                await self._pending_purchase(db, str(stored.get("organization_id")), project, exclude=stored["_id"]))
+            if replaced:
+                await release("failed", error="replaced_during_resume")
+                await self._review_event(stored, "subscription.reactivation_needs_reconciliation", current_user,
+                                         reason="replacement_appeared_during_resume")
+                raise SubscriptionReactivationRefused(
+                    "A replacement appeared while the gateway resumed this subscription; it was not reactivated "
+                    "and is listed for review"
                 )
 
         update = SubscriptionUpdate(
@@ -1482,7 +1539,9 @@ class MonetizationService:
         if status != "trial":
             raise TrialConversionRefused(f"Only a running trial can be converted (status '{status or 'unknown'}')")
         conversion = stored.get("conversion") or {}
-        if conversion.get("state") in {"starting", "pending_payment"}:
+        if conversion.get("state") == "pending_payment" or (
+            conversion.get("state") == "starting" and not self._claim_is_stale(conversion)
+        ):
             return self._conversion_outcome(trial_id, conversion)
         now = datetime.utcnow()
         period_class = classify(stored, now)
@@ -1542,7 +1601,13 @@ class MonetizationService:
             raise TrialConversionRefused(
                 "Priced add-ons are not charged by checkout; convert the trial first, then add them"
             )
+        await self._assert_period_priced(plan_code, billing_period)
         return await self._convert_trial_by_checkout(stored, plan_code, billing_period, current_user)
+
+    @staticmethod
+    def _claim_is_stale(claim: Dict[str, Any]) -> bool:
+        started = claim.get("requested_at")
+        return isinstance(started, datetime) and started < datetime.utcnow() - CLAIM_STALE_AFTER
 
     @staticmethod
     def _conversion_outcome(trial_id: str, conversion: Dict[str, Any]) -> Dict[str, Any]:
@@ -1563,10 +1628,25 @@ class MonetizationService:
 
         db = await self._get_db()
         trial_id = str(stored["_id"])
+        # Review 7 R5-2: a checkout already created for this trial (an attempt that crashed
+        # after creating it) is adopted, never duplicated.
+        adopted = await db.subscriptions.find_one({"converts_trial_id": trial_id, "status": "pending"})
+        if adopted is not None:
+            outcome = {"state": "pending_payment", "subscription_id": str(adopted["_id"]),
+                       "gateway_subscription_id": adopted.get("payment_gateway_subscription_id"),
+                       "checkout_url": None, "adopted": True}
+            await db.subscriptions.update_one({"_id": stored["_id"], "status": stored.get("status")},
+                                              {"$set": {**{f"conversion.{k}": v for k, v in outcome.items()}}})
+            return self._conversion_outcome(trial_id, outcome)
+        # Review 7 R5-1: no second purchase for a scope already awaiting a payment.
+        if await self._pending_purchase(db, str(stored.get("organization_id")), scope_text(stored.get("project_id"))):
+            raise TrialConversionRefused("A purchase for this scope is already awaiting payment")
         attempt = uuid.uuid4().hex
+        stale_before = datetime.utcnow() - CLAIM_STALE_AFTER
         claimed = await db.subscriptions.find_one_and_update(
             {"_id": stored["_id"], "status": stored.get("status"),
-             "$or": [{"conversion": {"$exists": False}}, {"conversion": None}, {"conversion.state": "failed"}]},
+             "$or": [{"conversion": {"$exists": False}}, {"conversion": None}, {"conversion.state": "failed"},
+                     {"conversion.state": "starting", "conversion.requested_at": {"$lt": stale_before}}]},
             {"$set": {"conversion": {"state": "starting", "attempt": attempt, "plan_code": plan_code,
                                      "billing_period": billing_period, "requested_by": getattr(current_user, "id", None),
                                      "requested_at": datetime.utcnow()}}},

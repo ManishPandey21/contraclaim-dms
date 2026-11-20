@@ -247,7 +247,8 @@ def test_checkout_binds_once_and_refuses_an_id_already_bound(monkeypatch) -> Non
             monkeypatch.setattr(module, "get_payment_gateway", lambda *a, **k: _Replaying())
             before = await env.db.subscriptions.count_documents({})
             with pytest.raises(GatewayIdentityConflict):
-                await service.start_checkout(organization_id=ORG_A, project_id=PROJ_A1, plan_code="dms_enterprise",
+                # Another scope (review 7 R5-1: a scope awaiting a payment gets no second checkout).
+                await service.start_checkout(organization_id=ORG_A, project_id="gw-proj-other", plan_code="dms_enterprise",
                                              billing_period="monthly", current_user=actor)
             assert await env.db.subscriptions.count_documents({}) == before
 
