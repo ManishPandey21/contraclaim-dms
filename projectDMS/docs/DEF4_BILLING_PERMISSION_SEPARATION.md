@@ -691,7 +691,7 @@ Gitleaks failed in both runs, on the 2 known findings. Locally on `f09d9be`: 1,1
 
 ## 14. Entitlement resolution (owner decision 2026-11-20)
 
-**Commits:** `5740b06`; review fixes `53c78e6`; redesign after re-review `d37824e` (supersession withdrawn); second re-review fixes `b9ab8b3`.
+**Commits:** `5740b06`; review fixes `53c78e6`; redesign after re-review `d37824e` (supersession withdrawn); second re-review fixes `b9ab8b3`; third review fixes `b51de70`, `6fc0705`.
 
 **The defect.** `EntitlementService._active_subscription` took any subscription of the scope in its period, whatever its status, and preferred the most recently updated row. Two consequences:
 
@@ -716,7 +716,11 @@ Gitleaks failed in both runs, on the 2 known findings. Locally on `f09d9be`: 1,1
 - **Several governing subscriptions in one tier: the most recently activated governs.** `governing_since` is stamped when a row *becomes* governing: create, webhook activation from a non-governing status, an update into a governing status, and the plan-settings insert. An ordinary metadata edit never stamps it. Selection takes the latest `governing_since`; ties go to the larger id. Nothing is cancelled: a trial over a paid plan governs until it expires, then the paid plan governs again; a future-dated replacement governs from its start.
 - **Ambiguity:** two or more governing rows in the deciding tier **none of which** carries `governing_since` (rows written before 2026-11-20) cannot be ordered safely. They deny (`ambiguous_subscriptions`) and are shown as "ambiguous". P-05 counts them.
 - **Supersession withdrawn (`d37824e`).** `53c78e6` cancelled the older governing row on every activation. The re-review found that non-convergent under concurrency and harmful: a trial cancelled the paid plan it overlay, a refused or failed activation could still cancel, and cancellation is not reversible by the system (R1 to R3). It was removed; no row is cancelled by selection or by activation. The double billing an upgrade checkout can cause (old plan still active and billed) is an owner decision, recorded below, not a resolution concern.
-- **Lifecycle changes only on the governing row (`b9ab8b3`, re-review N1/N2).** Upgrade, downgrade, billing-period change and add-on add/remove are refused with **409** when the row is outranked by a newer activation in its tier, when the tier holds governing rows that cannot be ordered, or when the row's status is not governing (cancelled, pending, unknown: "reactivate it first"). The check runs before the gateway is called, so an outranked row is never billed for a plan the customer would not receive. A row that has not yet started may be amended. The 409 names only a subscription of the same organisation.
+- **Lifecycle changes only on the subscription enforcement selects (`b9ab8b3`, tightened in `b51de70`).** Upgrade, downgrade, billing-period change and add-on add/remove are refused with **409**, before the gateway is called, unless:
+  - the row's status is `active`, `pilot` or `trial` (an upgrade no longer lifts `past_due`, `paused`, `archive` or `offboarding`: R6-4); and
+  - `EntitlementService.resolve_subscription` - the same query and rule enforcement uses - selects this very row for its scope (outranked, ended, expired-trial, unorderable-tier and invisible rows are refused: N1, R6-2, R6-9). A row not yet started is judged at its start date (R6-1).
+
+  The write is then compare-and-set on the status, plan, billing period, add-ons and `governing_since` the decision was made on, so a concurrent cancel or activation is refused, never revived or re-stamped (R6-3). The 409 names only a subscription of the same organisation and scope.
 - **The same gates everywhere:**
   - `check_permission_entitlement`;
   - `effective_features`;
@@ -730,7 +734,7 @@ Gitleaks failed in both runs, on the 2 known findings. Locally on `f09d9be`: 1,1
 - A project id stored as an ObjectId is matched.
 - Statuses are compared stripped.
 
-**Tests:** `test_entitlement_resolution_mongo.py`, 29 tests. They cover:
+**Tests:** `test_entitlement_resolution_mongo.py`, 38 tests. They cover:
 
 - the review reproduction;
 - precedence;
@@ -746,10 +750,11 @@ Gitleaks failed in both runs, on the 2 known findings. Locally on `f09d9be`: 1,1
 - concurrent plan-settings writes converging on one governing row;
 - the feature, summary and quota gates;
 - ObjectId project ids and padded statuses;
-- lifecycle changes on an outranked, cancelled, pending or unorderable row refused before the gateway (service and HTTP 409), a scheduled row amendable;
+- lifecycle changes on an outranked, cancelled, pending, ended, expired-trial, blocked, restricted, unorderable or invisible row refused before the gateway (service and HTTP 409); a scheduled row judged at its start;
+- the decided-state compare-and-set, with the concurrent change landing before and after the write's own read;
 - the P-05 reading, period-aware.
 
-**Mutants:** 17 of 17 killed on `5740b06`/`53c78e6`; 9 of 9 on `b9ab8b3` (status guard, outranked check, unorderable check, scheduled-row allowance, guard placement in upgrade and add-on removal, the route's 409, P-05 period and stamp parity). Untested mutant noted: removing the same-tier condition only matters for an *ended* row whose own tier then holds nothing; not covered by a test.
+**Mutants:** 17 of 17 killed on `5740b06`/`53c78e6`; 9 of 9 on `b9ab8b3` (status guard, outranked check, unorderable check, scheduled-row allowance, guard placement in upgrade and add-on removal, the route's 409, P-05 period and stamp parity). 7 of 8 on `b51de70`/`6fc0705` (eligible-only status, start-date judgement, selected-must-be-own, outranked and ambiguous branches, the `now` pass-through, the compare-and-set filter); the survivor, the in-process pre-check before the filter, is equivalent (the filter carries the same values and raises the same 409).
 
 **Independent review of `5740b06`:**
 
@@ -774,10 +779,26 @@ Gitleaks failed in both runs, on the 2 known findings. Locally on `f09d9be`: 1,1
 | N4 | Cancelling the newest row brings back an older active one (which may still be billing); a trial overlays a paid plan for its duration | Low | By design | Recorded; listings should mark the governing row (with F7) |
 | N5 | P-05 ambiguity count ignored periods and counted an unreadable stamp | Low | Introduced | **Fixed** in `b9ab8b3` |
 
+**Third independent review (of `b9ab8b3`; in-memory probes, real MongoDB not used by the reviewer):**
+
+| # | Finding | Severity | Origin | Resolution |
+|---|---|---|---|---|
+| R6-1 | A not-yet-started row stamped earlier than the current one could be re-priced, then never govern | Low-Medium | Introduced | **Fixed** `b51de70` (judged at its start) |
+| R6-2 | Ended rows and expired trials whose own tier held nothing passed the guard | Low | Introduced (N1 residual) | **Fixed** `b51de70` (must be the selected row) |
+| R6-3 | Check-then-act: a concurrent cancel was revived and re-stamped by the upgrade | Low-Medium | Introduced window | **Fixed** `b51de70` (decided-state compare-and-set); residual below |
+| R6-4 | Upgrade set `active` on `past_due`, `paused`, `archive`, `offboarding` without payment | Medium | Pre-existing | **Fixed** `b51de70` (eligible statuses only) |
+| R6-5 | `convert_trial` converts an expired or outranked trial to paid `active` with no payment and unvalidated add-ons | Low-Medium | Pre-existing | **Open: owner decision** (route conversion through checkout) |
+| R6-6 | `reactivate_subscription` ignores the period and outranks the current plan; both gateway subscriptions bill | Low | Pre-existing | **Open: owner decision** (with the double-billing decision) |
+| R6-7 | Plan settings cancel rows locally without `_gateway_cancel`, so the old gateway subscription keeps billing | Low | Pre-existing | **Open: owner decision** |
+| R6-8 | `PUT /subscriptions/{id}` changes plan, period and add-ons with no guard and no gateway call | Info | Pre-existing | **Open** (admin override; refuse plan fields there or apply the guard) |
+| R6-9 | Organisation stored as an ObjectId: the guard saw no tier-mates | Low | Introduced | **Fixed** `b51de70` |
+
+**Residual of R6-3:** the gateway is changed before the local write (so a gateway failure leaves local state untouched). A concurrent change landing between the two is refused locally after the gateway price has moved; that pair needs manual reconciliation. Not reversible automatically; recorded for the re-billing design.
+
 **Production impact:**
 
 - **Two or more governing rows in one tier with none stamped (data already in production):** denied (`ambiguous_subscriptions`) until a person resolves them, or until one of them is re-activated and so stamped. Where at least one is stamped, the latest governs.
-- **Plan or add-on changes aimed at a non-governing row** now answer 409 instead of succeeding silently. A client or operator script that upgraded an old row must target the governing one (listed in the policy audit evidence) or reactivate first.
+- **Plan, period or add-on changes aimed at a non-governing, blocked or restricted row** now answer 409 instead of succeeding silently (a past-due customer must settle before upgrading; an archived or offboarding scope cannot be upgraded back to service without reactivation). A client or operator script that upgraded an old row must target the governing one (listed in the policy audit evidence) or reactivate first.
 - **A past-due or paused project:** still denied, without falling back (unchanged).
 - **Rows with string or unreadable dates:** now governed by their real dates, or denied.
 

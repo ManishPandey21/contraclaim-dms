@@ -469,3 +469,64 @@ Full record: `docs/DEF4_BILLING_PERMISSION_SEPARATION.md` §13.
 | `system:admin` on the client catalogue route | Low, visibility only |
 
 **Not security approval.**
+
+## Subscription security remediation (owner decisions 2026-11-20, ninth pass)
+
+Full records: `docs/DEF4_BILLING_PERMISSION_SEPARATION.md` §14 (entitlement resolution) and §15 (gateway identity). Two remediations, reviewed separately. **Nothing here is security approval or production acceptance.**
+
+### F3 completion evidence (recorded as given; not approval)
+
+CI run 44765102151 on `f09d9be`: backend 8,435 passed; real MongoDB 1,132 passed across 87 modules, none skipped; frontend, dependency scan and Docker build/scan passed; **Gitleaks failed** on its 2 known findings (security-review dependency). F3 is implemented, locally tested and CI-verified; it is not security-approved and not production-accepted.
+
+### Gateway subscription id: protected payment identity
+
+**Commits:** `da322ae`, `7cabfdf`, `f64ac9f`; migration `20261124_0001` (Gate 6 fresh install 33/33, run `gate6-20261120t174311z-13219`, sandbox-CA caveat recorded in `docs/GATE_6_FRESH_INSTALL_EVIDENCE.md`). Not run against any production copy.
+
+- **Writers audited:** ordinary `POST`/`PUT /subscriptions` (refused for every caller, every spelling, unknown keys 400); checkout (the only binder: refuses an id already bound, 409, and records provenance); the webhook (reads, never binds).
+- **Webhook:** canonical provider allowlist (404 otherwise); signature; body-hash idempotency (unique index); exactly one checkout-bound subscription of this provider; customer and notes ownership; event order with a baseline; activation allowlist (`pending`, `trial`, `active`, `past_due`); payment dedupe (unique index); refused payments still recorded with a redacted payload.
+- **Re-binding:** designed only (§15); not implemented.
+- **Tests:** 26 real-Mongo (negative HTTP, cross-organisation, replay under a new event id, concurrency, mutation); 20 of 21 mutants killed, the survivor equivalent.
+- **Independent reviews:** F1 to F6 and R1 to R4 fixed (F1, F3, F5, R1, R3, R4 introduced; F2, F4, F6, R2 pre-existing); R5 (migration blocks later migrations while duplicates exist) intended and documented.
+- **Still open:** legacy bindings without provenance are trusted by the webhook (P-05 counts them; owner decision to classify and refuse unverified ones).
+
+### Entitlement resolution: deterministic, status-aware selection
+
+**Commits:** `5740b06`, `53c78e6`, `d37824e` (supersession withdrawn; latest activation governs), `b9ab8b3`, `b51de70`, `6fc0705`.
+
+- **Rule:** package > project > organisation; eligible / restricted (archive read-only, offboarding export-only) / blocking (no fallback) / unknown and invalid period (deny) / not governing (pending, cancelled, expired trial, not started, ended: never shadow). A cancelled project subscription falls back to the organisation. Several governing rows: latest `governing_since` (stamped only on becoming governing); all unstamped: `ambiguous_subscriptions`, fail closed. The selected subscription and reason are in the policy audit.
+- **Lifecycle guard:** plan, period and add-on changes only on an `active`/`pilot`/`trial` row that enforcement itself selects; compare-and-set on the decided state; 409 before the gateway otherwise.
+- **Tests:** `test_entitlement_resolution_mongo.py`, 38 real-Mongo (competing and overlapping subscriptions, cancellations, trial expiry, archive/offboarding, package precedence, 10-round concurrency, stale writes, HTTP 409, P-05). Mutants: 17/17, 6/6, 9/9 and 7/8 (one equivalent) across the passes.
+- **Three independent reviews** (findings, origin, resolution in §14): F1 to F8 (F1 High introduced, fixed by redesign; F7 display selector recorded); R1 to R4 (supersession harmful, withdrawn); N1 to N5 (N1 Medium introduced, fixed; N3 host clock and N4 older plan resurfacing recorded); R6-1 to R6-9 (R6-1/2/3/9 introduced, fixed; R6-4 pre-existing Medium, fixed; R6-5 to R6-8 pre-existing, open for owner decision).
+
+### Coverage asked for in the review
+
+| Area | Gateway identity | Entitlement resolution |
+|---|---|---|
+| Cross-tenant | Binding another organisation's id refused; webhook ownership checks; 409/404 without foreign data | Resolution filtered by organisation; guard and 409 limited to the row's own scope |
+| Role combinations | Refusal for every caller incl. Super Admin; checkout under billing permission + step-up | Routes unchanged: billing permission + step-up; DEF-4 matrix suites |
+| Revoked permissions | Existing DEF-4 and SEC suites (permission re-read per request) | Same; no new grant paths |
+| Stale writes | Compare-and-set on scope and gateway id; checkout `DuplicateKeyError` | Compare-and-set on scope, gateway id and decided lifecycle state |
+| Webhook replay | Event id and body hash (unique index), order baseline, payment dedupe | Activation stamps only from a non-governing state |
+
+### Remaining security findings (open)
+
+| Finding | Severity | Origin | Owner |
+|---|---|---|---|
+| R6-5 trial conversion without payment | Low-Medium | Pre-existing | Owner decision |
+| R6-6 reactivation ignores period; double billing | Low | Pre-existing | Owner decision (with R2 double billing) |
+| R6-7 plan settings cancel without gateway cancel | Low | Pre-existing | Owner decision |
+| R6-8 `PUT` changes plan fields unguarded | Info | Pre-existing | Owner decision |
+| R6-3 residual: gateway moved, local write refused | Low | Introduced window (narrowed) | Re-billing design |
+| N3 host-clock stamps | Low | Introduced | Recorded |
+| N4 older plan resurfaces after cancelling the newest | Low | By design | Listing should mark the governing row (with F7) |
+| Legacy gateway bindings without provenance | Medium until classified | Pre-existing | Owner decision after P-05 |
+| Gitleaks (2 historical findings), picomatch R5 | - | Pre-existing | Authorised security review |
+| M1 built-in role scope | High workstream | Pre-existing | Approved ticket |
+
+### Production impact (nothing deployed, migrated or re-granted)
+
+- Scopes with two or more unstamped governing rows deny (`ambiguous_subscriptions`) until resolved; P-05 `subscription_security_impact` counts them per organisation.
+- A past-due or paused project still denies without falling back; rows with string or unreadable dates are governed by their real dates or denied.
+- Plan, period and add-on changes on non-governing, blocked or restricted rows now answer 409.
+- Migration `20261124_0001` raises (and blocks later migrations) while duplicate gateway ids, webhook bodies or payment records exist: read P-05 first.
+- Gateway-bound subscriptions created through the old `PUT` remain trusted until classified.

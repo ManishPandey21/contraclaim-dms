@@ -395,6 +395,24 @@ Backend and frontend inventories regenerated at `378076d` and diffed against the
 - **Working tree.** The tree was clean when verification began. During it, uncommitted changes appeared: four documents (the plan, the post-cutover assessment, `RBAC_REVIEW_EXTRACTION_REMEDIATION.md`, `SECRET_SCAN_EXCEPTION_REQUEST_2026-11-16.md`); nine backend files (`core/permissions.py`, `main.py`, `migrations/catalog.py`, `routers/skills.py`, `services/skills/approvals.py`, three files under `services/arbitration_drafting/`, `tests/test_arbitration_drafting.py`); and untracked files for reviewer assignments (`migrations/v20261121_0001_reviewer_role_identities.py`, `v20261121_0002_reviewer_role_assignment_indexes.py`, `models/reviewer_assignment.py`, `routers/reviewer_assignments.py`, `services/reviewer_assignments.py`) and `docs/PHASE_4B_READINGS_OPERATOR_PROCEDURE.md`. This looks like 4B-06 and 4B-07 in progress. It is not committed, was not assessed, and does not change any row above: the register describes `19f6d61`, where those tickets have no code. The plan text was read from the working tree.
 - **Verified by reading only, not by a run:** the absence findings for the 21 tickets not started (searches for the named routes, collections, fields, components and test files); the CI list and `MOCKED_SUITES`; the `docs/CLAIM_BENCH.md` statements; the content of the Playwright spec.
 
+## Subscription security remediation (ninth pass, 2026-11-20)
+
+Records: `docs/DEF4_BILLING_PERMISSION_SEPARATION.md` §14 and §15; `docs/SECURITY_REMEDIATION_2026-11-19.md` (ninth pass). Statuses are kept separate; CI success is not security approval.
+
+| Item | Implemented | Locally tested | CI-verified | Security-approved | Production-accepted |
+|---|---|---|---|---|---|
+| F3 package scope (`8eefa27`, `f09d9be`) | Yes | Yes | Yes: run 44765102151 (Gitleaks red, known) | No | No |
+| Gateway identity protection (`da322ae`, `7cabfdf`, `f64ac9f`) | Yes | Yes (26 real-Mongo) | Yes: run 44786462934 on `51c192e` (backend 8,436; real-Mongo 1,183 in 89 modules; Gitleaks red, known) | No | No |
+| Migration `20261124_0001` | Yes, not run anywhere but empty DBs | Gate 6 fresh install 33/33 (sandbox-CA caveat) | Yes: run 44786462934 (gate-6 pin 33) | No | No |
+| Entitlement resolution and lifecycle guard (`5740b06` to `6fc0705`) | Yes | Yes (38 real-Mongo) | Pending: run on the final head | No | No |
+| P-05 `subscription_security_impact` | Yes (read-only) | Yes | Pending: run on the final head | No | Not run on production |
+| Gateway re-binding | Design only | - | - | No | No |
+| Package transfer | Design only | - | - | No | No |
+
+**F3 completion evidence:** CI run 44765102151 on `f09d9be`: backend 8,435 passed; real MongoDB 1,132 passed across 87 modules, none skipped; frontend, dependency scan and Docker passed; Gitleaks failed on its 2 known findings. Not security or production approval.
+
+**Open owner decisions from this pass:** R6-5 trial conversion without payment; R6-6 reactivation and double billing (with checkout `replaces_subscription_id`); R6-7 plan-settings gateway cancel; R6-8 plan fields on `PUT`; legacy gateway bindings without provenance; F7 client profile selector.
+
 ## CI evidence
 
 - This session is told when a CI check fails on the pull request. It is not told when one passes, and it did not query run results. "No failure reported" therefore means only that; it is not a recorded green run.

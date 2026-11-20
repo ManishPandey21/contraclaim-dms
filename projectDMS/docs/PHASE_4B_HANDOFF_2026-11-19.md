@@ -212,6 +212,24 @@ It is the main code-side blocker to DEF-4 activation, and it needs no production
 - **Package transfer:** designed only; not implemented.
 - **Next dependency-ready work** is unchanged: the M1 shadow-mode evaluator, behind `BUILT_IN_ROLE_ASSIGNMENTS`, default `off`.
 
+## Ninth pass (subscription security remediation, 2026-11-20)
+
+- **F3 confirmed complete** on CI run 44765102151 (`f09d9be`): backend 8,435; real MongoDB 1,132 across 87 modules, none skipped; frontend, dependency scan, Docker green; Gitleaks red on the 2 known findings. Not security or production approval.
+- **Gateway identity** (`da322ae`, `7cabfdf`, `f64ac9f`): only checkout binds; ordinary writes refused; webhook signature, body-hash idempotency, binding, ownership, order and activation checks; migration `20261124_0001` with Gate 6 fresh install 33/33. Re-binding designed only.
+- **Entitlement resolution** (`5740b06` to `6fc0705`): status-aware tiers, latest activation governs, ambiguity fails closed, lifecycle changes only on the selected row with compare-and-set. Three independent reviews; introduced findings fixed; R6-5 to R6-8 pre-existing and open for owner decision.
+
+| Item | Implemented | Locally tested | CI-verified | Security-approved | Production-accepted |
+|---|---|---|---|---|---|
+| F3 package scope (`8eefa27`, `f09d9be`) | Yes | Yes | Yes: run 44765102151 (Gitleaks red, known) | No | No |
+| Gateway identity protection (`da322ae`, `7cabfdf`, `f64ac9f`) | Yes | Yes (26 real-Mongo) | Yes: run 44786462934 on `51c192e` (backend 8,436; real-Mongo 1,183 in 89 modules; Gitleaks red, known) | No | No |
+| Migration `20261124_0001` | Yes, not run anywhere but empty DBs | Gate 6 fresh install 33/33 (sandbox-CA caveat) | Yes: run 44786462934 (gate-6 pin 33) | No | No |
+| Entitlement resolution and lifecycle guard (`5740b06` to `6fc0705`) | Yes | Yes (38 real-Mongo) | Pending: run on the final head | No | No |
+| P-05 `subscription_security_impact` | Yes (read-only) | Yes | Pending: run on the final head | No | Not run on production |
+| Gateway re-binding | Design only | - | - | No | No |
+| Package transfer | Design only | - | - | No | No |
+
+**Next dependency-ready work** is unchanged: the M1 shadow-mode evaluator behind `BUILT_IN_ROLE_ASSIGNMENTS`, default `off`. The open billing items above need owner decisions first.
+
 ## Blockers before production authorisation
 
 1. P-01 to P-16 production readings with authorised read-only access (AQ-11). This includes:
