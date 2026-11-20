@@ -381,3 +381,40 @@ Still open, documented, not changed:
 Backend in both runs: 8,431 unit tests and 1,070 real-MongoDB tests (80 modules) passed.
 
 **CI (exact head).** CI run 44570828567 on `14b695b`: backend (8,431 unit; real-Mongo 80 modules, 1,070 passed, every module ran), frontend (1,014 unit; 78 mocked E2E passed), dependency scan and Docker green; secret scan red (same two findings). Fourth-pass stages: implemented, tested and CI-verified; **not** security-approved (authorised review outstanding) and **not** production-accepted.
+
+
+## DEF-4 owner acceptance and security follow-ups (2026-11-20, sixth pass)
+
+The owner instructions are restated in `docs/DEF4_BILLING_PERMISSION_SEPARATION.md` §11, which also holds the details, the changed flag-off matrix cells and the review table.
+
+**Summary of security-relevant changes:**
+
+- **M4 (`8a45f3b`): global pricing.**
+  - Before: a tenant billing admin could edit every tenant's plans and add-ons, because `PolicyService` allowed `billing.plan.manage` unscoped.
+  - Now: catalogue writes need Super Admin, or `platform.pricing.manage` held by name on a platform-scoped role. Such a role applies only to a user bound to no organisation.
+  - No tenant can obtain it: `platform.*` is non-delegable, and only a Super Admin can put it on a role.
+  - The advertised list and the client gating follow the same rule.
+  - Every writer is audited with before/after.
+- **L3 (`01cdb29`, `e633a0f`): subscription scope integrity.** Covered under DEF-4 §11.
+- **Decision 4 (`5ccd918`, `8517f27`, `d0eb1db`): minimum disclosure.**
+  - A caller without organisation-level standing gets the operational view only: status, boolean feature indicators and expiry.
+  - With the flag off, the organisation financial routes are refused to such a caller, though the legacy alias still grants the name.
+  - Raw override values never pass through the feature-status endpoint.
+  - The tenant billing admin no longer sees every organisation's service state.
+- **M1 (`10714db`): built-in roles are global.** Audit, P-05 reading and tests only. Five exposures are pinned (E1 to E5) and the holding boundaries have negative tests. The remediation is a separate, approved, High-priority workstream (`docs/M1_BUILT_IN_ROLE_SCOPING.md`); no migration has been run.
+
+**Not changed, by instruction:**
+
+- `BILLING_EXPLICIT_PERMISSIONS` stays off, and the aliases are unchanged.
+- No production role, user or membership is changed.
+- No deployment, no merge, no rollout.
+- PR #114 stays a draft, and the skill packs stay unpublished.
+
+**Open, Low:**
+
+- unknown plan or add-on codes reseed defaults on read, unaudited (pre-existing);
+- `has_permission("platform.pricing.manage")` ignores scope;
+- the client billing-catalogue route also admits `system:admin` (visibility only);
+- L3 silently drops other scope spellings instead of refusing them.
+
+**Review and CI:** the independent re-review and CI on the exact head are recorded in the DEF-4 doc §11.

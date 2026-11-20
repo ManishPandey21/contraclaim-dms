@@ -328,3 +328,94 @@ No Critical or High issue. Flag-off paths are code-identical to today, and with 
 | **Info:** a project-tier user holding an explicit custom organisation-level grant is refused at organisation level everywhere under the flag (consistent since the M2 fix). | Info | — |
 
 **CI.** CI run 44584757939 on `73c9b41` (code identical at `698effd`): backend (8,432 unit; real-Mongo 81 modules, 1,080 passed, every module ran), frontend (1,014 unit; 78 mocked E2E), dependency scan and Docker green; secret scan red (same two findings). Earlier run 44582778268 on `2401094` (before the review fixes) also green except the secret scan.
+
+## 11. Owner acceptance and follow-ups (2026-11-20, sixth pass)
+
+The owner acknowledged the DEF-4 implementation and the M2, M3 and L2 fixes as code-complete and CI-verified. **That is not production authorisation.**
+
+**Decisions:**
+
+- the target matrix in §4 is approved provisionally;
+- `BILLING_EXPLICIT_PERMISSIONS` stays `false`;
+- the legacy aliases stay unchanged until a separately approved removal phase.
+
+**Activation stays blocked until all of these are done:**
+
+1. P-05 is read and reviewed. This now includes `built_in_role_scope_impact` (M1).
+2. Scoped grants are approved and applied in order.
+3. Cross-organisation and mixed-role checks pass. M1 (`docs/M1_BUILT_IN_ROLE_SCOPING.md`) must first be shown safe.
+4. The authorised security review is complete.
+5. Two consecutive deployed staging E2E runs pass.
+6. A separate production release decision is recorded.
+
+| Item | Commit | What changed | Evidence |
+|---|---|---|---|
+| **M4:** global pricing | `8a45f3b` | Plan and add-on create/update need Super Admin or `platform.pricing.manage` on a platform role (no organisation, held by a user with no organisation). A tenant `billing.plan.manage` no longer suffices; it keeps scoped uses such as `POST /billing-records`. Step-up is kept. Policy decisions and every writer are audited, with before/after. An unknown id now returns 404. The advertised list and the client gating follow the same rule. | `test_m4_global_pricing_mongo.py` (7 tests); a reverted-gate mutant fails 3 |
+| **L3:** subscription scope | `01cdb29`, `e633a0f` | `PUT /subscriptions/{id}` authorises on the stored scope. An omitted field means unchanged, and an equal value is a no-op. Any other `organization_id` or `project_id` (null, sibling or foreign project, another organisation, camelCase spellings) is refused with 400 for everyone. The service refuses scope changes from every caller and writes compare-and-set on both fields; a stale read or a concurrent change returns 409. `e633a0f` replaced a raw body read that the upload-route gate (rightly) flagged. | `test_l3_subscription_scope_integrity_mongo.py` (4 tests); 4 of 4 mutants killed |
+| **Decision 4:** minimum disclosure | `5ccd918`, `8517f27`, `d0eb1db` | See below | `test_operational_minimum_disclosure_mongo.py` (13 tests, both flag states); 11 mutants killed in total |
+
+### Decision 4, as implemented (both flag states; it narrows disclosure and activates nothing)
+
+**Who it applies to.** A caller without **organisation-level standing** in an organisation gets only the operational view there. Organisation-level standing (`PolicyService.has_organisation_level_standing`) means one of:
+
+- Super Admin;
+- a member holding `orgadmin`, `orguser`, `contractmgr_org`, `doccontroller`, `reporter`, `settings_manager` or `contraclaim_billing_admin`;
+- a member holding a custom role of that organisation with no project.
+
+Callers without standing include Project Admin, Project User, a limited user, a plain user, and anyone holding only a custom project role. With the flag on, lists are first cut by the explicit grants. Project Admin and Project User are then cut further, even when they hold `subscription.status.view`.
+
+**What the operational view contains:**
+
+- service status;
+- `dms_enabled` and `drafting_enabled`;
+- `features` reduced to **boolean indicators**: a non-boolean value of the merged `entitlement_overrides` (price, limit, term) is dropped;
+- expiry: `current_period_end`, `trial`, `trial_ends_at`;
+- the caller's own projects only.
+
+Plan code and name, add-ons, billing status and period, gateway ids, metadata and audit fields are not included. In `/plan-settings`, organisations and projects are cut to identity.
+
+**Where it applies:**
+
+- `/plan-settings/effective-services`;
+- `/plan-settings`;
+- `/subscriptions`;
+- `/subscriptions/{id}`. With the flag on, this route is cut by the explicit history and status grants in scope.
+
+**The financial routes.** With the flag off, `PolicyService` refuses the scoped organisation financial views to callers without standing:
+
+- `billing.plan.view`, `billing.record.view`, `billing.invoice.view`, `billing.invoice.download`, `subscription.history.view`;
+- this covers `/billing/summary`, `/billing/history`, `/billing/records`, `/billing/review-queue`, the receipt, subscription history and the invoice preview.
+
+The legacy alias still grants the name, and organisation-level users keep it. The unscoped public `/plans` list is unaffected.
+
+**The tenant billing admin.** With the flag off, `/plan-settings/effective-services` used to return every organisation's full state to any holder of `subscription.entitlement.manage`. It now returns only the holder's own organisations, as with the flag on.
+
+**Changes to the flag-off matrix in §3:**
+
+| Persona | Routes | Was | Now |
+|---|---|---|---|
+| Project Admin, Project User | billing records, review queue, summary, history, receipt, subscription history, invoice preview | allow | **deny** |
+| Project Admin, Project User | subscription reads and effective services | full rows | operational view |
+| Billing admin | effective services | every organisation | its own organisations |
+
+All other cells are unchanged.
+
+**Client.** `DocumentsPage` reads `drafting_enabled`, which is kept. The profile card shows "Not available" for the plan of project-level users, and still shows expiry.
+
+### Independent review of this pass (agent; not the authorised security review)
+
+The first round found no Critical issues, and M4, L3 and the M1 reading were sound.
+
+| Finding | Severity | Resolution |
+|---|---|---|
+| **H1:** with the flag off, Project Admin and Project User still read the organisation financial routes through `organizations:read` (gateway ids, raw overrides, sibling projects, invoice lines). | High | **Fixed** (`d0eb1db`): the standing rule in `PolicyService`. |
+| **M:** the cut was keyed on project role names, so it failed open for `limited_user`, `user` and custom project roles. With the flag on, the single read was uncut for a custom project role. | Medium | **Fixed** (`d0eb1db`): decided by standing, and by grants on the flag-on single read. |
+| **Low 1:** `GET /plans/{code}` with an unknown code reseeds the default plans or add-ons (`$setOnInsert`, unaudited). It only restores a default deleted outside the API; there is no API delete. | Low, pre-existing | Recorded; not changed. |
+| **Low 2:** `has_permission("platform.pricing.manage")` ignores scope, while `authorize` refuses a scoped call. Nothing calls it scoped, and a platform user has no organisation. | Low | Recorded. |
+| **Low 3:** the client route `/admin/billing-catalog` still admits `system:admin`. This affects visibility only; the server refuses the write. | Low | Recorded. |
+| **Low 4:** L3 silently drops other spellings (`organisation_id`, `org_id`) instead of refusing them. They are never written. | Low | Recorded. |
+| **Low 5:** the M1 doc overstated what its test proves about "no writes". | Low | **Corrected.** |
+
+Re-review of `d0eb1db`: *pending; recorded below when it reports.*
+
+**CI:** *pending; recorded below.*

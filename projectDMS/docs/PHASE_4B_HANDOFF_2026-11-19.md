@@ -153,10 +153,33 @@ Open:
   - L3: validating the new scope on `PUT /subscriptions/{id}`;
   - whether operational `features` should omit `entitlement_overrides`.
 
+## Sixth pass (owner acceptance and security follow-ups, 2026-11-20)
+
+| Commit | Change |
+|---|---|
+| `8a45f3b` | M4 |
+| `01cdb29`, `e633a0f` | L3 |
+| `5ccd918`, `8517f27`, `d0eb1db` | Decision 4 and its review fixes |
+| `10714db` | M1 audit, reading and tests |
+
+- **Done (implemented and tested; CI on the exact head: see DEF-4 doc §11):**
+  - M4: global pricing restricted to Super Admin or a platform pricing role;
+  - L3: subscription scope preserved on `PUT`, with compare-and-set;
+  - Decision 4: minimum disclosure for callers without organisation-level standing;
+  - M1: audit, P-05 `built_in_role_scope_impact`, negative tests and the architecture plan.
+- **Not done, by instruction:**
+  - DEF-4 not activated, and the aliases are unchanged;
+  - M1 not remediated, and no migration run.
+- **Next M1 steps, each needing approval:**
+  - read P-05;
+  - owner decisions on the assignments needing one;
+  - assignments (grant before revoke);
+  - `BUILT_IN_ROLE_ASSIGNMENTS` shadow mode, then on.
+
 ## Blockers before production authorisation
 
 1. P-01 to P-16 production readings with authorised read-only access (AQ-11). This includes:
-   - P-05 access impact, then authorised scoped re-grants;
+   - P-05 access impact (billing and the M1 built-in role scope), then authorised scoped re-grants;
    - P-03 for legacy `Other` claims.
 2. Authorised security review, including the two historical Gitleaks findings and the picomatch R5 assessment, which stay with the security owner.
 3. JG-5(f) independent legal sign-off.
