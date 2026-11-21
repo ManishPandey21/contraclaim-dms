@@ -9,6 +9,7 @@ any external provider — suitable for internal / manual billing workflows.
 
 from __future__ import annotations
 
+import calendar
 import functools
 import hashlib
 import hmac
@@ -371,7 +372,9 @@ class RazorpayGateway(PaymentGatewayInterface):
     ) -> Optional[GatewaySubscription]:
         """Bounded scan of recent subscriptions for ``notes.checkout_reference`` (5 pages of
         100). Not finding one is not proof it was never created: the caller keeps it listed."""
-        since = int(created_after.timestamp()) if created_after else None
+        # Review 14 R14-1: stored datetimes are naive UTC; .timestamp() would read them as local
+        # time and move the window (a host behind UTC skipped the subscription it looked for).
+        since = int(calendar.timegm(created_after.utctimetuple())) if created_after else None
         for page in range(5):
             query: Dict[str, Any] = {"count": 100, "skip": page * 100, **({"from": since} if since else {})}
             resp = await self._call(functools.partial(self._list_subscriptions, query),

@@ -227,3 +227,21 @@ def test_r10_3_authentication_is_not_an_activation() -> None:
     event = _gateway(FakeClient()).parse_webhook_event(
         payload={"event": "subscription.authenticated", "payload": {"subscription": {"entity": {"id": "sub_1"}}}})
     assert event is not None and event.event_type == "subscription.authenticated"
+
+
+def test_r14_1_the_search_window_is_utc_whatever_the_host_time_zone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review 14 R14-1: stored datetimes are naive UTC; the search's ``from`` must not move with
+    the host's time zone (a host behind UTC skipped the subscription it looked for)."""
+    import calendar
+    import time as _time
+
+    monkeypatch.setenv("TZ", "America/New_York")
+    _time.tzset()
+    try:
+        created = datetime(2030, 1, 10, 12, 0, 0)  # naive UTC, as stored
+        client = FakeClient(all=[{"items": []}])
+        _run(_gateway(client).find_subscription_by_reference(reference="op_1", created_after=created))
+        assert client.calls[0][1]["from"] == calendar.timegm(created.utctimetuple())
+    finally:
+        monkeypatch.delenv("TZ", raising=False)
+        _time.tzset()

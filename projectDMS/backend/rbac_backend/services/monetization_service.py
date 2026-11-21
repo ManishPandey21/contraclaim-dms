@@ -1320,8 +1320,11 @@ class MonetizationService:
         if exists_at_provider is None and getattr(gateway, "supports_reference_search", False):
             created = op.get("created_at") if isinstance(op.get("created_at"), datetime) else None
             try:
-                exists_at_provider = await gateway.find_subscription_by_reference(
-                    reference=op["_id"], created_after=(created - timedelta(minutes=10)) if created else None) is not None
+                found_now = await gateway.find_subscription_by_reference(
+                    reference=op["_id"], created_after=(created - timedelta(minutes=10)) if created else None)
+                exists_at_provider = found_now is not None
+                if found_now is not None and not first.get("gateway_subscription_id"):
+                    first = {**first, "gateway_subscription_id": found_now.gateway_subscription_id}
             except Exception:
                 exists_at_provider = None  # review 13 R13-4: an incomplete search proves nothing
         if exists_at_provider:
@@ -1379,6 +1382,22 @@ class MonetizationService:
             db = await self._get_db()
 
         first = (op.get("items") or [{}])[0] or {}
+        recorded_here = await db.subscriptions.find_one(
+            {"$or": [{"checkout_reference": op["_id"]}, {"replacement_operation_id": op["_id"]}]},
+            {"_id": 1, "payment_gateway_subscription_id": 1})
+        if recorded_here is not None:
+            # Review 14 R14-2: the purchase was recorded before the attempt stopped (a crash after
+            # the insert): resolved as recorded, whatever the provider search can say.
+            done_item = {**first, "gateway": "confirmed", "local": "recorded",
+                         "subscription_id": str(recorded_here["_id"]),
+                         "gateway_subscription_id": recorded_here.get("payment_gateway_subscription_id")}
+            items_now = [done_item, *list(op.get("items") or [])[1:]]
+            await db[ops.OPERATIONS].update_one(
+                {"_id": op["_id"], "status": {"$in": ["needs_review", "in_progress"]}},
+                {"$set": {"status": "awaiting_payment" if op.get("kind") == "replacement" else "completed",
+                          "items": items_now, "lease_until": None, "updated_at": datetime.utcnow(),
+                          "result": {"reconciled": True, "subscription_id": str(recorded_here["_id"])}}})
+            return True
         if first.get("gateway") == "confirmed" and first.get("local") in UNRECORDED_PURCHASE_STATES:
             # Review 10 R10-7: created at the provider but not recorded (lease lost): the id is
             # known from the provider's own answer. A binding conflict is left for a person.

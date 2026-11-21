@@ -191,3 +191,25 @@ def test_r13_5_a_conflict_with_its_own_record_is_resolved(monkeypatch, provider)
             assert retried.status_code == 200 and retried.json().get("reconciled") is True, retried.text[:200]
 
     _run(scenario())
+
+
+# R14-2: a checkout recorded locally before its attempt stopped is resolved as recorded, even
+# where the provider cannot be searched - never a false "not created" statement.
+def test_r14_2_a_purchase_recorded_before_the_crash_is_resolved_as_recorded(monkeypatch, provider) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            past = datetime.utcnow() - timedelta(minutes=5)
+            await env.db.subscriptions.insert_one({**_bound("r14-rec", status="pending"), "checkout_reference": "op_rec"})
+            await env.db.subscription_operations.insert_one({
+                "_id": "op_rec", "kind": "checkout", "organization_id": ORG_A, "project_id": PROJ_A1,
+                "status": "needs_review", "lease_until": None, "created_at": past, "updated_at": past,
+                "items": [{"reference": "op_rec", "gateway": "outcome_unknown", "create_started": True}],
+                "request": {"plan_code": "dms_starter", "billing_period": "monthly"}})
+            provider.supports_reference_search = False
+            retried = await _call(env, "/plan-settings/operations/op_rec/retry", None, STEP)
+            assert retried.status_code == 200 and retried.json().get("reconciled") is True, retried.text[:200]
+            op = await env.db.subscription_operations.find_one({"_id": "op_rec"})
+            assert op["status"] == "completed" and op["items"][0]["subscription_id"] == "r14-rec"
+            assert await env.db.subscriptions.count_documents({"checkout_reference": "op_rec"}) == 1
+
+    _run(scenario())

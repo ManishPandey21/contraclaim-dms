@@ -739,7 +739,10 @@ async def retry_subscription_operation(
         # Workstream 1: continue a replacement whose source cancellation did not complete.
         if stored.get("status") != "needs_review":
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This replacement is not awaiting review")
-        return await service.complete_replacement(operation_id, actor=str(current_user.id))
+        try:
+            return await service.complete_replacement(operation_id, actor=str(current_user.id))
+        except OperationConflict as exc:  # review 14 R14-3: a lost lease is a conflict, not a 500
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     if stored.get("kind") in {"checkout", "replacement"}:
         # Workstream 4: an unanswered checkout create is reconciled by its reference at the
         # provider - never created again.
