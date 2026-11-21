@@ -747,7 +747,7 @@ class MonetizationService:
             query["_id"] = {"$ne": exclude}
         return await db.subscriptions.find_one(
             query, {"_id": 1, "converts_trial_id": 1, "created_at": 1, "payment_gateway_subscription_id": 1,
-                    "organization_id": 1, "project_id": 1})
+                    "organization_id": 1, "project_id": 1, "replacement_operation_id": 1})
 
     async def _expire_abandoned_checkout(self, db: Any, pending: Dict[str, Any], current_user: Any) -> None:
         """Review 8 B3: cancel an abandoned checkout at the gateway first (so it can never be
@@ -781,11 +781,340 @@ class MonetizationService:
                       "updated_at": now,
                       "updated_by": getattr(current_user, "id", None)}},
         )
+        if pending.get("replacement_operation_id"):
+            from . import subscription_operations as ops
+
+            await db[ops.OPERATIONS].update_one(
+                {"_id": pending["replacement_operation_id"], "status": "awaiting_payment"},
+                {"$set": {"status": "abandoned", "updated_at": now}})
         await self.audit_service.emit(
             action="subscription.checkout_abandoned_cancelled", actor_id=getattr(current_user, "id", None),
             resource_type="subscription", resource_id=str(pending["_id"]),
             organization_id=str(pending.get("organization_id") or ""), project_id=scope_text(pending.get("project_id")),
         )
+
+    async def _gateway_billed_in_scope(self, db: Any, organization_id: str,
+                                       project_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        """A subscription of exactly this scope (no package) billed through the gateway and
+        still able to be charged."""
+        return await db.subscriptions.find_one({
+            "organization_id": organization_id, "project_id": project_id if project_id else {"$in": [None, ""]},
+            "package_id": {"$in": [None, ""]}, "status": {"$in": ["active", "pilot", "past_due"]},
+            "payment_gateway_subscription_id": {"$type": "string", "$gt": ""},
+            "replaced_by_subscription_id": {"$exists": False}}, {"_id": 1})
+
+    #: Statuses a replaced subscription may have: paid and in service.
+    REPLACEABLE_STATUSES = frozenset({"active", "pilot"})
+    #: The earliest a replacement may be scheduled after now (a cancel at cycle end needs time).
+    REPLACEMENT_MIN_LEAD = timedelta(hours=1)
+    #: Local and provider paid-through dates further apart than this disagree (needs review).
+    REPLACEMENT_DATE_TOLERANCE = timedelta(days=1)
+
+    async def _start_replacement_locked(
+        self, db: Any, *, organization_id: str, project_id: Optional[str], plan_code: str, billing_period: str,
+        current_user: Any, customer_name: Optional[str], customer_email: Optional[str],
+        replaces_subscription_id: str, idempotency_key: str, holder: str,
+    ) -> Dict[str, Any]:
+        """Workstream 1 (owner approval for development 2026-11-21; behind
+        ``CHECKOUT_REPLACEMENT_ENABLED``, default off). Buy a new plan for a scope whose
+        governing subscription is billed through the gateway, without overlapping charges:
+
+        1. a durable ``replacement`` operation under the caller's ``Idempotency-Key``;
+        2. the source is verified exactly: same organisation, project and (no) package, the
+           subscription enforcement selects now, paid and in service, bound by checkout to the
+           configured provider, not already being replaced;
+        3. the provider must guarantee a scheduled start (``supports_scheduled_start``); the
+           new subscription starts when the source's paid period ends - the provider's cycle
+           end, which must agree with the local paid-through date - so they never bill the
+           same days. Any other arrangement (proration, credit) is refused here;
+        4. the target is recorded ``pending`` with ``starts_at`` at that date: even once paid
+           it governs only from then, and the source keeps service until then (no gap);
+        5. only on the target's authoritative payment confirmation (the signed webhook) is the
+           source cancelled at the gateway at its cycle end, then locally (its service ends at
+           the same date) - :meth:`complete_replacement`.
+
+        Nothing is refunded and no other subscription is touched. A provider/database
+        disagreement or a failed step leaves the operation ``needs_review`` with its evidence.
+        """
+        from . import subscription_operations as ops
+
+        op = await ops.begin(
+            db, kind="replacement", organization_id=organization_id, project_id=project_id,
+            idempotency_key=f"replacement:{replaces_subscription_id}:{idempotency_key}",
+            request={"replaces_subscription_id": replaces_subscription_id, "plan_code": plan_code,
+                     "billing_period": billing_period},
+            requested_by=getattr(current_user, "id", None),
+        )
+        if op.get("status") in {"completed", "awaiting_payment"}:
+            return {"operation": self._operation_summary(op), **(op.get("result") or {})}
+        reference, token = op["_id"], op.get("token")
+
+        async def refuse(exc: Exception, *, review: Optional[str] = None, evidence: Optional[Dict[str, Any]] = None) -> None:
+            items = [{"role": "source", "subscription_id": replaces_subscription_id, "refused": type(exc).__name__,
+                      **({"evidence": evidence} if evidence else {})}]
+            await ops.finish(db, reference, "needs_review" if review else "failed", items=items, token=token)
+            if review:
+                await self.audit_service.emit(
+                    action="subscription.replacement_needs_review", actor_id=getattr(current_user, "id", None),
+                    resource_type="subscription_operation", resource_id=reference, organization_id=organization_id,
+                    project_id=project_id, result="failure", reason=review,
+                    metadata={"requires_admin_review": True, "operation_id": reference,
+                              "replaces_subscription_id": replaces_subscription_id})
+            raise exc
+
+        source = await db.subscriptions.find_one({"_id": self._lookup_id(replaces_subscription_id)})
+        if not source:
+            await refuse(ValueError("The subscription to replace was not found"))
+        assert source is not None
+        if (str(source.get("organization_id") or "") != organization_id
+                or scope_text(source.get("project_id")) != project_id or scope_text(source.get("package_id"))):
+            await refuse(SubscriptionNotGoverning(
+                "The subscription to replace belongs to another organisation, project or package"))
+        status_before = str(source.get("status") or "").strip().lower()
+        gateway_id = scope_text(source.get("payment_gateway_subscription_id"))
+        provider = str(source.get("payment_provider") or "").strip().lower()
+        if status_before not in self.REPLACEABLE_STATUSES or source.get("trial"):
+            await refuse(SubscriptionNotGoverning(
+                f"Only a paid subscription in service can be replaced (status '{status_before or 'unknown'}')"))
+        if not gateway_id or source.get("payment_gateway_bound_by") not in (None, "checkout") or (
+                provider and provider != str(settings.PAYMENT_PROVIDER or "").strip().lower()):
+            await refuse(SubscriptionNotGoverning(
+                "Only a subscription billed through the configured payment gateway is replaced by checkout"))
+        if source.get("replaced_by_subscription_id"):
+            await refuse(SubscriptionNotGoverning("This subscription is already being replaced"))
+        from .entitlement_service import EntitlementService
+
+        resolution = await EntitlementService(db).resolve_subscription(organization_id=organization_id,
+                                                                       project_id=project_id)
+        selected = (resolution.subscription or {}).get("_id") or (resolution.subscription or {}).get("id")
+        if str(selected or "") != str(source["_id"]):
+            await refuse(SubscriptionNotGoverning("The subscription to replace does not govern this scope"))
+
+        gateway = get_payment_gateway()
+        if not getattr(gateway, "supports_scheduled_start", False):
+            await refuse(SubscriptionNotGoverning(
+                "The payment provider cannot schedule the new plan to start when the current one ends; "
+                "the replacement was refused so the two never bill the same days"))
+        local_end = None
+        for field in ("current_period_end", "ends_at"):
+            value = source.get(field)
+            if isinstance(value, datetime):
+                local_end = value
+                break
+        try:
+            state = await gateway.fetch_subscription_state(gateway_subscription_id=str(gateway_id)) if isinstance(
+                gateway, PaymentGatewayInterface) else None
+        except Exception as exc:
+            await refuse(GatewayOperationFailed("The payment provider could not be read; nothing was changed"))
+            raise AssertionError from exc  # unreachable: refuse raises
+        provider_end = state.current_end if state else None
+        evidence = {"provider": state.evidence() if state else None, "local_paid_through": local_end}
+        if state is not None and state.status not in {"active", "authenticated"}:
+            await refuse(SubscriptionNotGoverning(
+                f"The payment provider shows the subscription as '{state.status}'; listed for review"),
+                review="provider_status_disagrees", evidence=evidence)
+        if provider_end and local_end and abs(provider_end - local_end) > self.REPLACEMENT_DATE_TOLERANCE:
+            await refuse(SubscriptionNotGoverning(
+                "The provider's and the local paid-through dates disagree; listed for review"),
+                review="paid_through_dates_disagree", evidence=evidence)
+        effective_at = provider_end or local_end
+        if effective_at is None or effective_at < datetime.utcnow() + self.REPLACEMENT_MIN_LEAD:
+            await refuse(SubscriptionNotGoverning(
+                "The subscription to replace has no paid period left to schedule against; buy the new plan "
+                "after it ends"))
+        assert effective_at is not None
+
+        await self._reconcile_unknown_checkouts(db, organization_id, project_id, current_user)
+        if await self._pending_purchase(db, organization_id, project_id) is not None:
+            await refuse(PurchaseInProgress("A purchase for this scope is already awaiting payment"))
+
+        items: List[Dict[str, Any]] = [
+            {"role": "target", "reference": reference, "gateway": "pending", "attempts": 1, "last_error": None},
+            {"role": "source", "subscription_id": str(source["_id"]), "status_before": status_before,
+             "gateway_subscription_id": gateway_id, "gateway": "awaiting_target_payment", "local": "unchanged",
+             "effective_at": effective_at, "evidence": evidence},
+        ]
+        target = items[0]
+        try:
+            customer = await gateway.create_customer(organization_id=organization_id,
+                                                     name=customer_name or organization_id, email=customer_email)
+        except Exception as exc:
+            target.update(gateway="failed", last_error=getattr(exc, "cause_type", None) or type(exc).__name__)
+            await ops.finish(db, reference, "failed", items=items, token=token)
+            raise GatewayOperationFailed("The payment gateway did not start the checkout; nothing was recorded") from exc
+        try:
+            gateway_sub = await gateway.create_subscription(
+                gateway_customer_id=customer.gateway_customer_id, plan_code=plan_code, billing_period=billing_period,
+                metadata={"organization_id": organization_id, "project_id": project_id or "",
+                          "checkout_reference": reference, "replaces_subscription_id": str(source["_id"])},
+                start_at=effective_at,
+            )
+        except Exception as exc:
+            outcome = reliability.classify(exc)
+            not_applied = isinstance(exc, ValueError) or outcome in {reliability.NOT_SENT, reliability.REJECTED}
+            target.update(gateway="failed" if not_applied else "outcome_unknown", last_outcome=outcome,
+                          last_error=getattr(exc, "cause_type", None) or type(exc).__name__,
+                          customer_id=customer.gateway_customer_id)
+            await ops.finish(db, reference, "failed" if not_applied else "needs_review", items=items, token=token)
+            if not not_applied:
+                await self.audit_service.emit(
+                    action="subscription.checkout_outcome_unknown", actor_id=getattr(current_user, "id", None),
+                    resource_type="subscription_operation", resource_id=reference, organization_id=organization_id,
+                    project_id=project_id, result="failure", reason=target["last_error"],
+                    metadata={"requires_admin_review": True, "operation_id": reference})
+            raise GatewayOperationFailed(
+                "The payment gateway did not start the replacement"
+                + ("; nothing was recorded" if not_applied else "; its outcome is unknown and is listed for review")
+            ) from exc
+        new_gateway_id = scope_text(gateway_sub.gateway_subscription_id)
+        target.update(gateway="confirmed", gateway_subscription_id=new_gateway_id)
+        if not await db[ops.LOCKS].find_one({"_id": ops.scope_key(organization_id, project_id), "holder": holder}):
+            target["local"] = "not_recorded_lease_lost"
+            await ops.finish(db, reference, "needs_review", items=items, token=token)
+            raise PurchaseInProgress("The purchase took too long and was not recorded; it is listed for review")
+        now = datetime.utcnow()
+        doc = {
+            "organization_id": organization_id, "project_id": project_id, "plan_code": plan_code,
+            "billing_period": billing_period, "status": SubscriptionStatus.PENDING.value, "billing_status": "pending",
+            "auto_renew": True, "payment_provider": str(settings.PAYMENT_PROVIDER),
+            "payment_gateway_customer_id": customer.gateway_customer_id,
+            "payment_gateway_subscription_id": new_gateway_id,
+            "payment_gateway_bound_by": "checkout", "payment_gateway_bound_at": now,
+            "checkout_reference": reference, "replaces_subscription_id": str(source["_id"]),
+            "replacement_operation_id": reference,
+            # Governs only from the end of the source's paid period, even once paid.
+            "starts_at": effective_at,
+            "created_at": now, "updated_at": now,
+            "created_by": getattr(current_user, "id", None), "updated_by": getattr(current_user, "id", None),
+        }
+        try:
+            inserted = await db.subscriptions.insert_one(doc)
+        except DuplicateKeyError as exc:
+            target["local"] = "binding_conflict"
+            await ops.finish(db, reference, "needs_review", items=items, token=token)
+            raise GatewayIdentityConflict("The gateway subscription is already bound to a subscription") from exc
+        target.update(local="recorded", subscription_id=str(inserted.inserted_id))
+        result = {"subscription_id": str(inserted.inserted_id), "replaces_subscription_id": str(source["_id"]),
+                  "starts_at": effective_at.isoformat(), "provider": str(settings.PAYMENT_PROVIDER),
+                  "gateway_subscription_id": new_gateway_id,
+                  "checkout_url": (gateway_sub.metadata or {}).get("short_url"), "status": "pending"}
+        await ops.finish(db, reference, "awaiting_payment", result=result, items=items, token=token)
+        await self.audit_service.emit(
+            action="subscription.replacement_checkout_started", actor_id=getattr(current_user, "id", None),
+            resource_type="subscription", resource_id=str(inserted.inserted_id), organization_id=organization_id,
+            project_id=project_id, metadata={"operation_id": reference, "replaces_subscription_id": str(source["_id"]),
+                                             "plan_code": plan_code, "starts_at": effective_at.isoformat()})
+        # A confirmation that arrived while this request was finishing is acted on now.
+        recorded = await db.subscriptions.find_one({"_id": inserted.inserted_id}, {"status": 1})
+        if str((recorded or {}).get("status") or "") == "active":
+            await self.complete_replacement(reference, actor=f"replacement:{reference}")
+        return {"operation": {"id": reference, "status": "awaiting_payment"}, **result}
+
+    async def complete_replacement(self, operation_id: str, *, actor: str) -> Dict[str, Any]:
+        """Step 5 of a replacement, once the target's payment is confirmed: cancel the source
+        at the gateway at its cycle end, then locally (service until the same date). Idempotent:
+        a completed operation is not repeated; a confirmed gateway cancel is not re-sent.
+        Anything unconfirmed or changed meanwhile: ``needs_review``, never a refund."""
+        import uuid
+
+        from . import subscription_operations as ops
+
+        db = await self._get_db()
+        now = datetime.utcnow()
+        token = uuid.uuid4().hex
+        op = await db[ops.OPERATIONS].find_one_and_update(
+            {"_id": operation_id, "kind": "replacement", "status": {"$in": ["awaiting_payment", "needs_review"]},
+             "items.0.local": "recorded"},
+            {"$set": {"status": "in_progress", "token": token, "lease_until": now + ops.LEASE, "updated_at": now},
+             "$inc": {"attempts": 1}},
+            return_document=True,
+        )
+        if op is None:
+            current = await db[ops.OPERATIONS].find_one({"_id": operation_id}) or {}
+            return {"operation_id": operation_id, "status": current.get("status"), "changed": False}
+        items = list(op.get("items") or [])
+        target, source_item = items[0], items[1]
+        org, project = str(op.get("organization_id") or ""), scope_text(op.get("project_id"))
+
+        async def stop(status: str, reason: str) -> Dict[str, Any]:
+            await ops.finish(db, operation_id, status, items=items, token=token)
+            if status == "needs_review":
+                await self.audit_service.emit(
+                    action="subscription.replacement_needs_review", actor_id=actor,
+                    resource_type="subscription_operation", resource_id=operation_id, organization_id=org,
+                    project_id=project, result="failure", reason=reason,
+                    metadata={"requires_admin_review": True, "operation_id": operation_id,
+                              "replaces_subscription_id": source_item.get("subscription_id")})
+            return {"operation_id": operation_id, "status": status, "reason": reason}
+
+        paid = await db.subscriptions.find_one({"_id": self._lookup_id(target["subscription_id"])})
+        if not paid or str(paid.get("status") or "") != "active" or str(paid.get("billing_status") or "") != "active":
+            return await stop("awaiting_payment", "target_not_paid")
+        try:
+            await ops.lock_scope(db, org, project, token)
+        except ops.OperationConflict:
+            return await stop("needs_review", "scope_busy")
+        try:
+            source = await db.subscriptions.find_one({"_id": self._lookup_id(source_item["subscription_id"])})
+            if (not source or str(source.get("status") or "").strip().lower() != source_item["status_before"]
+                    or scope_text(source.get("payment_gateway_subscription_id")) != source_item["gateway_subscription_id"]
+                    or (source.get("replaced_by_subscription_id")
+                        and source.get("replaced_by_subscription_id") != target["subscription_id"])):
+                source_item["local"] = "changed_meanwhile"
+                return await stop("needs_review", "source_changed_meanwhile")
+            effective_at = source_item["effective_at"]
+            if source_item["gateway"] in OUTCOME_UNKNOWN_STATES and await self._provider_shows_cancelled(source):
+                source_item["gateway"] = "confirmed"
+            if source_item["gateway"] != "confirmed":
+                previously_unknown = source_item["gateway"] in OUTCOME_UNKNOWN_STATES
+                source_item["attempts"] = int(source_item.get("attempts") or 0) + 1
+                try:
+                    evidence = await self._cancel_at_gateway(source_item["gateway_subscription_id"], immediate=False)
+                except Exception as exc:
+                    outcome = reliability.classify(exc)
+                    not_applied = outcome == reliability.NOT_SENT or (
+                        outcome == reliability.REJECTED and not previously_unknown)
+                    source_item.update(gateway="failed" if not_applied else "outcome_unknown", last_outcome=outcome,
+                                       last_error=getattr(exc, "cause_type", None) or type(exc).__name__)
+                    return await stop("needs_review", "source_cancellation_not_confirmed")
+                source_item["gateway"] = "confirmed"
+                source_item["cancellation"] = {
+                    **self._cancellation_record({"immediate": False}, evidence, operation_id), "effective_at": effective_at}
+                if isinstance(evidence, reliability.ProviderSubscriptionState):
+                    source_item["provider_evidence"] = evidence.evidence()
+                await ops.save_items(db, operation_id, items, token=token)
+            changed = await db.subscriptions.update_one(
+                {"_id": source["_id"], "status": source_item["status_before"],
+                 "payment_gateway_subscription_id": source_item["gateway_subscription_id"]},
+                {"$set": {"auto_renew": False, "ends_at": effective_at,
+                          "replaced_by_subscription_id": target["subscription_id"],
+                          "replacement_operation_id": operation_id,
+                          "gateway_cancellation": source_item.get("cancellation") or {
+                              "mode": "cycle_end", "request_confirmed": True, "effective_at": effective_at,
+                              "state": "scheduled", "operation_id": operation_id},
+                          "updated_at": datetime.utcnow(), "updated_by": actor}},
+            )
+            if not changed.matched_count:
+                source_item["local"] = "changed_meanwhile"
+                return await stop("needs_review", "source_changed_meanwhile")
+            source_item["local"] = "ends_at_effective_date"
+            await ops.finish(db, operation_id, "completed", items=items, token=token,
+                             result={**(op.get("result") or {}), "completed": True})
+            await self._record_history(
+                subscription_id=source_item["subscription_id"], organization_id=org, project_id=project,
+                change_type=SubscriptionChangeType.CANCELLATION, from_status=source_item["status_before"],
+                to_status=source_item["status_before"], changed_by=actor,
+                metadata={"operation_id": operation_id, "reason": "replaced_by_checkout",
+                          "ends_at": effective_at.isoformat() if isinstance(effective_at, datetime) else None,
+                          "replaced_by": target["subscription_id"]},
+            )
+            await self.audit_service.emit(
+                action="subscription.replacement_completed", actor_id=actor, resource_type="subscription",
+                resource_id=source_item["subscription_id"], organization_id=org, project_id=project,
+                metadata={"operation_id": operation_id, "replaced_by": target["subscription_id"]})
+            return {"operation_id": operation_id, "status": "completed"}
+        finally:
+            await ops.unlock_scope(db, org, project, token)
 
     async def _reconcile_unknown_checkouts(self, db: Any, organization_id: str, project_id: Optional[str],
                                            current_user: Any) -> None:
@@ -797,8 +1126,8 @@ class MonetizationService:
         from . import subscription_operations as ops
 
         for op in await db[ops.OPERATIONS].find({
-            "kind": "checkout", "status": "needs_review", "organization_id": organization_id,
-            "project_id": project_id, "items.gateway": "outcome_unknown",
+            "kind": {"$in": ["checkout", "replacement"]}, "status": "needs_review", "organization_id": organization_id,
+            "project_id": project_id, "items.0.gateway": "outcome_unknown",
         }).to_list(length=20):
             if not await self.reconcile_checkout_operation(db, op, current_user):
                 raise PurchaseInProgress(
@@ -813,7 +1142,8 @@ class MonetizationService:
 
         db = await self._get_db()
         items = op.get("items") or [{}]
-        if op.get("kind") != "checkout" or op.get("status") != "needs_review" or (items[0] or {}).get("gateway") != "outcome_unknown":
+        if op.get("kind") not in {"checkout", "replacement"} or op.get("status") != "needs_review" or (
+                items[0] or {}).get("gateway") != "outcome_unknown":
             raise ops.OperationConflict("Only a checkout with an unknown provider outcome can be resolved this way")
         if await self.reconcile_checkout_operation(db, op, current_user):
             return {"operation_id": op["_id"], "status": "completed", "reconciled": True}
@@ -836,6 +1166,13 @@ class MonetizationService:
             metadata={"operation_id": op["_id"], "provider_checked_manually": bool(provider_checked_manually)},
         )
         return {"operation_id": op["_id"], "status": "resolved"}
+
+    @staticmethod
+    def _replacement_fields(op: Dict[str, Any]) -> Dict[str, Any]:
+        request = op.get("request") or {}
+        source = (op.get("items") or [{}, {}])[1] if len(op.get("items") or []) > 1 else {}
+        return {"replaces_subscription_id": request.get("replaces_subscription_id"),
+                "replacement_operation_id": op["_id"], "starts_at": source.get("effective_at")}
 
     async def reconcile_checkout_operation(self, db: Any, op: Dict[str, Any], current_user: Any) -> bool:
         """True when the unknown checkout is resolved: found at the provider and recorded."""
@@ -876,14 +1213,25 @@ class MonetizationService:
                 "payment_gateway_bound_by": "checkout", "payment_gateway_bound_at": now,
                 "checkout_reference": op["_id"], "checkout_reconciled_at": now,
                 **({"converts_trial_id": request["converts_trial_id"]} if request.get("converts_trial_id") else {}),
+                **(self._replacement_fields(op) if op.get("kind") == "replacement" else {}),
                 "created_at": now, "updated_at": now,
                 "created_by": op.get("requested_by"), "updated_by": getattr(current_user, "id", None),
             })
             item.update(gateway="confirmed", gateway_subscription_id=gateway_id, local="recorded_by_reconciliation")
-        await db[ops.OPERATIONS].update_one(
-            {"_id": op["_id"], "status": "needs_review"},
-            {"$set": {"status": "completed", "items": [item], "lease_until": None, "updated_at": datetime.utcnow(),
-                      "result": {"reconciled": True}}})
+        if op.get("kind") == "replacement":
+            # Recorded: the replacement now awaits the target's payment like any other (step 5).
+            recorded = await db.subscriptions.find_one({"payment_gateway_subscription_id": gateway_id}, {"_id": 1})
+            item.update(local="recorded", subscription_id=str((recorded or {}).get("_id")))
+            await db[ops.OPERATIONS].update_one(
+                {"_id": op["_id"], "status": "needs_review"},
+                {"$set": {"status": "awaiting_payment", "items": [item, *items[1:]], "lease_until": None,
+                          "updated_at": datetime.utcnow(),
+                          "result": {"reconciled": True, "subscription_id": item["subscription_id"]}}})
+        else:
+            await db[ops.OPERATIONS].update_one(
+                {"_id": op["_id"], "status": "needs_review"},
+                {"$set": {"status": "completed", "items": [item], "lease_until": None, "updated_at": datetime.utcnow(),
+                          "result": {"reconciled": True}}})
         await self.audit_service.emit(
             action="subscription.checkout_reconciled", actor_id=getattr(current_user, "id", None),
             resource_type="subscription_operation", resource_id=op["_id"], organization_id=op["organization_id"],
@@ -911,12 +1259,24 @@ class MonetizationService:
         converts_trial_id: Optional[str] = None,
         scope_lock_holder: Optional[str] = None,
         manual_billing_authorised: bool = False,
+        replaces_subscription_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Provision a customer + subscription on the payment gateway and create a
         local subscription in ``pending`` state. The webhook flips it to ``active``
         once payment is captured, which in turn enables entitlements.
+
+        ``replaces_subscription_id`` (workstream 1, behind ``CHECKOUT_REPLACEMENT_ENABLED``):
+        buy a new plan for a scope whose governing subscription is billed through the gateway,
+        without the two ever billing the same days - see :meth:`_start_replacement_locked`.
         """
         db = await self._get_db()
+        if replaces_subscription_id is not None and not settings.CHECKOUT_REPLACEMENT_ENABLED:
+            raise SubscriptionNotGoverning("Checkout replacement is not enabled; nothing was changed")
+        if replaces_subscription_id is not None and converts_trial_id:
+            raise ValueError("A trial conversion does not replace a subscription")
+        if replaces_subscription_id is not None and not idempotency_key:
+            raise ValueError("A replacement checkout needs an Idempotency-Key")
         if not await self.validate_plan_code(plan_code):
             raise ValueError(f"Plan '{plan_code}' not found")
         # Review 9 R9-2: checkout sells only an active plan priced for the period (a zero-priced
@@ -937,6 +1297,13 @@ class MonetizationService:
             except ops.OperationConflict as exc:
                 raise PurchaseInProgress("Another purchase or plan change for this scope is in progress") from exc
         try:
+            if replaces_subscription_id is not None:
+                return await self._start_replacement_locked(
+                    db, organization_id=str(organization_id), project_id=scope_project, plan_code=plan_code,
+                    billing_period=billing_period, current_user=current_user, customer_name=customer_name,
+                    customer_email=customer_email, replaces_subscription_id=str(replaces_subscription_id),
+                    idempotency_key=str(idempotency_key), holder=holder,
+                )
             return await self._start_checkout_locked(
                 db, organization_id=organization_id, project_id=project_id, plan_code=plan_code,
                 billing_period=billing_period, current_user=current_user, customer_name=customer_name,
@@ -957,6 +1324,14 @@ class MonetizationService:
         # Workstream 4: an earlier checkout whose create the provider never answered blocks the
         # scope - whatever key a new request carries - until it is reconciled or resolved.
         await self._reconcile_unknown_checkouts(db, str(organization_id), scope_project, current_user)
+        if settings.CHECKOUT_REPLACEMENT_ENABLED and not converts_trial_id:
+            billed = await self._gateway_billed_in_scope(db, str(organization_id), scope_project)
+            if billed is not None:
+                # Workstream 1: with replacement available, a second paid plan beside a
+                # gateway-billed one is refused; the buyer names the one it replaces.
+                raise SubscriptionNotGoverning(
+                    "This scope already has a subscription billed through the payment gateway; name it in "
+                    "replaces_subscription_id to replace it at the end of its paid period")
         pending = await self._pending_purchase(db, str(organization_id), scope_project)
         if pending is not None:
             created = pending.get("created_at")

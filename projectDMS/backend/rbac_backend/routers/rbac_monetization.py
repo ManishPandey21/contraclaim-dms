@@ -732,7 +732,12 @@ async def retry_subscription_operation(
         project_id=stored.get("project_id"),
         resource_type="plan_settings",
     )
-    if stored.get("kind") == "checkout":
+    if stored.get("kind") == "replacement" and (stored.get("items") or [{}])[0].get("gateway") != "outcome_unknown":
+        # Workstream 1: continue a replacement whose source cancellation did not complete.
+        if stored.get("status") != "needs_review":
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This replacement is not awaiting review")
+        return await service.complete_replacement(operation_id, actor=str(current_user.id))
+    if stored.get("kind") in {"checkout", "replacement"}:
         # Workstream 4: an unanswered checkout create is reconciled by its reference at the
         # provider - never created again.
         if stored.get("status") != "needs_review":
@@ -1114,6 +1119,9 @@ class CheckoutRequest(BaseModel):
     billing_period: str = "monthly"
     customer_name: Optional[str] = Field(default=None, max_length=200)
     customer_email: Optional[str] = Field(default=None, max_length=200)
+    # Workstream 1 (behind CHECKOUT_REPLACEMENT_ENABLED): the gateway-billed subscription of
+    # this scope that the new plan replaces at the end of its paid period.
+    replaces_subscription_id: Optional[str] = Field(default=None, max_length=100)
 
 
 @router.post("/subscriptions/checkout", response_model=Dict[str, Any])
@@ -1140,8 +1148,11 @@ async def start_subscription_checkout(
             customer_name=payload.customer_name,
             customer_email=payload.customer_email,
             manual_billing_authorised=ScopeService().is_superadmin(current_user),
+            replaces_subscription_id=payload.replaces_subscription_id,
+            idempotency_key=_idempotency_key(request),
         )
-    except (GatewayIdentityConflict, PurchaseInProgress, SubscriptionNotGoverning) as exc:
+    except (GatewayIdentityConflict, PurchaseInProgress, SubscriptionNotGoverning, OperationConflict,
+            IdempotencyKeyReused) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except GatewayOperationFailed as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc

@@ -44,6 +44,9 @@ OPERATIONS = "subscription_operations"
 LOCKS = "subscription_operation_locks"
 LEASE = timedelta(seconds=60)
 OPEN_STATUSES = ("in_progress", "needs_review")
+#: Statuses a repeat of the same request answers with as they are (workstream 1 adds the
+#: replacement's "awaiting_payment" and "abandoned").
+SETTLED_STATUSES = ("completed", "awaiting_payment", "abandoned")
 
 
 class OperationConflict(Exception):
@@ -98,7 +101,9 @@ async def begin(db: Any, *, kind: str, organization_id: str, project_id: Optiona
         existing = await db[OPERATIONS].find_one({"_id": op_id}) or {}
     if existing.get("fingerprint") != doc["fingerprint"]:
         raise IdempotencyKeyReused("This idempotency key was used for a different request")
-    if existing.get("status") == "completed":
+    if existing.get("status") in SETTLED_STATUSES:
+        # Completed, or waiting for something outside this request (a replacement's payment):
+        # answered as it is, never started again.
         return existing
     return await resume(db, existing)
 

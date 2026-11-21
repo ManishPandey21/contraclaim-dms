@@ -340,6 +340,10 @@ class Settings(BaseSettings):
     # implemented and is refused at startup: it needs P-05, the authorised security review and
     # a separate owner approval.
     BUILT_IN_ROLE_ASSIGNMENTS: str = Field(default="off", validation_alias="BUILT_IN_ROLE_ASSIGNMENTS")
+    # Workstream 1 (2026-11-21): checkout that replaces a gateway-billed subscription. Off (the
+    # default) keeps today's checkout (a warning over a paid plan) and refuses
+    # replaces_subscription_id. Activation needs a separate owner approval.
+    CHECKOUT_REPLACEMENT_ENABLED: bool = Field(default=False, validation_alias="CHECKOUT_REPLACEMENT_ENABLED")
     ARBITRATION_ENGINE_DEFAULT: str = Field(default="arbitration_v2", validation_alias="ARBITRATION_ENGINE_DEFAULT")
     ARBITRATION_ENGINE_ROLLOUT_MODE: str = Field(default="off", validation_alias="ARBITRATION_ENGINE_ROLLOUT_MODE")
     ARBITRATION_ENGINE_CANARY_PERCENT: int = Field(default=0, ge=0, le=100, validation_alias="ARBITRATION_ENGINE_CANARY_PERCENT")

@@ -257,6 +257,18 @@ class BillingWebhookService:
         await db.subscriptions.update_one({"_id": subscription["_id"]}, {"$set": update})
         if becomes_governing and subscription.get("converts_trial_id"):
             await self._close_converted_trial(db, subscription, event, now)
+        if becomes_governing and subscription.get("replacement_operation_id"):
+            # Workstream 1: the target's payment is the authoritative confirmation; the source is
+            # now cancelled at the end of its paid period. A failure there is recorded on the
+            # operation for review and never undoes this payment's activation.
+            try:
+                from .monetization_service import MonetizationService
+
+                await MonetizationService(db).complete_replacement(
+                    str(subscription["replacement_operation_id"]), actor=f"system:webhook:{self.provider}")
+            except Exception:
+                logger.exception("Replacement %s could not be completed from the webhook",
+                                 subscription.get("replacement_operation_id"))
 
         # Billing record (financial audit trail).
         record_status = "paid" if event.event_type == "payment.succeeded" else (

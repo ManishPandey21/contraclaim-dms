@@ -141,6 +141,12 @@ class PaymentGatewayInterface(ABC):
     #: Whether :meth:`find_subscription_by_reference` really searches the provider.
     supports_reference_search: bool = False
 
+    #: Whether ``create_subscription(start_at=...)`` makes the provider start billing only at
+    #: that time (workstream 1: a replacement starts when the old plan's paid period ends, so
+    #: the two never bill the same days). An adapter that cannot guarantee it says False, and
+    #: a replacement checkout is refused rather than risk overlapping charges.
+    supports_scheduled_start: bool = False
+
     @abstractmethod
     async def create_customer(
         self, *, organization_id: str, name: str, email: Optional[str] = None
@@ -149,7 +155,8 @@ class PaymentGatewayInterface(ABC):
 
     @abstractmethod
     async def create_subscription(
-        self, *, gateway_customer_id: str, plan_code: str, billing_period: str, metadata: Optional[Dict[str, Any]] = None
+        self, *, gateway_customer_id: str, plan_code: str, billing_period: str, metadata: Optional[Dict[str, Any]] = None,
+        start_at: Optional[datetime] = None,
     ) -> GatewaySubscription:
         ...
 
@@ -212,8 +219,12 @@ class NoOpPaymentGateway(PaymentGatewayInterface):
             gateway_customer_id=gateway_id, email=email, name=name
         )
 
+    #: Records locally only: a scheduled start is whatever the caller records (no charge).
+    supports_scheduled_start = True
+
     async def create_subscription(
-        self, *, gateway_customer_id: str, plan_code: str, billing_period: str, metadata: Optional[Dict[str, Any]] = None
+        self, *, gateway_customer_id: str, plan_code: str, billing_period: str, metadata: Optional[Dict[str, Any]] = None,
+        start_at: Optional[datetime] = None,
     ) -> GatewaySubscription:
         # Unique per call: one gateway subscription id binds exactly one local subscription
         # (2026-11-20), and two checkouts for the same plan (two projects) are two subscriptions.
@@ -326,6 +337,10 @@ class RazorpayGateway(PaymentGatewayInterface):
     # Razorpay cannot swap a subscription's plan in place (see update_subscription).
     supports_in_place_plan_change = False
     supports_reference_search = True
+    # Razorpay documents ``start_at`` on subscription creation, but whether the authorisation
+    # payment and the first charge then wait for it has not been verified in Razorpay test
+    # mode (workstream 1). Until it is, and the change is reviewed, replacements are refused.
+    supports_scheduled_start = False
 
     async def fetch_subscription_status(self, *, gateway_subscription_id: str) -> Optional[str]:
         state = await self.fetch_subscription_state(gateway_subscription_id=gateway_subscription_id)
@@ -379,8 +394,11 @@ class RazorpayGateway(PaymentGatewayInterface):
         return GatewayCustomer(gateway_customer_id=resp["id"], email=email, name=name, metadata=resp)
 
     async def create_subscription(
-        self, *, gateway_customer_id: str, plan_code: str, billing_period: str, metadata: Optional[Dict[str, Any]] = None
+        self, *, gateway_customer_id: str, plan_code: str, billing_period: str, metadata: Optional[Dict[str, Any]] = None,
+        start_at: Optional[datetime] = None,
     ) -> GatewaySubscription:
+        if start_at is not None and not self.supports_scheduled_start:
+            raise ValueError("Scheduled start is not verified for Razorpay; a replacement checkout is refused")
         total_count = {"monthly": 12, "quarterly": 4, "semi_annual": 2, "annual": 1}.get(billing_period, 12)
         resp = await self._call(lambda: self._client().subscription.create(
             {
@@ -518,7 +536,7 @@ class StripeGateway(PaymentGatewayInterface):
     async def create_customer(self, *, organization_id, name, email=None):
         self._not_implemented()
 
-    async def create_subscription(self, *, gateway_customer_id, plan_code, billing_period, metadata=None):
+    async def create_subscription(self, *, gateway_customer_id, plan_code, billing_period, metadata=None, start_at=None):
         self._not_implemented()
 
     async def update_subscription(self, *, gateway_subscription_id, new_plan_code=None, new_billing_period=None):
