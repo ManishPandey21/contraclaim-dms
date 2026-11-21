@@ -125,6 +125,14 @@ def classify(subscription: Dict[str, Any], now: datetime) -> str:
         trial_ends_at = _instant(subscription.get("trial_ends_at"))
         if trial_ends_at is not None and trial_ends_at < now:
             return "trial_expired"
+    review = subscription.get("financial_review")
+    if isinstance(review, dict) and review.get("state") == "open" and status in GOVERNING_STATUSES:
+        # Workstream 2: an unsettled payment discrepancy past its grace period stops service
+        # (fail closed); within the grace the paid entitlement continues. Only written with
+        # PAYMENT_MISMATCH_POLICY=enforce.
+        grace_until = _instant(review.get("grace_until"))
+        if grace_until is _UNREADABLE or grace_until is None or grace_until < now:
+            return "blocking"
     if status in ELIGIBLE_STATUSES:
         return "eligible"
     if status in RESTRICTED_STATUSES:

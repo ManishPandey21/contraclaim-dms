@@ -834,6 +834,67 @@ async def reconcile_gateway_cancellations(
     return await MonetizationService().reconcile_gateway_cancellations(organization_id, limit=limit)
 
 
+class DiscrepancyResolution(BaseModel):
+    """Workstream 2: a Super Admin's decision on one payment discrepancy."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    outcome: str = Field(pattern="^(settled|written_off|escalated)$")
+    reason: str = Field(min_length=10, max_length=500)
+
+
+@router.get("/billing/discrepancies", response_model=List[Dict[str, Any]])
+async def list_payment_discrepancies(
+    organization_id: Optional[str] = Query(default=None),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Workstream 2: open and escalated payment discrepancies (Super Admin only)."""
+    if not ScopeService().is_superadmin(current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only superadmins can review payment discrepancies")
+    from ..services import payment_discrepancy_service
+
+    return await payment_discrepancy_service.list_open(await MonetizationService()._get_db(), organization_id)
+
+
+@router.post("/billing/discrepancies/{discrepancy_id}/resolve", response_model=Dict[str, Any])
+async def resolve_payment_discrepancy(
+    discrepancy_id: str,
+    payload: DiscrepancyResolution,
+    request: Request,
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
+):
+    """Workstream 2: settle, write off or escalate a payment discrepancy (Super Admin, step-up,
+    audited). Nothing is refunded or charged; escalation never extends the grace period."""
+    if not ScopeService().is_superadmin(current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only superadmins can resolve payment discrepancies")
+    await require_step_up(request, current_user, action="subscription.entitlement.manage")
+    from ..services import payment_discrepancy_service
+    from ..services.audit_event_service import AuditEventService
+
+    db = await MonetizationService()._get_db()
+    stored = await db[payment_discrepancy_service.COLLECTION].find_one({"_id": discrepancy_id})
+    if not stored:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Discrepancy not found")
+    await policy.authorize(current_user, Permissions.SUBSCRIPTION_ENTITLEMENT_MANAGE,
+                           organization_id=stored.get("organization_id"), project_id=stored.get("project_id"),
+                           resource_type="payment_discrepancy")
+    try:
+        result = await payment_discrepancy_service.resolve(db, discrepancy_id, outcome=payload.outcome,
+                                                           reason=payload.reason, actor=str(current_user.id))
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    await AuditEventService(db).emit(
+        action=f"billing.payment_discrepancy_{payload.outcome}", actor_id=str(current_user.id),
+        resource_type="payment_discrepancy", resource_id=discrepancy_id,
+        organization_id=stored.get("organization_id"), project_id=stored.get("project_id"),
+        reason=payload.outcome, metadata={"subscription_id": stored.get("subscription_id"),
+                                          "review_closed": result.get("review_closed")})
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Plan CRUD (admin)
 #

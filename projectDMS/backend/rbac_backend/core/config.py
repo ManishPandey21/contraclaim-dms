@@ -344,6 +344,13 @@ class Settings(BaseSettings):
     # default) keeps today's checkout (a warning over a paid plan) and refuses
     # replaces_subscription_id. Activation needs a separate owner approval.
     CHECKOUT_REPLACEMENT_ENABLED: bool = Field(default=False, validation_alias="CHECKOUT_REPLACEMENT_ENABLED")
+    # Workstream 2 (2026-11-21): payment amount mismatch policy. "off" (the default) keeps
+    # today's webhook behaviour; "enforce" separates initial activation (verified amount and
+    # currency required) from renewal discrepancies (financial review with a bounded grace).
+    # The grace length is a placeholder for development: production values and activation need
+    # separate owner, security and commercial approval.
+    PAYMENT_MISMATCH_POLICY: str = Field(default="off", validation_alias="PAYMENT_MISMATCH_POLICY")
+    PAYMENT_MISMATCH_GRACE_DAYS: int = Field(default=0, ge=0, le=30, validation_alias="PAYMENT_MISMATCH_GRACE_DAYS")
     ARBITRATION_ENGINE_DEFAULT: str = Field(default="arbitration_v2", validation_alias="ARBITRATION_ENGINE_DEFAULT")
     ARBITRATION_ENGINE_ROLLOUT_MODE: str = Field(default="off", validation_alias="ARBITRATION_ENGINE_ROLLOUT_MODE")
     ARBITRATION_ENGINE_CANARY_PERCENT: int = Field(default=0, ge=0, le=100, validation_alias="ARBITRATION_ENGINE_CANARY_PERCENT")
@@ -646,6 +653,23 @@ class Settings(BaseSettings):
         if mode not in {"off", "shadow"}:
             raise ValueError("BUILT_IN_ROLE_ASSIGNMENTS must be off or shadow")
         return mode
+
+    @field_validator('PAYMENT_MISMATCH_POLICY', mode='before')
+    @classmethod
+    def _payment_mismatch_policy_mode(cls, value: Any) -> str:
+        mode = str(value or "off").strip().lower()
+        if mode not in {"off", "enforce"}:
+            raise ValueError("PAYMENT_MISMATCH_POLICY must be off or enforce")
+        return mode
+
+    @field_validator('PAYMENT_MISMATCH_GRACE_DAYS', mode='after')
+    @classmethod
+    def _payment_mismatch_grace_needs_approval(cls, value: int, info: ValidationInfo) -> int:
+        # "enforce" with no grace would stop a legitimately paid service on the first
+        # unreviewed discrepancy; the grace length is an owner decision, never defaulted here.
+        if info.data.get("PAYMENT_MISMATCH_POLICY") == "enforce" and value < 1:
+            raise ValueError("PAYMENT_MISMATCH_POLICY=enforce needs an approved PAYMENT_MISMATCH_GRACE_DAYS (1-30)")
+        return value
 
     @field_validator('CORS_ORIGINS', 'ALLOWED_DOCUMENT_MIMES', 'ALLOWED_CONTRACT_MIMES', 'ALLOWED_ENCLOSURE_MIMES', mode='before')
     @classmethod

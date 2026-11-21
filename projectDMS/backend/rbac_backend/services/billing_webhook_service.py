@@ -22,6 +22,7 @@ from pymongo.errors import DuplicateKeyError
 
 from ..core.database import get_database
 from .audit_event_service import AuditEventService
+from . import payment_discrepancy_service as payment_discrepancies
 from .payment_gateway import PaymentGatewayInterface, WebhookEvent, get_payment_gateway
 
 logger = logging.getLogger(__name__)
@@ -231,7 +232,14 @@ class BillingWebhookService:
         # plan was priced at. A mismatch never enables entitlement (entitlement
         # derives from status == "active"); it is flagged for admin review.
         activates = update.get("status") == "active" or update.get("billing_status") == "active"
-        if activates and event.amount_minor is not None:
+        if activates and payment_discrepancies.enforced():
+            # Workstream 2 (PAYMENT_MISMATCH_POLICY=enforce): initial activation needs a verified
+            # amount and currency; a renewal discrepancy enters financial review with a grace
+            # anchored at the first open discrepancy, and grants nothing.
+            decided = await self._enforce_payment_policy(db, subscription, event, update, now)
+            if decided is not None:
+                return decided
+        elif activates and event.amount_minor is not None:
             expected = await self._expected_charge(db, subscription)
             if expected is not None and not expected["amount_minor"]:
                 # Review 9 R9-2: a plan not sold for a price is never "paid" into service.
@@ -315,6 +323,57 @@ class BillingWebhookService:
             "subscription_id": str(subscription["_id"]),
             "applied": {k: v for k, v in update.items() if k in {"status", "billing_status"}},
         }
+
+    #: Statuses of a subscription already in paid service: a payment for it is a renewal.
+    PAID_SERVICE_STATUSES = frozenset({"active", "pilot", "past_due"})
+
+    async def _enforce_payment_policy(self, db: Any, subscription: Dict[str, Any], event: WebhookEvent,
+                                      update: Dict[str, Any], now: datetime) -> Optional[Dict[str, Any]]:
+        """``None`` when the payment is verified (the caller applies it); otherwise the
+        recorded refusal. With an open financial review a verified payment never clears it -
+        only a Super Admin settlement does - so its billing status label is kept."""
+        renewal = str(subscription.get("status") or "").strip().lower() in self.PAID_SERVICE_STATUSES
+        if renewal and not event.gateway_payment_id:
+            # A lifecycle event that carries no payment for a subscription already in paid
+            # service: nothing to verify, nothing granted, nothing recorded.
+            return {"matched": True, "changed": False, "validation": "no_payment_in_event"}
+        expected = await self._expected_charge(db, subscription)
+        problem: Optional[str] = None
+        if not event.gateway_payment_id:
+            problem = "the event carries no payment"
+        elif expected is None:
+            problem = "expected charge cannot be resolved for the plan and period"
+        elif not expected["amount_minor"]:
+            problem = "plan is not sold for a price"
+        elif event.amount_minor is None or int(event.amount_minor) != expected["amount_minor"]:
+            problem = f"amount {event.amount_minor} != expected {expected['amount_minor']}"
+        elif not event.currency or str(event.currency).upper() != str(expected["currency"]).upper():
+            problem = f"currency {event.currency} != expected {expected['currency']}"
+        review = subscription.get("financial_review") if isinstance(subscription.get("financial_review"), dict) else {}
+        if problem is None:
+            if review.get("state") == "open":
+                update.pop("billing_status", None)
+            return None
+        kind = "renewal" if renewal else "initial"
+        outcome = await payment_discrepancies.record(
+            db, subscription=subscription, provider=self.provider, kind=kind, reason=problem, event_id=event.event_id,
+            gateway_payment_id=event.gateway_payment_id, amount_minor=event.amount_minor, currency=event.currency,
+            expected=expected, now=now)
+        if renewal:
+            if not await self._insert_billing_record(db, subscription, event, "amount_mismatch", now, requires_review=True):
+                return {"matched": True, "changed": False, "duplicate_payment": True}
+            await AuditEventService(db).emit(
+                action="billing.payment_discrepancy_renewal", actor_id=f"system:webhook:{self.provider}",
+                resource_type="subscription", resource_id=str(subscription["_id"]),
+                organization_id=str(subscription.get("organization_id", "")), project_id=subscription.get("project_id"),
+                result="failure", reason="renewal_payment_discrepancy",
+                metadata={"requires_admin_review": True, "discrepancy_id": outcome["discrepancy_id"],
+                          "validation_error": problem, "event_id": event.event_id,
+                          "grace_until": outcome["grace_until"].isoformat() if isinstance(outcome["grace_until"], datetime) else None})
+            return {"matched": True, "changed": False, "validation": "financial_review", "detail": problem,
+                    "subscription_id": str(subscription["_id"]), "discrepancy_id": outcome["discrepancy_id"]}
+        result = await self._record_mismatch(db, subscription, event, problem, now)
+        return {**result, "discrepancy_id": outcome["discrepancy_id"]}
 
     async def _close_converted_trial(self, db: Any, subscription: Dict[str, Any], event: WebhookEvent, now: datetime) -> None:
         """R6-5: payment for a trial conversion confirmed. The paid subscription now governs
