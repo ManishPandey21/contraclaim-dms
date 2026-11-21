@@ -584,3 +584,49 @@ Real HTTP and real MongoDB throughout; concurrent requests (same and different k
 ### Production impact still awaiting measurement (P-05 `payment_integrity_impact`, read-only)
 
 Gateway bindings by class (verified checkout / verified reconciliation / conflicting / unverified); duplicate payment groups (block the migration's index); payments refused for review; overlapping governing scopes and gateway-bound overlaps; cancelled bound subscriptions without gateway evidence; governing rows without activation dates; operations needing review; conversions awaiting payment; no-charge conversions. Plus behaviour changes for tenants: in-place plan changes on Razorpay-bound subscriptions now 409 (checkout instead); unbilled plans changed only by Super Admin; one trial per scope.
+
+
+## Payment integrity closure and M1 shadow preparation (owner instructions 2026-11-21, eleventh pass)
+
+Full record: `docs/DEF4_BILLING_PERMISSION_SEPARATION.md` §17 and `docs/M1_BUILT_IN_ROLE_SCOPING.md` §8. **Nothing here is security approval or production acceptance.** No real payment provider was called; nothing was deployed, migrated, rebound, refunded or cancelled at any provider; no role was migrated or re-granted. `BILLING_EXPLICIT_PERMISSIONS=false`, Claim Bench rollout off, skill packs unpublished, Phase 5 blocked.
+
+| Item | Flag (default) | Implemented | Locally verified | CI-verified (exact head) | Security-approved | Production-accepted |
+|---|---|---|---|---|---|---|
+| WS4 provider reliability (timeouts, outcome_unknown, durable checkout, cycle-end reading) | always on | Yes (`8b6733e`, `71402c3`) | Yes | CI_PENDING | No | No |
+| WS1 checkout replacement | `CHECKOUT_REPLACEMENT_ENABLED=false` | Yes, inactive (`f40a89f`, `71402c3`) | Yes | CI_PENDING | No | No (activation needs owner approval; Razorpay scheduled start unverified) |
+| WS2 payment amount mismatch policy | `PAYMENT_MISMATCH_POLICY=off` | Yes, inactive (`21ac55c`, `71402c3`) | Yes | CI_PENDING | No | No (grace length and activation need owner approval) |
+| WS3 P-05 legacy bindings and old cancellations | read-only | Yes (`9c64db2`, `71402c3`) | Yes | CI_PENDING | No | Not run on production |
+| WS5 M1 shadow evaluator | `BUILT_IN_ROLE_ASSIGNMENTS=off` (`on` refused) | Shadow only (`e661b92`, `71402c3`) | Yes | CI_PENDING | No | No (M1 approval) |
+
+### Verdict per workstream (each defect or gap reproduced on real MongoDB at the commit before its change)
+
+| Workstream | Verdict |
+|---|---|
+| 4 Provider reliability | **Implemented (always on).** Bounded, classified provider calls; `outcome_unknown` reconciled with the same operation; no second create after a timeout under any key; abandoned checkouts never cancelled on an unreadable provider; R9-11 resolved by our own durable record of the confirmed cycle-end request and a read-only reconciliation |
+| 1 Checkout replacement | **Implemented, inactive.** Exact source identity; scheduled start required (Razorpay unverified, so refused); source cancelled at cycle end only on the provider's confirmation of the target; no gap or overlap in entitlement; review on any disagreement; no refund |
+| 2 Amount mismatch | **Implemented, inactive.** Verified initial activation; renewal financial review with a grace anchored at the first discrepancy; blocking after the grace; Super Admin settlement; nothing granted from unverified payment |
+| 3 Legacy bindings and old cancellations | **Implemented (read-only reading).** Counts by organisation and category; remediation sequence proposed (DEF-4 §17.4), not executed |
+| 5 M1 shadow evaluator | **Implemented, shadow only.** Responses unchanged; privacy-safe divergence counts; `on` refused |
+
+### Independent reviews
+
+Review 10 (cold, given the code): 17 findings - 1 High (R10-1, latent), 4 Medium (R10-2 to R10-4; R10-2 a pre-existing failure mode), 12 Low/Info. All fixed in `71402c3` except R10-17 (recorded). Re-review 11: RR_PENDING.
+
+### Findings by origin
+
+- **Introduced by this pass and fixed:** R10-1, R10-3 to R10-16 (DEF-4 §17.7).
+- **Pre-existing, fixed or closed here:** R10-2 (interrupted purchase); the unresolvable-price activation (closed only under `PAYMENT_MISMATCH_POLICY=enforce`); `subscription.authenticated` treated as an activation (R10-12); R9-11.
+- **Residual (open):**
+
+| Risk | Severity | Owner |
+|---|---|---|
+| Razorpay SDK absent from the backend requirements; the installed SDK needs `pkg_resources` | Blocks `PAYMENT_PROVIDER=razorpay` | Dependency change with review |
+| Razorpay `start_at` (scheduled start) behaviour unverified; replacement refused for Razorpay until verified | - | Razorpay test mode, then a reviewed change |
+| Razorpay answer to a second cycle-end cancel undocumented (sent to review) | Low | Provider confirmation |
+| With every flag off, checkout over a paid Razorpay plan still bills both until the old one is cancelled (warning) | Medium | Owner activation of WS1 (after the Razorpay verification) |
+| With the policy off, renewal mismatch marks review without a time limit; an unresolvable price still activates | Medium | Owner activation of WS2 with a grace length |
+| Legacy bindings and pre-R6-7 cancellations unmeasured on production | Unknown until measured | P-05 + reconciliation, then the §17.4 sequence |
+| M1: built-in roles reach every organisation of the user; shadow covers the policy gate only | High (pre-existing) | P-05, security review, owner approval |
+| Gitleaks 2 historical findings; picomatch R5 | - | Authorised security review |
+
+**CI:** CI_PENDING

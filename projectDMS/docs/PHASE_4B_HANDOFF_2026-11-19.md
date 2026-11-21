@@ -257,7 +257,23 @@ It is the main code-side blocker to DEF-4 activation, and it needs no production
 
 **Exact-head CI for this pass:** run 44822992420 on `918b41f` (the final code; later commits `897fe22`, `8fe6e4b` and this one are docs only): backend 8,437 passed, 1,365 skipped, 4 xfailed; exhibit confinement 20; real MongoDB "all 99 module(s) ran: 1271 test case(s)", 1,271 passed, none skipped; frontend (lint, unit, mocked Playwright, build), dependency scan and Docker build/scan passed; **Gitleaks failed** on its 2 known findings. **Local, quiet worktree at `918b41f`:** real MongoDB 1,271 passed after the local Redis (which had stopped mid-run; 8 Redis-backed tests failed with connection refused) was restarted and `test_security_redis_mongo.py` rerun (11/11); full backend suite 9,683 passed + the same 8 re-run; frontend lint clean, 1,017 passed (3 skipped), build passed; mypy staged gate passed; ruff unchanged on every touched file. CI success is not security approval.
 
-**Next dependency-ready action:** run P-05 `payment_integrity_impact` (read-only, with authorised access) to measure legacy bindings, duplicates, overlaps and ungated cancellations; then the owner decides the binding remediation (§16.6) and whether to authorise the checkout replacement (§16.7). M1 shadow-mode evaluator remains the next code item.
+**Next dependency-ready action (superseded by the eleventh pass):** run P-05 `payment_integrity_impact` (read-only, with authorised access); the checkout replacement and the M1 shadow evaluator were built in the eleventh pass.
+
+## Eleventh pass (payment integrity closure and M1 shadow preparation, 2026-11-21)
+
+Full record: DEF-4 §17, M1 §8, security report (eleventh pass). Baseline `6913a01`. No real provider was called; nothing was deployed, migrated, rebound, refunded or cancelled; no role was migrated or re-granted; every new flag is off by default.
+
+| Item | Flag (default) | Implemented | Locally verified | CI-verified (exact head) | Security-approved | Production-accepted |
+|---|---|---|---|---|---|---|
+| WS4 provider reliability (timeouts, outcome_unknown, durable checkout, cycle-end reading) | always on | Yes (`8b6733e`, `71402c3`) | Yes | CI_PENDING | No | No |
+| WS1 checkout replacement | `CHECKOUT_REPLACEMENT_ENABLED=false` | Yes, inactive (`f40a89f`, `71402c3`) | Yes | CI_PENDING | No | No (activation needs owner approval; Razorpay scheduled start unverified) |
+| WS2 payment amount mismatch policy | `PAYMENT_MISMATCH_POLICY=off` | Yes, inactive (`21ac55c`, `71402c3`) | Yes | CI_PENDING | No | No (grace length and activation need owner approval) |
+| WS3 P-05 legacy bindings and old cancellations | read-only | Yes (`9c64db2`, `71402c3`) | Yes | CI_PENDING | No | Not run on production |
+| WS5 M1 shadow evaluator | `BUILT_IN_ROLE_ASSIGNMENTS=off` (`on` refused) | Shadow only (`e661b92`, `71402c3`) | Yes | CI_PENDING | No | No (M1 approval) |
+
+**Reviews (agents, not the authorised security review):** review 10 (cold) found 1 High (latent, R10-1), 4 Medium and 12 Low/Info; all fixed in `71402c3` except R10-17 (recorded). Re-review 11: RR_PENDING.
+
+**Next dependency-ready action:** with authorised read-only access, run P-05 (`payment_integrity_impact`, `legacy_binding_and_cancellation_reconciliation`, `built_in_role_scope_impact`) and the read-only cancellation reconciliation; then owner decisions on the flags, the grace length, the remediation sequence (DEF-4 §17.4) and the Razorpay SDK dependency (§17.6).
 
 ## Blockers before production authorisation
 

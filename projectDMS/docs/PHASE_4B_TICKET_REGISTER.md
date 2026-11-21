@@ -435,12 +435,28 @@ Records: DEF-4 §16; security report (tenth pass). Commits: `1b731f6` (R6-8), `4
 | R6-7 durable cancellation (+R7, C1-C5) | Yes | Yes | Yes: run 44822992420 on `918b41f` (final code; Gitleaks red, known) | No | No |
 | Gateway/database consistency for lifecycle changes | Yes | Yes | Yes: run 44822992420 on `918b41f` (final code; Gitleaks red, known) | No | No |
 | P-05 `payment_integrity_impact` | Yes (read-only) | Yes | Yes: run 44822992420 on `918b41f` (final code; Gitleaks red, known) | No | Not run on production |
-| Checkout replacement safeguard | Design only (§16.7) | - | - | No | No |
+| Checkout replacement safeguard | Design only (§16.7); built in the eleventh pass behind a default-off flag (§17.2) | - | - | No | No |
 | Gate 6 fresh install, migration `20261124_0001` | Yes | 33/33 (sandbox-CA caveat; not production evidence) | Pin verified in CI on `0cb99f0` | No | No |
 
 **Previous-pass CI, recorded accurately:** run 44791457632 on `0cb99f0` (final code of the ninth pass): backend 8,436; real MongoDB 1,196 in 89 modules, none skipped; frontend, dependency scan, Docker passed; Gitleaks red on the 2 known findings. **Exact-head CI for this pass:** run 44822992420 on `918b41f` (the final code; later commits `897fe22`, `8fe6e4b` and this one are docs only): backend 8,437 passed, 1,365 skipped, 4 xfailed; exhibit confinement 20; real MongoDB "all 99 module(s) ran: 1271 test case(s)", 1,271 passed, none skipped; frontend (lint, unit, mocked Playwright, build), dependency scan and Docker build/scan passed; **Gitleaks failed** on its 2 known findings. **Local, quiet worktree at `918b41f`:** real MongoDB 1,271 passed after the local Redis (which had stopped mid-run; 8 Redis-backed tests failed with connection refused) was restarted and `test_security_redis_mongo.py` rerun (11/11); full backend suite 9,683 passed + the same 8 re-run; frontend lint clean, 1,017 passed (3 skipped), build passed; mypy staged gate passed; ruff unchanged on every touched file. CI success is not security approval.
 
 **Owner decisions opened by this pass:** authorise the checkout replacement workflow (§16.7); whether an amount mismatch on renewal stops service; remediation of legacy binding classes after P-05 (§16.6).
+
+## Payment integrity closure and M1 shadow preparation (eleventh pass, 2026-11-21)
+
+Records: DEF-4 §17; M1 §8; security report (eleventh pass). Commits: `8b6733e` (WS4), `e661b92` (WS5), `f40a89f` (WS1), `9c64db2` (WS3), `21ac55c` (WS2), `71402c3` (review 10 fixes); docs `da10baf` and later.
+
+| Item | Flag (default) | Implemented | Locally verified | CI-verified (exact head) | Security-approved | Production-accepted |
+|---|---|---|---|---|---|---|
+| WS4 provider reliability (timeouts, outcome_unknown, durable checkout, cycle-end reading) | always on | Yes (`8b6733e`, `71402c3`) | Yes | CI_PENDING | No | No |
+| WS1 checkout replacement | `CHECKOUT_REPLACEMENT_ENABLED=false` | Yes, inactive (`f40a89f`, `71402c3`) | Yes | CI_PENDING | No | No (activation needs owner approval; Razorpay scheduled start unverified) |
+| WS2 payment amount mismatch policy | `PAYMENT_MISMATCH_POLICY=off` | Yes, inactive (`21ac55c`, `71402c3`) | Yes | CI_PENDING | No | No (grace length and activation need owner approval) |
+| WS3 P-05 legacy bindings and old cancellations | read-only | Yes (`9c64db2`, `71402c3`) | Yes | CI_PENDING | No | Not run on production |
+| WS5 M1 shadow evaluator | `BUILT_IN_ROLE_ASSIGNMENTS=off` (`on` refused) | Shadow only (`e661b92`, `71402c3`) | Yes | CI_PENDING | No | No (M1 approval) |
+
+Tests added: `test_provider_reliability_mongo.py` (12), `test_checkout_replacement_mongo.py` (23), `test_payment_mismatch_policy_mongo.py` (7), `test_m1_shadow_evaluator_mongo.py` (8), `test_payment_review10_mongo.py` (14), additions to `test_p05_payment_integrity_mongo.py`; unit `test_payment_gateway_reliability.py` (34), `test_payment_and_m1_flags.py` (13). Mutants: WS4 24/24, WS5 9/10 + 1 equivalent, WS1 22/22, WS3 8/8, WS2 15/16 + 1 equivalent, review 10 fixes 18/18.
+
+**Owner decisions opened by this pass:** activate (or not) `CHECKOUT_REPLACEMENT_ENABLED`, `PAYMENT_MISMATCH_POLICY` with a grace length, `BUILT_IN_ROLE_ASSIGNMENTS=shadow` on staging; the legacy remediation sequence (DEF-4 §17.4); adding the Razorpay SDK dependency; verifying Razorpay `start_at` in test mode; any proration/credit arrangement.
 
 ## CI evidence
 

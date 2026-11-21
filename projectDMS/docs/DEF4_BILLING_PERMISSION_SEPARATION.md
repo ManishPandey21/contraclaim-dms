@@ -1046,9 +1046,9 @@ Baseline: `6913a01` (R6-5 to R6-8 accepted provisionally as implemented and CI-v
 
 | Workstream | Commit | Flag (default) | Implemented | Locally verified | Mutants |
 |---|---|---|---|---|---|
-| 4 Provider reliability | `8b6733e` | always on (timeouts are configuration) | Yes | Yes | 24/24 |
+| 4 Provider reliability | `8b6733e`, `71402c3` | always on (timeouts are configuration) | Yes | Yes | 24/24 |
 | 5 M1 shadow evaluator | `e661b92` | `BUILT_IN_ROLE_ASSIGNMENTS=off` (`shadow` available; `on` refused at startup) | Shadow only | Yes | 9/10 + 1 equivalent (killed when combined) |
-| 1 Checkout replacement | `f40a89f` | `CHECKOUT_REPLACEMENT_ENABLED=false` | Yes, inactive | Yes | 22/22 |
+| 1 Checkout replacement | `f40a89f`, `71402c3` | `CHECKOUT_REPLACEMENT_ENABLED=false` | Yes, inactive | Yes | 22/22 |
 | 3 Legacy bindings and old cancellations (P-05) | `9c64db2` | read-only reading | Yes | Yes | 8/8 |
 | 2 Payment amount mismatch | `21ac55c` | `PAYMENT_MISMATCH_POLICY=off`; `enforce` needs an approved `PAYMENT_MISMATCH_GRACE_DAYS` | Yes, inactive | Yes | 15/16 + 1 equivalent |
 
@@ -1066,10 +1066,10 @@ Baseline: `6913a01` (R6-5 to R6-8 accepted provisionally as implemented and CI-v
 Implements the §16.7 design behind `CHECKOUT_REPLACEMENT_ENABLED` (off: today's checkout, and `replaces_subscription_id` refused).
 
 1. With the flag on, a checkout over a gateway-billed governing subscription must name it in `replaces_subscription_id` and carry an `Idempotency-Key`.
-2. **Exact identity:** same organisation, project and (no) package; the subscription enforcement selects now; `active` or `pilot`; bound by checkout to the configured provider; not already being replaced. Each refusal is asserted by reason; no other subscription is touched.
+2. **Exact identity:** same organisation, project and (no) package; the subscription enforcement selects now; `active` or `pilot`; bound by checkout (or provider-reconciled, R10-13) to the configured provider; not already being replaced. Each refusal is asserted by reason; no other subscription is touched.
 3. **No overlapping charge:** the provider must guarantee a scheduled start (`supports_scheduled_start`; **Razorpay declares False** until `start_at` is verified in Razorpay test mode and reviewed, so a Razorpay replacement is refused today). The target starts at the source's paid-through date - the provider's `current_end`, which must agree with the local date within a day (otherwise `needs_review` with the evidence).
 4. The target is `pending` with `starts_at` at that date: once paid it governs only from then. The source keeps service until then. **Neither a gap nor an overlap**, verified through `resolve_subscription` before and after the date.
-5. Only the target's **signed payment confirmation** (webhook) cancels the source - at the provider at its cycle end, then locally (`ends_at` = the effective date, `replaced_by_subscription_id`, `gateway_cancellation`). A failed or unknown cancellation, or a source changed meanwhile: `needs_review`; Super Admin retry continues it. Nothing is refunded.
+5. Only the provider's **signed confirmation of the target** cancels the source - its authentication of the scheduled subscription (`subscription.authenticated`; changed after review 10 R10-3, because with a scheduled start the first charge comes only when the source's period ends, too late to stop it renewing) or its paid activation. The source is cancelled at the provider at its cycle end, then locally (`ends_at` = the effective date, `replaced_by_subscription_id`, `gateway_cancellation`). The target stays `pending` until a verified charge. A source that renewed before the confirmation, a failed or unknown cancellation, or a source changed meanwhile: `needs_review`; Super Admin retry continues it. Nothing is refunded.
 6. Durable `replacement` operation, scope lease, idempotent repeats (`awaiting_payment` answers as it is), an unanswered target create reconciled by reference.
 7. **Not implemented (refused):** proration or credit arrangements - they need an explicitly approved commercial arrangement.
 - **Tests:** `test_checkout_replacement_mongo.py` (23): flag off; each identity rule; unschedulable provider; provider/database disagreement; scheduling and completion; entitlement on both sides of the date; duplicate confirmations; amount mismatch on the target; simultaneous and repeated requests; failed source cancellation and retry; source changed; unknown create; completion before payment; cross-organisation refusal.
@@ -1116,6 +1116,32 @@ P-05 `legacy_binding_and_cancellation_reconciliation` (read-only; counts by orga
 ### 17.5 M1 shadow evaluator (workstream 5, `e661b92`)
 
 Design and evidence in `docs/M1_BUILT_IN_ROLE_SCOPING.md` §8. Shadow only: no decision changes, nothing is migrated, `on` is refused at startup.
+
+### 17.7 Independent review 10 (cold, given the code) and its fixes (`71402c3`)
+
+Every fixed finding was reproduced on real MongoDB at `da10baf` (14 new real-Mongo tests and 2 unit tests failed there) and pinned in `test_payment_review10_mongo.py` (14) and `test_payment_gateway_reliability.py`; mutants 18/18 killed.
+
+| # | Finding | Severity | Origin | Fix |
+|---|---|---|---|---|
+| R10-1 | A replacement retried with the same key after an unknown create re-sent the create: two provider subscriptions | High (latent: flag off; no real provider declares scheduled start) | Introduced | A resumed attempt is reconciled by reference and never created again |
+| R10-2 | A purchase interrupted mid-create (crash, restart) did not block the next checkout | Medium | Pre-existing failure mode, not covered by the new guard | Interrupted operations (in progress, lease lapsed) are treated as unknown and reconciled first |
+| R10-3 | With a scheduled start the source was cancelled only on the target's first charge, after the source had renewed | Medium (latent) | Introduced (design) | Cancelled on the provider's authentication of the target; a source renewed before it goes to review |
+| R10-4 | P-05 hid refused post-cancellation charges; counted unrelated confirmed items as cancellations | Medium | Introduced | Refused payments count as charging evidence; only cancellation items count |
+| R10-5 | A cancel refused because the provider already ended it failed for ever, unlisted | Low (always on) | Introduced | Confirmed from the provider's state |
+| R10-6 | A resume applied but unread was "not sent" | Low (latent) | Introduced | Unknown outcome |
+| R10-7 | Created at the provider, not recorded (lease lost): unresolvable | Low | Introduced | Recorded from the provider's answer on retry (even when the provider cannot be searched) |
+| R10-8 | Replaced sources not reconciled | Low | Introduced | Included |
+| R10-9 | Settlement restored a stale billing label | Low | Introduced | Label follows the current status |
+| R10-10 | A discrepancy racing a settlement escaped the policy | Low | Introduced | Decided on the stored review (reopened) |
+| R10-11 | Shadow: one projects query per project | Low | Introduced | One query |
+| R10-12 | `subscription.authenticated` treated as an activation (spurious initial discrepancies under enforce) | Low | Introduced (enforce) / pre-existing mapping | Not an activation |
+| R10-13 | Replacement accepted legacy unverified bindings | Low | Introduced | Checkout binding or recorded provider reconciliation required |
+| R10-14 | Reconciliation route could read 1,000 subscriptions in one request | Info | Introduced | 200 maximum, default 50 |
+| R10-15 | An abandoned replacement restarted under its key | Info | Introduced | Refused (new key) |
+| R10-16 | The request's own completion collided with its own scope lease | Info | Introduced | Uses the lease it holds |
+| R10-17 | Unscoped project-tier requests count as `would_deny` in shadow | Info | Introduced | Recorded as an interpretation of M1 §4 (narrower only) |
+
+**Always-on changes with every flag off (as the reviewer listed them, after the fixes):** bounded and classified Razorpay calls; a durable checkout operation with a provider reference, reconciliation of unknown or interrupted checkouts before a new one; an abandoned checkout is not cancelled when the provider cannot be read; cancellation outcome classification (`outcome_unknown`; provider-ended refusals confirmed); `gateway_cancellation` recorded on confirmed cancels; new Super Admin routes (operation resolve, cancellation reconciliation, discrepancy list and resolve); `subscription.authenticated` no longer activates; startup refuses invalid values of the new flags. The replacement, mismatch and shadow branches are dormant without their flags or data.
 
 ### 17.6 Production dependencies recorded by this pass
 
