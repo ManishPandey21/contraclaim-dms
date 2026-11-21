@@ -1048,7 +1048,7 @@ Baseline: `6913a01` (R6-5 to R6-8 accepted provisionally as implemented and CI-v
 |---|---|---|---|---|---|
 | 4 Provider reliability | `8b6733e`, `71402c3` | always on (timeouts are configuration) | Yes | Yes | 24/24 |
 | 5 M1 shadow evaluator | `e661b92` | `BUILT_IN_ROLE_ASSIGNMENTS=off` (`shadow` available; `on` refused at startup) | Shadow only | Yes | 9/10 + 1 equivalent (killed when combined) |
-| 1 Checkout replacement | `f40a89f`, `71402c3` | `CHECKOUT_REPLACEMENT_ENABLED=false` | Yes, inactive | Yes | 22/22 |
+| 1 Checkout replacement | `f40a89f`, `71402c3`, `43ef3e0` | `CHECKOUT_REPLACEMENT_ENABLED=false` | Yes, inactive | Yes | 22/22 |
 | 3 Legacy bindings and old cancellations (P-05) | `9c64db2` | read-only reading | Yes | Yes | 8/8 |
 | 2 Payment amount mismatch | `21ac55c` | `PAYMENT_MISMATCH_POLICY=off`; `enforce` needs an approved `PAYMENT_MISMATCH_GRACE_DAYS` | Yes, inactive | Yes | 15/16 + 1 equivalent |
 
@@ -1142,6 +1142,26 @@ Every fixed finding was reproduced on real MongoDB at `da10baf` (14 new real-Mon
 | R10-17 | Unscoped project-tier requests count as `would_deny` in shadow | Info | Introduced | Recorded as an interpretation of M1 §4 (narrower only) |
 
 **Always-on changes with every flag off (as the reviewer listed them, after the fixes):** bounded and classified Razorpay calls; a durable checkout operation with a provider reference, reconciliation of unknown or interrupted checkouts before a new one; an abandoned checkout is not cancelled when the provider cannot be read; cancellation outcome classification (`outcome_unknown`; provider-ended refusals confirmed); `gateway_cancellation` recorded on confirmed cancels; new Super Admin routes (operation resolve, cancellation reconciliation, discrepancy list and resolve); `subscription.authenticated` no longer activates; startup refuses invalid values of the new flags. The replacement, mismatch and shadow branches are dormant without their flags or data.
+
+### 17.8 Independent re-review 11 of `71402c3` and its fixes (`43ef3e0`)
+
+The re-review found the review-10 fixes sound for creates but introduced defects in the replacement retry, quarantine and reconciliation paths (latent: no real provider declares a scheduled start today) and three always-on ones. All reproduced at `71402c3` (12/12 new tests failed) and fixed in `43ef3e0`; `test_payment_review11_mongo.py` (14); mutants 15/16 + 1 equivalent.
+
+| # | Finding | Severity | Fix |
+|---|---|---|---|
+| R11-1 | A same-key repeat turned a replacement's open source step (needs_review) back into awaiting_payment, hiding it | Medium (latent) | A recorded target's operation answers as it is |
+| R11-2 | A replacement refused before any provider call, retried, became an "unknown create" blocking the scope | Low-Medium (latent) | Re-validated; only attempts that reached the provider are reconciled |
+| R11-3 | An authorisation survived the target's cancellation; a retry cancelled the source for a cancelled target | Medium (latent) | Authorisation counts only for a pending target; otherwise review |
+| R11-4 | An interrupted replacement had no saved items: the reconciled target had no start date (governed at once) and completion raised | High (latent) | Items (with the effective date) saved before provider calls; never recorded without them; completion reviews an incomplete record |
+| R11-5 | A binding-conflict purchase blocked the scope with no way to clear it | Low-Medium (always on) | Super Admin resolution |
+| R11-6 | A lease-lost purchase was recorded without its customer id (webhook ownership check skipped) | Low (always on) | Customer kept; never recorded without it |
+| R11-7 | A live slow replacement outlived its leases (led to R11-4) | (R11-4) | Leases renewed before each provider call |
+| R11-8 | The reconciliation cap hid rows past the first 200 | Low (always on) | Paged (`after`, `next_after`) |
+| R11-9 | An authorised target waiting for its start date could be expired as abandoned | Low (latent) | Never expired once authorised |
+| R10-3 gap | Renewal check skipped before re-sending an unknown cancel | (latent) | Checked |
+| R10-6 caller | Reactivation reported an unknown resume as "nothing changed" | Low | Reported and audited as unknown |
+| R10-9 | The fix relabelled past-due subscriptions active (regression) | Low (always on for settlements) | Label keeps a later event's label; inactive if cancelled; active after a verified payment; else the earlier label |
+| R10-10 | A discrepancy recorded during settlement still escaped | Low | Reopens the review |
 
 ### 17.6 Production dependencies recorded by this pass
 
