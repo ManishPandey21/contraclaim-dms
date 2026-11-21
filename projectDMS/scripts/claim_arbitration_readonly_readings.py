@@ -293,6 +293,7 @@ def read_roles(db: ReadOnlyDatabase) -> Dict[str, Any]:
         custom_role_compatibility=_read_custom_role_compatibility(db),
         billing_permission_impact=_read_billing_permission_impact(db),
         built_in_role_scope_impact=_read_built_in_role_scope_impact(db),
+        built_in_role_shadow_divergence=_read_built_in_role_shadow_divergence(db),
         flag_off_disclosure_impact=_read_flag_off_disclosure_impact(db),
         subscription_security_impact=_read_subscription_security_impact(db),
         payment_integrity_impact=_read_payment_integrity_impact(db),
@@ -562,6 +563,35 @@ def _read_built_in_role_scope_impact(db: ReadOnlyDatabase) -> Dict[str, Any]:
         "affected_users_by_organization": dict(sorted(affected_by_org.items())),
         "proposed_scoped_assignments": dict(sorted(proposed.items())),
         "assignments_needing_a_decision": needing_decision,
+    }
+
+
+def _read_built_in_role_shadow_divergence(db: ReadOnlyDatabase) -> Dict[str, Any]:
+    """M1 shadow (workstream 5): the divergence counts ``BUILT_IN_ROLE_ASSIGNMENTS=shadow``
+    recorded in ``rbac_shadow_observations`` - allowed decisions the proposed per-assignment
+    model would refuse, by the sorted built-in role keys held and how the request related to
+    the user. The collection holds no user, organisation or project ids. Empty (all zero)
+    until shadow mode has run somewhere."""
+    totals: Dict[str, int] = {}
+    divergent: Dict[str, int] = {}
+    by_permission: Dict[str, int] = {}
+    days: set = set()
+    for row in db["rbac_shadow_observations"].find({}, {"day": 1, "permission": 1, "outcome": 1,
+                                                        "role_combination": 1, "relation": 1, "count": 1}):
+        count = int(row.get("count") or 0)
+        outcome = str(row.get("outcome") or "unknown")
+        totals[outcome] = totals.get(outcome, 0) + count
+        days.add(str(row.get("day") or ""))
+        if outcome == "would_deny":
+            label = f"{row.get('role_combination')} @ {row.get('relation')}"
+            divergent[label] = divergent.get(label, 0) + count
+            permission = str(row.get("permission") or "")
+            by_permission[permission] = by_permission.get(permission, 0) + count
+    return {
+        "observations": {"agree": totals.get("agree", 0), "would_deny": totals.get("would_deny", 0)},
+        "days_observed": len(days - {""}),
+        "would_deny_by_role_combination_and_relation": dict(sorted(divergent.items())),
+        "would_deny_by_permission": dict(sorted(by_permission.items())),
     }
 
 

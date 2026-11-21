@@ -333,6 +333,13 @@ class Settings(BaseSettings):
     # explicit subscription.upgrade. Off (the default) changes nothing. Turn on only after P-05,
     # the authorised security review, staging evidence and a recorded release decision.
     BILLING_EXPLICIT_PERMISSIONS: bool = Field(default=False, validation_alias="BILLING_EXPLICIT_PERMISSIONS")
+    # M1 (workstream 5, 2026-11-21): built-in roles scoped to their assignment. "off" (the
+    # default) changes nothing; "shadow" evaluates the proposed per-assignment decision beside
+    # every allowed PolicyService.authorize decision and records privacy-safe divergence counts
+    # (services/role_scope_shadow.py) without changing any response. "on" (enforcement) is not
+    # implemented and is refused at startup: it needs P-05, the authorised security review and
+    # a separate owner approval.
+    BUILT_IN_ROLE_ASSIGNMENTS: str = Field(default="off", validation_alias="BUILT_IN_ROLE_ASSIGNMENTS")
     ARBITRATION_ENGINE_DEFAULT: str = Field(default="arbitration_v2", validation_alias="ARBITRATION_ENGINE_DEFAULT")
     ARBITRATION_ENGINE_ROLLOUT_MODE: str = Field(default="off", validation_alias="ARBITRATION_ENGINE_ROLLOUT_MODE")
     ARBITRATION_ENGINE_CANARY_PERCENT: int = Field(default=0, ge=0, le=100, validation_alias="ARBITRATION_ENGINE_CANARY_PERCENT")
@@ -625,6 +632,16 @@ class Settings(BaseSettings):
     )
     BACKUP_S3_BUCKET: str = Field(default="", validation_alias="BACKUP_S3_BUCKET")
     BACKUP_S3_PREFIX: str = Field(default="contraclaim/backups", validation_alias="BACKUP_S3_PREFIX")
+
+    @field_validator('BUILT_IN_ROLE_ASSIGNMENTS', mode='before')
+    @classmethod
+    def _built_in_role_assignments_mode(cls, value: Any) -> str:
+        mode = str(value or "off").strip().lower()
+        if mode == "on":
+            raise ValueError("BUILT_IN_ROLE_ASSIGNMENTS=on (enforcement) is not implemented; use off or shadow")
+        if mode not in {"off", "shadow"}:
+            raise ValueError("BUILT_IN_ROLE_ASSIGNMENTS must be off or shadow")
+        return mode
 
     @field_validator('CORS_ORIGINS', 'ALLOWED_DOCUMENT_MIMES', 'ALLOWED_CONTRACT_MIMES', 'ALLOWED_ENCLOSURE_MIMES', mode='before')
     @classmethod

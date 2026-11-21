@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any, Optional
 
 from fastapi import HTTPException, status
@@ -18,6 +19,7 @@ from ..services.entitlement_service import EntitlementService
 from ..services.permission_service import PermissionService
 from ..services.scope_service import ScopeService
 from ..services.usage_metering_service import QuotaExceededError, UsageMeteringService
+from . import role_scope_shadow
 
 #: Roles whose authority is bound to assigned projects, never to a whole organisation.
 PROJECT_TIER_ROLE_KEYS = frozenset({"projectadmin", "projectuser"})
@@ -40,6 +42,8 @@ ORGANISATION_FINANCIAL_VIEW_PERMISSIONS = frozenset(
         Permissions.SUBSCRIPTION_HISTORY_VIEW,
     }
 )
+
+logger = logging.getLogger(__name__)
 
 
 class PolicyService:
@@ -431,6 +435,14 @@ class PolicyService:
             reason = "unsupported_permission_domain"
             return await self._deny(reason)
         finally:
+            if granted and role_scope_shadow.enabled() and not self.scope_service.is_superadmin(current_user):
+                # M1 shadow (workstream 5): counted beside the decision, never changing it.
+                try:
+                    shadow_db = self.db if self.db is not None else await self.permission_service._get_db()
+                    await role_scope_shadow.observe(shadow_db, current_user, permission,
+                                                    organization_id=organization_id, project_id=project_id)
+                except Exception:  # never affects the response
+                    logger.warning("M1 shadow evaluation skipped", exc_info=True)
             if audit:
                 await self.audit_service.emit(
                     action="policy.authorize",
