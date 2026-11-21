@@ -191,6 +191,8 @@ class BillingWebhookService:
             "subscription.halted": {"billing_status": "past_due"},
             "subscription.cancelled": {"status": "cancelled", "billing_status": "inactive"},
         }
+        if event.event_type == "subscription.authenticated":
+            return await self._authenticated(db, subscription, event, now)
         update = dict(transitions.get(event.event_type) or {})
         if not update:
             return {"matched": True, "changed": False}
@@ -323,6 +325,30 @@ class BillingWebhookService:
             "subscription_id": str(subscription["_id"]),
             "applied": {k: v for k, v in update.items() if k in {"status", "billing_status"}},
         }
+
+    async def _authenticated(self, db: Any, subscription: Dict[str, Any], event: WebhookEvent,
+                             now: datetime) -> Dict[str, Any]:
+        """The customer authorised a subscription's mandate (review 10 R10-3). Nothing is paid
+        and nothing is activated. For a scheduled replacement target this is the provider's
+        authoritative confirmation: the source is cancelled at its cycle end now, before it can
+        renew (workstream 1)."""
+        if not subscription.get("replacement_operation_id") or str(subscription.get("status") or "") != "pending":
+            return {"matched": True, "changed": False, "authenticated": True}
+        marked = await db.subscriptions.update_one(
+            {"_id": subscription["_id"], "status": "pending", "replacement_authorised_at": {"$exists": False}},
+            {"$set": {"replacement_authorised_at": now, "updated_at": now,
+                      "updated_by": f"system:webhook:{self.provider}"}})
+        try:
+            from .monetization_service import MonetizationService
+
+            outcome = await MonetizationService(db).complete_replacement(
+                str(subscription["replacement_operation_id"]), actor=f"system:webhook:{self.provider}")
+        except Exception:
+            logger.exception("Replacement %s could not be completed from the webhook",
+                             subscription.get("replacement_operation_id"))
+            outcome = {"status": "error"}
+        return {"matched": True, "changed": bool(marked.modified_count), "authenticated": True,
+                "replacement": outcome.get("status")}
 
     #: Statuses of a subscription already in paid service: a payment for it is a renewal.
     PAID_SERVICE_STATUSES = frozenset({"active", "pilot", "past_due"})

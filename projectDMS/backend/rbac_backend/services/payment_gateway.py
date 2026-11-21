@@ -20,7 +20,9 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
 from .payment_gateway_reliability import (
+    GatewayCallError,
     GatewayCallPolicy,
+    GatewayOutcomeUnknown,
     ProviderSubscriptionState,
     bounded_session,
     call_provider,
@@ -299,7 +301,8 @@ class RazorpayGateway(PaymentGatewayInterface):
         "payment.captured": "payment.succeeded",
         "order.paid": "payment.succeeded",
         "subscription.activated": "subscription.activated",
-        "subscription.authenticated": "subscription.activated",
+        # Review 10 R10-3/R10-12: the customer authorised the mandate; nothing is paid yet.
+        "subscription.authenticated": "subscription.authenticated",
         "subscription.cancelled": "subscription.cancelled",
         "subscription.completed": "subscription.cancelled",
         "subscription.halted": "subscription.halted",
@@ -440,8 +443,13 @@ class RazorpayGateway(PaymentGatewayInterface):
     async def reactivate_subscription(self, *, gateway_subscription_id: str) -> GatewaySubscription:
         await self._call(lambda: self._client().subscription.resume(gateway_subscription_id, {"resume_at": "now"}),
                          operation="subscription.resume", mutating=True)
-        resp = await self._call(lambda: self._client().subscription.fetch(gateway_subscription_id),
-                                operation="subscription.fetch", mutating=False)
+        try:
+            resp = await self._call(lambda: self._client().subscription.fetch(gateway_subscription_id),
+                                    operation="subscription.fetch", mutating=False)
+        except GatewayCallError as exc:
+            # Review 10 R10-6: the resume was applied; only its state is unread. Never "not sent".
+            raise GatewayOutcomeUnknown("The resume was sent; the provider's state could not be read",
+                                        cause_type=exc.cause_type) from exc
         return GatewaySubscription(
             gateway_subscription_id=gateway_subscription_id,
             gateway_customer_id=resp.get("customer_id", ""),

@@ -974,9 +974,11 @@ def _read_legacy_binding_and_cancellation_reconciliation(db: ReadOnlyDatabase) -
         "audit_events", {"action": "billing.webhook.binding_refused"}, {"resource_id": 1})}
 
     paid_by_gateway: Dict[str, Dict[str, Any]] = {}
+    charged_times: Dict[str, List[datetime]] = {}
     under_review: set = set()
     for record in rows("billing_records", {}, {"gateway_subscription_id": 1, "subscription_id": 1, "record_status": 1,
-                                               "requires_admin_review": 1, "requires_review": 1, "created_at": 1}):
+                                               "requires_admin_review": 1, "requires_review": 1, "created_at": 1,
+                                               "gateway_payment_id": 1, "event_type": 1}):
         gid, owner = text(record.get("gateway_subscription_id")), text(record.get("subscription_id"))
         status = text(record.get("record_status"))
         if record.get("requires_admin_review") or record.get("requires_review") or status == "amount_mismatch" \
@@ -985,19 +987,26 @@ def _read_legacy_binding_and_cancellation_reconciliation(db: ReadOnlyDatabase) -
         if gid and status == "paid":
             entry = paid_by_gateway.setdefault(gid, {"owners": set(), "times": []})
             entry["owners"].add(owner)
-            if isinstance(record.get("created_at"), datetime):
-                entry["times"].append(record["created_at"])
+        # Review 10 R10-4: any money the provider took counts as charging evidence - including a
+        # payment the webhook refused because the subscription was already cancelled.
+        took_money = status == "paid" or (status.startswith("refused") and (
+            record.get("gateway_payment_id") or text(record.get("event_type")) == "payment.succeeded"))
+        if gid and took_money and isinstance(record.get("created_at"), datetime):
+            charged_times.setdefault(gid, []).append(record["created_at"])
 
     open_named: set = set()
     confirmed_cancel: set = set()
-    for op in rows("subscription_operations", {}, {"status": 1, "items": 1}):
+    for op in rows("subscription_operations", {}, {"status": 1, "items": 1, "kind": 1}):
         for item in op.get("items") or []:
             sid = text((item or {}).get("subscription_id"))
             if not sid:
                 continue
             if op.get("status") in {"needs_review", "in_progress"}:
                 open_named.add(sid)
-            if (item or {}).get("gateway") == "confirmed":
+            # Review 10 R10-4: only a confirmed *cancellation* counts (not a confirmed create,
+            # resume or plan change).
+            cancelled_kind = op.get("kind") in {"cancellation", "plan_settings_replacement", "plan_settings_inherit"}
+            if (item or {}).get("gateway") == "confirmed" and (cancelled_kind or (item or {}).get("cancellation")):
                 confirmed_cancel.add(sid)
 
     subscriptions = rows("subscriptions", {"payment_gateway_subscription_id": {"$type": "string", "$gt": ""}}, {
@@ -1033,7 +1042,7 @@ def _read_legacy_binding_and_cancellation_reconciliation(db: ReadOnlyDatabase) -
             continue
         cancelled_at = row.get("cancelled_at") if isinstance(row.get("cancelled_at"), datetime) else None
         record = row.get("gateway_cancellation") if isinstance(row.get("gateway_cancellation"), dict) else {}
-        if cancelled_at and any(moment > cancelled_at for moment in paid["times"]):
+        if cancelled_at and any(moment > cancelled_at for moment in charged_times.get(gid, [])):
             klass = "charged_after_cancellation"
         elif (record.get("request_confirmed") or sub_id in confirmed_cancel
               or text(row.get("cancellation_reason")) in {"converted_to_paid", "checkout_abandoned"}):

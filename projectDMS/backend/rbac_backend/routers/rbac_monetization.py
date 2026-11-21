@@ -732,7 +732,10 @@ async def retry_subscription_operation(
         project_id=stored.get("project_id"),
         resource_type="plan_settings",
     )
-    if stored.get("kind") == "replacement" and (stored.get("items") or [{}])[0].get("gateway") != "outcome_unknown":
+    first_item = (stored.get("items") or [{}])[0] or {}
+    unrecorded = first_item.get("gateway") == "outcome_unknown" or first_item.get("local") in {
+        "not_recorded_lease_lost", "binding_conflict"}
+    if stored.get("kind") == "replacement" and not unrecorded:
         # Workstream 1: continue a replacement whose source cancellation did not complete.
         if stored.get("status") != "needs_review":
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This replacement is not awaiting review")
@@ -823,7 +826,7 @@ async def resolve_unknown_checkout(
 @router.get("/plan-settings/reconciliation/cancellations", response_model=Dict[str, Any])
 async def reconcile_gateway_cancellations(
     organization_id: Optional[str] = Query(default=None),
-    limit: int = Query(default=200, ge=1, le=1000),
+    limit: int = Query(default=50, ge=1, le=200),
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Workstream 4 / R9-11: read-only comparison of the provider's state with locally

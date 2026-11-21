@@ -208,3 +208,19 @@ def test_cancellation_interpretation(status: Any, mode: Any, confirmed: bool, ef
     state = rel.ProviderSubscriptionState(status=status) if status else None
     assert rel.interpret_cancellation(state, requested_mode=mode, request_confirmed=confirmed,
                                       effective_at=effective, now=NOW) == expected
+
+
+def test_r10_6_a_resume_applied_but_unread_is_an_unknown_outcome() -> None:
+    """Review 10 R10-6: the resume reached the provider; only its state could not be read
+    afterwards. That is never "not sent"."""
+    client = FakeClient(resume=None, fetch=[requests.exceptions.ReadTimeout()] * 5)
+    with pytest.raises(rel.GatewayOutcomeUnknown):
+        _run(_gateway(client).reactivate_subscription(gateway_subscription_id="sub_1"))
+    assert [c[0] for c in client.calls][0] == "resume"
+    assert [c[0] for c in client.calls].count("resume") == 1
+
+
+def test_r10_3_authentication_is_not_an_activation() -> None:
+    event = _gateway(FakeClient()).parse_webhook_event(
+        payload={"event": "subscription.authenticated", "payload": {"subscription": {"entity": {"id": "sub_1"}}}})
+    assert event is not None and event.event_type == "subscription.authenticated"

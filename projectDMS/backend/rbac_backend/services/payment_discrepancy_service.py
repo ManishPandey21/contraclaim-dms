@@ -81,12 +81,14 @@ async def record(db: Any, *, subscription: Dict[str, Any], provider: str, kind: 
         new = False
     grace_until = None
     if kind == "renewal":
-        review = subscription.get("financial_review") if isinstance(subscription.get("financial_review"), dict) else {}
-        if review.get("state") == "open":
-            grace_until = review.get("grace_until")  # anchored at the first discrepancy: never moved
-            if new:
-                await db.subscriptions.update_one({"_id": subscription["_id"]},
-                                                  {"$inc": {"financial_review.discrepancies": 1}})
+        # Review 10 R10-10: decided on the stored review, not the caller's snapshot - a review
+        # settled meanwhile is reopened for this discrepancy rather than missed.
+        counted = await db.subscriptions.find_one_and_update(
+            {"_id": subscription["_id"], "financial_review.state": "open"},
+            {"$inc": {"financial_review.discrepancies": 1 if new else 0}},
+            projection={"financial_review": 1})
+        if counted is not None:
+            grace_until = (counted.get("financial_review") or {}).get("grace_until")  # anchored: never moved
         else:
             grace_until = now + grace()
             await db.subscriptions.update_one(
@@ -136,16 +138,27 @@ async def resolve(db: Any, doc_id: str, *, outcome: str, reason: str, actor: Opt
 
         sid = current["subscription_id"]
         lookup: List[Any] = [sid] + ([ObjectId(sid)] if ObjectId.is_valid(sid) else [])
-        sub = await db.subscriptions.find_one({"_id": {"$in": lookup}}, {"financial_review": 1})
+        sub = await db.subscriptions.find_one({"_id": {"$in": lookup}}, {"financial_review": 1, "status": 1})
         review = (sub or {}).get("financial_review") or {}
         if sub and review.get("state") == "open":
             await db.subscriptions.update_one(
                 {"_id": sub["_id"], "financial_review.state": "open"},
                 {"$set": {"financial_review.state": "settled", "financial_review.settled_at": moment,
-                          "billing_status": review.get("billing_status_before") or "active",
+                          "billing_status": _billing_label_after_review(sub, review),
                           "payment_review_required": False, "updated_at": moment}})
             closed = True
     return {"id": doc_id, "status": outcome, "review_closed": closed}
+
+
+def _billing_label_after_review(sub: Dict[str, Any], review: Dict[str, Any]) -> str:
+    """Review 10 R10-9: the label follows the subscription as it is now - past due stays past
+    due; a subscription back in good standing is active - not the snapshot from when the
+    review opened."""
+    status = str(sub.get("status") or "").strip().lower()
+    if status == "past_due":
+        return "past_due"
+    before = str(review.get("billing_status_before") or "")
+    return "active" if before in {"", "past_due", "review", "financial_review"} else before
 
 
 __all__ = ["COLLECTION", "OPEN", "RESOLUTIONS", "discrepancy_id", "enforced", "grace", "list_open", "record", "resolve"]

@@ -75,6 +75,24 @@ async def _project_organisation(db: Any, project_id: str, cache: Dict[str, Optio
     return cache[project_id]
 
 
+async def _prefetch_project_organisations(db: Any, projects: Iterable[str], cache: Dict[str, Optional[str]]) -> None:
+    """One query for every project the user is on (review 10 R10-11: not one per project)."""
+    wanted = [project for project in set(projects) if project not in cache]
+    if not wanted:
+        return
+    candidates: List[Any] = list(wanted)
+    try:
+        from bson import ObjectId
+
+        candidates += [ObjectId(project) for project in wanted if ObjectId.is_valid(project)]
+    except Exception:
+        pass
+    async for row in db.projects.find({"_id": {"$in": candidates}}, {"organization_id": 1, "organizationId": 1}):
+        cache[str(row["_id"])] = _text(row.get("organization_id") or row.get("organizationId"))
+    for project in wanted:
+        cache.setdefault(project, None)
+
+
 async def proposed_assignments(db: Any, user_doc: Mapping[str, Any], role_key: str,
                                projects: Iterable[str], cache: Dict[str, Optional[str]]) -> List[Dict[str, Any]]:
     """Where a built-in role would be assigned under the proposed model."""
@@ -125,6 +143,7 @@ async def proposed_decision(db: Any, user_doc: Mapping[str, Any], permission: st
     wanted = service.checks_satisfied_by(permission)
     cache: Dict[str, Optional[str]] = {}
     _orgs, projects = await user_memberships(db, user_doc)
+    await _prefetch_project_organisations(db, projects, cache)
     primary = _text(user_doc.get("organization_id"))
     for rid in user_doc.get("roles") or []:
         resolution = await service._load_role(db, rid)
