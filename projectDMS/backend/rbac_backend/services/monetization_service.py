@@ -749,11 +749,15 @@ class MonetizationService:
             query["_id"] = {"$ne": exclude}
         return await db.subscriptions.find_one(
             query, {"_id": 1, "converts_trial_id": 1, "created_at": 1, "payment_gateway_subscription_id": 1,
-                    "organization_id": 1, "project_id": 1, "replacement_operation_id": 1})
+                    "organization_id": 1, "project_id": 1, "replacement_operation_id": 1,
+                    "replacement_authorised_at": 1})
 
     async def _expire_abandoned_checkout(self, db: Any, pending: Dict[str, Any], current_user: Any) -> None:
         """Review 8 B3: cancel an abandoned checkout at the gateway first (so it can never be
         paid later beside the new one), then locally; a gateway failure keeps it blocking."""
+        if pending.get("replacement_authorised_at"):
+            # Review 11 R11-9: an authorised replacement legitimately waits for its start date.
+            raise PurchaseInProgress("A replacement for this scope is authorised and waits for its start date")
         try:
             provider_status = await self._gateway().fetch_subscription_status(
                 gateway_subscription_id=pending["payment_gateway_subscription_id"])
@@ -852,10 +856,21 @@ class MonetizationService:
         if op.get("status") == "abandoned":
             # Review 10 R10-15: a settled operation is never restarted under its old key.
             raise SubscriptionNotGoverning("This replacement was abandoned; start a new one with a new Idempotency-Key")
-        if op.get("prior_status") in {"needs_review", "in_progress"}:
+        prior_items = list(op.get("items") or [])
+        prior_target = prior_items[0] if prior_items and prior_items[0].get("role") == "target" else {}
+        if op.get("prior_status") in {"needs_review", "in_progress"} and prior_target.get("local") == "recorded":
+            # Review 11 R11-1: the target is recorded; what is open is the source step. A repeat
+            # of the request neither re-runs nor hides it: the operation stays as it was.
+            await ops.step_back(db, op)
+            current = await db[ops.OPERATIONS].find_one({"_id": op["_id"]}) or {}
+            return {"operation": self._operation_summary(current), **(current.get("result") or {})}
+        reached_create = (op.get("prior_status") == "in_progress"
+                          or prior_target.get("gateway") not in (None, "pending", "failed"))
+        if op.get("prior_status") in {"needs_review", "in_progress"} and reached_create:
             # Review 10 R10-1/R10-2: an earlier attempt may have reached the provider's create
             # (unknown outcome, interrupted, or created but not recorded). It is reconciled by
-            # its reference, never created again - whatever the client retries.
+            # its reference, never created again - whatever the client retries. (Review 11 R11-2:
+            # a request refused before any provider call is simply re-validated below.)
             await self._quarantine_interrupted_purchase(db, op)
             stored = await db[ops.OPERATIONS].find_one({"_id": op["_id"]}) or {}
             if await self.reconcile_checkout_operation(db, stored, current_user):
@@ -953,6 +968,21 @@ class MonetizationService:
              "effective_at": effective_at, "evidence": evidence},
         ]
         target = items[0]
+
+        async def keep_leases() -> None:
+            # Review 11 R11-7: leases renewed before each provider call; an attempt that lost
+            # them stops before calling (the items are already durable: R11-4).
+            now_ = datetime.utcnow()
+            held = await db[ops.LOCKS].update_one(
+                {"_id": ops.scope_key(organization_id, project_id), "holder": holder},
+                {"$set": {"lease_until": now_ + ops.LEASE, "updated_at": now_}})
+            mine = await db[ops.OPERATIONS].update_one(
+                {"_id": reference, "token": token}, {"$set": {"lease_until": now_ + ops.LEASE, "updated_at": now_}})
+            if not held.matched_count or not mine.matched_count:
+                raise PurchaseInProgress("The purchase lost its scope lease before calling the provider; retry")
+
+        await ops.save_items(db, reference, items, token=token)
+        await keep_leases()
         try:
             customer = await gateway.create_customer(organization_id=organization_id,
                                                      name=customer_name or organization_id, email=customer_email)
@@ -960,6 +990,9 @@ class MonetizationService:
             target.update(gateway="failed", last_error=getattr(exc, "cause_type", None) or type(exc).__name__)
             await ops.finish(db, reference, "failed", items=items, token=token)
             raise GatewayOperationFailed("The payment gateway did not start the checkout; nothing was recorded") from exc
+        target["customer_id"] = customer.gateway_customer_id
+        await ops.save_items(db, reference, items, token=token)
+        await keep_leases()
         try:
             gateway_sub = await gateway.create_subscription(
                 gateway_customer_id=customer.gateway_customer_id, plan_code=plan_code, billing_period=billing_period,
@@ -1056,8 +1089,11 @@ class MonetizationService:
             current = await db[ops.OPERATIONS].find_one({"_id": operation_id}) or {}
             return {"operation_id": operation_id, "status": current.get("status"), "changed": False}
         items = list(op.get("items") or [])
-        target, source_item = items[0], items[1]
         org, project = str(op.get("organization_id") or ""), scope_text(op.get("project_id"))
+        if len(items) < 2:
+            await ops.finish(db, operation_id, "needs_review", items=items, token=token)
+            return {"operation_id": operation_id, "status": "needs_review", "reason": "incomplete_record"}
+        target, source_item = items[0], items[1]
 
         async def stop(status: str, reason: str) -> Dict[str, Any]:
             await ops.finish(db, operation_id, status, items=items, token=token)
@@ -1071,10 +1107,14 @@ class MonetizationService:
             return {"operation_id": operation_id, "status": status, "reason": reason}
 
         paid = await db.subscriptions.find_one({"_id": self._lookup_id(target["subscription_id"])})
+        target_status = str((paid or {}).get("status") or "")
         confirmed_target = bool(paid) and (
-            (str(paid.get("status") or "") == "active" and str(paid.get("billing_status") or "") == "active")
-            or bool(paid.get("replacement_authorised_at")))
+            (target_status == "active" and str(paid.get("billing_status") or "") == "active")
+            or (bool(paid.get("replacement_authorised_at")) and target_status == "pending"))
         if not confirmed_target:
+            if paid and target_status not in {"pending", "active"}:
+                # Review 11 R11-3: the target was cancelled or ended after its authorisation.
+                return await stop("needs_review", "target_no_longer_valid")
             return await stop("awaiting_payment", "target_not_confirmed")
         lock_holder = scope_holder or token
         try:
@@ -1090,7 +1130,9 @@ class MonetizationService:
                 source_item["local"] = "changed_meanwhile"
                 return await stop("needs_review", "source_changed_meanwhile")
             effective_at = source_item["effective_at"]
-            if source_item["gateway"] not in {"confirmed"} | OUTCOME_UNKNOWN_STATES:
+            if source_item["gateway"] in OUTCOME_UNKNOWN_STATES and await self._provider_shows_cancelled(source):
+                source_item["gateway"] = "confirmed"
+            if source_item["gateway"] != "confirmed":
                 # Review 10 R10-3: if the source renewed before this confirmation, a cycle-end
                 # cancel now would end the *next* cycle (paid twice for those days): review.
                 try:
@@ -1211,8 +1253,9 @@ class MonetizationService:
 
         db = await self._get_db()
         items = op.get("items") or [{}]
-        if op.get("kind") not in {"checkout", "replacement"} or op.get("status") != "needs_review" or (
-                items[0] or {}).get("gateway") != "outcome_unknown":
+        first = items[0] or {}
+        if op.get("kind") not in {"checkout", "replacement"} or op.get("status") != "needs_review" or not (
+                first.get("gateway") == "outcome_unknown" or first.get("local") in UNRECORDED_PURCHASE_STATES):
             raise ops.OperationConflict("Only a checkout with an unknown provider outcome can be resolved this way")
         if await self.reconcile_checkout_operation(db, op, current_user):
             return {"operation_id": op["_id"], "status": "completed", "reconciled": True}
@@ -1254,8 +1297,9 @@ class MonetizationService:
         if first.get("gateway") == "confirmed" and first.get("local") in UNRECORDED_PURCHASE_STATES:
             # Review 10 R10-7: created at the provider but not recorded (lease lost): the id is
             # known from the provider's own answer. A binding conflict is left for a person.
-            if first.get("local") == "binding_conflict" or not first.get("gateway_subscription_id"):
-                return False
+            if (first.get("local") == "binding_conflict" or not first.get("gateway_subscription_id")
+                    or not first.get("customer_id")):
+                return False  # review 11 R11-6: never recorded without the customer it belongs to
             from .payment_gateway import GatewaySubscription
 
             found: Any = GatewaySubscription(gateway_subscription_id=str(first["gateway_subscription_id"]),
@@ -1277,6 +1321,10 @@ class MonetizationService:
         request = op.get("request") or {}
         gateway_id = scope_text(found.gateway_subscription_id)
         if not gateway_id:
+            return False
+        if op.get("kind") == "replacement" and (len(items) < 2 or not isinstance(items[1].get("effective_at"), datetime)):
+            # Review 11 R11-4: without the source item there is no start date; recording the
+            # target would let it govern at once beside the source. Left for a person.
             return False
         if await db.subscriptions.find_one({"payment_gateway_subscription_id": gateway_id}, {"_id": 1}):
             # Already recorded (an earlier reconciliation): resolved, never bound twice.
@@ -1476,7 +1524,8 @@ class MonetizationService:
                 "The payment gateway did not answer the checkout; its outcome is unknown and is listed for review. "
                 "Do not start another purchase for this scope until it is reconciled"
             ) from exc
-        item.update(gateway="confirmed", gateway_subscription_id=scope_text(gateway_sub.gateway_subscription_id))
+        item.update(gateway="confirmed", gateway_subscription_id=scope_text(gateway_sub.gateway_subscription_id),
+                    customer_id=customer.gateway_customer_id)
         # Review 9 R9-5: a gateway call slower than the lease could let another checkout in; the
         # lease is re-checked before recording, and a purchase made without it goes to review.
         if not await db[ops.LOCKS].find_one({"_id": ops.scope_key(str(organization_id), scope_project), "holder": holder}):
@@ -2268,10 +2317,16 @@ class MonetizationService:
                     gateway_subscription_id=stored["payment_gateway_subscription_id"]
                 )
             except Exception as exc:
-                await release("failed", error=type(exc).__name__)
-                await self._review_event(stored, "subscription.reactivation_gateway_failed", current_user,
+                # Review 11 (R10-6 caller): an unknown outcome is not "nothing changed".
+                unknown = reliability.classify(exc) == reliability.UNKNOWN
+                await release("outcome_unknown" if unknown else "failed",
+                              error=getattr(exc, "cause_type", None) or type(exc).__name__)
+                await self._review_event(stored, "subscription.reactivation_gateway_outcome_unknown" if unknown
+                                         else "subscription.reactivation_gateway_failed", current_user,
                                          reason=type(exc).__name__)
-                raise GatewayOperationFailed("The payment gateway did not resume the subscription; nothing was changed") from exc
+                raise GatewayOperationFailed(
+                    "The payment gateway did not confirm the resume; its outcome is unknown and is listed for review"
+                    if unknown else "The payment gateway did not resume the subscription; nothing was changed") from exc
             gateway_status = str(getattr(resumed, "status", "") or "").strip().lower()
             if gateway_status not in self.GATEWAY_ACTIVE_STATUSES:
                 await release("refused_by_gateway", gateway_status=gateway_status)
@@ -3640,6 +3695,7 @@ class MonetizationService:
 
     async def reconcile_gateway_cancellations(
         self, organization_id: Optional[str] = None, *, now: Optional[datetime] = None, limit: int = 200,
+        after: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Workstream 4 / R9-11: read-only comparison of the provider's state with every
         locally cancelled, gateway-bound subscription. Nothing is written, cancelled, refunded
@@ -3662,6 +3718,8 @@ class MonetizationService:
                                  "payment_gateway_subscription_id": {"$type": "string", "$gt": ""}}
         if organization_id:
             query["organization_id"] = str(organization_id)
+        if after:
+            query["_id"] = {"$gt": self._lookup_id(after)}  # review 11 R11-8: paged by _id
         counts: Dict[str, int] = {}
         review: List[Dict[str, Any]] = []
         gateway = self._gateway()
@@ -3694,8 +3752,9 @@ class MonetizationService:
                     "requested_mode": record.get("mode"), "effective_at": record.get("effective_at"),
                     "provider_status": state.status if state else None,
                 })
-        return {"checked": len(rows), "counts": counts, "requires_review": review,
-                "complete": len(rows) < max(1, min(int(limit), 1000)), "writes": 0}
+        complete = len(rows) < max(1, min(int(limit), 1000))
+        return {"checked": len(rows), "counts": counts, "requires_review": review, "complete": complete,
+                "next_after": None if complete or not rows else str(rows[-1]["_id"]), "writes": 0}
 
     async def get_subscription_operation(self, operation_id: str) -> Optional[Dict[str, Any]]:
         from . import subscription_operations as ops

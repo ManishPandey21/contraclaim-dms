@@ -349,11 +349,12 @@ def test_r10_9_r10_10_settlement_label_and_a_discrepancy_racing_a_settlement(mon
 
             first = await record("pay-d-1", stale)
             snapshot_with_open_review = await env.db.subscriptions.find_one({"_id": "rv10-d"})
-            await env.db.subscriptions.update_one({"_id": "rv10-d"}, {"$set": {"status": "past_due"}})
+            # payment.failed during the review sets the billing label (webhooks never set status).
+            await env.db.subscriptions.update_one({"_id": "rv10-d"}, {"$set": {"billing_status": "past_due"}})
             settled = await pd.resolve(env.db, first["discrepancy_id"], outcome="settled", reason="r", actor="sa")
             assert settled["review_closed"] is True
             row = await env.db.subscriptions.find_one({"_id": "rv10-d"})
-            assert row["billing_status"] == "past_due", "R10-9: the label follows the subscription as it is now"
+            assert row["billing_status"] == "past_due", "R10-9: a later failure is kept"
             # R10-10: a discrepancy decided on a snapshot taken while the review was open.
             await record("pay-d-2", snapshot_with_open_review)
             row = await env.db.subscriptions.find_one({"_id": "rv10-d"})
@@ -405,5 +406,38 @@ def test_r10_11_the_shadow_reads_the_users_projects_in_one_query(monkeypatch) ->
                 Counting(env.db), user, "dms.claim.view", organization_id=ORG_A, project_id=projects[-1])
             assert allowed is True and user_id
             assert calls.count("find_one") <= 1 and calls.count("find") <= 1, calls
+
+    _run(scenario())
+
+
+def test_r10_9_the_label_after_settlement_follows_what_happened(monkeypatch, provider) -> None:
+    """Re-review 11: past due before the review stays past due; a verified payment during the
+    review means active; a cancellation during it stays inactive."""
+
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            from rbac_backend.core.config import settings
+            from rbac_backend.services import payment_discrepancy_service as pd
+
+            monkeypatch.setattr(settings, "PAYMENT_MISMATCH_POLICY", "enforce", raising=False)
+            monkeypatch.setattr(settings, "PAYMENT_MISMATCH_GRACE_DAYS", 7, raising=False)
+            now = datetime.utcnow()
+            cases = {"rv10-l-pd": ({"billing_status": "past_due"}, None, "past_due"),
+                     "rv10-l-paid": ({"billing_status": "past_due"}, "paid", "active"),
+                     "rv10-l-cancel": ({}, "cancel", "inactive")}
+            for sub_id, (extra, during, expected) in cases.items():
+                await env.db.subscriptions.insert_one({**_bound(sub_id, project_id=f"p-{sub_id}"), **extra})
+                snapshot = await env.db.subscriptions.find_one({"_id": sub_id})
+                opened = await pd.record(env.db, subscription=snapshot, provider="razorpay", kind="renewal", reason="x",
+                                         event_id=f"evt-{sub_id}", gateway_payment_id=f"pay-{sub_id}", amount_minor=1,
+                                         currency="INR", expected={"amount_minor": 2, "currency": "INR"}, now=now)
+                if during == "paid":
+                    await env.db.billing_records.insert_one({"subscription_id": sub_id, "record_status": "paid",
+                                                             "created_at": datetime.utcnow()})
+                if during == "cancel":
+                    await env.db.subscriptions.update_one({"_id": sub_id}, {"$set": {"status": "cancelled",
+                                                                                   "billing_status": "inactive"}})
+                await pd.resolve(env.db, opened["discrepancy_id"], outcome="settled", reason="r", actor="sa")
+                assert (await env.db.subscriptions.find_one({"_id": sub_id}))["billing_status"] == expected, sub_id
 
     _run(scenario())

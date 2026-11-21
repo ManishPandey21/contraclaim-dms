@@ -138,27 +138,48 @@ async def resolve(db: Any, doc_id: str, *, outcome: str, reason: str, actor: Opt
 
         sid = current["subscription_id"]
         lookup: List[Any] = [sid] + ([ObjectId(sid)] if ObjectId.is_valid(sid) else [])
-        sub = await db.subscriptions.find_one({"_id": {"$in": lookup}}, {"financial_review": 1, "status": 1})
+        sub = await db.subscriptions.find_one({"_id": {"$in": lookup}},
+                                              {"financial_review": 1, "status": 1, "billing_status": 1})
         review = (sub or {}).get("financial_review") or {}
         if sub and review.get("state") == "open":
+            opened = review.get("opened_at")
+            paid_since = bool(await db.billing_records.find_one(
+                {"subscription_id": sid, "record_status": "paid",
+                 **({"created_at": {"$gte": opened}} if isinstance(opened, datetime) else {})}, {"_id": 1}))
             await db.subscriptions.update_one(
                 {"_id": sub["_id"], "financial_review.state": "open"},
                 {"$set": {"financial_review.state": "settled", "financial_review.settled_at": moment,
-                          "billing_status": _billing_label_after_review(sub, review),
+                          "billing_status": _billing_label_after_review(sub, review, paid_since),
                           "payment_review_required": False, "updated_at": moment}})
             closed = True
+            # Review 11 (R10-10): a discrepancy recorded between the check above and this close
+            # reopens the review, its grace anchored at the earliest still-open discrepancy.
+            late = await db[COLLECTION].find_one(
+                {"subscription_id": sid, "kind": "renewal", "status": {"$in": list(OPEN)}}, sort=[("detected_at", 1)])
+            if late is not None:
+                anchor = late.get("detected_at") if isinstance(late.get("detected_at"), datetime) else moment
+                await db.subscriptions.update_one(
+                    {"_id": sub["_id"], "financial_review.state": "settled"},
+                    {"$set": {"financial_review.state": "open", "financial_review.grace_until": anchor + grace(),
+                              "billing_status": "financial_review", "payment_review_required": True,
+                              "updated_at": moment}})
+                closed = False
     return {"id": doc_id, "status": outcome, "review_closed": closed}
 
 
-def _billing_label_after_review(sub: Dict[str, Any], review: Dict[str, Any]) -> str:
-    """Review 10 R10-9: the label follows the subscription as it is now - past due stays past
-    due; a subscription back in good standing is active - not the snapshot from when the
-    review opened."""
-    status = str(sub.get("status") or "").strip().lower()
-    if status == "past_due":
-        return "past_due"
+def _billing_label_after_review(sub: Dict[str, Any], review: Dict[str, Any], paid_since: bool) -> str:
+    """Review 10 R10-9 / review 11: the label follows what happened. A later event that set
+    the billing label (``payment.failed``: past due; a cancellation: inactive) is kept; a
+    verified payment during the review means active; otherwise the label from before."""
+    current = str(sub.get("billing_status") or "")
+    if current and current not in {"financial_review", "review"}:
+        return current
+    if str(sub.get("status") or "").strip().lower() == "cancelled":
+        return "inactive"
+    if paid_since:
+        return "active"
     before = str(review.get("billing_status_before") or "")
-    return "active" if before in {"", "past_due", "review", "financial_review"} else before
+    return before if before and before not in {"review", "financial_review"} else "active"
 
 
 __all__ = ["COLLECTION", "OPEN", "RESOLUTIONS", "discrepancy_id", "enforced", "grace", "list_open", "record", "resolve"]

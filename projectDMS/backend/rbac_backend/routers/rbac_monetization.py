@@ -827,6 +827,7 @@ async def resolve_unknown_checkout(
 async def reconcile_gateway_cancellations(
     organization_id: Optional[str] = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
+    after: Optional[str] = Query(default=None, max_length=100),
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Workstream 4 / R9-11: read-only comparison of the provider's state with locally
@@ -834,7 +835,7 @@ async def reconcile_gateway_cancellations(
     failure). Super Admin only; reads the provider, writes nothing."""
     if not ScopeService().is_superadmin(current_user):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only superadmins can reconcile billing")
-    return await MonetizationService().reconcile_gateway_cancellations(organization_id, limit=limit)
+    return await MonetizationService().reconcile_gateway_cancellations(organization_id, limit=limit, after=after)
 
 
 class DiscrepancyResolution(BaseModel):
