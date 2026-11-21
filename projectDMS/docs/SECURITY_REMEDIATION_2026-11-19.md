@@ -610,7 +610,7 @@ Full record: `docs/DEF4_BILLING_PERMISSION_SEPARATION.md` §17 and `docs/M1_BUIL
 
 ### Independent reviews
 
-Review 10 (cold, given the code): 17 findings - 1 High (R10-1, latent), 4 Medium (R10-2 to R10-4; R10-2 a pre-existing failure mode), 12 Low/Info. All fixed in `71402c3` except R10-17 (recorded). Re-review 11: RR_PENDING.
+Review 10 (cold, given the code): 17 findings - 1 High (R10-1, latent), 4 Medium (R10-2 to R10-4; R10-2 a pre-existing failure mode), 12 Low/Info. All fixed in `71402c3` except R10-17 (recorded). Further reviews: review 10 (cold) and re-reviews 11 to 14 - every finding reproduced and fixed (`71402c3`, `43ef3e0`, `fdef504`, `7420456`, `1b77419`); re-review 14 found nothing Medium or higher in a UTC deployment (DEF-4 §17.7-17.11).
 
 ### Findings by origin
 

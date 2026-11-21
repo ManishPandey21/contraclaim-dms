@@ -1046,9 +1046,9 @@ Baseline: `6913a01` (R6-5 to R6-8 accepted provisionally as implemented and CI-v
 
 | Workstream | Commit | Flag (default) | Implemented | Locally verified | Mutants |
 |---|---|---|---|---|---|
-| 4 Provider reliability | `8b6733e`, `71402c3`, `fdef504`, `7420456` | always on (timeouts are configuration) | Yes | Yes | 24/24 |
+| 4 Provider reliability | `8b6733e`, `71402c3`, `fdef504`, `7420456`, `1b77419` | always on (timeouts are configuration) | Yes | Yes | 24/24 |
 | 5 M1 shadow evaluator | `e661b92` | `BUILT_IN_ROLE_ASSIGNMENTS=off` (`shadow` available; `on` refused at startup) | Shadow only | Yes | 9/10 + 1 equivalent (killed when combined) |
-| 1 Checkout replacement | `f40a89f`, `71402c3`, `43ef3e0`, `fdef504`, `7420456` | `CHECKOUT_REPLACEMENT_ENABLED=false` | Yes, inactive | Yes | 22/22 |
+| 1 Checkout replacement | `f40a89f`, `71402c3`, `43ef3e0`, `fdef504`, `7420456`, `1b77419` | `CHECKOUT_REPLACEMENT_ENABLED=false` | Yes, inactive | Yes | 22/22 |
 | 3 Legacy bindings and old cancellations (P-05) | `9c64db2` | read-only reading | Yes | Yes | 8/8 |
 | 2 Payment amount mismatch | `21ac55c` | `PAYMENT_MISMATCH_POLICY=off`; `enforce` needs an approved `PAYMENT_MISMATCH_GRACE_DAYS` | Yes, inactive | Yes | 15/16 + 1 equivalent |
 
@@ -1190,6 +1190,19 @@ All reproduced at `fdef504` (5/5 new tests failed), fixed in `7420456`, pinned i
 | R13-5 | A binding conflict with the purchase's own record had no honest resolution | Low | Recognised as already recorded |
 | R12-3 caveat | "Cancelled at the provider" was taken on say-so | Low | Refused while the provider still shows it billable |
 | R12-5 gap | Completion sent the cancel after losing its scope | Low | Stops before sending |
+
+### 17.11 Re-review 14 of `7420456` and its fixes (`1b77419`); where the review loop stopped
+
+Re-review 14 found **nothing Medium or higher in a UTC deployment** (the backend image and compose files set no `TZ`). Its Low findings were reproduced at `7420456` and fixed in `1b77419`:
+
+| # | Finding | Severity | Fix |
+|---|---|---|---|
+| R14-1 | The reference search's window was computed from a naive UTC datetime as local time; on a host behind UTC an existing subscription read as absent | Low (Medium only on a host behind UTC) | Explicit UTC timestamp |
+| R14-2 | A purchase recorded before its attempt stopped could be cleared only by a false "not created" statement | Low | Resolved from its own reference first |
+| R14-3 | The retry route answered 500 when completion lost its lease | Low (flag-gated) | 409 |
+| R12-3 gap | The id found by the search was not checked for being billable | Low | Checked |
+
+**Review history of this pass (agents, not the authorised security review):** review 10 (cold) 17 findings (1 High latent, 4 Medium); re-review 11 9 new (1 High latent); re-review 12 9 new (4 Medium); re-review 13 5 new (1 Medium always-on, introduced by the review-12 fix); re-review 14 none Medium or higher. Every finding was reproduced before its fix; the review loop stopped at re-review 14. Recorded, not changed: R10-17 (shadow interpretation), the replacement paths remain latent until a provider with a verified scheduled start exists, and Razorpay's reference search is bounded (an incomplete scan now needs a stated manual check).
 
 ### 17.6 Production dependencies recorded by this pass
 
