@@ -40,7 +40,7 @@ import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 # Write operations the guard refuses by name. Kept here, and only here, so the
 # source scan can tell a refusal list from a call.
@@ -297,6 +297,7 @@ def read_roles(db: ReadOnlyDatabase) -> Dict[str, Any]:
         flag_off_disclosure_impact=_read_flag_off_disclosure_impact(db),
         subscription_security_impact=_read_subscription_security_impact(db),
         payment_integrity_impact=_read_payment_integrity_impact(db),
+        legacy_binding_and_cancellation_reconciliation=_read_legacy_binding_and_cancellation_reconciliation(db),
     )
 
 
@@ -902,6 +903,161 @@ def _read_payment_integrity_impact(db: ReadOnlyDatabase) -> Dict[str, Any]:
         "operations_needing_review_by_organization": dict(sorted(open_operations.items())),
         "trial_conversions_awaiting_payment": pending_conversions,
         "no_charge_conversions": no_charge,
+    }
+
+
+#: Workstream 3 (2026-11-21): the four categories a gateway binding falls into before release.
+LB_CATEGORIES = ("verified", "conflicting", "unverified", "requires_reconciliation")
+#: What the database shows about each cancelled, gateway-bound subscription.
+LB_CANCELLATION_CLASSES = (
+    "confirmed_at_gateway",
+    "charged_after_cancellation",
+    "historical_plan_settings_without_gateway_evidence",
+    "other_without_gateway_evidence",
+)
+_LB_CHECKOUT_ACTIONS = ("subscription.checkout_started", "subscription.checkout_reconciled",
+                        "subscription.replacement_checkout_started")
+
+
+def _read_legacy_binding_and_cancellation_reconciliation(db: ReadOnlyDatabase) -> Dict[str, Any]:
+    """Workstream 3: legacy gateway bindings and old cancellations, classified from checkout
+    provenance, gateway records, audit events and payment history - counts by organisation and
+    category only. No subscription, gateway, customer or payment id, name, email or amount
+    leaves this reading, and nothing is deleted, rebound, cancelled, refunded or disabled.
+
+    **Bindings** (each gateway-bound subscription, first match wins):
+
+    - ``conflicting``: the gateway id is bound twice; the binding was recorded outside checkout
+      or written by an ordinary create/update; or a payment for the gateway id was recorded
+      against another subscription;
+    - ``requires_reconciliation``: the payment history or the review queue says something is
+      unresolved - a payment refused or held for review, an amount mismatch, a webhook refused
+      for this subscription's binding, or an open durable operation naming it;
+    - ``verified``: a checkout (or checkout reconciliation / replacement) audit event names it,
+      or a person recorded a provider reconciliation (``payment_gateway_reconciled_at``);
+    - ``unverified``: none of the above.
+
+    **Old cancellations** (cancelled, gateway-bound): whether the provider may still charge.
+    The database cannot read the provider; it shows the evidence it has:
+
+    - ``charged_after_cancellation``: a payment for the gateway id was recorded after the
+      cancellation - the provider was still charging (highest priority);
+    - ``confirmed_at_gateway``: a confirmed cancellation request is on record (workstream 4
+      ``gateway_cancellation``, a durable operation's confirmed item, a paid trial conversion
+      or an abandoned checkout cancelled at the gateway);
+    - ``historical_plan_settings_without_gateway_evidence``: a plan-settings replacement from
+      before R6-7 - the gateway was never told;
+    - ``other_without_gateway_evidence``.
+
+    Only ``GET /plan-settings/reconciliation/cancellations`` (Super Admin, read-only) reads the
+    provider's own state; this reading says which subscriptions need that check.
+    """
+    def text(value: Any) -> str:
+        return str(value).strip() if value is not None else ""
+
+    collections = set(db.list_collection_names())
+
+    def rows(name: str, query: Dict[str, Any], projection: Dict[str, Any]) -> List[Dict[str, Any]]:
+        return list(db[name].find(query, projection)) if name in collections else []
+
+    def bump(table: Dict[str, Dict[str, int]], category: str, org: str) -> None:
+        bucket = table.setdefault(category, {})
+        bucket[org] = bucket.get(org, 0) + 1
+
+    checkout_audited = {text(r.get("resource_id")) for r in rows(
+        "audit_events", {"action": {"$in": list(_LB_CHECKOUT_ACTIONS)}}, {"resource_id": 1})}
+    written_by_ordinary_update = {text(r.get("resource_id")) for r in rows(
+        "audit_events", {"action": {"$in": ["subscription.created", "subscription.updated"]},
+                         "after.payment_gateway_subscription_id": {"$type": "string", "$gt": ""}},
+        {"resource_id": 1})}
+    refused_binding = {text(r.get("resource_id")) for r in rows(
+        "audit_events", {"action": "billing.webhook.binding_refused"}, {"resource_id": 1})}
+
+    paid_by_gateway: Dict[str, Dict[str, Any]] = {}
+    under_review: set = set()
+    for record in rows("billing_records", {}, {"gateway_subscription_id": 1, "subscription_id": 1, "record_status": 1,
+                                               "requires_admin_review": 1, "requires_review": 1, "created_at": 1}):
+        gid, owner = text(record.get("gateway_subscription_id")), text(record.get("subscription_id"))
+        status = text(record.get("record_status"))
+        if record.get("requires_admin_review") or record.get("requires_review") or status == "amount_mismatch" \
+                or status.startswith("refused"):
+            under_review.add(owner)
+        if gid and status == "paid":
+            entry = paid_by_gateway.setdefault(gid, {"owners": set(), "times": []})
+            entry["owners"].add(owner)
+            if isinstance(record.get("created_at"), datetime):
+                entry["times"].append(record["created_at"])
+
+    open_named: set = set()
+    confirmed_cancel: set = set()
+    for op in rows("subscription_operations", {}, {"status": 1, "items": 1}):
+        for item in op.get("items") or []:
+            sid = text((item or {}).get("subscription_id"))
+            if not sid:
+                continue
+            if op.get("status") in {"needs_review", "in_progress"}:
+                open_named.add(sid)
+            if (item or {}).get("gateway") == "confirmed":
+                confirmed_cancel.add(sid)
+
+    subscriptions = rows("subscriptions", {"payment_gateway_subscription_id": {"$type": "string", "$gt": ""}}, {
+        "organization_id": 1, "status": 1, "cancelled_at": 1, "cancellation_reason": 1, "cancellation_operation_id": 1,
+        "payment_gateway_subscription_id": 1, "payment_gateway_bound_by": 1, "payment_gateway_reconciled_at": 1,
+        "gateway_cancellation": 1,
+    })
+    gateway_use: Dict[str, int] = {}
+    for row in subscriptions:
+        gid = text(row.get("payment_gateway_subscription_id"))
+        gateway_use[gid] = gateway_use.get(gid, 0) + 1
+
+    categories: Dict[str, Dict[str, int]] = {}
+    cancellations: Dict[str, Dict[str, int]] = {}
+    verified_with_payments = 0
+    for row in subscriptions:
+        org, sub_id = text(row.get("organization_id")), text(row.get("_id"))
+        gid = text(row.get("payment_gateway_subscription_id"))
+        paid = paid_by_gateway.get(gid) or {"owners": set(), "times": []}
+        if (gateway_use.get(gid, 0) > 1 or row.get("payment_gateway_bound_by") not in (None, "checkout")
+                or sub_id in written_by_ordinary_update or (paid["owners"] - {sub_id})):
+            category = "conflicting"
+        elif sub_id in under_review or sub_id in refused_binding or sub_id in open_named:
+            category = "requires_reconciliation"
+        elif sub_id in checkout_audited or row.get("payment_gateway_reconciled_at"):
+            category = "verified"
+            verified_with_payments += 1 if sub_id in paid["owners"] else 0
+        else:
+            category = "unverified"
+        bump(categories, category, org)
+
+        if text(row.get("status")).lower() != "cancelled":
+            continue
+        cancelled_at = row.get("cancelled_at") if isinstance(row.get("cancelled_at"), datetime) else None
+        record = row.get("gateway_cancellation") if isinstance(row.get("gateway_cancellation"), dict) else {}
+        if cancelled_at and any(moment > cancelled_at for moment in paid["times"]):
+            klass = "charged_after_cancellation"
+        elif (record.get("request_confirmed") or sub_id in confirmed_cancel
+              or text(row.get("cancellation_reason")) in {"converted_to_paid", "checkout_abandoned"}):
+            klass = "confirmed_at_gateway"
+        elif text(row.get("cancellation_reason")) == "replaced_by_plan_settings" and not row.get("cancellation_operation_id"):
+            klass = "historical_plan_settings_without_gateway_evidence"
+        else:
+            klass = "other_without_gateway_evidence"
+        bump(cancellations, klass, org)
+
+    def totals(table: Dict[str, Dict[str, int]], names: Tuple[str, ...]) -> Dict[str, int]:
+        return {name: sum((table.get(name) or {}).values()) for name in names}
+
+    cancellation_totals = totals(cancellations, LB_CANCELLATION_CLASSES)
+    return {
+        "bindings_by_category": totals(categories, LB_CATEGORIES),
+        "bindings_by_category_and_organization": {
+            name: dict(sorted((categories.get(name) or {}).items())) for name in LB_CATEGORIES},
+        "verified_bindings_with_payment_history": verified_with_payments,
+        "cancelled_bound_by_class": cancellation_totals,
+        "cancelled_bound_by_class_and_organization": {
+            name: dict(sorted((cancellations.get(name) or {}).items())) for name in LB_CANCELLATION_CLASSES},
+        "cancellations_needing_a_provider_check": sum(
+            count for name, count in cancellation_totals.items() if name != "confirmed_at_gateway"),
     }
 
 

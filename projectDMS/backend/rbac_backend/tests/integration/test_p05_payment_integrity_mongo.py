@@ -115,3 +115,86 @@ def test_the_payment_integrity_reading_classifies_and_counts_without_identifiers
             assert "secret" not in repr(reading) and "pi-" not in repr(reading), "no gateway, payment or subscription ids"
 
     _run(scenario())
+
+
+def _legacy(database: str) -> Dict[str, Any]:
+    from pymongo import MongoClient
+
+    from rbac_backend.tests.integration.test_claim_arbitration_readings_mongo import _reader, _uri
+
+    reader = _reader()
+    client = MongoClient(_uri(), serverSelectionTimeoutMS=5_000)
+    try:
+        sync_db = client[database]
+        names = ("subscriptions", "billing_records", "audit_events", "subscription_operations")
+        counts = {name: sync_db[name].count_documents({}) for name in names}
+        reading = reader._read_legacy_binding_and_cancellation_reconciliation(reader.ReadOnlyDatabase(sync_db))
+        assert {name: sync_db[name].count_documents({}) for name in names} == counts, "read-only"
+        return reading
+    finally:
+        client.close()
+
+
+def test_workstream_3_classifies_legacy_bindings_and_old_cancellations_by_organisation(monkeypatch) -> None:
+    """Workstream 3: bindings as verified / conflicting / unverified / requires_reconciliation from
+    checkout provenance, gateway records, audit events and payment history; cancelled bound
+    subscriptions by what the database shows about the provider still charging."""
+
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            db = env.db
+            now = datetime.utcnow()
+            baseline = _legacy(db.name)  # the environment seeds other organisations' subscriptions
+            await db.subscriptions.insert_many([
+                _sub("lb-verified", "p1", gid="gw-lb-1", payment_gateway_bound_by="checkout"),
+                _sub("lb-reconciled", "p2", gid="gw-lb-2", payment_gateway_reconciled_at=now),
+                _sub("lb-unverified", "p3", gid="gw-lb-3"),
+                _sub("lb-admin-bound", "p4", gid="gw-lb-4", payment_gateway_bound_by="admin_update"),
+                _sub("lb-paid-elsewhere", "p5", gid="gw-lb-5", payment_gateway_bound_by="checkout"),
+                _sub("lb-mismatch", "p6", gid="gw-lb-6", payment_gateway_bound_by="checkout"),
+                _sub("lb-open-op", "p7", gid="gw-lb-7", payment_gateway_bound_by="checkout"),
+                # Old cancellations.
+                _sub("lb-c-charged", "c1", gid="gw-lb-c1", status="cancelled", cancelled_at=now - timedelta(days=40),
+                     cancellation_reason="replaced_by_plan_settings"),
+                _sub("lb-c-legacy-ps", "c2", gid="gw-lb-c2", status="cancelled", cancelled_at=now - timedelta(days=40),
+                     cancellation_reason="replaced_by_plan_settings"),
+                _sub("lb-c-confirmed", "c3", gid="gw-lb-c3", status="cancelled", cancelled_at=now - timedelta(days=5),
+                     gateway_cancellation={"mode": "cycle_end", "request_confirmed": True, "effective_at": now}),
+                _sub("lb-c-other", "c4", gid="gw-lb-c4", status="cancelled", cancelled_at=now - timedelta(days=5),
+                     cancellation_reason="customer_request"),
+            ])
+            await db.audit_events.insert_many([
+                {"action": "subscription.checkout_started", "resource_id": rid}
+                for rid in ("lb-verified", "lb-paid-elsewhere", "lb-mismatch", "lb-open-op")])
+            await db.billing_records.insert_many([
+                {"subscription_id": "lb-verified", "gateway_subscription_id": "gw-lb-1", "record_status": "paid",
+                 "created_at": now - timedelta(days=3), "gateway_payment_id": "pay-lb-1", "event_type": "payment.succeeded"},
+                {"subscription_id": "someone-else", "gateway_subscription_id": "gw-lb-5", "record_status": "paid",
+                 "created_at": now - timedelta(days=3), "gateway_payment_id": "pay-lb-5", "event_type": "payment.succeeded"},
+                {"subscription_id": "lb-mismatch", "gateway_subscription_id": "gw-lb-6", "record_status": "amount_mismatch",
+                 "created_at": now - timedelta(days=3), "gateway_payment_id": "pay-lb-6", "event_type": "payment.succeeded"},
+                {"subscription_id": "lb-c-charged", "gateway_subscription_id": "gw-lb-c1", "record_status": "paid",
+                 "created_at": now - timedelta(days=10), "gateway_payment_id": "pay-lb-c1", "event_type": "payment.succeeded"},
+            ])
+            await db.subscription_operations.insert_one({
+                "_id": "op-lb-7", "kind": "cancellation", "status": "needs_review", "organization_id": ORG,
+                "items": [{"subscription_id": "lb-open-op", "gateway": "outcome_unknown"}]})
+
+            reading = _legacy(db.name)
+            by_org = reading["bindings_by_category_and_organization"]
+            assert by_org["verified"][ORG] == 2, by_org             # checkout-audited; provider reconciliation recorded
+            assert by_org["unverified"][ORG] == 5, by_org           # lb-unverified and the four cancelled rows
+            assert by_org["conflicting"][ORG] == 2                  # admin-bound, payment recorded elsewhere
+            assert by_org["requires_reconciliation"][ORG] == 2      # amount mismatch, open operation
+            cancelled = reading["cancelled_bound_by_class_and_organization"]
+            assert cancelled["charged_after_cancellation"][ORG] == 1
+            assert cancelled["historical_plan_settings_without_gateway_evidence"][ORG] == 1
+            assert cancelled["confirmed_at_gateway"][ORG] == 1
+            assert cancelled["other_without_gateway_evidence"][ORG] == 1
+            assert reading["cancellations_needing_a_provider_check"] - baseline["cancellations_needing_a_provider_check"] == 3
+            assert reading["verified_bindings_with_payment_history"] >= 1
+            text = repr(reading)
+            for secret in ("gw-lb", "pay-lb", "lb-verified", "lb-c-charged", "op-lb"):
+                assert secret not in text, secret
+
+    _run(scenario())
