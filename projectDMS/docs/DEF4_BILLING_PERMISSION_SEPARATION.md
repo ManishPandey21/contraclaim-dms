@@ -1039,3 +1039,87 @@ No High finding: no route left a tenant billing administrator paid, extended or 
 **Four independent reviews of this pass, in sum:** review 7 (cold, on R6-5 to R6-8 and lifecycle consistency) found 4 pre-existing payment bypasses (1 Critical, 3 High) and 13 introduced or adjacent defects; review 8 found 2 more High pre-existing paths and 11 others; review 9 found none High. Every finding was reproduced at the commit before its fix and fixed in its own commit with tests and mutants, except those recorded above.
 
 **CI (§16 code):** run 44822992420 on `918b41f`: backend 8,437; real MongoDB 1,271 in 99 modules, none skipped; frontend, dependency scan, Docker passed; Gitleaks red on the 2 known findings. Not security approval.
+
+## 17. Payment integrity closure and M1 shadow preparation (owner instructions 2026-11-21, eleventh pass)
+
+Baseline: `6913a01` (R6-5 to R6-8 accepted provisionally as implemented and CI-verified, not production-approved). Every flag added here is **off by default**; no real payment provider was called; nothing was deployed, migrated, rebound, refunded or cancelled at any provider; no role was migrated or re-granted.
+
+| Workstream | Commit | Flag (default) | Implemented | Locally verified | Mutants |
+|---|---|---|---|---|---|
+| 4 Provider reliability | `8b6733e` | always on (timeouts are configuration) | Yes | Yes | 24/24 |
+| 5 M1 shadow evaluator | `e661b92` | `BUILT_IN_ROLE_ASSIGNMENTS=off` (`shadow` available; `on` refused at startup) | Shadow only | Yes | 9/10 + 1 equivalent (killed when combined) |
+| 1 Checkout replacement | `f40a89f` | `CHECKOUT_REPLACEMENT_ENABLED=false` | Yes, inactive | Yes | 22/22 |
+| 3 Legacy bindings and old cancellations (P-05) | `9c64db2` | read-only reading | Yes | Yes | 8/8 |
+| 2 Payment amount mismatch | `21ac55c` | `PAYMENT_MISMATCH_POLICY=off`; `enforce` needs an approved `PAYMENT_MISMATCH_GRACE_DAYS` | Yes, inactive | Yes | 15/16 + 1 equivalent |
+
+### 17.1 Provider reliability (workstream 4, `8b6733e`)
+
+- **Defects reproduced at `6913a01`:** the Razorpay SDK ran on the event loop with no timeout (a hung provider held the loop for the whole call: 3.0 s blocked in the reproduction); every failure looked the same, so a `4xx` refusal was an unknown outcome and a plan-settings timeout was recorded "failed" (nothing changed) though it may have been applied; after a checkout `create` timed out, the next request - under any key - created a **second provider subscription**; an abandoned checkout was cancelled when the provider could not be read; nothing recorded a cycle-end cancellation's effective date (R9-11).
+- **Bounded calls** (`services/payment_gateway_reliability.py`): each SDK call runs in a worker thread with connect/read timeouts on an injected `requests` session and an overall deadline (`PAYMENT_GATEWAY_CONNECT_TIMEOUT_SECONDS` 5, `..._READ_TIMEOUT_SECONDS` 15, clamped). Failures are classified: **not sent** (connect timeout, refused or unresolvable connection: nothing changed), **rejected** (`4xx`: nothing changed), **unknown** (read timeout, reset after send, `5xx`, deadline: may have been applied). Reads are retried twice with backoff; a mutating call is retried only when provably not sent.
+- **`outcome_unknown`:** lifecycle and plan-settings cancellations record it, list it for review and reconcile against the provider on retry with the **same** operation; a refusal of a repeat after an unknown outcome is still unknown (never "failed").
+- **Checkout** is a durable operation whose id the provider subscription carries in `notes.checkout_reference`. An unanswered create blocks the scope for every later request until it is found by reference (recorded as that checkout's pending purchase) or a Super Admin resolves it as never created (`POST /plan-settings/operations/{id}/resolve`, after a fresh provider search; where the provider cannot be searched, a stated manual check). **Never a second create because a response timed out.**
+- **Razorpay cycle-end cancellation (R9-11):** Razorpay documents that a subscription cancelled at cycle end keeps its status until the cycle ends and documents no field marking the cancellation as scheduled. The interpretation is therefore made from our own durable record: a confirmed request stores `gateway_cancellation` (`mode`, `effective_at` = the provider's `current_end`, the provider's answer as evidence). `GET /plan-settings/reconciliation/cancellations` (Super Admin, read-only) reads `scheduled` before the effective date (+24 h tolerance), `still_billable_after_effective_date` after it, `unconfirmed` where no confirmed request exists (all pre-existing cancellations), `not_applied`, `unreadable`, `unrecognised`. It writes nothing. Undocumented and therefore sent to review, not guessed: how Razorpay answers a second cycle-end cancel of a subscription already scheduled.
+- **Tests:** `test_provider_reliability_mongo.py` (12), `test_payment_gateway_reliability.py` (32). Three earlier tests changed for the stated classification change (a timeout is `outcome_unknown`; a provider that is down raises `ConnectionRefusedError` in the R6-5 fake).
+
+### 17.2 Checkout replacement (workstream 1, `f40a89f`; inactive)
+
+Implements the §16.7 design behind `CHECKOUT_REPLACEMENT_ENABLED` (off: today's checkout, and `replaces_subscription_id` refused).
+
+1. With the flag on, a checkout over a gateway-billed governing subscription must name it in `replaces_subscription_id` and carry an `Idempotency-Key`.
+2. **Exact identity:** same organisation, project and (no) package; the subscription enforcement selects now; `active` or `pilot`; bound by checkout to the configured provider; not already being replaced. Each refusal is asserted by reason; no other subscription is touched.
+3. **No overlapping charge:** the provider must guarantee a scheduled start (`supports_scheduled_start`; **Razorpay declares False** until `start_at` is verified in Razorpay test mode and reviewed, so a Razorpay replacement is refused today). The target starts at the source's paid-through date - the provider's `current_end`, which must agree with the local date within a day (otherwise `needs_review` with the evidence).
+4. The target is `pending` with `starts_at` at that date: once paid it governs only from then. The source keeps service until then. **Neither a gap nor an overlap**, verified through `resolve_subscription` before and after the date.
+5. Only the target's **signed payment confirmation** (webhook) cancels the source - at the provider at its cycle end, then locally (`ends_at` = the effective date, `replaced_by_subscription_id`, `gateway_cancellation`). A failed or unknown cancellation, or a source changed meanwhile: `needs_review`; Super Admin retry continues it. Nothing is refunded.
+6. Durable `replacement` operation, scope lease, idempotent repeats (`awaiting_payment` answers as it is), an unanswered target create reconciled by reference.
+7. **Not implemented (refused):** proration or credit arrangements - they need an explicitly approved commercial arrangement.
+- **Tests:** `test_checkout_replacement_mongo.py` (23): flag off; each identity rule; unschedulable provider; provider/database disagreement; scheduling and completion; entitlement on both sides of the date; duplicate confirmations; amount mismatch on the target; simultaneous and repeated requests; failed source cancellation and retry; source changed; unknown create; completion before payment; cross-organisation refusal.
+
+### 17.3 Payment amount mismatch (workstream 2, `21ac55c`; inactive)
+
+`PAYMENT_MISMATCH_POLICY=off` keeps the webhook as it was. `enforce` requires an owner-approved `PAYMENT_MISMATCH_GRACE_DAYS` (1-30; startup refuses 0 - the code never picks a production grace).
+
+- **Initial activation** (pending or trial becoming paid): the plan's expected charge for the period must be resolvable and non-zero, the event must carry a payment, and its amount and currency must equal the expected charge. Otherwise nothing activates and an `initial` discrepancy is recorded. (Pre-existing gap closed under `enforce` only: with the policy off, an unresolvable price still activates without an amount check.)
+- **Renewal discrepancy** (active, pilot or past due): financial review with an auditable reason (`payment_discrepancies`, one record per payment; audit `billing.payment_discrepancy_renewal`). The paid entitlement continues; **nothing is granted** from the unverified payment (past due stays past due; no plan, period, quantity, add-on or paid-through change). The grace starts at the **first** open discrepancy; later mismatches never move it.
+- **Expiry:** past the grace with a discrepancy open, `classify` returns `blocking`; a later correct payment does not lift it.
+- **Settlement** (Super Admin, step-up, audited): `GET /billing/discrepancies`; `POST /billing/discrepancies/{id}/resolve` with `settled`, `written_off` or `escalated`. Closing the last open discrepancy ends the review and restores the billing status before it; escalation keeps it open and never extends the grace. Nothing is refunded or charged.
+- **Tests:** `test_payment_mismatch_policy_mongo.py` (7), `test_payment_and_m1_flags.py`.
+
+### 17.4 Legacy bindings and old cancellations (workstream 3, `9c64db2`)
+
+P-05 `legacy_binding_and_cancellation_reconciliation` (read-only; counts by organisation and category; no subscription, gateway, customer or payment id, name, email or amount):
+
+| Binding category | Rule (first match) |
+|---|---|
+| conflicting | gateway id bound twice; bound outside checkout; written by an ordinary create/update; a payment for the gateway id recorded against another subscription |
+| requires_reconciliation | a payment refused or held for review, an amount mismatch, a refused webhook binding, an open operation naming it |
+| verified | a checkout / checkout-reconciliation / replacement audit event names it, or a recorded provider reconciliation |
+| unverified | none of the above |
+
+| Old cancellation class | Meaning |
+|---|---|
+| charged_after_cancellation | a payment was recorded after the cancellation: the provider was still charging (highest priority) |
+| confirmed_at_gateway | a confirmed cancellation request is on record |
+| historical_plan_settings_without_gateway_evidence | a pre-R6-7 plan-settings replacement: the provider was never told |
+| other_without_gateway_evidence | anything else |
+
+`cancellations_needing_a_provider_check` counts the classes other than `confirmed_at_gateway`; the provider's own state is read only by the reconciliation route (§17.1).
+
+**Proposed remediation sequence (not implemented; each step needs owner approval):**
+
+1. **Read** P-05 on production (AQ-11 access) and run `GET /plan-settings/reconciliation/cancellations` per organisation (reads the provider, writes nothing). Freeze the numbers in a dated record.
+2. **Financial reconciliation first:** for every `charged_after_cancellation` and every overdue or unconfirmed cancellation the provider shows billable, finance compares provider invoices with entitlement for the period and decides credit or refund **outside the system** (no automatic refund). Record the decision per subscription.
+3. **Four-eyes change list:** a second administrator approves each proposed action - cancel at the provider at cycle end (for a provider still billing a cancelled subscription), record `payment_gateway_reconciled_at` (for an `unverified` binding checked at the provider), or remove a wrong binding through the §15 re-binding workflow (`conflicting`).
+4. **Execute in small batches** through the existing durable operations (never a bulk update), each batch re-read before and after.
+5. **Rollback:** a cancellation at the provider cannot be undone by the system - it is the last step, after finance sign-off; a recorded reconciliation is cleared by removing the field; a removed binding is restored from the audit `before`.
+6. **Optional, owner decision:** refuse webhook activation for `unverified` bindings until reconciled (flag).
+
+### 17.5 M1 shadow evaluator (workstream 5, `e661b92`)
+
+Design and evidence in `docs/M1_BUILT_IN_ROLE_SCOPING.md` §8. Shadow only: no decision changes, nothing is migrated, `on` is refused at startup.
+
+### 17.6 Production dependencies recorded by this pass
+
+- **The Razorpay SDK is not in the backend requirements**, and the installed SDK imports `pkg_resources`: `PAYMENT_PROVIDER=razorpay` fails at the first provider call until a reviewed dependency change adds it (and `setuptools` or an SDK version without `pkg_resources`). Not changed here (dependency change; vulnerability gate).
+- Razorpay `start_at` behaviour (authorisation payment and first charge) must be verified in Razorpay test mode before `supports_scheduled_start` is set for it.
+- How Razorpay answers a second cycle-end cancel of an already scheduled subscription is undocumented; such cases go to review.
+- Owner decisions: activation of each flag; the production grace length; the proration/credit arrangement (if any); the legacy remediation steps above; M1 approval.

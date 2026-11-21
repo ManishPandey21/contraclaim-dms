@@ -161,3 +161,44 @@ Counted by `grep` at `5ccd918`, excluding tests:
 6. A separate production release decision.
 
 DEF-4 activation depends on steps 1 to 4: its guarantees hold for single-role users only until then.
+
+## 8. Shadow evaluator (workstream 5, `e661b92`, owner instructions 2026-11-21)
+
+**Status:** implemented, shadow only, default off. No enforcement, no role migration, no re-grant. `BUILT_IN_ROLE_ASSIGNMENTS=on` is refused at startup.
+
+**Flag:** `BUILT_IN_ROLE_ASSIGNMENTS` = `off` (default; the evaluator is never called) | `shadow`.
+
+**What shadow does.** After every decision `PolicyService.authorize` *allowed* (Super Admin excluded), `services/role_scope_shadow.py` evaluates the same request under the §4 model and counts the comparison. It runs after the decision; errors are swallowed in the module and again in the hook, so a response never changes.
+
+**Proposed model evaluated** (no data is written to represent it):
+
+- an organisation-tier built-in role (`orgadmin`, `orguser`, the billing administrator, every other tenant built-in key) is assigned in the user's primary organisation;
+- a project-tier role (`projectadmin`, `projectuser`) is assigned on each project the user is on (`projects` or an active `project_memberships` row) *inside* the primary organisation;
+- explicit rows in `role_assignments` (`user_id`, `role_key`, `organization_id`, `project_id`, `status: active`) add assignments - none exist; they are how an owner decision to keep a secondary reach would be represented;
+- `superadmin` / `superuser` keep their platform meaning; custom roles keep their SEC-1 scope.
+
+Proposed decision = the existing decision allowed it **and** some held role grants the permission (by name or one-hop equivalent) and is assigned where the request is. It is narrower by construction, so the only divergence is `would_deny`.
+
+**Recorded (privacy-safe):** daily counters in `rbac_shadow_observations` keyed by day, permission, outcome (`agree` / `would_deny`), the sorted built-in role keys held, and the request's relation to the user (`primary_organisation`, `secondary_organisation`, `project_in_primary_organisation`, `project_outside_primary_organisation`, `unscoped`). No user, organisation or project id, name or email. P-05 `built_in_role_shadow_divergence` summarises them read-only.
+
+**Coverage, stated.** Only `PolicyService.authorize` allow decisions are compared. The other role-name sites of §3 (`build_scope_query` row visibility, `AuthorizationService` tiers, the subscription role sets, role-management fences and others) are **not** shadowed. A zero divergence count therefore covers the policy gate only; the remaining sites need their own shadow or a static migration to the single resolver (§4 step 2) before `on` can be considered.
+
+**Tests (real HTTP, real MongoDB):** `test_m1_shadow_evaluator_mongo.py` (8)
+
+| Case | Result |
+|---|---|
+| Responses with `off` and `shadow` for six personas × four requests | identical; no user, role or assignment written |
+| Dual-organisation users (`organizations` list, membership row) - M1-E1/E2 | `would_deny` orgadmin @ secondary organisation |
+| Billing admin of A in B - M1-E4 | `would_deny` |
+| Project Admin of A1 + Org User of B - M1-E3 | `would_deny` orguser+projectadmin @ project outside primary |
+| Org User of A with a custom role of B - M1-E5 | `would_deny` orguser @ secondary |
+| Explicit `role_assignments` row (legacy reach kept) | `agree` |
+| Project membership rows inside / outside the primary organisation | `agree` / `would_deny` |
+| Disabled account | refused before any evaluation; nothing recorded |
+| Role change + `complete_grant_change` (cache invalidation) | evaluated against the new roles; no stale divergence |
+| Identifiers in observations; evaluator failure | none; failure changes no response and records nothing |
+| P-05 reading | read-only; counts only |
+
+Mutants 9/10 killed singly; removing the module's error swallow alone is equivalent behind the hook's own guard, and removing both is killed.
+
+**Next steps (each needs approval):** run `shadow` on staging, read P-05 `built_in_role_shadow_divergence` and `built_in_role_scope_impact` together, extend shadowing to the §3 sites (or migrate them to the single resolver first), owner decision per `assignments_needing_a_decision`, then the §5 plan.
