@@ -1046,9 +1046,9 @@ Baseline: `6913a01` (R6-5 to R6-8 accepted provisionally as implemented and CI-v
 
 | Workstream | Commit | Flag (default) | Implemented | Locally verified | Mutants |
 |---|---|---|---|---|---|
-| 4 Provider reliability | `8b6733e`, `71402c3` | always on (timeouts are configuration) | Yes | Yes | 24/24 |
+| 4 Provider reliability | `8b6733e`, `71402c3`, `fdef504`, `7420456` | always on (timeouts are configuration) | Yes | Yes | 24/24 |
 | 5 M1 shadow evaluator | `e661b92` | `BUILT_IN_ROLE_ASSIGNMENTS=off` (`shadow` available; `on` refused at startup) | Shadow only | Yes | 9/10 + 1 equivalent (killed when combined) |
-| 1 Checkout replacement | `f40a89f`, `71402c3`, `43ef3e0` | `CHECKOUT_REPLACEMENT_ENABLED=false` | Yes, inactive | Yes | 22/22 |
+| 1 Checkout replacement | `f40a89f`, `71402c3`, `43ef3e0`, `fdef504`, `7420456` | `CHECKOUT_REPLACEMENT_ENABLED=false` | Yes, inactive | Yes | 22/22 |
 | 3 Legacy bindings and old cancellations (P-05) | `9c64db2` | read-only reading | Yes | Yes | 8/8 |
 | 2 Payment amount mismatch | `21ac55c` | `PAYMENT_MISMATCH_POLICY=off`; `enforce` needs an approved `PAYMENT_MISMATCH_GRACE_DAYS` | Yes, inactive | Yes | 15/16 + 1 equivalent |
 
@@ -1162,6 +1162,34 @@ The re-review found the review-10 fixes sound for creates but introduced defects
 | R10-6 caller | Reactivation reported an unknown resume as "nothing changed" | Low | Reported and audited as unknown |
 | R10-9 | The fix relabelled past-due subscriptions active (regression) | Low (always on for settlements) | Label keeps a later event's label; inactive if cancelled; active after a verified payment; else the earlier label |
 | R10-10 | A discrepancy recorded during settlement still escaped | Low | Reopens the review |
+
+### 17.9 Re-review 12 of `43ef3e0` and its fixes (`fdef504`)
+
+All reproduced at `43ef3e0` (7/7 scenarios failed), fixed in `fdef504`, pinned in `test_payment_review12_mongo.py` (10); mutants 11/11.
+
+| # | Finding | Severity | Fix |
+|---|---|---|---|
+| R12-1 / R12-9 | An attempt that stopped before the provider's create (lease lost, blocked by another unknown checkout, crash after it began) stayed in progress and later blocked the scope as an "unknown create" | Medium | Finished as `failed`; "reached the provider" is a durable `create_started` marker saved just before the create |
+| R12-2 / R12-3 | Purchases the provider created (confirmed, or found but not recordable) could be closed as "not created", leaving a live, unrecorded provider subscription | Medium | "Not created" only after a search finds nothing; otherwise only `provider_subscription_cancelled` with a stated manual check |
+| R12-4 | Paging by `_id` skipped ObjectId rows after a string cursor | Low-Medium | Typed cursor (`o:` / `s:`) |
+| R12-5 | A completion superseded after its cancel was sent was later read as "nothing applied" | Medium | Leases renewed and the cancel recorded as `sending` before it is sent |
+| R12-6 | A repeat of a reviewed refusal that failed another check hid the review | Low | Stays `needs_review` |
+| R12-7 | Failed then verified payment during the review left a past-due label | Low | Latest payment outcome decides (refined in R13-3) |
+| R12-8 | An authorised target never paid blocked the scope for ever | Low | Expires a week after its start date |
+
+### 17.10 Re-review 13 of `fdef504` and its fixes (`7420456`)
+
+All reproduced at `fdef504` (5/5 new tests failed), fixed in `7420456`, pinned in `test_payment_review13_mongo.py` (5); mutants 7/8 + 1 defence in depth.
+
+| # | Finding | Severity | Fix |
+|---|---|---|---|
+| R13-1 | **Always on, introduced by `fdef504`:** a plain checkout slower than its lease, classified `failed` by another request, still reached the create - two provider subscriptions, one possibly unrecorded | Medium | Scope lease and attempt token re-checked and renewed right before the create; classification rotates the token |
+| R13-2 | A record from the previous version, written just before its create (customer id, no marker), was retried as if never sent | Medium (only data from `43ef3e0` with replacement enabled) | Counts as possibly created |
+| R13-3 | A halt after a verified payment during the review was overwritten at settlement | Low | The review label is restored on a verified payment; a later event's label is kept |
+| R13-4 | The Razorpay search (newest 500 of the account) was accepted as proof of absence | Low | An incomplete scan raises; "not created" then needs a stated manual check; the search starts at the operation's date |
+| R13-5 | A binding conflict with the purchase's own record had no honest resolution | Low | Recognised as already recorded |
+| R12-3 caveat | "Cancelled at the provider" was taken on say-so | Low | Refused while the provider still shows it billable |
+| R12-5 gap | Completion sent the cancel after losing its scope | Low | Stops before sending |
 
 ### 17.6 Production dependencies recorded by this pass
 
