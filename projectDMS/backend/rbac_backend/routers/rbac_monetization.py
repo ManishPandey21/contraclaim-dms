@@ -732,6 +732,18 @@ async def retry_subscription_operation(
         project_id=stored.get("project_id"),
         resource_type="plan_settings",
     )
+    if stored.get("kind") == "checkout":
+        # Workstream 4: an unanswered checkout create is reconciled by its reference at the
+        # provider - never created again.
+        if stored.get("status") != "needs_review":
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This checkout is not awaiting review")
+        if not await service.reconcile_checkout_operation(None, stored, current_user):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="The provider shows no subscription for this checkout yet; it stays listed. "
+                       "If the provider confirms none was created, resolve it explicitly",
+            )
+        return {"operation_id": operation_id, "status": "completed", "reconciled": True}
     if stored.get("kind") not in {"plan_settings_replacement", "plan_settings_inherit"}:
         # Review 7 R7-3: a lifecycle operation is resumed by repeating its own request with the
         # same Idempotency-Key (its route re-checks authority and state); not here.
@@ -761,6 +773,60 @@ async def retry_subscription_operation(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Operation not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+class CheckoutResolution(BaseModel):
+    """Closing an unanswered checkout as never created at the provider (workstream 4)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    resolution: str = Field(pattern="^not_created_at_provider$")
+    reason: str = Field(min_length=10, max_length=500)
+    provider_checked_manually: bool = False
+
+
+@router.post("/plan-settings/operations/{operation_id}/resolve", response_model=Dict[str, Any])
+async def resolve_unknown_checkout(
+    operation_id: str,
+    payload: CheckoutResolution,
+    request: Request,
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
+):
+    """Workstream 4: a Super Admin closes a checkout whose create the provider never
+    answered, once the provider shows none was created (a fresh search runs first; where the
+    provider cannot be searched, the administrator must state they checked it). Audited.
+    Nothing is created, cancelled or refunded here."""
+    if not ScopeService().is_superadmin(current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only superadmins can resolve plan operations")
+    await require_step_up(request, current_user, action="subscription.entitlement.manage")
+    service = MonetizationService()
+    stored = await service.get_subscription_operation(operation_id)
+    if not stored:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Operation not found")
+    await policy.authorize(
+        current_user, Permissions.SUBSCRIPTION_ENTITLEMENT_MANAGE, organization_id=stored["organization_id"],
+        project_id=stored.get("project_id"), resource_type="plan_settings",
+    )
+    try:
+        return await service.resolve_unknown_checkout(
+            stored, current_user, reason=payload.reason, provider_checked_manually=payload.provider_checked_manually)
+    except (OperationConflict, PurchaseInProgress) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@router.get("/plan-settings/reconciliation/cancellations", response_model=Dict[str, Any])
+async def reconcile_gateway_cancellations(
+    organization_id: Optional[str] = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=1000),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Workstream 4 / R9-11: read-only comparison of the provider's state with locally
+    cancelled, gateway-bound subscriptions (a scheduled cycle-end cancellation is not a
+    failure). Super Admin only; reads the provider, writes nothing."""
+    if not ScopeService().is_superadmin(current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only superadmins can reconcile billing")
+    return await MonetizationService().reconcile_gateway_cancellations(organization_id, limit=limit)
 
 
 # ---------------------------------------------------------------------------

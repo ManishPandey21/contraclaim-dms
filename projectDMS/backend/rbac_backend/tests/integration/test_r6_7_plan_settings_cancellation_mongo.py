@@ -146,7 +146,9 @@ def test_a_gateway_failure_leaves_the_paid_subscription_and_installs_nothing_unt
             listed = {op["id"]: op for op in open_ops.json()}
             assert operation_id in listed and listed[operation_id]["status"] == "needs_review"
             item = next(i for i in listed[operation_id]["items"] if i["subscription_id"] == BOUND)
-            assert (item["gateway"], item["last_error"]) == ("failed", "TimeoutError")
+            # A timeout may have reached the provider: its outcome is unknown (workstream 4),
+            # never "failed" (which would mean nothing changed there).
+            assert (item["gateway"], item["last_error"]) == ("outcome_unknown", "TimeoutError")
             assert await env.db.audit_events.count_documents(
                 {"action": "subscription.plan_settings_operation_needs_review", "resource_id": operation_id,
                  "metadata.requires_admin_review": True, "metadata.unresolved": 1}) == 1

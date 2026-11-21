@@ -57,7 +57,9 @@ class FakeGateway:
     async def create_subscription(self, *, gateway_customer_id: str, plan_code: str, billing_period: str,
                                   metadata: Optional[Dict[str, Any]] = None) -> Any:
         if self.fail:
-            raise ConnectionError("gateway unavailable")
+            # Refused: provably never reached the provider (workstream 4). An ambiguous
+            # failure is an unknown outcome instead - test_provider_reliability_mongo.py.
+            raise ConnectionRefusedError("gateway unavailable")
         await asyncio.sleep(0.05)  # widen the window for concurrent requests
         gateway_id = f"sub_r65_{next(self._ids)}"
         self.calls.append(("subscription", gateway_id, plan_code, (metadata or {}).get("converts_trial_id")))

@@ -9,7 +9,8 @@ from pymongo.errors import DuplicateKeyError
 
 from ..core.config import settings
 from ..core.database import get_database
-from .payment_gateway import get_payment_gateway
+from .payment_gateway import PaymentGatewayInterface, get_payment_gateway
+from . import payment_gateway_reliability as reliability
 from ..models.rbac_monetization import (
     AddOnCreate,
     AddOnUpdate,
@@ -83,6 +84,10 @@ CLAIM_STALE_AFTER = timedelta(minutes=10)
 #: A checkout still unpaid after this is treated as abandoned (review 8 B3): the next checkout
 #: for the scope cancels it at the gateway first, so it can never be paid later alongside.
 PENDING_CHECKOUT_TTL = timedelta(hours=48)
+
+#: Item states meaning the provider may have applied a request that was not answered
+#: ("unknown" is the name operations recorded before workstream 4).
+OUTCOME_UNKNOWN_STATES = frozenset({"unknown", "outcome_unknown"})
 
 #: One document per scope that has ever had a trial (``_id`` = scope key; review 8 A3/A4):
 #: the insert is the atomic "first trial" gate, and it outlives conversions and cancellations.
@@ -399,7 +404,7 @@ class MonetizationService:
     def _gateway(self) -> Any:
         return self._gateway_override or get_payment_gateway()
 
-    async def _gateway_cancel(self, sub: Dict[str, Any], *, immediate: bool) -> None:
+    async def _gateway_cancel(self, sub: Dict[str, Any], *, immediate: bool) -> Any:
         """Propagate a cancel to the payment gateway so it stops billing.
 
         No-op when the subscription has no gateway id (trial / manually created /
@@ -407,8 +412,17 @@ class MonetizationService:
         """
         gid = sub.get("payment_gateway_subscription_id")
         if not gid:
-            return
-        await self._gateway().cancel_subscription(gateway_subscription_id=gid, immediate=immediate)
+            return None
+        return await self._cancel_at_gateway(str(gid), immediate=immediate)
+
+    async def _cancel_at_gateway(self, gateway_subscription_id: str, *, immediate: bool) -> Any:
+        """Cancel at the provider, returning its answer as evidence where the adapter gives one
+        (workstream 4: a cycle-end cancel's effective date is the cycle end it reports)."""
+        gateway = self._gateway()
+        if isinstance(gateway, PaymentGatewayInterface):
+            return await gateway.cancel_with_evidence(gateway_subscription_id=gateway_subscription_id, immediate=immediate)
+        await gateway.cancel_subscription(gateway_subscription_id=gateway_subscription_id, immediate=immediate)
+        return None
 
     async def _gateway_reactivate(self, sub: Dict[str, Any]) -> None:
         gid = sub.get("payment_gateway_subscription_id")
@@ -741,8 +755,12 @@ class MonetizationService:
         try:
             provider_status = await self._gateway().fetch_subscription_status(
                 gateway_subscription_id=pending["payment_gateway_subscription_id"])
-        except Exception:
-            provider_status = None
+        except Exception as exc:
+            # Workstream 4: an unreadable provider is not evidence the checkout went unpaid;
+            # it is never cancelled on that basis.
+            raise PurchaseInProgress(
+                "An earlier purchase for this scope could not be checked at the payment provider; retry later"
+            ) from exc
         if str(provider_status or "").strip().lower() in self.GATEWAY_ACTIVE_STATUSES:
             # Review 9 R9-4: the customer paid and the webhook is late - never cancel it.
             await self._review_event(pending, "subscription.pending_checkout_paid_at_provider", current_user,
@@ -768,6 +786,110 @@ class MonetizationService:
             resource_type="subscription", resource_id=str(pending["_id"]),
             organization_id=str(pending.get("organization_id") or ""), project_id=scope_text(pending.get("project_id")),
         )
+
+    async def _reconcile_unknown_checkouts(self, db: Any, organization_id: str, project_id: Optional[str],
+                                           current_user: Any) -> None:
+        """Workstream 4: a checkout whose provider create was not answered is reconciled by its
+        reference before anything else is bought for the scope. Found at the provider: the
+        subscription is recorded as that checkout's (pending, awaiting payment). Not found, or
+        the provider cannot be searched: the scope stays blocked and the operation listed - an
+        unanswered create is never repeated, under any key."""
+        from . import subscription_operations as ops
+
+        for op in await db[ops.OPERATIONS].find({
+            "kind": "checkout", "status": "needs_review", "organization_id": organization_id,
+            "project_id": project_id, "items.gateway": "outcome_unknown",
+        }).to_list(length=20):
+            if not await self.reconcile_checkout_operation(db, op, current_user):
+                raise PurchaseInProgress(
+                    "An earlier checkout for this scope has an unknown outcome at the payment provider; "
+                    "it is listed for review")
+
+    async def resolve_unknown_checkout(self, op: Dict[str, Any], current_user: Any, *, reason: str,
+                                       provider_checked_manually: bool) -> Dict[str, Any]:
+        """Close an unanswered checkout as never created (workstream 4). A fresh provider
+        search runs first and wins: if it finds the subscription, it is recorded instead."""
+        from . import subscription_operations as ops
+
+        db = await self._get_db()
+        items = op.get("items") or [{}]
+        if op.get("kind") != "checkout" or op.get("status") != "needs_review" or (items[0] or {}).get("gateway") != "outcome_unknown":
+            raise ops.OperationConflict("Only a checkout with an unknown provider outcome can be resolved this way")
+        if await self.reconcile_checkout_operation(db, op, current_user):
+            return {"operation_id": op["_id"], "status": "completed", "reconciled": True}
+        if not getattr(get_payment_gateway(), "supports_reference_search", False) and not provider_checked_manually:
+            raise PurchaseInProgress(
+                "The provider cannot be searched from here; confirm you checked it (provider_checked_manually)")
+        now = datetime.utcnow()
+        closed = await db[ops.OPERATIONS].update_one(
+            {"_id": op["_id"], "status": "needs_review"},
+            {"$set": {"status": "resolved", "lease_until": None, "updated_at": now,
+                      "resolution": {"outcome": "not_created_at_provider", "reason": reason,
+                                     "provider_checked_manually": bool(provider_checked_manually),
+                                     "resolved_by": getattr(current_user, "id", None), "resolved_at": now}}})
+        if not closed.matched_count:
+            raise ops.OperationConflict("The operation changed meanwhile")
+        await self.audit_service.emit(
+            action="subscription.checkout_resolved_not_created", actor_id=getattr(current_user, "id", None),
+            resource_type="subscription_operation", resource_id=op["_id"], organization_id=op["organization_id"],
+            project_id=op.get("project_id"), reason="not_created_at_provider",
+            metadata={"operation_id": op["_id"], "provider_checked_manually": bool(provider_checked_manually)},
+        )
+        return {"operation_id": op["_id"], "status": "resolved"}
+
+    async def reconcile_checkout_operation(self, db: Any, op: Dict[str, Any], current_user: Any) -> bool:
+        """True when the unknown checkout is resolved: found at the provider and recorded."""
+        from . import subscription_operations as ops
+
+        if db is None:
+            db = await self._get_db()
+
+        gateway = get_payment_gateway()
+        if not getattr(gateway, "supports_reference_search", False):
+            return False
+        created = op.get("created_at") if isinstance(op.get("created_at"), datetime) else None
+        try:
+            found = await gateway.find_subscription_by_reference(
+                reference=op["_id"], created_after=(created - timedelta(minutes=10)) if created else None)
+        except Exception:
+            return False  # an unreadable provider resolves nothing
+        if found is None:
+            return False
+        items = list(op.get("items") or [{}])
+        item = dict(items[0]) if items else {}
+        request = op.get("request") or {}
+        gateway_id = scope_text(found.gateway_subscription_id)
+        if not gateway_id:
+            return False
+        if await db.subscriptions.find_one({"payment_gateway_subscription_id": gateway_id}, {"_id": 1}):
+            # Already recorded (an earlier reconciliation): resolved, never bound twice.
+            item.update(gateway="confirmed", gateway_subscription_id=gateway_id, local="already_recorded")
+        else:
+            now = datetime.utcnow()
+            await db.subscriptions.insert_one({
+                "organization_id": op["organization_id"], "project_id": op.get("project_id"),
+                "plan_code": request.get("plan_code"), "billing_period": request.get("billing_period"),
+                "status": SubscriptionStatus.PENDING.value, "billing_status": "pending", "auto_renew": True,
+                "payment_provider": str(settings.PAYMENT_PROVIDER),
+                "payment_gateway_customer_id": found.gateway_customer_id or item.get("customer_id"),
+                "payment_gateway_subscription_id": gateway_id,
+                "payment_gateway_bound_by": "checkout", "payment_gateway_bound_at": now,
+                "checkout_reference": op["_id"], "checkout_reconciled_at": now,
+                **({"converts_trial_id": request["converts_trial_id"]} if request.get("converts_trial_id") else {}),
+                "created_at": now, "updated_at": now,
+                "created_by": op.get("requested_by"), "updated_by": getattr(current_user, "id", None),
+            })
+            item.update(gateway="confirmed", gateway_subscription_id=gateway_id, local="recorded_by_reconciliation")
+        await db[ops.OPERATIONS].update_one(
+            {"_id": op["_id"], "status": "needs_review"},
+            {"$set": {"status": "completed", "items": [item], "lease_until": None, "updated_at": datetime.utcnow(),
+                      "result": {"reconciled": True}}})
+        await self.audit_service.emit(
+            action="subscription.checkout_reconciled", actor_id=getattr(current_user, "id", None),
+            resource_type="subscription_operation", resource_id=op["_id"], organization_id=op["organization_id"],
+            project_id=op.get("project_id"), metadata={"operation_id": op["_id"]},
+        )
+        return True
 
     async def _assert_period_priced(self, plan_code: str, billing_period: str) -> None:
         """Review 7 R5-3: a period the plan does not price would fall back to the monthly price."""
@@ -832,6 +954,9 @@ class MonetizationService:
         from . import subscription_operations as ops
 
         scope_project = str(project_id) if project_id else None
+        # Workstream 4: an earlier checkout whose create the provider never answered blocks the
+        # scope - whatever key a new request carries - until it is reconciled or resolved.
+        await self._reconcile_unknown_checkouts(db, str(organization_id), scope_project, current_user)
         pending = await self._pending_purchase(db, str(organization_id), scope_project)
         if pending is not None:
             created = pending.get("created_at")
@@ -843,26 +968,67 @@ class MonetizationService:
                 raise PurchaseInProgress("A purchase for this scope is already awaiting payment")
 
         gateway = get_payment_gateway()
+        # Workstream 4: the checkout is a durable operation recorded before the provider is
+        # called. Its id is the reference the provider subscription carries in its notes, so
+        # an unanswered create is found again by reconciliation instead of being repeated.
+        op = await ops.begin(
+            db, kind="checkout", organization_id=str(organization_id), project_id=scope_project, idempotency_key=None,
+            request={"plan_code": plan_code, "billing_period": billing_period,
+                     "converts_trial_id": str(converts_trial_id) if converts_trial_id else None},
+            requested_by=getattr(current_user, "id", None),
+        )
+        reference, op_token = op["_id"], op.get("token")
+        item: Dict[str, Any] = {"reference": reference, "gateway": "pending", "attempts": 1, "last_error": None}
         try:
             customer = await gateway.create_customer(
                 organization_id=str(organization_id),
                 name=customer_name or str(organization_id),
                 email=customer_email,
             )
+        except Exception as exc:  # a customer is never charged: any failure leaves nothing to reconcile
+            item.update(gateway="failed", last_error=getattr(exc, "cause_type", None) or type(exc).__name__)
+            await ops.finish(db, reference, "failed", items=[item], token=op_token)
+            raise GatewayOperationFailed("The payment gateway did not start the checkout; nothing was recorded") from exc
+        try:
             gateway_sub = await gateway.create_subscription(
                 gateway_customer_id=customer.gateway_customer_id,
                 plan_code=plan_code,
                 billing_period=billing_period,
                 metadata={"organization_id": str(organization_id), "project_id": str(project_id or ""),
+                          "checkout_reference": reference,
                           **({"converts_trial_id": str(converts_trial_id)} if converts_trial_id else {})},
             )
-        except (ValueError, GatewayIdentityConflict, PurchaseInProgress):
+        except (ValueError, GatewayIdentityConflict, PurchaseInProgress) as exc:
+            item.update(gateway="failed", last_error=type(exc).__name__)
+            await ops.finish(db, reference, "failed", items=[item], token=op_token)
             raise
         except Exception as exc:  # review 9 R9-10: a gateway failure is 502, not 500
-            raise GatewayOperationFailed("The payment gateway did not start the checkout; nothing was recorded") from exc
+            outcome = reliability.classify(exc)
+            not_applied = outcome in {reliability.NOT_SENT, reliability.REJECTED}
+            item.update(gateway="failed" if not_applied else "outcome_unknown", last_outcome=outcome,
+                        last_error=getattr(exc, "cause_type", None) or type(exc).__name__,
+                        customer_id=customer.gateway_customer_id)
+            await ops.finish(db, reference, "failed" if not_applied else "needs_review", items=[item], token=op_token)
+            if not_applied:
+                raise GatewayOperationFailed("The payment gateway did not start the checkout; nothing was recorded") from exc
+            await self.audit_service.emit(
+                action="subscription.checkout_outcome_unknown", actor_id=getattr(current_user, "id", None),
+                resource_type="subscription_operation", resource_id=reference, organization_id=str(organization_id),
+                project_id=scope_project, result="failure", reason=item["last_error"],
+                metadata={"requires_admin_review": True, "operation_id": reference},
+            )
+            raise GatewayOperationFailed(
+                "The payment gateway did not answer the checkout; its outcome is unknown and is listed for review. "
+                "Do not start another purchase for this scope until it is reconciled"
+            ) from exc
+        item.update(gateway="confirmed", gateway_subscription_id=scope_text(gateway_sub.gateway_subscription_id))
         # Review 9 R9-5: a gateway call slower than the lease could let another checkout in; the
         # lease is re-checked before recording, and a purchase made without it goes to review.
         if not await db[ops.LOCKS].find_one({"_id": ops.scope_key(str(organization_id), scope_project), "holder": holder}):
+            item["local"] = "not_recorded_lease_lost"
+            await db[ops.OPERATIONS].update_one(
+                {"_id": reference}, {"$set": {"status": "needs_review", "items": [item], "lease_until": None,
+                                              "updated_at": datetime.utcnow()}})
             await self.audit_service.emit(
                 action="subscription.checkout_lease_lost", actor_id=getattr(current_user, "id", None),
                 resource_type="subscription", organization_id=str(organization_id), project_id=scope_project,
@@ -897,10 +1063,16 @@ class MonetizationService:
             "created_by": getattr(current_user, "id", None),
             "updated_by": getattr(current_user, "id", None),
         }
+        doc["checkout_reference"] = reference
         try:
             result = await db.subscriptions.insert_one(doc)
         except DuplicateKeyError as exc:  # the unique index (migration 20261124_0001), when present
             raise GatewayIdentityConflict("The gateway subscription is already bound to a subscription") from exc
+        item["local"] = "recorded"
+        await db[ops.OPERATIONS].update_one(
+            {"_id": reference}, {"$set": {"status": "completed", "items": [item], "lease_until": None,
+                                          "result": {"subscription_id": str(result.inserted_id)},
+                                          "updated_at": datetime.utcnow()}})
 
         await self.audit_service.emit(
             action="subscription.checkout_started",
@@ -1184,7 +1356,8 @@ class MonetizationService:
             await ops.step_back(db, op)  # review 8 C1: a review item stays listed
             raise
         try:
-            if item["gateway"] == "unknown" and kind == "cancellation" and await self._provider_shows_cancelled(sub):
+            previously_unknown = item["gateway"] in OUTCOME_UNKNOWN_STATES
+            if previously_unknown and kind == "cancellation" and await self._provider_shows_cancelled(sub):
                 # Review 8 C5: the earlier, unanswered cancel did reach the provider; repeating it
                 # would fail there for ever. Reconciled from the provider's own state.
                 item["gateway"], item["last_error"] = "confirmed", None
@@ -1192,27 +1365,37 @@ class MonetizationService:
             if item["gateway"] not in {"confirmed", "not_bound"}:
                 item["attempts"] += 1
                 try:
-                    await gateway_call()
+                    evidence = await gateway_call()
                 except Exception as exc:
                     if isinstance(exc, (ValueError, SubscriptionNotGoverning)):
                         item["gateway"], item["last_error"] = "failed", type(exc).__name__
                         await ops.finish(db, op["_id"], "failed", items=items, token=token)
                         raise
-                    # Review 7 G-3: only a refused connection proves nothing reached the
-                    # gateway. A timeout or any other error may have been applied there:
-                    # "unknown", listed for review and reconciled against the provider.
-                    known_not_applied = isinstance(exc, ConnectionRefusedError)
-                    item["gateway"] = "failed" if known_not_applied else "unknown"
-                    item["last_error"] = type(exc).__name__
+                    # Review 7 G-3 / workstream 4: only a failure that proves the request never
+                    # reached the provider (not sent) or that the provider refused it
+                    # (rejected) means nothing changed there. Anything else may have been
+                    # applied: "outcome_unknown", listed and reconciled against the provider,
+                    # never re-sent under a new key. A refusal of a repeat after an unknown
+                    # outcome proves nothing about the first request: still unknown.
+                    outcome = reliability.classify(exc)
+                    known_not_applied = outcome == reliability.NOT_SENT or (
+                        outcome == reliability.REJECTED and not previously_unknown)
+                    item["gateway"] = "failed" if known_not_applied else "outcome_unknown"
+                    item["last_error"] = getattr(exc, "cause_type", None) or type(exc).__name__
+                    item["last_outcome"] = outcome
                     await ops.finish(db, op["_id"], "failed" if known_not_applied else "needs_review", items=items, token=token)
                     if not known_not_applied:
                         await self._review_event(sub, f"subscription.{kind}_gateway_outcome_unknown", current_user,
-                                                 reason=type(exc).__name__)
+                                                 reason=item["last_error"])
                     raise GatewayOperationFailed(
                         "The payment gateway did not confirm the change; nothing was changed here"
                         + ("" if known_not_applied else " - the gateway outcome is unknown and is listed for review")
                     ) from exc
                 item["gateway"], item["last_error"] = ("confirmed" if bound else "not_bound"), None
+                if isinstance(evidence, reliability.ProviderSubscriptionState):
+                    item["provider_evidence"] = evidence.evidence()
+                if kind == "cancellation" and bound:
+                    item["cancellation"] = self._cancellation_record(target, evidence, op["_id"])
                 await ops.save_items(db, op["_id"], items, token=token)
             try:
                 result = await local_call()
@@ -1225,10 +1408,34 @@ class MonetizationService:
                                              reason="gateway_changed_local_refused")
                 raise
             item["local"] = "applied"
+            if item.get("cancellation"):
+                # Workstream 4: what reconciliation compares the provider with later.
+                await db.subscriptions.update_one({"_id": self._lookup_id(sub_id)},
+                                                  {"$set": {"gateway_cancellation": item["cancellation"]}})
             await ops.finish(db, op["_id"], "completed", result={"subscription_id": sub_id}, items=items, token=token)
             return result
         finally:
             await ops.unlock_scope(db, org, project, token or op["_id"])
+
+    @staticmethod
+    def _cancellation_record(target: Dict[str, Any], evidence: Any, op_id: str) -> Dict[str, Any]:
+        """The confirmed cancel request (workstream 4, R9-11): mode, when it takes effect at
+        the provider, and the provider's answer. A cycle-end cancel the provider still shows
+        active before ``effective_at`` is *scheduled*, not failed."""
+        immediate = bool(target.get("immediate"))
+        state = evidence if isinstance(evidence, reliability.ProviderSubscriptionState) else None
+        ended = bool(state and state.status in reliability.PROVIDER_ENDED)
+        return {
+            "mode": "immediate" if immediate else "cycle_end",
+            "request_confirmed": True,
+            "requested_at": datetime.utcnow(),
+            "effective_at": (state.ended_at if ended and state else None) or (
+                None if immediate else (state.current_end if state else None)),
+            "provider_status_at_request": state.status if state else None,
+            "state": "cancelled" if ended or (immediate and state is None) else (
+                "scheduled" if not immediate else "requested"),
+            "operation_id": op_id,
+        }
 
     def _assert_commercial_change_allowed(self, sub: Dict[str, Any], operation: str, *,
                                           manual_billing_authorised: bool, plan_change: bool) -> None:
@@ -2831,19 +3038,32 @@ class MonetizationService:
                         item["local"] = "cancelled"
                         continue
                     item["status_before"], item["local"] = row.get("status"), "unchanged"
-                if item["gateway"] == "failed" and item["gateway_bound"] and await self._provider_shows_cancelled(row):
+                # Before workstream 4 every failure was recorded "failed", including timeouts.
+                maybe_applied = item["gateway"] in OUTCOME_UNKNOWN_STATES | {"failed"}
+                if maybe_applied and item["gateway_bound"] and await self._provider_shows_cancelled(row):
                     item["gateway"], item["last_error"] = "confirmed", None  # review 8 C5: it did reach the provider
-                if item["gateway"] in {"pending", "failed"}:
+                if item["gateway"] in {"pending", "failed"} | OUTCOME_UNKNOWN_STATES:
                     if not item["gateway_bound"]:
                         item["gateway"] = "not_bound"
                     else:
                         item["attempts"] += 1
+                        previously_unknown = item["gateway"] in OUTCOME_UNKNOWN_STATES
                         try:
-                            await self._gateway().cancel_subscription(
-                                gateway_subscription_id=row["payment_gateway_subscription_id"], immediate=False)
+                            evidence = await self._cancel_at_gateway(
+                                str(row["payment_gateway_subscription_id"]), immediate=False)
                             item["gateway"], item["last_error"] = "confirmed", None
+                            item["cancellation"] = self._cancellation_record({"immediate": False}, evidence, op_id)
+                            if isinstance(evidence, reliability.ProviderSubscriptionState):
+                                item["provider_evidence"] = evidence.evidence()
                         except Exception as exc:  # recorded, retried later; never treated as done
-                            item["gateway"], item["last_error"] = "failed", type(exc).__name__
+                            # Workstream 4: "failed" only when the provider provably did not
+                            # apply it; otherwise its outcome is unknown and is reconciled.
+                            outcome = reliability.classify(exc)
+                            not_applied = outcome == reliability.NOT_SENT or (
+                                outcome == reliability.REJECTED and not previously_unknown)
+                            item["gateway"] = "failed" if not_applied else "outcome_unknown"
+                            item["last_error"] = getattr(exc, "cause_type", None) or type(exc).__name__
+                            item["last_outcome"] = outcome
                         await ops.save_items(db, op_id, items, token=token)
                 if item["gateway"] not in {"confirmed", "not_bound"}:
                     continue
@@ -2853,6 +3073,7 @@ class MonetizationService:
                     {"$set": {"status": "cancelled", "billing_status": "inactive", "cancelled_at": now,
                               "cancellation_reason": "replaced_by_plan_settings", "auto_renew": False,
                               "cancelled_administratively": True,
+                              **({"gateway_cancellation": item["cancellation"]} if item.get("cancellation") else {}),
                               "cancellation_operation_id": op_id, "updated_at": now, "updated_by": actor}},
                 )
                 if changed.matched_count:
@@ -2949,6 +3170,63 @@ class MonetizationService:
                                                       "attempts", "last_error")} for item in items],
             "result": op.get("result") or {},
         }
+
+    async def reconcile_gateway_cancellations(
+        self, organization_id: Optional[str] = None, *, now: Optional[datetime] = None, limit: int = 200,
+    ) -> Dict[str, Any]:
+        """Workstream 4 / R9-11: read-only comparison of the provider's state with every
+        locally cancelled, gateway-bound subscription. Nothing is written, cancelled, refunded
+        or rebound; the result is a review list.
+
+        - ``scheduled``: a confirmed cycle-end cancel, provider still active before its
+          effective date - expected, not a failure;
+        - ``cancelled``: the provider ended it;
+        - ``still_billable_after_effective_date``: should have ended; the provider may still bill;
+        - ``unconfirmed``: no confirmed cancel request on record (cancellations before workstream
+          4, including pre-R6-7 plan-settings cancellations) and the provider still billable -
+          the customer may still be charged;
+        - ``not_applied`` (an immediate cancel the provider does not show), ``unreadable``,
+          ``unrecognised``.
+        """
+        db = await self._get_db()
+        moment = now or datetime.utcnow()
+        query: Dict[str, Any] = {"status": "cancelled", "payment_gateway_subscription_id": {"$type": "string", "$gt": ""}}
+        if organization_id:
+            query["organization_id"] = str(organization_id)
+        counts: Dict[str, int] = {}
+        review: List[Dict[str, Any]] = []
+        gateway = self._gateway()
+        rows = await db.subscriptions.find(query, {
+            "_id": 1, "organization_id": 1, "project_id": 1, "payment_gateway_subscription_id": 1,
+            "gateway_cancellation": 1, "cancellation_reason": 1, "ends_at": 1, "payment_provider": 1,
+        }).sort("_id", 1).to_list(length=max(1, min(int(limit), 1000)))
+        for row in rows:
+            record = row.get("gateway_cancellation") if isinstance(row.get("gateway_cancellation"), dict) else {}
+            provider = str(row.get("payment_provider") or "").strip().lower()
+            if provider and provider != str(settings.PAYMENT_PROVIDER or "").strip().lower():
+                verdict, state = "other_provider", None
+            else:
+                try:
+                    state = await gateway.fetch_subscription_state(
+                        gateway_subscription_id=str(row["payment_gateway_subscription_id"])) if isinstance(
+                        gateway, PaymentGatewayInterface) else None
+                except Exception:
+                    state = None
+                verdict = reliability.interpret_cancellation(
+                    state, requested_mode=record.get("mode"), request_confirmed=bool(record.get("request_confirmed")),
+                    effective_at=record.get("effective_at") if isinstance(record.get("effective_at"), datetime) else None,
+                    now=moment)
+            counts[verdict] = counts.get(verdict, 0) + 1
+            if verdict not in {reliability.SCHEDULED, reliability.CANCELLED}:
+                review.append({
+                    "subscription_id": str(row["_id"]), "organization_id": row.get("organization_id"),
+                    "project_id": row.get("project_id"), "interpretation": verdict,
+                    "cancellation_reason": row.get("cancellation_reason"),
+                    "requested_mode": record.get("mode"), "effective_at": record.get("effective_at"),
+                    "provider_status": state.status if state else None,
+                })
+        return {"checked": len(rows), "counts": counts, "requires_review": review,
+                "complete": len(rows) < max(1, min(int(limit), 1000)), "writes": 0}
 
     async def get_subscription_operation(self, operation_id: str) -> Optional[Dict[str, Any]]:
         from . import subscription_operations as ops

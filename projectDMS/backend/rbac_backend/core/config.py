@@ -424,6 +424,13 @@ class Settings(BaseSettings):
     RAZORPAY_KEY_ID: str = Field(default="", validation_alias="RAZORPAY_KEY_ID")
     RAZORPAY_KEY_SECRET: str = Field(default="", validation_alias="RAZORPAY_KEY_SECRET")
     RAZORPAY_WEBHOOK_SECRET: str = Field(default="", validation_alias="RAZORPAY_WEBHOOK_SECRET")
+    # Workstream 4 (2026-11-21): bounded provider calls. Values are clamped in
+    # services/payment_gateway_reliability.policy_from_settings whatever is configured.
+    PAYMENT_GATEWAY_CONNECT_TIMEOUT_SECONDS: float = Field(default=5.0, validation_alias="PAYMENT_GATEWAY_CONNECT_TIMEOUT_SECONDS")
+    PAYMENT_GATEWAY_READ_TIMEOUT_SECONDS: float = Field(default=15.0, validation_alias="PAYMENT_GATEWAY_READ_TIMEOUT_SECONDS")
+    PAYMENT_GATEWAY_READ_RETRIES: int = Field(default=2, validation_alias="PAYMENT_GATEWAY_READ_RETRIES")
+    PAYMENT_GATEWAY_NOT_SENT_RETRIES: int = Field(default=1, validation_alias="PAYMENT_GATEWAY_NOT_SENT_RETRIES")
+    PAYMENT_GATEWAY_RETRY_BACKOFF_SECONDS: float = Field(default=0.5, validation_alias="PAYMENT_GATEWAY_RETRY_BACKOFF_SECONDS")
     STRIPE_API_KEY: str = Field(default="", validation_alias="STRIPE_API_KEY")
     STRIPE_WEBHOOK_SECRET: str = Field(default="", validation_alias="STRIPE_WEBHOOK_SECRET")
 

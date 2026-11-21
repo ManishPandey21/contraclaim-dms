@@ -9,6 +9,7 @@ any external provider — suitable for internal / manual billing workflows.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import hmac
 import logging
@@ -16,7 +17,16 @@ import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
+
+from .payment_gateway_reliability import (
+    GatewayCallPolicy,
+    ProviderSubscriptionState,
+    bounded_session,
+    call_provider,
+    policy_from_settings,
+    state_from_entity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +114,32 @@ class PaymentGatewayInterface(ABC):
         """The provider's own status of a subscription, for reconciliation (review 8 C5);
         ``None`` when the adapter cannot read it."""
         return None
+
+    async def fetch_subscription_state(self, *, gateway_subscription_id: str) -> Optional[ProviderSubscriptionState]:
+        """The provider's state of a subscription (status and, where the provider gives them,
+        the current cycle's end and when it ended); ``None`` when the adapter cannot read it."""
+        status = await self.fetch_subscription_status(gateway_subscription_id=gateway_subscription_id)
+        return ProviderSubscriptionState(status=str(status).strip().lower()) if status else None
+
+    async def cancel_with_evidence(
+        self, *, gateway_subscription_id: str, immediate: bool = False
+    ) -> Optional[ProviderSubscriptionState]:
+        """Cancel, returning the provider's answer as evidence (workstream 4): for a cycle-end
+        cancel, the effective date is the cycle end the provider reports. ``None`` when the
+        adapter gives no state; a failure raises."""
+        await self.cancel_subscription(gateway_subscription_id=gateway_subscription_id, immediate=immediate)
+        return None
+
+    async def find_subscription_by_reference(
+        self, *, reference: str, created_after: Optional[datetime] = None
+    ) -> Optional[GatewaySubscription]:
+        """Reconciliation after an unknown create (workstream 4): the provider subscription
+        whose notes carry ``reference``. ``None`` when none is found or the adapter cannot
+        search - the caller must then not assume it was never created."""
+        return None
+
+    #: Whether :meth:`find_subscription_by_reference` really searches the provider.
+    supports_reference_search: bool = False
 
     @abstractmethod
     async def create_customer(
@@ -260,40 +296,93 @@ class RazorpayGateway(PaymentGatewayInterface):
         "payment.failed": "payment.failed",
     }
 
-    def __init__(self, *, key_id: str, key_secret: str, webhook_secret: str = "") -> None:
+    def __init__(self, *, key_id: str, key_secret: str, webhook_secret: str = "",
+                 client: Any = None, policy: Optional[GatewayCallPolicy] = None) -> None:
         self.key_id = key_id
         self.key_secret = key_secret
         self.webhook_secret = webhook_secret
+        self._injected_client = client
+        self.policy = policy
 
     def _client(self):
+        if self._injected_client is not None:
+            return self._injected_client
         try:
             import razorpay  # lazy: only needed when this provider is active
         except ImportError as exc:  # pragma: no cover - depends on optional dep
             raise RuntimeError(
                 "razorpay package is not installed; add it to run PAYMENT_PROVIDER=razorpay"
             ) from exc
-        return razorpay.Client(auth=(self.key_id, self.key_secret))
+        # Workstream 4: every SDK request carries bounded connect/read timeouts.
+        return razorpay.Client(auth=(self.key_id, self.key_secret), session=bounded_session(self._policy()))
+
+    def _policy(self) -> GatewayCallPolicy:
+        return self.policy or policy_from_settings()
+
+    async def _call(self, fn: Callable[[], Any], *, operation: str, mutating: bool) -> Any:
+        """The SDK is synchronous: run off the event loop, bounded and classified."""
+        return await call_provider(fn, operation=operation, mutating=mutating, policy=self._policy())
 
     # Razorpay cannot swap a subscription's plan in place (see update_subscription).
     supports_in_place_plan_change = False
+    supports_reference_search = True
 
     async def fetch_subscription_status(self, *, gateway_subscription_id: str) -> Optional[str]:
-        resp = self._client().subscription.fetch(gateway_subscription_id)
-        return str(resp.get("status") or "") or None
+        state = await self.fetch_subscription_state(gateway_subscription_id=gateway_subscription_id)
+        return state.status if state else None
+
+    async def fetch_subscription_state(self, *, gateway_subscription_id: str) -> Optional[ProviderSubscriptionState]:
+        resp = await self._call(lambda: self._client().subscription.fetch(gateway_subscription_id),
+                                operation="subscription.fetch", mutating=False)
+        return state_from_entity(resp)
+
+    async def cancel_with_evidence(
+        self, *, gateway_subscription_id: str, immediate: bool = False
+    ) -> Optional[ProviderSubscriptionState]:
+        resp = await self._call(
+            lambda: self._client().subscription.cancel(gateway_subscription_id, {"cancel_at_cycle_end": 0 if immediate else 1}),
+            operation="subscription.cancel", mutating=True)
+        return state_from_entity(resp)
+
+    def _list_subscriptions(self, query: Dict[str, Any]) -> Any:
+        return self._client().subscription.all(query)
+
+    async def find_subscription_by_reference(
+        self, *, reference: str, created_after: Optional[datetime] = None
+    ) -> Optional[GatewaySubscription]:
+        """Bounded scan of recent subscriptions for ``notes.checkout_reference`` (5 pages of
+        100). Not finding one is not proof it was never created: the caller keeps it listed."""
+        since = int(created_after.timestamp()) if created_after else None
+        for page in range(5):
+            query: Dict[str, Any] = {"count": 100, "skip": page * 100, **({"from": since} if since else {})}
+            resp = await self._call(functools.partial(self._list_subscriptions, query),
+                                    operation="subscription.all", mutating=False)
+            items = (resp or {}).get("items") or []
+            for entity in items:
+                notes = entity.get("notes") if isinstance(entity.get("notes"), dict) else {}
+                if str(notes.get("checkout_reference") or "") == reference:
+                    return GatewaySubscription(
+                        gateway_subscription_id=str(entity.get("id")), gateway_customer_id=str(entity.get("customer_id") or ""),
+                        plan_id=str(entity.get("plan_id") or ""), status=str(entity.get("status") or "created"),
+                        metadata={"short_url": entity.get("short_url"), **notes},
+                    )
+            if len(items) < 100:
+                break
+        return None
 
     async def create_customer(
         self, *, organization_id: str, name: str, email: Optional[str] = None
     ) -> GatewayCustomer:
-        resp = self._client().customer.create(
+        resp = await self._call(lambda: self._client().customer.create(
             {"name": name, "email": email or "", "fail_existing": 0, "notes": {"organization_id": organization_id}}
-        )
+        ), operation="customer.create", mutating=True)
         return GatewayCustomer(gateway_customer_id=resp["id"], email=email, name=name, metadata=resp)
 
     async def create_subscription(
         self, *, gateway_customer_id: str, plan_code: str, billing_period: str, metadata: Optional[Dict[str, Any]] = None
     ) -> GatewaySubscription:
         total_count = {"monthly": 12, "quarterly": 4, "semi_annual": 2, "annual": 1}.get(billing_period, 12)
-        resp = self._client().subscription.create(
+        resp = await self._call(lambda: self._client().subscription.create(
             {
                 "plan_id": plan_code,
                 "customer_id": gateway_customer_id,
@@ -301,7 +390,7 @@ class RazorpayGateway(PaymentGatewayInterface):
                 "customer_notify": 1,
                 "notes": metadata or {},
             }
-        )
+        ), operation="subscription.create", mutating=True)
         return GatewaySubscription(
             gateway_subscription_id=resp["id"],
             gateway_customer_id=gateway_customer_id,
@@ -316,7 +405,8 @@ class RazorpayGateway(PaymentGatewayInterface):
     ) -> GatewaySubscription:
         # Razorpay does not support in-place plan swaps; plan changes are handled
         # at the service layer via cancel + re-create. Return current state.
-        resp = self._client().subscription.fetch(gateway_subscription_id)
+        resp = await self._call(lambda: self._client().subscription.fetch(gateway_subscription_id),
+                                operation="subscription.fetch", mutating=False)
         return GatewaySubscription(
             gateway_subscription_id=gateway_subscription_id,
             gateway_customer_id=resp.get("customer_id", ""),
@@ -326,14 +416,14 @@ class RazorpayGateway(PaymentGatewayInterface):
         )
 
     async def cancel_subscription(self, *, gateway_subscription_id: str, immediate: bool = False) -> bool:
-        self._client().subscription.cancel(
-            gateway_subscription_id, {"cancel_at_cycle_end": 0 if immediate else 1}
-        )
+        await self.cancel_with_evidence(gateway_subscription_id=gateway_subscription_id, immediate=immediate)
         return True
 
     async def reactivate_subscription(self, *, gateway_subscription_id: str) -> GatewaySubscription:
-        self._client().subscription.resume(gateway_subscription_id, {"resume_at": "now"})
-        resp = self._client().subscription.fetch(gateway_subscription_id)
+        await self._call(lambda: self._client().subscription.resume(gateway_subscription_id, {"resume_at": "now"}),
+                         operation="subscription.resume", mutating=True)
+        resp = await self._call(lambda: self._client().subscription.fetch(gateway_subscription_id),
+                                operation="subscription.fetch", mutating=False)
         return GatewaySubscription(
             gateway_subscription_id=gateway_subscription_id,
             gateway_customer_id=resp.get("customer_id", ""),
@@ -345,7 +435,7 @@ class RazorpayGateway(PaymentGatewayInterface):
         self, *, gateway_subscription_id: str, line_items: List[Dict[str, Any]], currency: str = "INR"
     ) -> GatewayInvoice:
         total = sum(int(item.get("amount_minor", 0)) for item in line_items)
-        resp = self._client().invoice.create(
+        resp = await self._call(lambda: self._client().invoice.create(
             {
                 "type": "invoice",
                 "subscription_id": gateway_subscription_id,
@@ -355,7 +445,7 @@ class RazorpayGateway(PaymentGatewayInterface):
                     for item in line_items
                 ],
             }
-        )
+        ), operation="invoice.create", mutating=True)
         return GatewayInvoice(
             gateway_invoice_id=resp["id"],
             gateway_subscription_id=gateway_subscription_id,

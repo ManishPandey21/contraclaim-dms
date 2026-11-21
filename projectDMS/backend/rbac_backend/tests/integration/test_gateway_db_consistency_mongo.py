@@ -236,7 +236,7 @@ def test_an_unknown_gateway_outcome_is_listed_for_review_and_retried(monkeypatch
             assert response.status_code == 502 and "unknown" in response.text, response.text[:200]
             assert (await _row(env))["plan_code"] == "dms_starter"
             listed = [op for op in await _open(env) if op["kind"] == "upgrade"]
-            assert len(listed) == 1 and listed[0]["items"][0]["gateway"] == "unknown"
+            assert len(listed) == 1 and listed[0]["items"][0]["gateway"] == "outcome_unknown"
             assert await env.db.audit_events.count_documents(
                 {"action": "subscription.upgrade_gateway_outcome_unknown", "metadata.requires_admin_review": True}) == 1
             gateway.fail = None
