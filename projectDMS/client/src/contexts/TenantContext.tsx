@@ -4,6 +4,7 @@ import React, {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { normalizeRoleId } from "@/config/rolePermissions";
@@ -57,6 +58,8 @@ export function TenantProvider({ children }: React.PropsWithChildren) {
   const [roles, setRoles] = useState<string[]>([]);
   const [selectedOrganizationId, setSelectedOrganizationId] = useState("");
   const [selectedProjectId, setSelectedProjectId] = useState("");
+  // The last scope announced to permission holders; null until the first selection.
+  const announcedScope = useRef<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -140,6 +143,18 @@ export function TenantProvider({ children }: React.PropsWithChildren) {
     } else {
       window.localStorage.removeItem(PROJECT_STORAGE_KEY);
     }
+    // Permission holders (useRBAC) re-read the server after a scope change (T-2). Only a
+    // change: the first selection after mount is not announced, so a provider mounting
+    // inside a permission guard cannot set off a refresh loop.
+    const scope = `${selectedOrganizationId}|${selectedProjectId || ""}`;
+    const previous = announcedScope.current;
+    announcedScope.current = scope;
+    if (previous === null || previous === scope) return;
+    window.dispatchEvent(
+      new CustomEvent("tenant-scope-changed", {
+        detail: { organizationId: selectedOrganizationId, projectId: selectedProjectId || null },
+      }),
+    );
   }, [selectedOrganizationId, selectedProjectId]);
 
   const projectsForSelectedOrganization = useMemo(

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from .citation_states import ledger_context_class
+
 
 PROMPT_VERSION = "arbitration_pleadings.v2"
 SOURCE_POLICY = "source-ledger-only-with-evidence-required-fallback"
@@ -527,6 +529,9 @@ class ArbitrationDraftGenerator:
         ]
 
     def _annexure_text(self, evidence: List[Dict[str, Any]]) -> str:
+        # JG-5(f) control 6: case analysis and register rows are context, not relied-upon
+        # documents; they never enter the filed annexure list.
+        evidence = [row for row in evidence if not ledger_context_class(row)]
         if not evidence:
             return "[Evidence required]"
         return "\n".join(

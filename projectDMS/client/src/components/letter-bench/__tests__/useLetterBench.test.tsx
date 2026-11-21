@@ -131,4 +131,15 @@ describe("errorMessage", () => {
     expect(errorMessage(new Error("boom"), "fallback")).toBe("boom");
     expect(errorMessage(null, "fallback")).toBe("fallback");
   });
+
+  it("reads the plain message of a structured refusal", () => {
+    const refusal = Object.assign(new Error("Request failed with status code 403"), {
+      isAxiosError: true,
+      response: {
+        status: 403,
+        data: { detail: { code: "notice_self_verification", user_message: "Someone else must verify it.", detail: null } },
+      },
+    });
+    expect(errorMessage(refusal, "fallback")).toBe("Someone else must verify it.");
+  });
 });

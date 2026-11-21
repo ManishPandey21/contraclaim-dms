@@ -32,6 +32,15 @@ KNOWN_COLLECTIONS = {
     "key_dates",
     "arbitration_issue_matrix",
     "arbitration_jurisdiction_matrix",
+    # JG-5: the other case matrices the pleading ledger cites (matrix_registry.MATRIX_COLLECTIONS).
+    "arbitration_claim_matrix",
+    "arbitration_defence_matrix",
+    "arbitration_counterclaim_matrix",
+    "arbitration_rejoinder_matrix",
+    "arbitration_quantum_annexures",
+    "arbitration_notice_compliance",
+    "arbitration_expert_alignment",
+    "arbitration_chronology_matrix",
 }
 
 

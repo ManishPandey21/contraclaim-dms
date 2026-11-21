@@ -63,9 +63,14 @@ class _Users:
     def __init__(self, docs):
         self._docs = list(docs)
 
-    async def find_one(self, query):
+    async def find_one(self, query, *_args, **_kwargs):
+        def matches(doc, key, value):
+            if isinstance(value, dict) and "$in" in value:
+                return any(str(doc.get(key)) == str(item) for item in value["$in"])
+            return doc.get(key) == value
+
         for doc in self._docs:
-            if all(doc.get(key) == value for key, value in query.items()):
+            if all(matches(doc, key, value) for key, value in query.items()):
                 return doc
         return None
 
@@ -334,4 +339,23 @@ def test_session_store_outage_closes_try_again_later(monkeypatch) -> None:
                 socket.send_text("ping")
                 socket.receive_text()
         assert exc.value.code == 1013
+        assert dict(notifications.manager._connections) == {}
+
+
+# ---------------------------------------------------------------------------
+# SEC-4: an open socket closes once its account is disabled
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("field,value", [("disabled", True), ("is_active", False)])
+def test_an_open_socket_closes_when_its_account_is_disabled(monkeypatch, field, value) -> None:
+    user = dict(_ACTIVE_USER)  # a copy: the shared fixture stays active for other tests
+    with _socket_app(monkeypatch, users=(user,)) as notifications:
+        client = TestClient(app)
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with client.websocket_connect(f"/ws/notifications?token={_access_token()}") as socket:
+                socket.send_text("ping")
+                assert socket.receive_text() == "pong"
+                user[field] = value
+                socket.send_text("ping")
+                socket.receive_text()
+        assert exc.value.code == UNAUTHENTICATED
         assert dict(notifications.manager._connections) == {}

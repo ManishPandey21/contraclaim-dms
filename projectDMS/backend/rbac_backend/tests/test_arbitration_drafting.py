@@ -375,7 +375,7 @@ class _FakeDb:
                     "version": 1,
                     "full_markdown": "# EOT Statement of Claim\n\nRelies on C-1 and [S1: Delay notice].\n",
                     "structured_output": {"source_hashes": ["abc"]},
-                    "source_ledger": [{"source_key": "S1", "source_id": "doc-1", "citation": "Delay notice"}],
+                    "source_ledger": [{"source_key": "S1", "source_id": "doc-1", "citation": "Delay notice", "verification_status": "approved"}],
                 }
             ]
         )
@@ -441,6 +441,8 @@ class _FakeDb:
             ]
         )
         self.audit_events = _FakeCollection([])
+        # Scoped reviewer assignments (4B-07); empty means the role list alone answers.
+        self.reviewer_role_assignments = _FakeCollection([])
         self.claims = _FakeCollection(
             [
                 {
@@ -1992,7 +1994,9 @@ def test_context_warns_on_expert_amount_mismatch_and_unaddressed_concurrency():
     context = asyncio.run(ArbitrationContextBuilder(db).build(draft, [], [], [], object()))
 
     assert context["matrix_context"]["experts"], "expert alignment rows must enter the matrix context"
-    assert any(row.get("source_type") == "expert_report" for row in context["source_ledger"])
+    # An alignment row with no expert report behind it cites itself (JG-5); with a report
+    # (`expert_report_source_id`) it cites the report, which is document-governed.
+    assert any(row.get("source_type") == "expert_alignment" for row in context["source_ledger"])
     warnings = context["context_warnings"]
     assert any(
         "Pleaded amount 1000000.0 for claim CL-001 does not match the expert-verified amount 800000.0" in item
@@ -4653,7 +4657,10 @@ def test_phase4_validation_fans_out_deterministically_and_only_deduplicates_exis
                 "body": "The amount is INR 100. [S1: Notice] [S1: Notice]",
             }
         ],
-        "source_ledger": [{"source_key": "S1", "source_id": "doc-1", "source_revision_id": "rev-1"}],
+        # D-17: a source is verified only by an allow-listed status; a row with none is unverified.
+        "source_ledger": [
+            {"source_key": "S1", "source_id": "doc-1", "source_revision_id": "rev-1", "verification_status": "approved"}
+        ],
         "structured_output": {"approval_blockers": []},
         "validation_status": "passed",
     }

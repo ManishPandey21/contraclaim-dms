@@ -46,7 +46,16 @@ async def start_scheduler() -> Optional["AsyncIOScheduler"]:
     from .sla_service import run_sla_scan
 
     ttl = int(settings.SCHEDULER_LOCK_TTL_SECONDS)
-    email_service = await get_email_service()
+
+    # T-3: the email service is resolved when the job runs, not captured here at start-up.
+    # A handle captured once would keep writing through a closed client after a database
+    # reconnect; get_email_service returns the service bound to the current handle
+    # (DEF-6), the same object while the handle is unchanged.
+    async def send_daily_digests() -> object:
+        return await (await get_email_service()).send_daily_digests()
+
+    async def send_weekly_digests() -> object:
+        return await (await get_email_service()).send_weekly_digests()
 
     async def reap_appraisal_jobs() -> int:
         # Fresh service per run; resolves its own DB handle (M1 stuck-job reaper).
@@ -54,8 +63,8 @@ async def start_scheduler() -> Optional["AsyncIOScheduler"]:
 
     # (job_id, callable, trigger) — every callable is leader-locked.
     specs = [
-        ("daily_digests", email_service.send_daily_digests, CronTrigger(hour=9, minute=0)),
-        ("weekly_digests", email_service.send_weekly_digests, CronTrigger(day_of_week="sun", hour=9, minute=0)),
+        ("daily_digests", send_daily_digests, CronTrigger(hour=9, minute=0)),
+        ("weekly_digests", send_weekly_digests, CronTrigger(day_of_week="sun", hour=9, minute=0)),
         ("sla_deadline_scan", run_sla_scan, CronTrigger(hour=8, minute=0)),
         ("key_date_notification_scan", run_key_date_notification_scan, CronTrigger(hour=8, minute=15)),
         ("bg_expiry_scan", run_bg_expiry_scan, CronTrigger(hour=8, minute=30)),

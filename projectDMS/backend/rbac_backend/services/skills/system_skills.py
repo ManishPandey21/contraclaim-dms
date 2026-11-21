@@ -5,6 +5,11 @@ are authored by us: the packs themselves carry no schema. A seed migration
 copies these into ``skills``/``skill_versions``; the registry also falls back
 to this bundle when the collections are empty, so a missing migration degrades
 to "system skills at their bundled version" rather than "no skills".
+
+The letter packs ship published. The claim, EOT, pleadings and hearing packs
+ship as DRAFTS: they are method text that has not had legal review, and each
+names the technical and legal approvals it must hold before it can be
+published. A bundled draft never resolves for drafting.
 """
 
 from __future__ import annotations
@@ -13,8 +18,15 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List
 
+from ...models.claim_skill_outputs import (
+    CLAIM_HEAD_TEST_SCHEMA_KEY,
+    DELAY_EVENT_SCHEMA_KEY,
+    HEARING_DELIVERABLE_SCHEMA_KEY,
+    PLEADING_HEAD_SCHEMA_KEY,
+)
 from ...models.skill import (
     SYSTEM_SCOPE,
+    SkillApprovalRequirement,
     SkillChainRule,
     SkillEvalReport,
     SkillManifest,
@@ -31,11 +43,22 @@ LETTERS_SKILL_KEY = "indian-infra-contract-letters"
 VARIATIONS_SKILL_KEY = "indian-infra-variations"
 CLAIMS_SKILL_KEY = "indian-infra-claims"
 EOT_SKILL_KEY = "indian-infra-eot-claims"
+PLEADINGS_SKILL_KEY = "indian-infra-arbitration-pleadings"
+HEARING_SKILL_KEY = "indian-infra-arbitration-hearing"
+
+# Reviewer roles. The legal role is the one the arbitration gates already use.
+LEGAL_APPROVER_ROLE = "senior_legal_approver"
+CHIEF_CONTRACT_EXPERT_ROLE = "chief_contract_expert"
+DELAY_PLANNING_EXPERT_ROLE = "delay_planning_expert"
+CASE_PREPARATION_EXPERT_ROLE = "arbitration_case_preparation_expert"
+
+AWAITING_APPROVAL_REASON = "Awaiting legal approval"
 
 CONTRACT_FORMS = ["FIDIC", "CPWD", "NHAI_EPC", "MORTH_EPC"]
 
-# Skills the packs hand off to by name but that are not installed. They are
-# shown in the chain as unavailable links instead of being silently dropped.
+# Skills the letter packs hand off to by name. Until a version of one is
+# published it is shown in the chain as an unavailable link, with the reason,
+# instead of being silently dropped.
 KNOWN_UNINSTALLED_SKILLS: Dict[str, str] = {
     CLAIMS_SKILL_KEY: "Claims analysis",
     EOT_SKILL_KEY: "Extension of time review",
@@ -45,7 +68,24 @@ _KINDS = {
     ANALYSIS_SKILL_KEY: "analysis",
     LETTERS_SKILL_KEY: "drafting",
     VARIATIONS_SKILL_KEY: "evaluation",
+    CLAIMS_SKILL_KEY: "evaluation",
+    EOT_SKILL_KEY: "evaluation",
+    PLEADINGS_SKILL_KEY: "drafting",
+    HEARING_SKILL_KEY: "drafting",
 }
+
+# Packs bundled as drafts. Everything else in the bundle is published.
+DRAFT_SKILL_KEYS = frozenset(
+    {CLAIMS_SKILL_KEY, EOT_SKILL_KEY, PLEADINGS_SKILL_KEY, HEARING_SKILL_KEY}
+)
+
+
+def _approvals(*technical_roles: str) -> List[SkillApprovalRequirement]:
+    return [
+        *[SkillApprovalRequirement(kind="technical", reviewer_role=role) for role in technical_roles],
+        SkillApprovalRequirement(kind="legal", reviewer_role=LEGAL_APPROVER_ROLE),
+    ]
+
 
 _MANIFESTS: Dict[str, SkillManifest] = {
     ANALYSIS_SKILL_KEY: SkillManifest(
@@ -115,6 +155,81 @@ _MANIFESTS: Dict[str, SkillManifest] = {
             SkillChainRule(skill_key=LETTERS_SKILL_KEY, label="Draft reply", always=True),
         ],
     ),
+    CLAIMS_SKILL_KEY: SkillManifest(
+        roles_supported=["contractor", "engineer", "employer"],
+        native_role=None,
+        contract_forms=CONTRACT_FORMS,
+        output_schema_key=CLAIM_HEAD_TEST_SCHEMA_KEY,
+        required_inputs=["event_summary", "contract_clauses"],
+        use_when=(
+            "Preparing a claim, or testing one head of claim on event, notice, "
+            "contractual basis, causation and quantum."
+        ),
+        required_approvals=_approvals(CHIEF_CONTRACT_EXPERT_ROLE),
+        chains_to=[
+            SkillChainRule(
+                skill_key=EOT_SKILL_KEY,
+                label="Extension of time review",
+                issue_types=["delay"],
+                keywords=["extension of time", "eot", "critical path", "delay", "time for completion"],
+            ),
+            SkillChainRule(
+                skill_key=PLEADINGS_SKILL_KEY,
+                label="Arbitration pleadings",
+                issue_types=["dispute"],
+                keywords=["arbitration", "statement of claim", "notice of dispute"],
+            ),
+            SkillChainRule(skill_key=LETTERS_SKILL_KEY, label="Draft letter", always=True),
+        ],
+    ),
+    EOT_SKILL_KEY: SkillManifest(
+        roles_supported=["contractor", "engineer", "employer"],
+        native_role=None,
+        contract_forms=CONTRACT_FORMS,
+        output_schema_key=DELAY_EVENT_SCHEMA_KEY,
+        required_inputs=["delay_event", "baseline_programme"],
+        use_when=(
+            "Classifying delay events by risk owner and criticality, and reasoning "
+            "about concurrency, for an extension of time."
+        ),
+        required_approvals=_approvals(DELAY_PLANNING_EXPERT_ROLE, CHIEF_CONTRACT_EXPERT_ROLE),
+        chains_to=[
+            SkillChainRule(skill_key=LETTERS_SKILL_KEY, label="Draft letter", always=True),
+        ],
+    ),
+    PLEADINGS_SKILL_KEY: SkillManifest(
+        # Pleadings are drafted for a party to the dispute, not for the Engineer.
+        roles_supported=["contractor", "employer"],
+        native_role=None,
+        contract_forms=CONTRACT_FORMS,
+        output_schema_key=PLEADING_HEAD_SCHEMA_KEY,
+        required_inputs=["claim_head", "approved_matrix_rows"],
+        use_when=(
+            "Drafting a Statement of Claim, Statement of Defence, Rejoinder or "
+            "Counterclaim from approved case matrices."
+        ),
+        required_approvals=_approvals(CHIEF_CONTRACT_EXPERT_ROLE),
+        chains_to=[
+            SkillChainRule(
+                skill_key=HEARING_SKILL_KEY,
+                label="Hearing preparation",
+                issue_types=["hearing"],
+                keywords=["hearing", "opening statement", "closing submissions", "cross-examination"],
+            ),
+        ],
+    ),
+    HEARING_SKILL_KEY: SkillManifest(
+        roles_supported=["contractor", "employer"],
+        native_role=None,
+        contract_forms=CONTRACT_FORMS,
+        output_schema_key=HEARING_DELIVERABLE_SCHEMA_KEY,
+        required_inputs=["filed_pleadings", "approved_matrix_rows"],
+        use_when=(
+            "Preparing hearing materials: strategy note, opening, timeline, hearing "
+            "matrix, deck, examination plans, closing and speaking notes."
+        ),
+        required_approvals=_approvals(CASE_PREPARATION_EXPERT_ROLE),
+    ),
 }
 
 SEED_EVAL_NOTE = (
@@ -128,6 +243,7 @@ def system_skill_versions() -> List[SkillVersion]:
     versions: List[SkillVersion] = []
     for skill_key, manifest in _MANIFESTS.items():
         loaded = load_skill_directory(SKILLS_DIR / skill_key)
+        is_draft = skill_key in DRAFT_SKILL_KEYS
         if loaded.skill_key != skill_key:
             raise RuntimeError(
                 f"Bundled skill folder {skill_key} declares name {loaded.skill_key}"
@@ -147,8 +263,10 @@ def system_skill_versions() -> List[SkillVersion]:
                     for ref in loaded.references
                 ],
                 manifest=manifest,
-                status="published",
-                eval_report=SkillEvalReport(
+                status="draft" if is_draft else "published",
+                eval_report=None
+                if is_draft
+                else SkillEvalReport(
                     suite="seed-structural",
                     score=1.0,
                     threshold=1.0,
@@ -157,7 +275,7 @@ def system_skill_versions() -> List[SkillVersion]:
                     notes=SEED_EVAL_NOTE,
                 ),
                 created_by="system",
-                published_by="system",
+                published_by=None if is_draft else "system",
             )
         )
     return versions
@@ -170,14 +288,52 @@ def system_skill_version(skill_key: str) -> SkillVersion | None:
     return None
 
 
+def required_approval_floor(skill_key: str) -> List[SkillApprovalRequirement]:
+    """The reviews every version of ``skill_key`` must hold, whatever its manifest says.
+
+    Server-controlled (plan D-05, owner review requirement B1): a manifest sent
+    with an import can add reviews, never remove one. The bundled claim and
+    arbitration packs need their bundled technical and legal reviews. Every
+    other key, the published letter packs at their next version included
+    (decision D-03), and any key imported into the system scope, needs at least
+    the independent legal sign-off.
+    """
+    bundled = _MANIFESTS.get(skill_key)
+    if bundled is not None and bundled.required_approvals:
+        return [item.model_copy() for item in bundled.required_approvals]
+    return _approvals()
+
+
+def with_approval_floor(skill_key: str, requirements: List[SkillApprovalRequirement]) -> List[SkillApprovalRequirement]:
+    """``requirements`` plus every review the floor demands, floor first, no duplicates."""
+    merged: List[SkillApprovalRequirement] = []
+    seen = set()
+    for item in [*required_approval_floor(skill_key), *requirements]:
+        key = (item.kind, item.reviewer_role)
+        if key not in seen:
+            seen.add(key)
+            merged.append(item)
+    return merged
+
+
 __all__ = [
     "ANALYSIS_SKILL_KEY",
+    "AWAITING_APPROVAL_REASON",
+    "CASE_PREPARATION_EXPERT_ROLE",
+    "CHIEF_CONTRACT_EXPERT_ROLE",
     "CLAIMS_SKILL_KEY",
+    "DELAY_PLANNING_EXPERT_ROLE",
+    "DRAFT_SKILL_KEYS",
     "EOT_SKILL_KEY",
+    "HEARING_SKILL_KEY",
+    "LEGAL_APPROVER_ROLE",
+    "PLEADINGS_SKILL_KEY",
     "KNOWN_UNINSTALLED_SKILLS",
     "LETTERS_SKILL_KEY",
     "SYSTEM_SKILL_VERSION",
     "VARIATIONS_SKILL_KEY",
+    "required_approval_floor",
     "system_skill_version",
     "system_skill_versions",
+    "with_approval_floor",
 ]

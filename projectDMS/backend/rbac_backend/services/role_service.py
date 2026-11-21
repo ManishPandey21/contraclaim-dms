@@ -9,7 +9,7 @@ from bson import ObjectId
 from ..core.config import settings
 from ..core.database import get_database
 from ..models.role import Role, RoleCreate, RoleUpdate
-from ..models.permission import Permission, PermissionCategory, PermissionLevel
+from ..models.permission import DEFAULT_PERMISSIONS, Permission, PermissionCategory, PermissionLevel
 from ..utils.error_handler import RoleError, ValidationError
 from ..utils.audit_logger import AuditLogger
 from .permission_service import begin_authority_change, cancel_authority_change, complete_authority_change
@@ -26,6 +26,14 @@ RESERVED_ROLE_KEYS = {
     "orgadmin",
     "projectadmin",
     "projectadministrator",
+    # SEC-2: no custom role may carry a built-in role's key as its name.
+    "orguser",
+    "projectuser",
+    "user",
+    "contraclaim_expert_drafter",
+    "contraclaim_expert_reviewer",
+    "contraclaim_drafting_manager",
+    "contract_expert",
 }
 NON_DELEGABLE_PERMISSION_PREFIXES = (
     "platform.",
@@ -111,6 +119,19 @@ class RoleService:
             role_names.add(str(role).lower())
         return role_names
 
+    def _is_reserved_name(self, name: Any) -> bool:
+        """A name no one but a Super Admin may give a role: any built-in key, in any spelling.
+
+        Compared both as the canonical key (``normalize_role_key``: aliases, case) and with
+        every non-alphanumeric removed, so ``contract_expert``, ``Contract Expert`` and
+        ``contractexpert`` are all refused (review R-1).
+        """
+        from .role_grants import BUILT_IN_ROLE_KEYS
+
+        keys = RESERVED_ROLE_KEYS | SYSTEM_ROLE_NAMES | set(BUILT_IN_ROLE_KEYS)
+        stripped = {self._normalize_role_key(key) for key in keys}
+        return normalize_role_key(str(name or "")) in keys or self._normalize_role_key(name) in stripped
+
     def _normalize_role_key(self, value: Any) -> str:
         raw = str(value or "").strip().lower()
         if not raw:
@@ -162,19 +183,132 @@ class RoleService:
             normalized.append(value)
         return normalized
 
-    def _ensure_permissions_assignable(self, actor: Any, permissions: Optional[List[str]]) -> List[str]:
-        normalized = self._normalize_permission_list(permissions)
-        if self._is_superadmin_actor(actor):
-            return normalized
+    @staticmethod
+    def _satisfied_by(name: str) -> set:
+        """Every permission check that a role holding ``name`` passes (the one-hop alias contract)."""
+        from .permission_service import PermissionService
 
-        for permission in normalized:
-            lowered = permission.lower()
-            if lowered in NON_DELEGABLE_PERMISSIONS or lowered.startswith(NON_DELEGABLE_PERMISSION_PREFIXES):
+        return PermissionService.checks_satisfied_by(name)
+
+    @staticmethod
+    def _is_non_delegable(permission: str) -> bool:
+        lowered = permission.strip().lower()
+        return lowered in NON_DELEGABLE_PERMISSIONS or lowered.startswith(NON_DELEGABLE_PERMISSION_PREFIXES)
+
+    async def _resolve_permission_entry(self, db: Any, entry: str) -> Optional[str]:
+        """The permission a role entry stands for: a catalogue id, a label or a name, as a name.
+
+        ``None`` when the entry names nothing the platform knows. Resolution happens
+        before any delegation check (SEC-2), so a catalogue ObjectId or a label
+        cannot carry a non-delegable permission past a check that compares names.
+        """
+        from ..core.permissions import known_permission_name
+        from .permission_service import PermissionService
+
+        text = entry.strip()
+        if text == "*":
+            return "*"
+        known = known_permission_name(text)
+        if known is not None:
+            return known
+        if text in {getattr(item, "name", None) or (item.get("name") if isinstance(item, dict) else None) for item in DEFAULT_PERMISSIONS}:
+            return text
+        candidates: List[Dict[str, Any]] = [{"_id": text}, {"name": text}, {"id": text}, {"code": text}]
+        try:
+            candidates.append({"_id": ObjectId(text)})
+        except Exception:
+            pass
+        document = await db.permissions.find_one({"$or": candidates})
+        if document is None:
+            return None
+        name = PermissionService()._build_permission_from_doc(document).name
+        return known_permission_name(name) or name
+
+    async def _ensure_permissions_assignable(
+        self,
+        actor: Any,
+        permissions: Optional[List[str]],
+        *,
+        organization_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> List[str]:
+        """The permissions a role may carry, as names; refuse what the actor may not delegate (SEC-2).
+
+        Every entry is resolved to the permission it stands for first (catalogue
+        id, label or name), and stored as that name. A Super Admin may put any
+        known permission on a role (an unknown string is kept as given, as before).
+        Anyone else may put on a role only a permission that is
+
+        - known to the platform (an unknown entry is refused, 422);
+        - not non-delegable (``*``, ``dms.admin``, ``drafting.admin``,
+          ``system:admin``, platform, billing, subscription, permission and role
+          management - 403), judged on the entry and on the name it resolves to;
+        - held by the actor in the role's own organisation and project: an
+          explicit-grant-only permission (privileged legal material, determination,
+          contract confirmation, signal view) only when the actor holds it by name
+          there, never through a wildcard (403).
+        """
+        from ..core.permissions import EXPLICIT_GRANT_ONLY_PERMISSIONS, SUPERADMIN_EXCLUDED_PERMISSIONS
+        from .permission_service import PermissionService
+
+        normalized = self._normalize_permission_list(permissions)
+        db = await self._get_db()
+        superadmin = self._is_superadmin_actor(actor)
+        resolved: List[str] = []
+        permission_service = PermissionService()
+        permission_service.db = db  # the same database the role is written to
+        actor_id = str(getattr(actor, "id", "") or "")
+        for entry in normalized:
+            name = await self._resolve_permission_entry(db, entry)
+            if superadmin:
+                value = name or entry
+                if value not in resolved:
+                    resolved.append(value)
+                continue
+            if self._is_non_delegable(entry):
+                raise RoleServiceError(f"Not authorized to assign privileged permission: {entry}", 403)
+            # The name the entry resolves to, and (DEF-4) every check it passes through the
+            # one-hop alias contract: organizations:read satisfies the billing views that
+            # declare it, so it is non-delegable as well.
+            if name and any(self._is_non_delegable(other) for other in self._satisfied_by(name)):
                 raise RoleServiceError(
-                    f"Not authorized to assign privileged permission: {permission}",
+                    f"Not authorized to assign {entry}: it also grants a permission only a Super Admin may give",
                     403,
                 )
-        return normalized
+            if name is None:
+                raise RoleServiceError(f"Unknown permission: {entry}", 422)
+            # Review R-2: a role holding `name` passes every check `name` satisfies (the
+            # one-hop alias contract: projects:update passes 23 canonical checks), so the
+            # creator must hold each of those checks here, not merely `name` or one equivalent.
+            for check in sorted(self._satisfied_by(name)):
+                if check in EXPLICIT_GRANT_ONLY_PERMISSIONS or check in SUPERADMIN_EXCLUDED_PERMISSIONS:
+                    held = await permission_service.user_has_explicit_permission(
+                        actor_id, check, organization_id=organization_id, project_id=project_id
+                    )
+                else:
+                    held = await permission_service.user_has_permission(
+                        actor_id, check, log=False, organization_id=organization_id, project_id=project_id
+                    )
+                if not held:
+                    raise RoleServiceError(
+                        f"You can only give a role permissions you hold yourself in its organisation or project: {name}"
+                        + (f" (it also grants {check})" if check != name else ""),
+                        403,
+                    )
+            if name not in resolved:
+                resolved.append(name)
+        return resolved
+
+    async def ensure_role_delegable(self, actor: Any, role: Any) -> None:
+        """Assigning a role delegates its permissions: the actor must be able to delegate each (SEC-2/SEC-3)."""
+        if self._is_superadmin_actor(actor):
+            return
+        await self._ensure_permissions_assignable(
+            actor,
+            list(self._get_role_field(role, "permissions") or []),
+            organization_id=self._get_role_org_id(role),
+            project_id=self._get_role_project_id(role),
+        )
 
     def _field_changed(self, existing: Dict[str, Any], field: str, value: Any) -> bool:
         current = existing.get(field)
@@ -360,6 +494,41 @@ class RoleService:
             self.db = await get_database()
         return self.db
 
+    async def _validate_role_scope(
+        self, db: Any, scope: Optional[str], organization_id: Any, project_id: Any
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """An organisation role names an existing organisation; a project role an existing
+        project of that organisation (SEC-2). System roles name neither."""
+        org = str(organization_id) if organization_id else None
+        project = str(project_id) if project_id else None
+        if scope == "system":
+            return None, None
+        if scope == "project":
+            if not project:
+                raise RoleServiceError("A project role needs a project", 422)
+            candidates: List[Any] = [project]
+            try:
+                candidates.append(ObjectId(project))
+            except Exception:
+                pass
+            project_doc = await db.projects.find_one({"_id": {"$in": candidates}}, {"organization_id": 1})
+            project_org = str((project_doc or {}).get("organization_id") or "") or None
+            if project_doc is None or project_org is None:
+                raise RoleServiceError("The role's project does not exist", 422)
+            if org and org != project_org:
+                raise RoleServiceError("The role's project belongs to another organisation", 422)
+            return project_org, project
+        if not org:
+            raise RoleServiceError("An organisation role needs an organisation", 422)
+        candidates = [org]
+        try:
+            candidates.append(ObjectId(org))
+        except Exception:
+            pass
+        if await db.organizations.find_one({"_id": {"$in": candidates}}, {"_id": 1}) is None:
+            raise RoleServiceError("The role's organisation does not exist", 422)
+        return org, None
+
     @staticmethod
     def _reference_names_role(reference: Any, role_id: str) -> bool:
         """Whether a stored reference can resolve to this role: its id, or a legacy spelling of it."""
@@ -464,8 +633,7 @@ class RoleService:
             org_id = getattr(created_by, "organization_id", None)
             project_ids = [str(p) for p in (getattr(created_by, "projects", []) or []) if p]
 
-            role_name_key = self._normalize_role_key(role_data.name)
-            if role_name_key in RESERVED_ROLE_KEYS | SYSTEM_ROLE_NAMES and not is_superadmin:
+            if self._is_reserved_name(role_data.name) and not is_superadmin:
                 raise RoleServiceError("Not authorized to create reserved roles", 403)
             await self._refuse_lookalike_name(db, role_data.name, None)
 
@@ -497,14 +665,17 @@ class RoleService:
                     raise RoleServiceError("Project context required for role creation", 403)
                 scope = "project"
                 organization_id = str(org_id)
-                if project_id and str(project_id) in project_ids:
-                    project_id = str(project_id)
-                else:
-                    project_id = project_ids[0]
+                if project_id and str(project_id) not in project_ids:
+                    # Before SEC-2 this silently created the role in the admin's first project.
+                    raise RoleServiceError("Not authorized to create roles for another project", 403)
+                project_id = str(project_id) if project_id else project_ids[0]
             else:
                 raise RoleServiceError("Not authorized to create roles", 403)
 
-            permissions = self._ensure_permissions_assignable(created_by, role_data.permissions)
+            organization_id, project_id = await self._validate_role_scope(db, scope, organization_id, project_id)
+            permissions = await self._ensure_permissions_assignable(
+                created_by, role_data.permissions, organization_id=organization_id, project_id=project_id
+            )
 
             # Create role document
             role_doc = {
@@ -684,7 +855,7 @@ class RoleService:
 
             self._ensure_role_manageable(updated_by, existing)
             if not self._is_superadmin_actor(updated_by):
-                if update_data.name is not None and self._normalize_role_key(update_data.name) in RESERVED_ROLE_KEYS | SYSTEM_ROLE_NAMES:
+                if update_data.name is not None and self._is_reserved_name(update_data.name):
                     raise RoleServiceError("Not authorized to rename roles to reserved names", 403)
                 if update_data.is_system is not None and self._field_changed(existing, "is_system", bool(update_data.is_system)):
                     raise RoleServiceError("Not authorized to change system role status", 403)
@@ -713,8 +884,22 @@ class RoleService:
                 update_doc["name"] = update_data.name
             if update_data.description is not None:
                 update_doc["description"] = update_data.description
+            target_scope = (update_data.scope or self._derive_scope_from_doc(existing)) if not existing.get("is_system") else "system"
+            target_org = update_data.organization_id if update_data.organization_id is not None else existing.get("organization_id")
+            target_project = update_data.project_id if update_data.project_id is not None else existing.get("project_id")
+            if {"scope", "organization_id", "project_id"} & {
+                field for field in ("scope", "organization_id", "project_id") if getattr(update_data, field) is not None
+            }:
+                target_org, target_project = await self._validate_role_scope(db, target_scope, target_org, target_project)
+                update_data.organization_id = target_org
+                update_data.project_id = target_project
             if update_data.permissions is not None:
-                update_doc["permissions"] = self._ensure_permissions_assignable(updated_by, update_data.permissions)
+                update_doc["permissions"] = await self._ensure_permissions_assignable(
+                    updated_by,
+                    update_data.permissions,
+                    organization_id=str(target_org) if target_org else None,
+                    project_id=str(target_project) if target_project else None,
+                )
             if update_data.is_system is not None:
                 update_doc["is_system"] = update_data.is_system
             if update_data.scope is not None:
@@ -887,7 +1072,12 @@ class RoleService:
                 raise RoleServiceError("Role not found", 404)
 
             self._ensure_role_manageable(updated_by, existing)
-            permission_ids = self._ensure_permissions_assignable(updated_by, permission_ids)
+            permission_ids = await self._ensure_permissions_assignable(
+                updated_by,
+                permission_ids,
+                organization_id=str(existing.get("organization_id")) if existing.get("organization_id") else None,
+                project_id=str(existing.get("project_id")) if existing.get("project_id") else None,
+            )
 
             # Update role permissions
             holders = await self._begin_role_authority_change(db, role_id)
@@ -936,7 +1126,14 @@ class RoleService:
                 raise RoleServiceError("Role not found", 404)
 
             self._ensure_role_manageable(updated_by, existing)
-            permission_id = self._ensure_permissions_assignable(updated_by, [permission_id])[0]
+            permission_id = (
+                await self._ensure_permissions_assignable(
+                    updated_by,
+                    [permission_id],
+                    organization_id=str(existing.get("organization_id")) if existing.get("organization_id") else None,
+                    project_id=str(existing.get("project_id")) if existing.get("project_id") else None,
+                )
+            )[0]
 
             # Add permission to role (if not already present)
             holders = await self._begin_role_authority_change(db, role_id)

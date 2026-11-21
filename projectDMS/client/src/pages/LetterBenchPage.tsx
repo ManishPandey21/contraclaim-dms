@@ -32,6 +32,7 @@ import {
 } from "@/components/letter-bench/benchLogic";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { DeterminationContext } from "@/components/letter-bench/DeterminationContext";
 import { errorMessage, useBench, useBenchActions, useSkills } from "@/hooks/useLetterBench";
 import { cn } from "@/lib/utils";
 import { type BenchPane, useLetterBenchStore } from "@/stores/useLetterBenchStore";
@@ -239,6 +240,7 @@ const LetterBenchPage: React.FC = () => {
         onRole={(role) => actions.settings.mutate({ role })}
         onDeadline={(date, basis) => actions.settings.mutate({ deadline_date: date, deadline_basis: basis })}
       />
+      <DeterminationContext trigger={board.trigger} />
       <div className="border-b">
         <SkillRail
           chain={board.chain}

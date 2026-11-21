@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from ..utils.datetime import now_utc
 from .letter_drafting import DraftRole, ProbingQuestion
+from .skill_output_schemas import register_schema
 
 # The letters skill's own four-way classification of an assertion.
 Verdict = Literal["entitlement", "partial", "none", "need_information"]
@@ -239,6 +240,9 @@ OUTPUT_SCHEMAS: Dict[str, type[BaseModel]] = {
     "reply_paragraph.v1": ReplyParagraphOutput,
 }
 
+for _schema_key, _schema_model in OUTPUT_SCHEMAS.items():
+    register_schema(_schema_key, _schema_model)
+
 
 class SkillStep(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
@@ -294,7 +298,9 @@ class SkillStepSummary(BaseModel):
 # --------------------------------------------------------------------------- #
 class BenchOpenRequest(BaseModel):
     incoming_document_id: Optional[str] = None
-    trigger_type: Optional[Literal["variation", "key_date", "hindrance"]] = None
+    trigger_type: Optional[
+        Literal["variation", "key_date", "hindrance", "claim", "determination", "information_request"]
+    ] = None
     trigger_id: Optional[str] = None
     project_id: Optional[str] = None
     organization_id: Optional[str] = None

@@ -78,6 +78,27 @@ describe("TenantProvider", () => {
     });
   });
 
+  it("announces a scope change so permission holders re-read the server (T-2)", async () => {
+    getCurrentUserProfile.mockResolvedValue({ roles: ["orgadmin"], organization_id: "org-1" });
+    const seen: Array<{ organizationId: string; projectId: string | null }> = [];
+    const listener = (event: Event) => seen.push((event as CustomEvent).detail);
+    window.addEventListener("tenant-scope-changed", listener);
+    try {
+      render(
+        <TenantProvider>
+          <TenantProbe />
+        </TenantProvider>,
+      );
+      expect(await screen.findByText("Acme Infrastructure")).toBeInTheDocument();
+      act(() => screen.getByRole("button", { name: "Switch project" }).click());
+      await waitFor(() =>
+        expect(seen.at(-1)).toEqual({ organizationId: "org-1", projectId: "project-2" }),
+      );
+    } finally {
+      window.removeEventListener("tenant-scope-changed", listener);
+    }
+  });
+
   it("does not expose project switching to a project-level user", async () => {
     getCurrentUserProfile.mockResolvedValue({
       roles: ["projectuser"],

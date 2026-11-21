@@ -225,6 +225,23 @@ _DEFAULT_TEMPLATES = {
 }
 
 
+def register_default_template(prompt_key: str, template: str) -> None:
+    """Register the built-in template for a prompt key owned by another feature.
+
+    Without a registered default an unknown key would be served the letter
+    drafting template, so every feature that runs skill steps registers its own.
+    Re-registering the same text is a no-op; different text is a programming error.
+    """
+    existing = _DEFAULT_TEMPLATES.get(prompt_key)
+    if existing is not None and existing != template:
+        raise ValueError(f"Prompt {prompt_key} already has a different default template")
+    _DEFAULT_TEMPLATES[prompt_key] = template
+
+
+def has_default_template(prompt_key: str) -> bool:
+    return prompt_key in _DEFAULT_TEMPLATES
+
+
 class PromptRegistry:
     """Versioned prompt registry with DB override support and variable validation."""
 

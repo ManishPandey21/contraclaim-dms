@@ -39,7 +39,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
 from ..models.contract_document import ProjectionStatus
 from .contract_document_store import CONTRACT_DOCUMENTS_COLLECTION
@@ -282,6 +282,9 @@ _ALIVE_EVERY_SECONDS = 30.0
 #: Rows of processes that died without removing theirs expire on their own.
 _HEARTBEAT_TTL_SECONDS = 7 * 24 * 3600
 
+#: How long a stop waits for a heartbeat write already in flight before deleting the row.
+_STOP_WAIT_SECONDS = 10.0
+
 
 class _Heartbeat:
     """The runtime's own liveness row. Best effort: never stops the owner."""
@@ -292,8 +295,23 @@ class _Heartbeat:
         self._interval = float(interval_seconds)
         self._started_at = datetime.now(timezone.utc)
         self._last_written = 0.0
+        # Writes still running. Motor runs each call in a worker thread that
+        # cancelling the awaiting task does not stop, so a write in flight at
+        # shutdown would otherwise land after remove() and put the row back.
+        self._writes: Set["asyncio.Task[None]"] = set()
+        self._stopping = False
 
     async def _write(self, extra: Dict[str, Any]) -> None:
+        if self._stopping:
+            return
+        write = asyncio.ensure_future(self._upsert(extra))
+        self._writes.add(write)
+        write.add_done_callback(self._writes.discard)
+        # Shielded: a cancelled caller stops waiting, the write itself runs to its
+        # end, and remove() waits for it before deleting.
+        await asyncio.shield(write)
+
+    async def _upsert(self, extra: Dict[str, Any]) -> None:
         now = datetime.now(timezone.utc)
         try:
             await self._db[RUNTIME_HEARTBEATS_COLLECTION].update_one(
@@ -341,6 +359,15 @@ class _Heartbeat:
         )
 
     async def remove(self) -> None:
+        self._stopping = True
+        pending = set(self._writes)
+        if pending:
+            _done, late = await asyncio.wait(pending, timeout=_STOP_WAIT_SECONDS)
+            if late:
+                logger.warning(
+                    "a reprojection heartbeat write was still running at stop; the row may "
+                    "outlive this runtime until its TTL"
+                )
         try:
             await self._db[RUNTIME_HEARTBEATS_COLLECTION].delete_one({"_id": self._id})
         except Exception:

@@ -299,11 +299,58 @@ class Settings(BaseSettings):
     # the engine flags above: off | canary (allow-listed tenants) | primary.
     LETTER_BENCH_ROLLOUT_MODE: str = Field(default="off", validation_alias="LETTER_BENCH_ROLLOUT_MODE")
     LETTER_BENCH_CANARY_TENANT_IDS: str = Field(default="", validation_alias="LETTER_BENCH_CANARY_TENANT_IDS")
+    # Claim Bench rollout, same shape as the Letter Bench: off | canary | primary.
+    CLAIM_BENCH_ROLLOUT_MODE: str = Field(default="off", validation_alias="CLAIM_BENCH_ROLLOUT_MODE")
+    CLAIM_BENCH_CANARY_TENANT_IDS: str = Field(default="", validation_alias="CLAIM_BENCH_CANARY_TENANT_IDS")
+    # D-26 (4B-45): a POST /arbitration/drafts with neither a case nor scratch=true.
+    # implicit_scratch (default): created as a scratch draft, with a Deprecation header,
+    # a warning and a logged caller. strict: 422 scratch_required. Switching to strict
+    # needs the owner's approval after reading P-12 shows no remaining legacy callers.
+    ARBITRATION_CASELESS_DRAFT_MODE: str = Field(
+        default="implicit_scratch", validation_alias="ARBITRATION_CASELESS_DRAFT_MODE"
+    )
+    # Model used for skill steps (letters, claims, arbitration). Empty keeps the built-in default.
+    SKILL_MODEL: str = Field(default="", validation_alias="SKILL_MODEL")
+    # Lowest threshold an evaluation report may set for itself before a skill
+    # version can be approved or published. May be raised, never lowered below 0.85.
+    SKILL_EVAL_MIN_THRESHOLD: float = Field(default=0.85, validation_alias="SKILL_EVAL_MIN_THRESHOLD")
+    # The restricted evaluation store (AQ-10): a directory outside the repository
+    # holding one golden set per pack, <skill_key>.json. Empty: no run can be made.
+    SKILL_EVAL_SUITE_DIR: str = Field(default="", validation_alias="SKILL_EVAL_SUITE_DIR")
+    # Model calls one evaluation run may make. A larger golden set needs this raised, with approval.
+    SKILL_EVAL_MAX_MODEL_CALLS: int = Field(default=60, ge=1, validation_alias="SKILL_EVAL_MAX_MODEL_CALLS")
     DRAFT_ENGINE_GRAPH_VERSION: str = Field(default="v3", validation_alias="DRAFT_ENGINE_GRAPH_VERSION")
     DRAFT_ENGINE_STATE_SCHEMA_VERSION: int = Field(default=1, ge=1, validation_alias="DRAFT_ENGINE_STATE_SCHEMA_VERSION")
     DRAFT_ENGINE_PRODUCTION_ACCEPTED: bool = Field(default=False, validation_alias="DRAFT_ENGINE_PRODUCTION_ACCEPTED")
     DRAFT_ENGINE_MAX_CHECKPOINT_BYTES: int = Field(default=262144, ge=4096, validation_alias="DRAFT_ENGINE_MAX_CHECKPOINT_BYTES")
     DRAFT_ENGINE_CHECKPOINT_RETENTION_DAYS: int = Field(default=30, ge=1, validation_alias="DRAFT_ENGINE_CHECKPOINT_RETENTION_DAYS")
+    # Which Word writer arbitration exports use (D-19, AQ-7). "minimal" is the writer production
+    # uses today; "python_docx" only after the owner has reviewed docs/DOCX_WRITER_COMPARISON.md.
+    DOCX_WRITER: str = Field(default="minimal", validation_alias="DOCX_WRITER")
+    # DEF-4 (owner decisions 2026-11-19): with this on, billing and subscription checks need an
+    # explicit grant in scope; organizations:read, orgs:view and reports:view no longer reach
+    # them, financial records are separated from operational status, and checkout needs an
+    # explicit subscription.upgrade. Off (the default) changes nothing. Turn on only after P-05,
+    # the authorised security review, staging evidence and a recorded release decision.
+    BILLING_EXPLICIT_PERMISSIONS: bool = Field(default=False, validation_alias="BILLING_EXPLICIT_PERMISSIONS")
+    # M1 (workstream 5, 2026-11-21): built-in roles scoped to their assignment. "off" (the
+    # default) changes nothing; "shadow" evaluates the proposed per-assignment decision beside
+    # every allowed PolicyService.authorize decision and records privacy-safe divergence counts
+    # (services/role_scope_shadow.py) without changing any response. "on" (enforcement) is not
+    # implemented and is refused at startup: it needs P-05, the authorised security review and
+    # a separate owner approval.
+    BUILT_IN_ROLE_ASSIGNMENTS: str = Field(default="off", validation_alias="BUILT_IN_ROLE_ASSIGNMENTS")
+    # Workstream 1 (2026-11-21): checkout that replaces a gateway-billed subscription. Off (the
+    # default) keeps today's checkout (a warning over a paid plan) and refuses
+    # replaces_subscription_id. Activation needs a separate owner approval.
+    CHECKOUT_REPLACEMENT_ENABLED: bool = Field(default=False, validation_alias="CHECKOUT_REPLACEMENT_ENABLED")
+    # Workstream 2 (2026-11-21): payment amount mismatch policy. "off" (the default) keeps
+    # today's webhook behaviour; "enforce" separates initial activation (verified amount and
+    # currency required) from renewal discrepancies (financial review with a bounded grace).
+    # The grace length is a placeholder for development: production values and activation need
+    # separate owner, security and commercial approval.
+    PAYMENT_MISMATCH_POLICY: str = Field(default="off", validation_alias="PAYMENT_MISMATCH_POLICY")
+    PAYMENT_MISMATCH_GRACE_DAYS: int = Field(default=0, ge=0, le=30, validation_alias="PAYMENT_MISMATCH_GRACE_DAYS")
     ARBITRATION_ENGINE_DEFAULT: str = Field(default="arbitration_v2", validation_alias="ARBITRATION_ENGINE_DEFAULT")
     ARBITRATION_ENGINE_ROLLOUT_MODE: str = Field(default="off", validation_alias="ARBITRATION_ENGINE_ROLLOUT_MODE")
     ARBITRATION_ENGINE_CANARY_PERCENT: int = Field(default=0, ge=0, le=100, validation_alias="ARBITRATION_ENGINE_CANARY_PERCENT")
@@ -395,6 +442,13 @@ class Settings(BaseSettings):
     RAZORPAY_KEY_ID: str = Field(default="", validation_alias="RAZORPAY_KEY_ID")
     RAZORPAY_KEY_SECRET: str = Field(default="", validation_alias="RAZORPAY_KEY_SECRET")
     RAZORPAY_WEBHOOK_SECRET: str = Field(default="", validation_alias="RAZORPAY_WEBHOOK_SECRET")
+    # Workstream 4 (2026-11-21): bounded provider calls. Values are clamped in
+    # services/payment_gateway_reliability.policy_from_settings whatever is configured.
+    PAYMENT_GATEWAY_CONNECT_TIMEOUT_SECONDS: float = Field(default=5.0, validation_alias="PAYMENT_GATEWAY_CONNECT_TIMEOUT_SECONDS")
+    PAYMENT_GATEWAY_READ_TIMEOUT_SECONDS: float = Field(default=15.0, validation_alias="PAYMENT_GATEWAY_READ_TIMEOUT_SECONDS")
+    PAYMENT_GATEWAY_READ_RETRIES: int = Field(default=2, validation_alias="PAYMENT_GATEWAY_READ_RETRIES")
+    PAYMENT_GATEWAY_NOT_SENT_RETRIES: int = Field(default=1, validation_alias="PAYMENT_GATEWAY_NOT_SENT_RETRIES")
+    PAYMENT_GATEWAY_RETRY_BACKOFF_SECONDS: float = Field(default=0.5, validation_alias="PAYMENT_GATEWAY_RETRY_BACKOFF_SECONDS")
     STRIPE_API_KEY: str = Field(default="", validation_alias="STRIPE_API_KEY")
     STRIPE_WEBHOOK_SECRET: str = Field(default="", validation_alias="STRIPE_WEBHOOK_SECRET")
 
@@ -590,6 +644,33 @@ class Settings(BaseSettings):
     BACKUP_S3_BUCKET: str = Field(default="", validation_alias="BACKUP_S3_BUCKET")
     BACKUP_S3_PREFIX: str = Field(default="contraclaim/backups", validation_alias="BACKUP_S3_PREFIX")
 
+    @field_validator('BUILT_IN_ROLE_ASSIGNMENTS', mode='before')
+    @classmethod
+    def _built_in_role_assignments_mode(cls, value: Any) -> str:
+        mode = str(value or "off").strip().lower()
+        if mode == "on":
+            raise ValueError("BUILT_IN_ROLE_ASSIGNMENTS=on (enforcement) is not implemented; use off or shadow")
+        if mode not in {"off", "shadow"}:
+            raise ValueError("BUILT_IN_ROLE_ASSIGNMENTS must be off or shadow")
+        return mode
+
+    @field_validator('PAYMENT_MISMATCH_POLICY', mode='before')
+    @classmethod
+    def _payment_mismatch_policy_mode(cls, value: Any) -> str:
+        mode = str(value or "off").strip().lower()
+        if mode not in {"off", "enforce"}:
+            raise ValueError("PAYMENT_MISMATCH_POLICY must be off or enforce")
+        return mode
+
+    @field_validator('PAYMENT_MISMATCH_GRACE_DAYS', mode='after')
+    @classmethod
+    def _payment_mismatch_grace_needs_approval(cls, value: int, info: ValidationInfo) -> int:
+        # "enforce" with no grace would stop a legitimately paid service on the first
+        # unreviewed discrepancy; the grace length is an owner decision, never defaulted here.
+        if info.data.get("PAYMENT_MISMATCH_POLICY") == "enforce" and value < 1:
+            raise ValueError("PAYMENT_MISMATCH_POLICY=enforce needs an approved PAYMENT_MISMATCH_GRACE_DAYS (1-30)")
+        return value
+
     @field_validator('CORS_ORIGINS', 'ALLOWED_DOCUMENT_MIMES', 'ALLOWED_CONTRACT_MIMES', 'ALLOWED_ENCLOSURE_MIMES', mode='before')
     @classmethod
     def parse_json_strings(cls, v):
@@ -743,6 +824,9 @@ class Settings(BaseSettings):
             raise ValueError("DRAFT_ENGINE_DEFAULT must be v2 or langgraph_v3")
         if draft_rollout not in {"off", "shadow", "canary", "primary", "forced_v2"}:
             raise ValueError("DRAFT_ENGINE_ROLLOUT_MODE must be off, shadow, canary, primary, or forced_v2")
+        docx_writer = str(getattr(self, "DOCX_WRITER", "minimal") or "minimal").strip().lower()
+        if docx_writer not in {"minimal", "python_docx"}:
+            raise ValueError("DOCX_WRITER must be minimal or python_docx")
         arbitration_engine_default = str(
             getattr(self, "ARBITRATION_ENGINE_DEFAULT", "arbitration_v2") or "arbitration_v2"
         ).lower()
@@ -760,6 +844,16 @@ class Settings(BaseSettings):
             raise ValueError(
                 "ARBITRATION_ENGINE_V2_COMPATIBILITY_MODE must be active, read_replay_only, or retired"
             )
+        # The Claim Bench reads an unknown mode as "off". Refuse it at startup
+        # instead, so a typo (or the spec's never-built "shadow") cannot switch
+        # the Bench off silently. Kept equal to services.claim_bench.VALID_MODES
+        # by test_claim_bench_rollout_guard.
+        claim_bench_rollout = str(getattr(self, "CLAIM_BENCH_ROLLOUT_MODE", "off") or "off").strip().lower()
+        if claim_bench_rollout not in {"off", "canary", "primary"}:
+            raise ValueError("CLAIM_BENCH_ROLLOUT_MODE must be off, canary, or primary")
+        caseless_mode = str(getattr(self, "ARBITRATION_CASELESS_DRAFT_MODE", "implicit_scratch") or "").strip().lower()
+        if caseless_mode not in {"implicit_scratch", "strict"}:
+            raise ValueError("ARBITRATION_CASELESS_DRAFT_MODE must be implicit_scratch or strict")
 
         environment = str(getattr(self, "ENVIRONMENT", "development") or "development").lower()
         if environment == "production":

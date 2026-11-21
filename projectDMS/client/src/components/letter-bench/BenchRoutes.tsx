@@ -30,7 +30,12 @@ export const LegacyOrBench: React.FC<{ children: React.ReactNode }> = ({ childre
   return <>{children}</>;
 };
 
-/** `/letters/bench/new?documentId=…` — opens (or reopens) the Bench for a document, no form. */
+/**
+ * `/letters/bench/new?documentId=…` opens (or reopens) the Bench for a document, no form.
+ * `?variationId=…` and `?claimId=…` start a letter from that record instead;
+ * `?determinationId=…&purpose=determination|information_request` a determination
+ * letter or a request for information, pre-filled from the determination (4B-31).
+ */
 export const BenchOpenRoute: React.FC = () => {
   const [params] = useSearchParams();
   const navigate = useNavigate();
@@ -38,19 +43,27 @@ export const BenchOpenRoute: React.FC = () => {
   const started = useRef(false);
   const documentId = params.get("documentId");
   const variationId = params.get("variationId");
+  const claimId = params.get("claimId");
+  const determinationId = params.get("determinationId");
+  const purpose = params.get("purpose") === "information_request" ? "information_request" : "determination";
+  const any = Boolean(documentId || variationId || claimId || determinationId);
 
   useEffect(() => {
-    if (started.current || (!documentId && !variationId)) return;
+    if (started.current || !any) return;
     started.current = true;
     open.mutate(
       documentId
         ? { incoming_document_id: documentId }
-        : { trigger_type: "variation", trigger_id: variationId as string },
+        : variationId
+          ? { trigger_type: "variation", trigger_id: variationId }
+          : determinationId
+            ? { trigger_type: purpose, trigger_id: determinationId }
+            : { trigger_type: "claim", trigger_id: claimId as string },
       { onSuccess: (result) => navigate(`/letters/${result.letter_id}/bench`, { replace: true }) }
     );
-  }, [documentId, navigate, open, variationId]);
+  }, [any, claimId, determinationId, documentId, navigate, open, purpose, variationId]);
 
-  if (!documentId && !variationId) return <Navigate to="/letters" replace />;
+  if (!any) return <Navigate to="/letters" replace />;
   if (open.isError) {
     return (
       <div role="alert" className="mx-auto max-w-xl space-y-3 p-8 text-center">

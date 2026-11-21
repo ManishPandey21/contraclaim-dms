@@ -393,6 +393,32 @@ async def create_milestone(
     return KeyDateMilestone(**created)
 
 
+@router.get("/key-dates/recalculate/preview")
+async def preview_key_date_recalculation(
+    project_id: str = Query(..., min_length=1),
+    organization_id: Optional[str] = Query(None),
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
+):
+    """KD-1 dry-run: what "Recalculate project" would change, changing nothing.
+
+    Same authority as the recalculation itself, because it shows the dates and bases a
+    person with that authority would act on."""
+    await selection.require_project(project_id, organization_id)
+    await policy.authorize(
+        current_user, Permissions.KEYDATE_EDIT, resource_type="key_dates",
+        organization_id=organization_id or getattr(current_user, "organization_id", None),
+        project_id=project_id,
+    )
+    scope = build_scope_query(current_user, organization_id=organization_id, project_id=project_id)
+    try:
+        return await KeyDateService(db).recalculation_preview(scope, project_id, current_user)
+    except KeyDateError as exc:
+        raise _bad_request(exc)
+
+
 @router.post("/key-dates/recalculate")
 async def recalculate_key_dates(
     project_id: str = Query(..., min_length=1),

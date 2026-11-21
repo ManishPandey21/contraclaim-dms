@@ -468,6 +468,23 @@ class ClaimEntityAdapter(EntityAdapter):
         if not getattr(result, "matched_count", 0):
             raise RuntimeError("Claim evidence was concurrently frozen")
 
+    async def lift_freeze(
+        self,
+        db: Any,
+        context: EntityContext,
+        *,
+        frozen_at: Any,
+        session: Any = None,
+    ) -> None:
+        """Lift the freeze stamped ``frozen_at``, and no other (4B-37: an undone escalation)."""
+        result = await db.claims.update_one(
+            {"_id": context.entity.get("_id"), "evidence_frozen_at": frozen_at},
+            {"$set": {"evidence_frozen_at": None, "evidence_frozen_by": None, "evidence_freeze_reason": None}},
+            session=session,
+        )
+        if not getattr(result, "matched_count", 0):
+            raise RuntimeError("Claim evidence was frozen by something else; it is left frozen")
+
     async def legacy_targets_for_document(
         self,
         db: Any,

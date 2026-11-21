@@ -107,6 +107,58 @@ from .v20261114_0003_letter_bench_indexes import DESCRIPTION as LETTER_BENCH_IND
 from .v20261114_0003_letter_bench_indexes import NAME as LETTER_BENCH_INDEXES_NAME
 from .v20261114_0003_letter_bench_indexes import VERSION as LETTER_BENCH_INDEXES_VERSION
 from .v20261114_0003_letter_bench_indexes import upgrade as upgrade_letter_bench_indexes
+from .v20261115_0001_seed_claim_arbitration_skill_drafts import (
+    DESCRIPTION as SEED_CLAIM_ARBITRATION_SKILL_DRAFTS_DESCRIPTION,
+)
+from .v20261115_0001_seed_claim_arbitration_skill_drafts import (
+    NAME as SEED_CLAIM_ARBITRATION_SKILL_DRAFTS_NAME,
+)
+from .v20261115_0001_seed_claim_arbitration_skill_drafts import (
+    VERSION as SEED_CLAIM_ARBITRATION_SKILL_DRAFTS_VERSION,
+)
+from .v20261115_0001_seed_claim_arbitration_skill_drafts import (
+    upgrade as upgrade_seed_claim_arbitration_skill_drafts,
+)
+from .v20261116_0001_claim_bench_indexes import DESCRIPTION as CLAIM_BENCH_INDEXES_DESCRIPTION
+from .v20261116_0001_claim_bench_indexes import NAME as CLAIM_BENCH_INDEXES_NAME
+from .v20261116_0001_claim_bench_indexes import VERSION as CLAIM_BENCH_INDEXES_VERSION
+from .v20261116_0001_claim_bench_indexes import upgrade as upgrade_claim_bench_indexes
+from .v20261117_0001_claim_head_link_indexes import DESCRIPTION as CLAIM_HEAD_LINK_INDEXES_DESCRIPTION
+from .v20261117_0001_claim_head_link_indexes import NAME as CLAIM_HEAD_LINK_INDEXES_NAME
+from .v20261117_0001_claim_head_link_indexes import VERSION as CLAIM_HEAD_LINK_INDEXES_VERSION
+from .v20261117_0001_claim_head_link_indexes import upgrade as upgrade_claim_head_link_indexes
+from .v20261118_0001_claim_findings_indexes import DESCRIPTION as CLAIM_FINDINGS_INDEXES_DESCRIPTION
+from .v20261118_0001_claim_findings_indexes import NAME as CLAIM_FINDINGS_INDEXES_NAME
+from .v20261118_0001_claim_findings_indexes import VERSION as CLAIM_FINDINGS_INDEXES_VERSION
+from .v20261118_0001_claim_findings_indexes import upgrade as upgrade_claim_findings_indexes
+from .v20261119_0001_claim_escalation_and_scratch_drafts import DESCRIPTION as CLAIM_ESCALATION_DESCRIPTION
+from .v20261119_0001_claim_escalation_and_scratch_drafts import NAME as CLAIM_ESCALATION_NAME
+from .v20261119_0001_claim_escalation_and_scratch_drafts import VERSION as CLAIM_ESCALATION_VERSION
+from .v20261119_0001_claim_escalation_and_scratch_drafts import upgrade as upgrade_claim_escalation
+from .v20261120_0001_arbitration_matrix_origin_unique import DESCRIPTION as MATRIX_ORIGIN_DESCRIPTION
+from .v20261120_0001_arbitration_matrix_origin_unique import NAME as MATRIX_ORIGIN_NAME
+from .v20261120_0001_arbitration_matrix_origin_unique import VERSION as MATRIX_ORIGIN_VERSION
+from .v20261120_0001_arbitration_matrix_origin_unique import upgrade as upgrade_matrix_origin
+from .v20261121_0001_reviewer_role_identities import DESCRIPTION as REVIEWER_IDENTITIES_DESCRIPTION
+from .v20261121_0001_reviewer_role_identities import NAME as REVIEWER_IDENTITIES_NAME
+from .v20261121_0001_reviewer_role_identities import VERSION as REVIEWER_IDENTITIES_VERSION
+from .v20261121_0001_reviewer_role_identities import upgrade as upgrade_reviewer_identities
+from .v20261121_0002_reviewer_role_assignment_indexes import DESCRIPTION as REVIEWER_ASSIGNMENTS_DESCRIPTION
+from .v20261121_0002_reviewer_role_assignment_indexes import NAME as REVIEWER_ASSIGNMENTS_NAME
+from .v20261121_0002_reviewer_role_assignment_indexes import VERSION as REVIEWER_ASSIGNMENTS_VERSION
+from .v20261121_0002_reviewer_role_assignment_indexes import upgrade as upgrade_reviewer_assignments
+from .v20261122_0001_claim_contract_index import DESCRIPTION as CLAIM_CONTRACT_DESCRIPTION
+from .v20261122_0001_claim_contract_index import NAME as CLAIM_CONTRACT_NAME
+from .v20261122_0001_claim_contract_index import VERSION as CLAIM_CONTRACT_VERSION
+from .v20261122_0001_claim_contract_index import upgrade as upgrade_claim_contract
+from .v20261123_0001_skill_eval_runs_indexes import DESCRIPTION as SKILL_EVAL_RUNS_DESCRIPTION
+from .v20261123_0001_skill_eval_runs_indexes import NAME as SKILL_EVAL_RUNS_NAME
+from .v20261123_0001_skill_eval_runs_indexes import VERSION as SKILL_EVAL_RUNS_VERSION
+from .v20261123_0001_skill_eval_runs_indexes import upgrade as upgrade_skill_eval_runs
+from .v20261124_0001_subscription_gateway_identity_unique import DESCRIPTION as GATEWAY_IDENTITY_DESCRIPTION
+from .v20261124_0001_subscription_gateway_identity_unique import NAME as GATEWAY_IDENTITY_NAME
+from .v20261124_0001_subscription_gateway_identity_unique import VERSION as GATEWAY_IDENTITY_VERSION
+from .v20261124_0001_subscription_gateway_identity_unique import upgrade as upgrade_gateway_identity
 
 
 MIGRATIONS = [
@@ -241,5 +293,71 @@ MIGRATIONS = [
         name=LETTER_BENCH_INDEXES_NAME,
         description=LETTER_BENCH_INDEXES_DESCRIPTION,
         upgrade=upgrade_letter_bench_indexes,
+    ),
+    Migration(
+        version=SEED_CLAIM_ARBITRATION_SKILL_DRAFTS_VERSION,
+        name=SEED_CLAIM_ARBITRATION_SKILL_DRAFTS_NAME,
+        description=SEED_CLAIM_ARBITRATION_SKILL_DRAFTS_DESCRIPTION,
+        upgrade=upgrade_seed_claim_arbitration_skill_drafts,
+    ),
+    Migration(
+        version=CLAIM_BENCH_INDEXES_VERSION,
+        name=CLAIM_BENCH_INDEXES_NAME,
+        description=CLAIM_BENCH_INDEXES_DESCRIPTION,
+        upgrade=upgrade_claim_bench_indexes,
+    ),
+    Migration(
+        version=CLAIM_HEAD_LINK_INDEXES_VERSION,
+        name=CLAIM_HEAD_LINK_INDEXES_NAME,
+        description=CLAIM_HEAD_LINK_INDEXES_DESCRIPTION,
+        upgrade=upgrade_claim_head_link_indexes,
+    ),
+    Migration(
+        version=CLAIM_FINDINGS_INDEXES_VERSION,
+        name=CLAIM_FINDINGS_INDEXES_NAME,
+        description=CLAIM_FINDINGS_INDEXES_DESCRIPTION,
+        upgrade=upgrade_claim_findings_indexes,
+    ),
+    Migration(
+        version=CLAIM_ESCALATION_VERSION,
+        name=CLAIM_ESCALATION_NAME,
+        description=CLAIM_ESCALATION_DESCRIPTION,
+        upgrade=upgrade_claim_escalation,
+    ),
+    Migration(
+        version=MATRIX_ORIGIN_VERSION,
+        name=MATRIX_ORIGIN_NAME,
+        description=MATRIX_ORIGIN_DESCRIPTION,
+        upgrade=upgrade_matrix_origin,
+    ),
+    Migration(
+        version=REVIEWER_IDENTITIES_VERSION,
+        name=REVIEWER_IDENTITIES_NAME,
+        description=REVIEWER_IDENTITIES_DESCRIPTION,
+        upgrade=upgrade_reviewer_identities,
+    ),
+    Migration(
+        version=REVIEWER_ASSIGNMENTS_VERSION,
+        name=REVIEWER_ASSIGNMENTS_NAME,
+        description=REVIEWER_ASSIGNMENTS_DESCRIPTION,
+        upgrade=upgrade_reviewer_assignments,
+    ),
+    Migration(
+        version=CLAIM_CONTRACT_VERSION,
+        name=CLAIM_CONTRACT_NAME,
+        description=CLAIM_CONTRACT_DESCRIPTION,
+        upgrade=upgrade_claim_contract,
+    ),
+    Migration(
+        version=SKILL_EVAL_RUNS_VERSION,
+        name=SKILL_EVAL_RUNS_NAME,
+        description=SKILL_EVAL_RUNS_DESCRIPTION,
+        upgrade=upgrade_skill_eval_runs,
+    ),
+    Migration(
+        version=GATEWAY_IDENTITY_VERSION,
+        name=GATEWAY_IDENTITY_NAME,
+        description=GATEWAY_IDENTITY_DESCRIPTION,
+        upgrade=upgrade_gateway_identity,
     ),
 ]

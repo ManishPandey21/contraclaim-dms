@@ -45,6 +45,11 @@ vi.mock("@/services/enhanced-api", () => ({
   enhancedApi: { getProjects: vi.fn().mockResolvedValue([]) },
 }));
 
+vi.mock("@/services/documents-api", () => ({
+  listDocuments: vi.fn().mockResolvedValue({ items: [], total: 0 }),
+  getDocument: vi.fn().mockResolvedValue({ _id: "doc-1", subject: "Delay notice" }),
+}));
+
 vi.mock("sonner", () => ({
   toast: { success: vi.fn(), error: vi.fn() },
 }));
@@ -248,10 +253,15 @@ describe("ArbitrationCaseWorkspacePage (matrices section)", () => {
     expect(linkedDraftSelect).toBeTruthy();
     await userEvent.click(linkedDraftSelect as HTMLButtonElement);
     await userEvent.click(await screen.findByText(/EOT Statement of Claim \(Statement Of Claim\)/i));
-    await userEvent.type(screen.getByPlaceholderText("Comma-separated scoped document IDs"), "doc-1");
+    // Documents are chosen with the picker, by name, not typed as ids (4B-40).
+    expect(screen.queryByPlaceholderText("Comma-separated scoped document IDs")).not.toBeInTheDocument();
+    expect(screen.getByText("Documents for this pleading")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Start governed workflow" }));
 
     expect(await screen.findByLabelText("Workflow timeline")).toBeInTheDocument();
+    // The stepper names the gate and who acts; no node name or hash is shown.
+    expect(screen.getByText(/Now: Review the matrices\. Who acts: a legal reviewer/)).toBeInTheDocument();
+    expect(screen.queryByText(/matrix_review_gate|review_matrices|langgraph_v1/)).not.toBeInTheDocument();
     expect(await screen.findByText(/workflow created/i)).toBeInTheDocument();
     expect(getArbitrationWorkflowEventsMock).toHaveBeenCalledWith("case-1", "run-1");
   });

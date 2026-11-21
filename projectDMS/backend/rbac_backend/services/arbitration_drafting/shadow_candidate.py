@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from .case_workspace import ArbitrationCaseWorkspaceService, _is_ready_row
+from .case_workspace import ArbitrationCaseWorkspaceService
 from .matrix_registry import MATRIX_COLLECTIONS
 from .workflow_domain import (
     ANALYSIS_BRANCHES,
     PLEADING_MATRIX_REQUIREMENTS,
     _branch_matrices,
     _canonical_row,
+    _row_satisfies_requirement,
     deterministic_merge,
 )
 
@@ -31,7 +32,7 @@ class ArbitrationShadowCandidate:
         case_id = str(run["case_id"])
         pleading_type = str(run.get("pleading_type") or "")
         rows = {
-            slug: await self.cases.list_matrix_rows(case_id, slug, draft_id=run.get("draft_id"))
+            slug: await self.cases.list_matrix_rows(case_id, slug, draft_id=run.get("draft_id"), with_case_rows=True)
             for slug in MATRIX_COLLECTIONS
         }
         branches = []
@@ -47,6 +48,7 @@ class ArbitrationShadowCandidate:
         blockers = [
             {"code": "missing_required_matrix", "matrix": slug}
             for slug in PLEADING_MATRIX_REQUIREMENTS.get(pleading_type, ())
-            if not any(_is_ready_row(row) for row in rows.get(slug) or [])
+            # The authoritative rule: approved AND its source authority not refused.
+            if not any(_row_satisfies_requirement(row) for row in rows.get(slug) or [])
         ]
         return {**merged, "blockers": blockers, "namespace": "shadow_candidate", "authoritative_writes": False}

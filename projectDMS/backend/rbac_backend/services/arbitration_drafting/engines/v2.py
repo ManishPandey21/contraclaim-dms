@@ -10,6 +10,7 @@ from ....core.config import settings
 from ....models.arbitration_drafting import ArbitrationWorkflowCreateRequest
 from ..case_workspace import ArbitrationCaseWorkspaceService, _actor_id
 from ..matrix_registry import MATRIX_COLLECTIONS
+from ...publication_policy import document_id_candidates
 from ..repository import ArbitrationDraftingRepository
 from ..workflow_repository import ArbitrationWorkflowRepository, artifact_hash
 from ..workflow_domain import ArbitrationWorkflowDomain
@@ -53,9 +54,10 @@ class ArbitrationV2WorkflowEngine:
                 raise HTTPException(status_code=422, detail="Workflow pleading type does not match the linked draft")
         documents = []
         for document_id in sorted(set(payload.selected_document_ids)):
+            # documents._id is ObjectId-keyed; the payload holds the string form.
             record = await self.db.documents.find_one(
                 {
-                    "_id": document_id,
+                    "_id": {"$in": document_id_candidates(document_id)},
                     "organization_id": case.get("organization_id"),
                     "project_id": case.get("project_id"),
                 }
@@ -93,7 +95,7 @@ class ArbitrationV2WorkflowEngine:
             run_id, case_id, str(payload.pleading_type), payload.opponent_draft_id, payload.opponent_version_id,
             payload.opponent_pleadings,
         )
-        rows = {slug: await self.cases.list_matrix_rows(case_id, slug, draft_id=payload.draft_id) for slug in MATRIX_COLLECTIONS}
+        rows = {slug: await self.cases.list_matrix_rows(case_id, slug, draft_id=payload.draft_id, with_case_rows=True) for slug in MATRIX_COLLECTIONS}
         evidence_manifest = await self.cases._authoritative_evidence_manifest(case, rows)
         evidence_snapshot = await self.repository.create_snapshot(
             run_id=run_id,

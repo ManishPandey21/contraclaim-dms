@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Dict, List
+from datetime import datetime, timezone
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 CLIENT_DMS_PERMISSIONS: List[str] = [
     "dms.document.view",
@@ -27,6 +28,10 @@ CLIENT_DMS_PERMISSIONS: List[str] = [
     "dms.claim.delete",
     "dms.claim.manage",
     "dms.claim.assess",
+    "dms.claim.determine",
+    "dms.claim.strategy.read",
+    "dms.claim.evidence.confirm_contract",
+    "dms.claim.signal.view",
     "dms.contract.appraisal.view",
     "dms.contract.appraisal.generate",
     "dms.contract.appraisal.edit",
@@ -138,6 +143,8 @@ DRAFTING_PERMISSIONS: List[str] = [
 ]
 
 BILLING_PERMISSIONS: List[str] = [
+    "billing.record.view",  # DEF-4: billing records, review queue and summary
+    "subscription.status.view",  # DEF-4: operational subscription status (no financial detail)
     "billing.plan.view",
     "billing.plan.manage",
     "billing.invoice.view",
@@ -154,6 +161,18 @@ BILLING_PERMISSIONS: List[str] = [
     "subscription.offboarding_export",
 ]
 
+#: Platform administration (M4, owner decision 2026-11-20): the global plan, price and
+#: add-on catalogue is shared by every tenant, so it is administered only by Super Admin or
+#: by a platform user holding this name on a platform role (a custom role with no
+#: organisation or project, which counts only for a user bound to no organisation). It is
+#: never satisfied by an alias, a wildcard, an administrator name or a tenant role.
+PLATFORM_PERMISSIONS: List[str] = [
+    "platform.pricing.manage",
+]
+
+#: Permissions held only through a platform-scoped grant (see PLATFORM_PERMISSIONS).
+PLATFORM_GRANT_ONLY_PERMISSIONS: frozenset = frozenset(PLATFORM_PERMISSIONS)
+
 ROLE_MANAGEMENT_PERMISSIONS: List[str] = [
     "roles:read",
     "roles:create",
@@ -167,6 +186,7 @@ CANONICAL_PERMISSIONS: List[str] = [
     *CLIENT_DMS_PERMISSIONS,
     *DRAFTING_PERMISSIONS,
     *BILLING_PERMISSIONS,
+    *PLATFORM_PERMISSIONS,
     *ROLE_MANAGEMENT_PERMISSIONS,
 ]
 
@@ -199,6 +219,15 @@ class Permissions:
     CLAIM_DELETE = "dms.claim.delete"
     CLAIM_MANAGE = "dms.claim.manage"
     CLAIM_ASSESS = "dms.claim.assess"
+    # Authority to make and approve an official determination of a claim, and
+    # access to a party's privileged analysis of it (simulations, strategy
+    # note). Both are granted by name, never through the bulk role merge.
+    CLAIM_DETERMINE = "dms.claim.determine"
+    CLAIM_STRATEGY_READ = "dms.claim.strategy.read"
+    #: OD-1 (owner decision 2026-11-17): confirm which contract a piece of evidence belongs to.
+    CLAIM_EVIDENCE_CONFIRM_CONTRACT = "dms.claim.evidence.confirm_contract"
+    #: RU-1 (owner decision 2026-11-17): see Letter Bench claim signals of a project.
+    CLAIM_SIGNAL_VIEW = "dms.claim.signal.view"
     CONTRACT_APPRAISAL_VIEW = "dms.contract.appraisal.view"
     CONTRACT_APPRAISAL_GENERATE = "dms.contract.appraisal.generate"
     CONTRACT_APPRAISAL_EDIT = "dms.contract.appraisal.edit"
@@ -315,6 +344,8 @@ class Permissions:
 
     BILLING_PLAN_VIEW = "billing.plan.view"
     BILLING_PLAN_MANAGE = "billing.plan.manage"
+    #: Global plan, price and add-on catalogue writes (M4): Super Admin or a platform grant only.
+    PLATFORM_PRICING_MANAGE = "platform.pricing.manage"
     BILLING_INVOICE_VIEW = "billing.invoice.view"
     BILLING_INVOICE_DOWNLOAD = "billing.invoice.download"
     SUBSCRIPTION_ENTITLEMENT_MANAGE = "subscription.entitlement.manage"
@@ -324,6 +355,8 @@ class Permissions:
     SUBSCRIPTION_TRIAL_MANAGE = "subscription.trial.manage"
     SUBSCRIPTION_ADDON_MANAGE = "subscription.addon.manage"
     SUBSCRIPTION_HISTORY_VIEW = "subscription.history.view"
+    BILLING_RECORD_VIEW = "billing.record.view"
+    SUBSCRIPTION_STATUS_VIEW = "subscription.status.view"
     SUBSCRIPTION_USAGE_VIEW = "subscription.usage.view"
     SUBSCRIPTION_ARCHIVE_ACCESS = "subscription.archive_access"
     SUBSCRIPTION_OFFBOARDING_EXPORT = "subscription.offboarding_export"
@@ -351,6 +384,28 @@ class Permissions:
 EXPLICIT_GRANT_ONLY_PERMISSIONS: frozenset = frozenset(
     {
         "dms.document.review_extraction",
+        # Claim-to-arbitration Phase 3. Determination authority and access to
+        # privileged claim analysis are deliberate grants: holding the claim
+        # permissions does not confer either.
+        "dms.claim.determine",
+        "dms.claim.strategy.read",
+        # OD-1: confirming the contract of evidence is a deliberate, assigned duty.
+        "dms.claim.evidence.confirm_contract",
+        # RU-1: claim signals drawn from letters are granted deliberately, never by default.
+        "dms.claim.signal.view",
+    }
+)
+
+#: Privileged legal material and determination authority (plan D-12, 4B-10).
+#: Granted only by name on one of the user's own roles. None of these is
+#: implied by Super Admin status, by the ``*`` wildcard, or by ``dms.admin``:
+#: PolicyService checks them against the user's role documents directly.
+SUPERADMIN_EXCLUDED_PERMISSIONS: frozenset = frozenset(
+    {
+        "dms.claim.determine",
+        "dms.claim.strategy.read",
+        "dms.claim.evidence.confirm_contract",
+        "dms.claim.signal.view",
     }
 )
 
@@ -415,6 +470,7 @@ LEGACY_PERMISSION_ALIASES: Dict[str, List[str]] = {
     "subscription.usage.view": ["reports:view"],
     "subscription.archive_access": [],
     "subscription.offboarding_export": [],
+    "platform.pricing.manage": [],
 }
 
 #: Older spellings of names that are still checked today (`orgs:view` is
@@ -449,6 +505,120 @@ _DECLARED_BY: Dict[str, frozenset] = {
 }
 
 
+def actor_role_names(user: Any) -> set[str]:
+    """Lower-cased names of the roles a user holds, as assigned.
+
+    Used where a decision belongs to a named reviewer role (arbitration gates,
+    skill approvals) rather than to a permission. No alias resolution and no
+    global-role shortcut: a Super Admin holds a reviewer role only if assigned it.
+    """
+    if isinstance(user, dict):
+        values = user.get("roles") or user.get("role_names") or [user.get("role")]
+    else:
+        values = (
+            getattr(user, "roles", None)
+            or getattr(user, "role_names", None)
+            or [getattr(user, "role", None)]
+        )
+    if isinstance(values, str):
+        values = [values]
+    result = set()
+    for value in values or []:
+        name = getattr(value, "name", None) or getattr(value, "value", None) or value
+        if name:
+            result.add(str(name).strip().lower())
+    return result
+
+
+#: Reviewer identities (plan D-06, AQ-3). A role key here is an identity, never a
+#: permission bundle: its role document carries no permissions. The first four
+#: sign off skill packs (platform scope) and, at organisation or project scope,
+#: arbitration gates; the rest answer arbitration gates only.
+SKILL_REVIEWER_ROLE_KEYS: frozenset = frozenset(
+    {
+        "chief_contract_expert",
+        "delay_planning_expert",
+        "arbitration_case_preparation_expert",
+        "senior_legal_approver",
+    }
+)
+ARBITRATION_REVIEWER_ROLE_KEYS: frozenset = frozenset(
+    {"legal_reviewer", "contract_reviewer", "delay_reviewer", "quantum_reviewer", "export_authorizer"}
+)
+REVIEWER_ROLE_KEYS: frozenset = SKILL_REVIEWER_ROLE_KEYS | ARBITRATION_REVIEWER_ROLE_KEYS
+
+REVIEWER_SCOPE_PLATFORM = "platform"
+REVIEWER_SCOPE_ORGANIZATION = "organization"
+REVIEWER_SCOPE_PROJECT = "project"
+REVIEWER_SCOPE_TYPES: frozenset = frozenset(
+    {REVIEWER_SCOPE_PLATFORM, REVIEWER_SCOPE_ORGANIZATION, REVIEWER_SCOPE_PROJECT}
+)
+
+
+def reviewer_assignment_is_live(assignment: Mapping[str, Any], now: datetime) -> bool:
+    """An assignment counts only while it is neither revoked nor expired."""
+    if assignment.get("revoked_at") is not None:
+        return False
+    expires_at = assignment.get("expires_at")
+    if expires_at is None:
+        return True
+    if not isinstance(expires_at, datetime):
+        return False  # an unreadable expiry is not an open-ended grant
+    if expires_at.tzinfo is not None:
+        expires_at = expires_at.astimezone(timezone.utc).replace(tzinfo=None)
+    moment = now.astimezone(timezone.utc).replace(tzinfo=None) if now.tzinfo is not None else now
+    return expires_at > moment
+
+
+def reviewer_roles_from_assignments(
+    assignments: Iterable[Mapping[str, Any]],
+    *,
+    user_id: str,
+    scope_type: str,
+    organization_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    now: datetime,
+) -> set[str]:
+    """The reviewer roles a user's assignments confer for one scope (plan D-06).
+
+    The single rule, stated once:
+
+    - ``platform``: only a live platform assignment answers. An organisation or
+      project assignment never does, whatever its role key.
+    - ``organization``: only a live assignment for that organisation answers.
+    - ``project``: a live assignment for that project, or for the organisation
+      that owns it, answers. A platform assignment does not: platform authority
+      is for skill packs, not for one tenant's case.
+
+    Nothing is inferred from role names, account type or Super Admin status.
+    """
+    wanted_user = str(user_id or "")
+    if not wanted_user or scope_type not in REVIEWER_SCOPE_TYPES:
+        return set()
+    organization = str(organization_id or "")
+    project = str(project_id or "")
+    roles: set[str] = set()
+    for item in assignments:
+        if str(item.get("user_id") or "") != wanted_user:
+            continue
+        role_key = str(item.get("role_key") or "").strip().lower()
+        if role_key not in REVIEWER_ROLE_KEYS or not reviewer_assignment_is_live(item, now):
+            continue
+        held = str(item.get("scope_type") or "")
+        if scope_type == REVIEWER_SCOPE_PLATFORM:
+            if held == REVIEWER_SCOPE_PLATFORM:
+                roles.add(role_key)
+            continue
+        if not organization or str(item.get("organization_id") or "") != organization:
+            continue
+        if held == REVIEWER_SCOPE_ORGANIZATION:
+            roles.add(role_key)
+        elif held == REVIEWER_SCOPE_PROJECT and scope_type == REVIEWER_SCOPE_PROJECT:
+            if project and str(item.get("project_id") or "") == project:
+                roles.add(role_key)
+    return roles
+
+
 def equivalent_permissions(permission: str) -> set[str]:
     """Every held name that satisfies a check for `permission`.
 
@@ -476,6 +646,32 @@ def equivalent_permissions(permission: str) -> set[str]:
         equivalents.add(related_name)
         equivalents.update(LEGACY_LABEL_ALIASES.get(related_name, []))
     return equivalents
+
+
+def known_permission_name(permission: str) -> Optional[str]:
+    """The name a role entry stands for if the platform defines it, else ``None`` (SEC-2).
+
+    A label spelling resolves to its target; a canonical or declared legacy name is
+    itself. Catalogue documents are resolved by the role service.
+    """
+    text = (permission or "").strip()
+    if not text:
+        return None
+    if text in _LABEL_TARGET:
+        return _LABEL_TARGET[text]
+    if text in CANONICAL_PERMISSIONS or text in LEGACY_PERMISSION_ALIASES or text in ALIAS_TO_CANONICAL or text in LEGACY_LABEL_ALIASES:
+        return text
+    return None
+
+
+#: DEF-4: held names that, with BILLING_EXPLICIT_PERMISSIONS on, no longer satisfy any
+#: billing or subscription check (today they do, through LEGACY_PERMISSION_ALIASES).
+LEGACY_BILLING_VIEW_ALIASES: frozenset = frozenset({"organizations:read", "orgs:view", "reports:view"})
+
+
+def is_billing_permission(permission: str) -> bool:
+    """A billing or subscription check (the names DEF-4's explicit-grant policy governs)."""
+    return str(permission or "").startswith(("billing.", "subscription."))
 
 
 def permission_domain(permission: str) -> str:

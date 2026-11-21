@@ -10,6 +10,9 @@ from __future__ import annotations
 import io
 from typing import Any, Dict, List, Optional, Tuple
 
+from ...core.config import settings
+from ..docx_xml import clean_text, w_paragraph, w_table
+
 
 def _is_separator_row(line: str) -> bool:
     cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
@@ -103,13 +106,30 @@ class ArbitrationDraftExporter:
         return buffer.getvalue()
 
     @staticmethod
-    def build_docx(version: Dict[str, Any]) -> bytes:
+    def build_docx(version: Dict[str, Any], *, writer: Optional[str] = None) -> bytes:
+        """The Word file for ``version``, by the configured writer (D-19, AQ-7).
+
+        ``minimal`` (the default, what production uses) whatever is installed: having
+        python-docx installed must not change production output unreviewed.
+        ``python_docx`` only when chosen, and then python-docx must be installed: a
+        configured writer that is missing is an error, never a silent fallback.
+        """
+        chosen = str(writer or getattr(settings, "DOCX_WRITER", "minimal") or "minimal").strip().lower()
+        if chosen == "minimal":
+            return ArbitrationDraftExporter._build_minimal_docx(version.get("full_markdown") or "")
+        if chosen != "python_docx":
+            raise ValueError(f"Unknown DOCX_WRITER: {chosen}")
+        return ArbitrationDraftExporter._build_python_docx(version)
+
+    @staticmethod
+    def _build_python_docx(version: Dict[str, Any]) -> bytes:
         try:
             import docx
-        except ModuleNotFoundError:
-            return ArbitrationDraftExporter._build_minimal_docx(version.get("full_markdown") or "")
+        except ModuleNotFoundError as exc:
+            raise RuntimeError("DOCX_WRITER=python_docx but python-docx is not installed") from exc
 
-        blocks = _parse_blocks(version.get("full_markdown") or "")
+        # 4B-29: python-docx refuses XML-forbidden characters; remove them first.
+        blocks = _parse_blocks(clean_text(version.get("full_markdown") or ""))
         document = docx.Document()
 
         contents = _contents(blocks)
@@ -151,11 +171,10 @@ class ArbitrationDraftExporter:
     @staticmethod
     def _build_minimal_docx(markdown: str) -> bytes:
         import zipfile
-        from xml.sax.saxutils import escape
 
         def paragraph_xml(text: str, style: Optional[str] = None) -> str:
-            body = f'<w:pPr><w:pStyle w:val="{style}"/></w:pPr>' if style else ""
-            return f'<w:p>{body}<w:r><w:t xml:space="preserve">{escape(text)}</w:t></w:r></w:p>'
+            # 4B-29: forbidden characters removed as well as escaped.
+            return w_paragraph(text, style=style)
 
         blocks = _parse_blocks(markdown)
         parts: List[str] = []
@@ -171,9 +190,9 @@ class ArbitrationDraftExporter:
             elif kind == "h2":
                 parts.append(paragraph_xml(payload, "Heading2"))
             elif kind == "table":
-                # Degrade tables to tab-joined rows (no table styling without python-docx).
-                for row in payload:
-                    parts.append(paragraph_xml(" \t ".join(row)))
+                # 4B-29: a real table with a w:tblGrid, as the python-docx path writes.
+                parts.append(w_table(payload, header=True, size=None))
+                parts.append(paragraph_xml(""))
             elif kind == "blank":
                 parts.append(paragraph_xml(""))
             else:

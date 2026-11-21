@@ -97,6 +97,9 @@ class _AsyncCursor:
     def __init__(self, docs) -> None:
         self.docs = [dict(doc) for doc in docs]
 
+    async def to_list(self, length=None):
+        return list(self.docs) if length is None else list(self.docs)[:length]
+
     def __aiter__(self):
         self._iter = iter(self.docs)
         return self
@@ -117,6 +120,9 @@ class _EntitlementDB:
         plans=None,
         addons=None,
     ) -> None:
+        if subscription is not None and "organization_id" not in subscription:
+            # Selection now compares the scope (2026-11-20); the cases here are org-1 / project-1.
+            subscription = {"organization_id": "org-1", "project_id": "project-1", **subscription}
         self.subscriptions = _CountableCollection(subscription_count, subscription)
         self.plans = _CountableCollection(documents=plans or [])
         self.addons = _CountableCollection(documents=addons or [])

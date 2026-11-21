@@ -1,7 +1,8 @@
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Literal
 from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from pydantic import BaseModel
 from pymongo import ReturnDocument
 
 from ..core.security import _normalize_roles_list, require_permission, get_current_user, build_scope_query
@@ -16,6 +17,12 @@ from ..services.project_service import ProjectService
 from ..services.permission_service import PermissionService
 from ..services.authorization_service import AuthorizationService
 from ..services.policy_service import PolicyService
+from ..services.project_perspective import (
+    ORG_DEFAULT_FIELD,
+    PerspectiveChange,
+    PerspectiveState,
+    ProjectPerspectiveService,
+)
 from ..services.step_up_service import require_step_up
 from ..utils.error_handler import BaseDomainError
 
@@ -102,6 +109,8 @@ async def create_project(
     payload = project.model_dump(by_alias=True, exclude_none=True)
     # Always let Mongo generate the _id to keep it as an ObjectId
     payload.pop("_id", None)
+    # Set afterwards through its own audited route (plan 4B-15, D-11).
+    payload.pop("contractual_capacity", None)
     # payload["organization_id"] = str(organization.get("_id", project.organization_id))
     # If your DB uses ObjectIds for foreign keys, use this:
     try:
@@ -300,6 +309,83 @@ async def update_project_notification_settings(
     return _project_subscription_response(saved or {})
 
 
+async def _may_update_project(current_user, project_id: str, db) -> bool:
+    try:
+        await _ensure_project_access(current_user, project_id, "projects:update", db)
+    except HTTPException as exc:
+        if exc.status_code in (status.HTTP_401_UNAUTHORIZED,):
+            raise
+        return False
+    return True
+
+
+@router.get("/projects/{project_id}/contractual-capacity", response_model=PerspectiveState)
+async def get_project_contractual_capacity(
+    project_id: str,
+    db=Depends(get_db),
+    current_user=Depends(get_current_user),
+    _: None = Depends(require_permission("projects:read")),
+):
+    """Which party this project acts for, where that comes from, and whether the caller may set it.
+
+    Screens use it to ask only people who can answer (plan 4B-15, D-11).
+    """
+    await _ensure_project_access(current_user, project_id, "projects:read", db)
+    existing = await _find_by_id(db.projects, project_id)
+    if not existing:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    may_update = await _may_update_project(current_user, project_id, db)
+    return await ProjectPerspectiveService(db).state(existing, current_user, may_update=may_update)
+
+
+@router.patch("/projects/{project_id}/contractual-capacity", response_model=Project)
+async def set_project_contractual_capacity(
+    project_id: str,
+    payload: PerspectiveChange,
+    db=Depends(get_db),
+    current_user=Depends(get_current_user),
+    _: None = Depends(require_permission("projects:update")),
+):
+    """State which party to the contract this project's workspace acts for.
+
+    The only route that writes it (plan 4B-15, D-11). Every change is audited.
+    Once a determination, simulation or submission has been made from the
+    position, only an administrator of the organisation may change it, with a
+    reason.
+    """
+    await _ensure_project_access(current_user, project_id, "projects:update", db)
+    existing = await _find_by_id(db.projects, project_id)
+    if not existing:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    updated = await ProjectPerspectiveService(db).set_for_project(existing, payload, current_user)
+    return Project(**updated)
+
+
+@router.patch("/organizations/{organization_id}/default-contractual-capacity", response_model=PerspectiveState)
+async def set_organization_default_contractual_capacity(
+    organization_id: str,
+    payload: PerspectiveChange,
+    db=Depends(get_db),
+    current_user=Depends(get_current_user),
+    _: None = Depends(require_permission("projects:update")),
+):
+    """The position a project of this organisation acts from until it states its own."""
+    await PolicyService(db).authorize(
+        current_user,
+        "dms.project.manage",
+        resource_type="organization",
+        resource_id=organization_id,
+        organization_id=organization_id,
+    )
+    organization = await _find_by_id(db.organizations, organization_id)
+    if not organization:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found")
+    updated = await ProjectPerspectiveService(db).set_organisation_default(organization, payload, current_user)
+    return PerspectiveState(
+        value=updated.get(ORG_DEFAULT_FIELD), source="organisation_default", can_set=True
+    )
+
+
 @router.put("/projects/{project_id}", response_model=Project)
 async def update_project(
     project_id: str,
@@ -338,6 +424,9 @@ async def update_project(
         exclude_none=True,
     )
     update_doc.pop("_id", None)
+    # The party the project acts for has its own audited, lockable route
+    # (plan 4B-15, D-11). A general update never carries it.
+    update_doc.pop("contractual_capacity", None)
     updated_project = await db.projects.find_one_and_update(
         {"_id": existing["_id"]},
         {"$set": update_doc},
@@ -361,7 +450,14 @@ async def delete_project(
     existing = await _find_by_id(db.projects, project_id)
     if not existing:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    from ..services.permission_service import begin_authority_change, complete_grant_change, project_member_ids
+
+    # Review (2026-11-19): project roles of a deleted project grant nothing; clear the
+    # members' cached grants around the delete (a 503 if that cannot be announced).
+    members = await project_member_ids(db, existing["_id"])
+    await begin_authority_change(members)
     deleted_project = await db.projects.find_one_and_delete({"_id": existing["_id"]})
+    await complete_grant_change(members)
     if not deleted_project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     return {"message": "Project deleted successfully"}

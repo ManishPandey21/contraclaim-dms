@@ -1,0 +1,406 @@
+import type { ClaimDTO, ClaimType, NoticeAssessment } from "@/services/claims-api";
+
+export const ELEMENT_KEYS = ["event", "notice", "contractual_basis", "causation", "quantum"] as const;
+export type ElementKey = (typeof ELEMENT_KEYS)[number];
+export type ElementState = "supported" | "weak" | "missing" | "not_applicable";
+export type HeadKind = "time" | "cost" | "time_and_cost";
+export type HeadClassification = "excusable" | "compensable" | "contractor_risk" | "undetermined";
+export type Perspective = "contractor" | "engineer" | "employer";
+
+export interface HeadElement {
+  proposed_state?: ElementState | null;
+  proposed_reason?: string | null;
+  /** Who made the proposal: the published skill, or the record checks alone. */
+  proposed_by?: "skill" | "record_check" | null;
+  source_ids: string[];
+  /** The call a person made. Null until someone decides. */
+  state?: ElementState | null;
+  note?: string | null;
+  decided_by?: string | null;
+  decided_at?: string | null;
+}
+
+export type FigureField = "amount_claimed" | "eot_days_claimed";
+
+/** A figure on the claim record that was not carried onto the board; a person re-enters it. */
+export interface FigureToReenter {
+  field: FigureField;
+  recorded: string;
+}
+
+export interface ClaimHead {
+  head_id: string;
+  title: string;
+  kind: HeadKind;
+  event_summary?: string | null;
+  clause_refs: string[];
+  amount_claimed?: number | null;
+  eot_days_claimed?: number | null;
+  figures_to_reenter?: FigureToReenter[];
+  elements: Record<ElementKey, HeadElement>;
+  proposed_classification?: HeadClassification | null;
+  classification?: HeadClassification | null;
+  residual_risks: string[];
+  missing_information: string[];
+  step_id?: string | null;
+  test_stale: boolean;
+  tested_at?: string | null;
+}
+
+export interface ClaimBenchBoard {
+  board_version: number;
+  stage: "heads" | "locked";
+  heads: ClaimHead[];
+  perspective?: Perspective | null;
+  locked_at?: string | null;
+  locked_by?: string | null;
+}
+
+export interface BenchGate {
+  undecided_elements: number;
+  unclassified_heads: number;
+  stale_tests: number;
+  blockers: string[];
+  can_lock: boolean;
+}
+
+export interface BenchStepSummary {
+  step_id: string;
+  subject_id: string;
+  skill_key: string;
+  skill_version: string;
+  skill_name?: string | null;
+  role?: string | null;
+  degraded: boolean;
+  stale: boolean;
+  error?: string | null;
+  model?: string | null;
+  completed_at?: string | null;
+}
+
+export interface NoticeRequirement {
+  _id?: string;
+  id?: string;
+  organization_id: string;
+  project_id: string;
+  claim_type: string;
+  period_days: number;
+  trigger: "awareness" | "event";
+  clause_no: string;
+  clause_title?: string | null;
+  quote: string;
+  document_type?: string | null;
+  /** Set by the server (D-08). "entered" is the value written before 4B-14. */
+  origin: "clause_index" | "entered_from_contract" | "entered";
+  verification: "extracted_unverified" | "verified";
+  status: "current" | "superseded";
+  created_by?: string | null;
+  created_at?: string | null;
+  verified_by?: string | null;
+  verified_at?: string | null;
+}
+
+export interface NoticePeriodCandidate {
+  period_days: number;
+  trigger: "awareness" | "event";
+  clause_no: string;
+  clause_title?: string | null;
+  quote: string;
+  document_id?: string | null;
+  document_type?: string | null;
+  clause_uid?: string | null;
+  modifies_general_conditions: boolean;
+  cited_by_claim: boolean;
+}
+
+export interface NoticeCandidates {
+  project_id: string;
+  claim_type: string;
+  clause_index_available: boolean;
+  candidates: NoticePeriodCandidate[];
+  current?: NoticeRequirement | null;
+}
+
+export interface NoticeRequirementInput {
+  project_id: string;
+  claim_type: string;
+  period_days: number;
+  trigger: "awareness" | "event";
+  clause_no: string;
+  clause_title?: string | null;
+  quote: string;
+  document_id?: string | null;
+  document_type?: string | null;
+  clause_uid?: string | null;
+}
+
+export interface ClaimBenchResponse {
+  claim_id: string;
+  claim_ref?: string | null;
+  title: string;
+  claim_type: ClaimType;
+  status: ClaimDTO["status"];
+  organization_id?: string | null;
+  project_id?: string | null;
+  exists: boolean;
+  bench: ClaimBenchBoard;
+  gate: BenchGate;
+  steps: BenchStepSummary[];
+  notice_assessment?: NoticeAssessment | null;
+  notice_requirement?: NoticeRequirement | null;
+  /** The party this project acts for. Null means nobody has said. */
+  perspective?: Perspective | null;
+  skill: { skill_key: string; available: boolean; version?: string | null; reason?: string | null };
+  read_only: boolean;
+  read_only_reason?: string | null;
+  arbitration_case_id?: string | null;
+  rollout_mode: string;
+}
+
+export interface ClaimSignal {
+  source_type: "hindrance" | "letter_bench";
+  source_id: string;
+  label: string;
+  title: string;
+  reason: string;
+  claim_type: ClaimType;
+  event_date?: string | null;
+  notice_assessment?: NoticeAssessment | null;
+}
+
+export interface HeadInput {
+  title: string;
+  kind: HeadKind;
+  event_summary?: string | null;
+  clause_refs: string[];
+  amount_claimed?: number | null;
+  eot_days_claimed?: number | null;
+}
+
+export interface HeadPatch {
+  title?: string;
+  kind?: HeadKind;
+  event_summary?: string;
+  clause_refs?: string[];
+  amount_claimed?: number;
+  clear_amount?: boolean;
+  eot_days_claimed?: number;
+  clear_eot_days?: boolean;
+  figures_not_needed?: FigureField[];
+  classification?: HeadClassification;
+  clear_classification?: boolean;
+}
+
+// --------------------------------------------------------------------------- //
+// Delay Lab and Quantum Builder (Phase 2)
+// --------------------------------------------------------------------------- //
+export type RiskOwner = "employer" | "contractor" | "neutral";
+export type Criticality = "critical" | "not_critical" | "unproven";
+export type DelayMethod = "as_planned_vs_as_built" | "windows";
+export type OverlapTreatment =
+  | "eot_granted_no_cost"
+  | "eot_granted_with_cost"
+  | "apportioned"
+  | "no_eot"
+  | "not_true_concurrency";
+export type LinkTargetType = "hindrance" | "eot_submission" | "eot_determination";
+
+export interface EventDecision {
+  proposed_risk_owner?: RiskOwner | null;
+  proposed_criticality?: Criticality | null;
+  proposed_reason?: string | null;
+  proposed_by?: "skill" | "register" | null;
+  risk_owner?: RiskOwner | null;
+  criticality?: Criticality | null;
+  note?: string | null;
+  decided_by?: string | null;
+}
+
+export interface DelayEventView {
+  event_id: string;
+  link_id: string;
+  label: string;
+  title: string;
+  start_date: string;
+  end_date?: string | null;
+  open_ended: boolean;
+  register_responsibility?: string | null;
+  register_critical?: boolean | null;
+  /** False when the hindrance has changed since it was linked. */
+  revision_current: boolean;
+  counted: boolean;
+  days?: number | null;
+  decision: EventDecision;
+}
+
+/** Why an overlap's days carry cost (4B-22, D-16). Nothing is compensable without it. */
+export interface CostBasis {
+  contractual_basis: string;
+  causation: string;
+  evidence_document_ids: string[];
+  recorded_by?: string | null;
+  recorded_at?: string | null;
+  reviewed_by?: string | null;
+  reviewed_at?: string | null;
+}
+
+export interface ConcurrencyFinding {
+  treatment: OverlapTreatment;
+  days_to_eot?: number | null;
+  basis: string;
+  decided_by?: string | null;
+  decided_at?: string | null;
+  event_ids?: string[];
+  cost_basis?: CostBasis | null;
+}
+
+export type OverlapKind = "employer_contractor" | "neutral_contractor";
+
+export interface OverlapView {
+  overlap_id: string;
+  start_date: string;
+  end_date: string;
+  days: number;
+  kind?: OverlapKind;
+  employer_event_ids: string[];
+  contractor_event_ids: string[];
+  neutral_event_ids?: string[];
+  finding?: ConcurrencyFinding | null;
+  days_to_eot?: number | null;
+  /** Whether its days carry cost; if not, cost_status says what is missing. */
+  cost_established?: boolean;
+  cost_status?: string | null;
+}
+
+export interface LinkedRecordView {
+  link_id: string;
+  target_type: LinkTargetType;
+  target_id: string;
+  label: string;
+  status?: string | null;
+  date?: string | null;
+  milestone_ref?: string | null;
+  granted_days?: number | null;
+  counted: boolean;
+  not_counted_reason?: string | null;
+  revision_current: boolean;
+}
+
+/** One line of the net-EOT table. `days` adds to the lower (settled) figure; `up_to` only to the higher. */
+export interface NetEotRow {
+  key:
+    | "employer_only"
+    | "neutral_only"
+    | "overlap_time"
+    | "overlap_none"
+    | "overlap_apportioned"
+    | "apportioned_shared"
+    | "previously_granted"
+    | "floor"
+    | "undecided";
+  label: string;
+  days: number;
+  up_to: number;
+  overlap_id?: string | null;
+  treatment?: string | null;
+}
+
+export interface DelayView {
+  head_id: string;
+  method?: DelayMethod | null;
+  as_of_date?: string | null;
+  unavailable_methods: Record<string, string>;
+  include_neutral: boolean;
+  neutral_basis?: string | null;
+  events: DelayEventView[];
+  overlaps: OverlapView[];
+  records: LinkedRecordView[];
+  employer_critical_days: number;
+  contractor_critical_days: number;
+  neutral_critical_days: number;
+  contractor_only_days: number;
+  net: {
+    low: number;
+    high: number;
+    /** Set only when every overlap has a decided treatment. */
+    days?: number | null;
+    settled: boolean;
+    previously_granted: number;
+    employer_only_days: number;
+    overlap_days_to_eot: number;
+    neutral_days_included: number;
+  };
+  /** The net-EOT table (4B-25): rows add up to `net` exactly. */
+  net_table?: NetEotRow[];
+  compensable_periods: { start_date: string; end_date: string; days: number }[];
+  blockers: string[];
+  stale_links: number;
+}
+
+export interface LinkCandidate {
+  target_type: LinkTargetType;
+  target_id: string;
+  label: string;
+  title?: string | null;
+  date?: string | null;
+  status?: string | null;
+  milestones: string[];
+}
+
+export type QuantumCategory =
+  | "direct"
+  | "prolongation"
+  | "disruption"
+  | "overhead_formula"
+  | "loss_of_profit"
+  | "interest";
+export type QuantumFormula = "none" | "hudson" | "emden" | "eichleay";
+export type RecordRole = "support" | "actual_loss" | "work_declined";
+
+export interface FormulaInputValue {
+  /** Decimal text, never a binary float. */
+  value: string;
+  document_id?: string | null;
+}
+
+export interface QuantumLine {
+  line_id: string;
+  category: QuantumCategory;
+  description: string;
+  /** Rupees, derived from amount_paise for display. */
+  amount: number;
+  /** The authoritative amount, in integer paise (4B-24). */
+  amount_paise?: number;
+  formula_inputs?: Record<string, FormulaInputValue>;
+  period_start?: string | null;
+  period_end?: string | null;
+  formula: QuantumFormula;
+  basis?: string | null;
+  records: { document_id: string; role: RecordRole }[];
+}
+
+/** A formula line sends formula_inputs and no amount: the server computes it. */
+export type QuantumLineInput = Omit<QuantumLine, "line_id" | "amount" | "amount_paise"> & { amount?: number };
+
+export interface QuantumView {
+  head_id: string;
+  currency: string;
+  lines: {
+    line: QuantumLine;
+    locked: boolean;
+    lock_reasons: string[];
+    /** A formula line: its amount is arithmetic from the figures, not a determination. */
+    calculated?: boolean;
+    calculation_note?: string | null;
+  }[];
+  /** Of the claimed total, the part calculated by a formula. */
+  calculated_total_paise?: number;
+  /** Totals in integer paise; the rupee totals are derived from them. */
+  claimed_total_paise?: number;
+  supported_total_paise?: number;
+  locked_total_paise?: number;
+  claimed_total: number;
+  supported_total: number;
+  locked_total: number;
+  locked_count: number;
+}

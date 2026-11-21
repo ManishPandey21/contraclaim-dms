@@ -19,7 +19,12 @@ async def upgrade(db: Any, dry_run: bool) -> MigrationResult:
     operations: List[Dict[str, Any]] = []
     warnings: List[str] = []
     now = now_utc()
+    # Only the packs bundled as published are seeded here. Packs bundled as
+    # drafts are stored, unpublished, by 20261115_0001; seeding them here would
+    # give unreviewed text a publication date and a "latest published" pointer.
     for version in system_skill_versions():
+        if version.status != "published":
+            continue
         existing = await db.skill_versions.find_one(
             {"skill_key": version.skill_key, "version": version.version}
         )

@@ -13,7 +13,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
-from ..core.permissions import CANONICAL_PERMISSIONS, CLIENT_DMS_PERMISSIONS
+from ..core.permissions import CANONICAL_PERMISSIONS, CLIENT_DMS_PERMISSIONS, SUPERADMIN_EXCLUDED_PERMISSIONS
 from .default_permissions import DEFAULT_PERMISSIONS
 from .default_roles import DEFAULT_ROLES
 
@@ -102,9 +102,19 @@ def seed_catalog_validation_issues(payload: Dict[str, Any] | None = None) -> Lis
         if missing:
             issues.append(f"role {role['id']} references permissions missing from seed catalog: {missing}")
 
+    # Granted only deliberately, by name (plan D-12): no default role may hold
+    # them, so the org admin's coverage rule does not ask for them.
+    deliberate = set(SUPERADMIN_EXCLUDED_PERMISSIONS)
+    for role in source["roles"]:
+        held = sorted(set(role["permissions"]) & deliberate)
+        if held:
+            issues.append(f"role {role['id']} seeds permissions that must be granted deliberately: {held}")
+
     orgadmin = next((role for role in source["roles"] if role["id"] == "orgadmin"), None)
     if orgadmin:
-        missing_client_dms = sorted(set(source["client_dms_permissions"]) - set(orgadmin["permissions"]))
+        missing_client_dms = sorted(
+            set(source["client_dms_permissions"]) - deliberate - set(orgadmin["permissions"])
+        )
         if missing_client_dms:
             issues.append(f"orgadmin seed missing Client DMS permissions: {missing_client_dms}")
     else:

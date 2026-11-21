@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import re
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 from ...config.document_processing_config import DocumentProcessingConfig
@@ -79,6 +80,17 @@ class LLMDraftGenerator:
             return base
 
         prompt = self._build_prompt(context, rewritable, additional_instruction)
+        # An approved, published pleadings skill supplies the method. It is put
+        # in front of the task; the task's hard rules and the checks below are
+        # unchanged. With no published skill the prompt is exactly as before.
+        skill = context.get("pleading_skill") or None
+        if skill and skill.get("block"):
+            # Imported here, and in this order: the skill engine and the letter
+            # drafting package import each other, and only this order resolves.
+            from ..letter_drafting import prompts as _letter_prompts  # noqa: F401
+            from ..skills.compiler import attach_skill_block
+
+            prompt = attach_skill_block(prompt, SimpleNamespace(block=str(skill["block"])))
         try:
             raw = await self.generator.generate(prompt, max_tokens=3500, model=self.model_name)
             rewrites = self._parse_sections(raw)
@@ -110,21 +122,33 @@ class LLMDraftGenerator:
         markdown = self._deterministic._markdown(
             context["draft"], new_sections, context, additional_instruction=additional_instruction
         )
+        prompt_version = self.prompt_version_for(skill)
         structured = {
             **base["structured_output"],
-            "prompt_version": LLM_DRAFT_PROMPT_VERSION,
+            "prompt_version": prompt_version,
             "generation_mode": "llm",
             "llm_rewritten_sections": rewritten,
             "model": self.model_name,
         }
+        if skill:
+            structured["skill"] = {
+                key: skill.get(key) for key in ("skill_key", "version", "content_hash", "role")
+            }
         return {
             **base,
             "sections": new_sections,
             "full_markdown": markdown,
             "structured_output": structured,
-            "ai_prompt_version": LLM_DRAFT_PROMPT_VERSION,
+            "ai_prompt_version": prompt_version,
             "model": self.model_name,
         }
+
+    @staticmethod
+    def prompt_version_for(skill: Optional[Dict[str, Any]]) -> str:
+        """The prompt version recorded on a draft: the task prompt's, plus the skill text it ran with."""
+        if skill and skill.get("content_hash"):
+            return f"{LLM_DRAFT_PROMPT_VERSION}+skill.{str(skill['content_hash'])[:12]}"
+        return LLM_DRAFT_PROMPT_VERSION
 
     # --- prompt / parse -------------------------------------------------------
 

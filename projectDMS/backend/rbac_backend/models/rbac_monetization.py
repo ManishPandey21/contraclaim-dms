@@ -299,6 +299,8 @@ class SubscriptionUpdate(BaseModel):
     payment_gateway_subscription_id: Optional[str] = None
     cancelled_at: Optional[datetime] = None
     cancellation_reason: Optional[str] = None
+    # A non-commercial note for administrators (R6-8 allowlist); never read by entitlement.
+    admin_note: Optional[str] = Field(default=None, max_length=1000)
 
 
 class Subscription(SubscriptionBase):
@@ -412,9 +414,14 @@ class StartTrialRequest(BaseModel):
 
 
 class ConvertTrialRequest(BaseModel):
-    """Payload for converting a trial into a paid subscription."""
+    """Payload for converting a trial (R6-5). A priced plan converts through a payment-confirmed
+    checkout; ``no_charge_reason`` asks for an audited no-charge conversion, which needs Super
+    Admin authority. Unknown keys are refused."""
+    model_config = ConfigDict(extra="forbid")
+
     billing_period: str = "monthly"
     add_on_codes: List[str] = Field(default_factory=list)
+    no_charge_reason: Optional[str] = Field(default=None, max_length=500)
 
 
 class CancelSubscriptionRequest(BaseModel):

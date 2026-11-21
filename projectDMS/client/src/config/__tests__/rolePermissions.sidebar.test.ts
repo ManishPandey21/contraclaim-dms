@@ -166,6 +166,12 @@ describe("SideBar route ↔ permission parity (Phase 1)", () => {
     expect(expanded.has("dms.document.view")).toBe(false);
   });
 
+  it("The global billing catalogue needs the platform permission, not billing.plan.manage (M4)", () => {
+    expect(isRouteAllowedByPermission(canFor(["billing.plan.manage"]), "/admin/billing-catalog")).toBe(false);
+    expect(isRouteAllowedByPermission(canFor(["platform.pricing.manage"]), "/admin/billing-catalog")).toBe(true);
+    expect(expandPermissionSet(["billing.plan.manage"]).has("platform.pricing.manage")).toBe(false);
+  });
+
   it("Legal words are open to signed-in users while admin stays gated", () => {
     expect(isRouteAllowedByPermission(canFor([]), "/legal-words")).toBe(true);
     expect(isRouteAllowedByPermission(canFor(["dms.document.view"]), "/admin/legal-words")).toBe(false);

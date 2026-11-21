@@ -566,12 +566,24 @@ const SubscriptionManagementPage: React.FC = () => {
         "Convert Trial",
         "Enter your password to convert this trial to a paid plan."
       );
-      await convertTrial(
+      const result = await convertTrial(
         sub.id,
         { billing_period: selectedPeriod },
         { stepUpToken: token }
       );
-      toast.success("Trial converted to paid subscription");
+      if (result.status === "pending_payment") {
+        // Paid conversion: the trial keeps running until the payment is confirmed.
+        const checkoutUrl = "checkout_url" in result ? result.checkout_url : null;
+        if (checkoutUrl) {
+          window.location.assign(checkoutUrl);
+          return;
+        }
+        toast.info("Awaiting payment", {
+          description: "The trial continues until the payment for the paid plan is confirmed.",
+        });
+      } else {
+        toast.success("Trial converted");
+      }
       await loadData();
     } catch (err: any) {
       toast.error("Trial conversion failed", {

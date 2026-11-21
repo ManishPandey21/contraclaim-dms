@@ -68,6 +68,17 @@ def test_initial_data_permission_catalog_contains_every_canonical_permission():
 
 
 def test_organization_admin_seed_has_explicit_client_dms_permissions():
+    """Every Client DMS permission, except those granted only deliberately (plan D-12)."""
+    from rbac_backend.core.permissions import SUPERADMIN_EXCLUDED_PERMISSIONS
+
     roles = {role["_id"]: set(role.get("permissions") or []) for role in DEFAULT_ROLES}
-    missing = sorted(set(CLIENT_DMS_PERMISSIONS) - roles["orgadmin"])
+    missing = sorted(set(CLIENT_DMS_PERMISSIONS) - set(SUPERADMIN_EXCLUDED_PERMISSIONS) - roles["orgadmin"])
     assert not missing, f"orgadmin seed missing explicit Client DMS permissions: {missing}"
+
+
+def test_no_default_role_seeds_a_deliberately_granted_permission():
+    from rbac_backend.core.permissions import SUPERADMIN_EXCLUDED_PERMISSIONS
+
+    for role in DEFAULT_ROLES:
+        held = set(role.get("permissions") or []) & set(SUPERADMIN_EXCLUDED_PERMISSIONS)
+        assert not held, f"{role['_id']} seeds {sorted(held)}"

@@ -35,11 +35,15 @@ async def _scoped_items(
     current_user: CurrentUser,
     policy: PolicyService,
 ) -> List[SlaItem]:
+    # C-27: the pages send no organisation. The subscription check needs one, and
+    # the organisation's own notice windows are looked up by it, so fall back to the
+    # active selection, as the other register routes do. Row scope is unchanged.
+    active_org = organization_id or getattr(current_user, "organization_id", None)
     await policy.authorize(
         current_user,
         Permissions.CLAIM_VIEW,
         resource_type="claims",
-        organization_id=organization_id,
+        organization_id=active_org,
         project_id=project_id,
         audit=False,
     )
@@ -48,7 +52,7 @@ async def _scoped_items(
         scope,
         days=days,
         only_breached=only_breached,
-        organization_id=organization_id,
+        organization_id=active_org,
     )
     return [SlaItem(**i) for i in items]
 

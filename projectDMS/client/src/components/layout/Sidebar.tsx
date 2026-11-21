@@ -46,6 +46,7 @@ import {
 import { cn } from "@/lib/utils";
 import useRBAC from "@/hooks/useRBAC";
 import { useSidebarIdentity } from "@/hooks/useSidebarIdentity";
+import { useMyPlatformReviewerRoles } from "@/hooks/useMyPlatformReviewerRoles";
 import { isRouteAllowedByPermission, labelForRole } from "@/config/rolePermissions";
 
 const Sidebar = () => {
@@ -86,7 +87,7 @@ const Sidebar = () => {
       label: "Dashboard",
     },
     { path: "/legal-words", icon: <BookOpen size={20} />, label: "Learn Legal Words" },
-    { path: "/register", icon: <Upload size={20} />, label: "Regisration" },
+    { path: "/register", icon: <Upload size={20} />, label: "Registration" },
 
     {
       path: "/organizations",
@@ -250,6 +251,9 @@ const Sidebar = () => {
     { path: "/health", icon: <HeartPulse size={20} />, label: "System Health" },
     { path: "/users", icon: <Users size={20} />, label: "Users" },
     { path: "/permissions", icon: <UserCog size={20} />, label: "Permissions" },
+    { path: "/reviewer-roles", icon: <UserCog size={20} />, label: "Reviewer roles" },
+    // Shown to people who hold a platform reviewer role; they hold no permission.
+    { path: "/skill-reviews", icon: <BookMarked size={20} />, label: "Skill reviews", reviewerOnly: true },
     {
       path: "/plan-settings",
       icon: <Settings size={20} />,
@@ -260,7 +264,7 @@ const Sidebar = () => {
       path: "/admin/billing-catalog",
       icon: <PackageOpen size={20} />,
       label: "Billing Catalog",
-      permission: "billing.plan.manage",
+      permission: "platform.pricing.manage",
     },
     {
       path: "/admin/legal-words",
@@ -277,16 +281,18 @@ const Sidebar = () => {
     { path: "/settings", icon: <Settings size={20} />, label: "Settings" },
   ], []);
 
+  const reviewerRoles = useMyPlatformReviewerRoles();
   const visibleLinks = useMemo(
     () =>
       sidebarLinks.filter((link) => {
+        if ("reviewerOnly" in link && link.reviewerOnly) return reviewerRoles.length > 0;
         if (!isRouteAllowedByPermission(can, link.path)) return false;
         if ("permission" in link && link.permission) {
           return roles.includes("superadmin") || can(link.permission);
         }
         return true;
       }),
-    [roles, sidebarLinks, can],
+    [roles, sidebarLinks, can, reviewerRoles],
   );
 
   return (

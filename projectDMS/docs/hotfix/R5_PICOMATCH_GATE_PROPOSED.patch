@@ -1,0 +1,1138 @@
+diff --git a/.github/scripts/fixtures/npm_audit_picomatch_2026-11-17.json b/.github/scripts/fixtures/npm_audit_picomatch_2026-11-17.json
+new file mode 100644
+index 0000000..15d85ac
+--- /dev/null
++++ b/.github/scripts/fixtures/npm_audit_picomatch_2026-11-17.json
+@@ -0,0 +1,672 @@
++{
++  "auditReportVersion": 2,
++  "vulnerabilities": {
++    "@tailwindcss/typography": {
++      "name": "@tailwindcss/typography",
++      "severity": "high",
++      "isDirect": true,
++      "via": [
++        "postcss-selector-parser",
++        "tailwindcss"
++      ],
++      "effects": [],
++      "range": "<=0.0.0-insiders.fda8ce5 || >=0.5.0-alpha.1",
++      "nodes": [
++        "node_modules/@tailwindcss/typography"
++      ],
++      "fixAvailable": {
++        "name": "@tailwindcss/typography",
++        "version": "0.5.4",
++        "isSemVerMajor": true
++      }
++    },
++    "@types/jest": {
++      "name": "@types/jest",
++      "severity": "high",
++      "isDirect": false,
++      "via": [
++        "expect"
++      ],
++      "effects": [],
++      "range": ">=29.0.0",
++      "nodes": [
++        "node_modules/@types/jest"
++      ],
++      "fixAvailable": true
++    },
++    "@typescript-eslint/eslint-plugin": {
++      "name": "@typescript-eslint/eslint-plugin",
++      "severity": "moderate",
++      "isDirect": false,
++      "via": [
++        "@typescript-eslint/type-utils",
++        "@typescript-eslint/utils"
++      ],
++      "effects": [],
++      "range": "6.16.0 - 8.72.2",
++      "nodes": [
++        "node_modules/@typescript-eslint/eslint-plugin"
++      ],
++      "fixAvailable": true
++    },
++    "@typescript-eslint/parser": {
++      "name": "@typescript-eslint/parser",
++      "severity": "moderate",
++      "isDirect": false,
++      "via": [
++        "@typescript-eslint/typescript-estree"
++      ],
++      "effects": [
++        "typescript-eslint"
++      ],
++      "range": "6.16.0 - 8.72.2",
++      "nodes": [
++        "node_modules/@typescript-eslint/parser"
++      ],
++      "fixAvailable": true
++    },
++    "@typescript-eslint/type-utils": {
++      "name": "@typescript-eslint/type-utils",
++      "severity": "moderate",
++      "isDirect": false,
++      "via": [
++        "@typescript-eslint/typescript-estree",
++        "@typescript-eslint/utils"
++      ],
++      "effects": [
++        "@typescript-eslint/eslint-plugin"
++      ],
++      "range": "6.16.0 - 8.72.2",
++      "nodes": [
++        "node_modules/@typescript-eslint/type-utils"
++      ],
++      "fixAvailable": true
++    },
++    "@typescript-eslint/typescript-estree": {
++      "name": "@typescript-eslint/typescript-estree",
++      "severity": "high",
++      "isDirect": false,
++      "via": [
++        "fast-glob",
++        "minimatch"
++      ],
++      "effects": [
++        "@typescript-eslint/parser",
++        "@typescript-eslint/type-utils",
++        "@typescript-eslint/utils"
++      ],
++      "range": "6.16.0 - 8.72.2",
++      "nodes": [
++        "node_modules/@typescript-eslint/typescript-estree"
++      ],
++      "fixAvailable": true
++    },
++    "@typescript-eslint/utils": {
++      "name": "@typescript-eslint/utils",
++      "severity": "moderate",
++      "isDirect": false,
++      "via": [
++        "@typescript-eslint/typescript-estree"
++      ],
++      "effects": [
++        "typescript-eslint"
++      ],
++      "range": "6.16.0 - 8.72.2",
++      "nodes": [
++        "node_modules/@typescript-eslint/utils"
++      ],
++      "fixAvailable": true
++    },
++    "@vitest/coverage-v8": {
++      "name": "@vitest/coverage-v8",
++      "severity": "moderate",
++      "isDirect": true,
++      "via": [
++        "vitest"
++      ],
++      "effects": [
++        "vitest"
++      ],
++      "range": "2.1.0-beta.1 - 4.1.10",
++      "nodes": [
++        "node_modules/@vitest/coverage-v8"
++      ],
++      "fixAvailable": true
++    },
++    "@vitest/mocker": {
++      "name": "@vitest/mocker",
++      "severity": "moderate",
++      "isDirect": false,
++      "via": [
++        {
++          "source": 1193684,
++          "name": "@vitest/mocker",
++          "dependency": "@vitest/mocker",
++          "title": "Vitest: Path Traversal / Arbitrary File Read via @vitest/mocker Redirect Mock",
++          "url": "https://github.com/advisories/GHSA-82fw-gwwq-j7x9",
++          "severity": "moderate",
++          "cwe": [
++            "CWE-22"
++          ],
++          "cvss": {
++            "score": 5.9,
++            "vectorString": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N"
++          },
++          "range": ">=2.1.0 <4.1.11"
++        },
++        {
++          "source": 1242767,
++          "name": "@vitest/mocker",
++          "dependency": "@vitest/mocker",
++          "title": "Vitest: Code injection via unauthenticated manual mock registration",
++          "url": "https://github.com/advisories/GHSA-qxg6-89mg-rqv8",
++          "severity": "moderate",
++          "cwe": [
++            "CWE-94",
++            "CWE-116",
++            "CWE-306"
++          ],
++          "cvss": {
++            "score": 4.7,
++            "vectorString": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:L/I:L/A:N"
++          },
++          "range": ">=2.1.0-beta.7 <4.1.12"
++        }
++      ],
++      "effects": [
++        "vitest"
++      ],
++      "range": "<=4.1.11",
++      "nodes": [
++        "node_modules/@vitest/mocker"
++      ],
++      "fixAvailable": true
++    },
++    "anymatch": {
++      "name": "anymatch",
++      "severity": "high",
++      "isDirect": false,
++      "via": [
++        "picomatch"
++      ],
++      "effects": [],
++      "range": ">=3.0.0",
++      "nodes": [
++        "node_modules/anymatch"
++      ],
++      "fixAvailable": true
++    },
++    "chokidar": {
++      "name": "chokidar",
++      "severity": "high",
++      "isDirect": false,
++      "via": [
++        "anymatch",
++        "readdirp"
++      ],
++      "effects": [
++        "tailwindcss"
++      ],
++      "range": "3.0.0 - 3.6.0",
++      "nodes": [
++        "node_modules/chokidar"
++      ],
++      "fixAvailable": false
++    },
++    "expect": {
++      "name": "expect",
++      "severity": "high",
++      "isDirect": false,
++      "via": [
++        "jest-message-util",
++        "jest-util"
++      ],
++      "effects": [
++        "@types/jest"
++      ],
++      "range": ">=25.0.0",
++      "nodes": [
++        "node_modules/expect"
++      ],
++      "fixAvailable": true
++    },
++    "fast-glob": {
++      "name": "fast-glob",
++      "severity": "high",
++      "isDirect": false,
++      "via": [
++        "micromatch"
++      ],
++      "effects": [
++        "@typescript-eslint/typescript-estree"
++      ],
++      "range": ">=3.0.0",
++      "nodes": [
++        "node_modules/fast-glob"
++      ],
++      "fixAvailable": true
++    },
++    "fdir": {
++      "name": "fdir",
++      "severity": "high",
++      "isDirect": false,
++      "via": [
++        "picomatch"
++      ],
++      "effects": [
++        "vite"
++      ],
++      "range": ">=5.2.1",
++      "nodes": [
++        "node_modules/tinyglobby/node_modules/fdir",
++        "node_modules/vite/node_modules/fdir"
++      ],
++      "fixAvailable": {
++        "name": "vite",
++        "version": "6.2.7",
++        "isSemVerMajor": true
++      }
++    },
++    "glob": {
++      "name": "glob",
++      "severity": "moderate",
++      "isDirect": false,
++      "via": [
++        {
++          "source": 1244013,
++          "name": "glob",
++          "dependency": "glob",
++          "title": "Glob: AbortSignal cancellation bypass allows post-timeout filesystem traversal",
++          "url": "https://github.com/advisories/GHSA-3g3m-2fjr-6pw4",
++          "severity": "moderate",
++          "cwe": [
++            "CWE-400"
++          ],
++          "cvss": {
++            "score": 0,
++            "vectorString": null
++          },
++          "range": ">=9.0.0 <=14.0.1"
++        },
++        "minimatch"
++      ],
++      "effects": [
++        "sucrase"
++      ],
++      "range": "9.0.0 - 14.0.1",
++      "nodes": [
++        "node_modules/glob"
++      ],
++      "fixAvailable": true
++    },
++    "jest-message-util": {
++      "name": "jest-message-util",
++      "severity": "high",
++      "isDirect": false,
++      "via": [
++        "micromatch"
++      ],
++      "effects": [
++        "expect"
++      ],
++      "range": "25.0.0 - 30.2.0",
++      "nodes": [
++        "node_modules/jest-message-util"
++      ],
++      "fixAvailable": true
++    },
++    "jest-util": {
++      "name": "jest-util",
++      "severity": "high",
++      "isDirect": false,
++      "via": [
++        "picomatch"
++      ],
++      "effects": [
++        "expect"
++      ],
++      "range": ">=27.0.0-next.0",
++      "nodes": [
++        "node_modules/jest-util"
++      ],
++      "fixAvailable": true
++    },
++    "lovable-tagger": {
++      "name": "lovable-tagger",
++      "severity": "high",
++      "isDirect": true,
++      "via": [
++        "tailwindcss"
++      ],
++      "effects": [],
++      "range": ">=1.1.1",
++      "nodes": [
++        "node_modules/lovable-tagger"
++      ],
++      "fixAvailable": {
++        "name": "lovable-tagger",
++        "version": "1.0.20",
++        "isSemVerMajor": true
++      }
++    },
++    "micromatch": {
++      "name": "micromatch",
++      "severity": "high",
++      "isDirect": false,
++      "via": [
++        "picomatch"
++      ],
++      "effects": [
++        "fast-glob",
++        "jest-message-util",
++        "tailwindcss"
++      ],
++      "range": ">=4.0.0",
++      "nodes": [
++        "node_modules/micromatch"
++      ],
++      "fixAvailable": false
++    },
++    "minimatch": {
++      "name": "minimatch",
++      "severity": "moderate",
++      "isDirect": false,
++      "via": [
++        {
++          "source": 1244623,
++          "name": "minimatch",
++          "dependency": "minimatch",
++          "title": "minimatch has potential denial of service via globparts amplification",
++          "url": "https://github.com/advisories/GHSA-g3hv-75wg-m249",
++          "severity": "moderate",
++          "cwe": [
++            "CWE-405"
++          ],
++          "cvss": {
++            "score": 0,
++            "vectorString": null
++          },
++          "range": ">=7.0.0 <11.0.1"
++        }
++      ],
++      "effects": [
++        "@typescript-eslint/typescript-estree",
++        "glob"
++      ],
++      "range": "7.0.0 - 11.0.0",
++      "nodes": [
++        "node_modules/@typescript-eslint/typescript-estree/node_modules/minimatch",
++        "node_modules/glob/node_modules/minimatch"
++      ],
++      "fixAvailable": true
++    },
++    "picomatch": {
++      "name": "picomatch",
++      "severity": "high",
++      "isDirect": false,
++      "via": [
++        {
++          "source": 1247710,
++          "name": "picomatch",
++          "dependency": "picomatch",
++          "title": "picomatch vulnerable to ReDoS through single-branch repeated extglobs",
++          "url": "https://github.com/advisories/GHSA-fc5q-39xc-vjpf",
++          "severity": "high",
++          "cwe": [
++            "CWE-1333"
++          ],
++          "cvss": {
++            "score": 7.5,
++            "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"
++          },
++          "range": "<=4.0.7"
++        }
++      ],
++      "effects": [
++        "anymatch",
++        "fdir",
++        "jest-util",
++        "micromatch",
++        "readdirp",
++        "rollup-plugin-visualizer",
++        "tinyglobby",
++        "vite",
++        "vitest"
++      ],
++      "range": "*",
++      "nodes": [
++        "node_modules/picomatch",
++        "node_modules/rollup-plugin-visualizer/node_modules/picomatch",
++        "node_modules/tinyglobby/node_modules/picomatch",
++        "node_modules/vite/node_modules/picomatch",
++        "node_modules/vitest/node_modules/picomatch"
++      ],
++      "fixAvailable": false
++    },
++    "postcss-selector-parser": {
++      "name": "postcss-selector-parser",
++      "severity": "moderate",
++      "isDirect": false,
++      "via": [
++        {
++          "source": 1243379,
++          "name": "postcss-selector-parser",
++          "dependency": "postcss-selector-parser",
++          "title": "PostCSS: Quadratic complexity in flat selector parsing allows CPU exhaustion",
++          "url": "https://github.com/advisories/GHSA-rj75-hqrm-r3gf",
++          "severity": "moderate",
++          "cwe": [
++            "CWE-400",
++            "CWE-407"
++          ],
++          "cvss": {
++            "score": 5.9,
++            "vectorString": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:H"
++          },
++          "range": "<6.1.5"
++        }
++      ],
++      "effects": [
++        "@tailwindcss/typography"
++      ],
++      "range": "<6.1.5",
++      "nodes": [
++        "node_modules/@tailwindcss/typography/node_modules/postcss-selector-parser",
++        "node_modules/postcss-selector-parser"
++      ],
++      "fixAvailable": {
++        "name": "@tailwindcss/typography",
++        "version": "0.5.4",
++        "isSemVerMajor": true
++      }
++    },
++    "readdirp": {
++      "name": "readdirp",
++      "severity": "high",
++      "isDirect": false,
++      "via": [
++        "picomatch"
++      ],
++      "effects": [
++        "chokidar"
++      ],
++      "range": "3.0.0 - 3.6.0",
++      "nodes": [
++        "node_modules/readdirp"
++      ],
++      "fixAvailable": false
++    },
++    "rollup-plugin-visualizer": {
++      "name": "rollup-plugin-visualizer",
++      "severity": "high",
++      "isDirect": true,
++      "via": [
++        "picomatch"
++      ],
++      "effects": [],
++      "range": "5.9.0 - 5.12.0 || >=5.13.1",
++      "nodes": [
++        "node_modules/rollup-plugin-visualizer"
++      ],
++      "fixAvailable": {
++        "name": "rollup-plugin-visualizer",
++        "version": "5.8.3",
++        "isSemVerMajor": true
++      }
++    },
++    "sucrase": {
++      "name": "sucrase",
++      "severity": "moderate",
++      "isDirect": false,
++      "via": [
++        "glob"
++      ],
++      "effects": [],
++      "range": "3.35.0",
++      "nodes": [
++        "node_modules/sucrase"
++      ],
++      "fixAvailable": true
++    },
++    "tailwindcss": {
++      "name": "tailwindcss",
++      "severity": "high",
++      "isDirect": true,
++      "via": [
++        "chokidar",
++        "fast-glob",
++        "micromatch"
++      ],
++      "effects": [
++        "@tailwindcss/typography",
++        "lovable-tagger",
++        "tailwindcss-animate"
++      ],
++      "range": "<=0.0.0-oxide-insiders.ff2c25f || 2.1.0-canary.1 - 3.4.19",
++      "nodes": [
++        "node_modules/tailwindcss"
++      ],
++      "fixAvailable": false
++    },
++    "tailwindcss-animate": {
++      "name": "tailwindcss-animate",
++      "severity": "high",
++      "isDirect": true,
++      "via": [
++        "tailwindcss"
++      ],
++      "effects": [],
++      "range": "*",
++      "nodes": [
++        "node_modules/tailwindcss-animate"
++      ],
++      "fixAvailable": false
++    },
++    "tinyglobby": {
++      "name": "tinyglobby",
++      "severity": "high",
++      "isDirect": false,
++      "via": [
++        "fdir",
++        "picomatch"
++      ],
++      "effects": [
++        "vitest"
++      ],
++      "range": "*",
++      "nodes": [
++        "node_modules/tinyglobby"
++      ],
++      "fixAvailable": true
++    },
++    "typescript-eslint": {
++      "name": "typescript-eslint",
++      "severity": "moderate",
++      "isDirect": true,
++      "via": [
++        "@typescript-eslint/eslint-plugin",
++        "@typescript-eslint/parser",
++        "@typescript-eslint/utils"
++      ],
++      "effects": [],
++      "range": "<=8.72.2",
++      "nodes": [
++        "node_modules/typescript-eslint"
++      ],
++      "fixAvailable": true
++    },
++    "vite": {
++      "name": "vite",
++      "severity": "high",
++      "isDirect": true,
++      "via": [
++        "fdir",
++        "picomatch",
++        "tinyglobby"
++      ],
++      "effects": [],
++      "range": ">=6.3.0-beta.0",
++      "nodes": [
++        "node_modules/vite"
++      ],
++      "fixAvailable": {
++        "name": "vite",
++        "version": "6.2.7",
++        "isSemVerMajor": true
++      }
++    },
++    "vitest": {
++      "name": "vitest",
++      "severity": "high",
++      "isDirect": true,
++      "via": [
++        "@vitest/coverage-v8",
++        "@vitest/mocker",
++        {
++          "source": 1193683,
++          "name": "vitest",
++          "dependency": "vitest",
++          "title": "Vitest: Path Traversal / Arbitrary File Read via @vitest/mocker Redirect Mock",
++          "url": "https://github.com/advisories/GHSA-82fw-gwwq-j7x9",
++          "severity": "moderate",
++          "cwe": [
++            "CWE-22"
++          ],
++          "cvss": {
++            "score": 5.9,
++            "vectorString": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N"
++          },
++          "range": ">=2.1.0 <4.1.11"
++        },
++        "picomatch",
++        "tinyglobby"
++      ],
++      "effects": [
++        "@vitest/coverage-v8"
++      ],
++      "range": ">=2.1.0-beta.1",
++      "nodes": [
++        "node_modules/vitest"
++      ],
++      "fixAvailable": true
++    }
++  },
++  "metadata": {
++    "vulnerabilities": {
++      "info": 0,
++      "low": 0,
++      "moderate": 11,
++      "high": 20,
++      "critical": 0,
++      "total": 31
++    },
++    "dependencies": {
++      "prod": 359,
++      "dev": 404,
++      "optional": 46,
++      "peer": 1,
++      "peerOptional": 0,
++      "total": 766
++    }
++  }
++}
+diff --git a/.github/scripts/npm_audit_gate.py b/.github/scripts/npm_audit_gate.py
+index 6deedd8..600b449 100644
+--- a/.github/scripts/npm_audit_gate.py
++++ b/.github/scripts/npm_audit_gate.py
+@@ -2,11 +2,14 @@
+ """Frontend dependency gate: `npm audit --audit-level=high`, plus ONE time-bound
+ exception.
+ 
+-R3 (projectDMS/docs/NOFIX_ADVISORY_ACCEPTANCE.md): GHSA-vfj7-8cjw-p6xm /
+-CVE-2026-93687, a stack-exhaustion DoS in `braces` <=3.0.3 with no patched
+-release. `braces` reaches the client only through build/test tooling
+-(tailwindcss, typescript-eslint, @types/jest); the deployed client image
+-carries no npm package at all. The owner accepted it until EXPIRES.
++R5 (projectDMS/docs/NOFIX_ADVISORY_ACCEPTANCE.md, PROPOSED - this file is the
++patch for review, not applied): GHSA-fc5q-39xc-vjpf, a ReDoS in `picomatch`
++<=4.0.7 through single-branch repeated extglobs, with no patched release.
++`picomatch` reaches the client only through build/test tooling (vite, vitest,
++tailwindcss, typescript-eslint, @types/jest); the deployed client image carries
++no npm package at all. Valid only until EXPIRES, at most 30 days from approval.
++R3 (braces, GHSA-vfj7-8cjw-p6xm) expired on 2026-11-05 and braces no longer
++appears in the audit; it is replaced, not extended.
+ 
+ This is deliberately not a general ignore list. Exactly one advisory, one
+ package, one installed version, one set of dependents and one expiry are
+@@ -14,14 +17,14 @@ hard-coded, and the gate fails - closed - on anything else:
+ 
+ - any CRITICAL finding;
+ - any HIGH finding whose root advisory is not this one (npm reports the
+-  packages that depend on braces as HIGH too; each must resolve to it alone);
++  packages that depend on picomatch as HIGH too; each must resolve to it alone);
+ - the advisory's identity changing (package, GHSA, npm source id, range);
+-- a package outside EXPECTED_DEPENDENTS reaching braces, or application
++- a package outside EXPECTED_DEPENDENTS reaching picomatch, or application
+   source (client/src) importing any package of the chain: the acceptance
+-  rests on braces staying in build/test tooling;
+-- an installed braces (aliases included) other than the accepted version;
++  rests on picomatch staying in build/test tooling;
++- an installed picomatch (aliases included) other than the accepted version;
+ - the date passing EXPIRES (UTC, inclusive);
+-- a braces release newer than the affected range being published (upgrade
++- a picomatch release newer than the affected range being published (upgrade
+   instead of extending the exception), or a version list it cannot read;
+ - npm audit failing to run, or answering with anything but a well-formed,
+   self-consistent report.
+@@ -38,38 +41,47 @@ import sys
+ from pathlib import Path
+ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+ 
+-# --- the one exception (R3) -------------------------------------------------------------
+-GHSA = "GHSA-vfj7-8cjw-p6xm"
+-CVE = "CVE-2026-93687"  # recorded with the GHSA; npm's report carries only the GHSA
+-PACKAGE = "braces"
+-NPM_SOURCE_ID = 1240992
+-AFFECTED_RANGE = "<=3.0.3"
+-INSTALLED_VERSION = "3.0.3"
+-EXPIRES = dt.date(2026, 11, 5)  # last day the exception applies (UTC, inclusive); renewed
+-# 2026-10-07 from 2026-10-10 after a fresh review (NOFIX_ADVISORY_ACCEPTANCE.md, R3 renewal)
+-
+-# The packages npm reported HIGH through braces when R3 was accepted - all
+-# build/test tooling. A package outside this set reaching braces is a new
++# --- the one exception (R5) -------------------------------------------------------------
++GHSA = "GHSA-fc5q-39xc-vjpf"
++CVE = "no CVE in npm's report"  # npm's report carries only the GHSA
++PACKAGE = "picomatch"
++NPM_SOURCE_ID = 1247710
++AFFECTED_RANGE = "<=4.0.7"
++#: The installed versions, from package-lock.json (2.3.2 under tailwindcss and jest,
++#: 4.0.4 under vite, vitest, tinyglobby and rollup-plugin-visualizer).
++INSTALLED_VERSIONS = frozenset({"2.3.2", "4.0.4"})
++#: The top of the affected range: any stable release above it is the patched release.
++PATCH_CEILING = "4.0.7"
++#: Set by the approver: the last day the exception applies (UTC, inclusive), at most
++#: 30 days from the date of approval. Proposed: 30 days from 2026-11-17.
++EXPIRES = dt.date(2026, 12, 17)
++
++# The packages npm reported HIGH through picomatch when R5 was proposed - all
++# build/test tooling. A package outside this set reaching picomatch is a new
+ # exposure question and fails; a smaller set (a path removed) is fine.
+ EXPECTED_DEPENDENTS = frozenset(
+     {
+-        "braces",
++        # The 20 packages npm reported HIGH through picomatch on 2026-11-17.
++        "picomatch",
++        "anymatch",
+         "chokidar",
+         "fast-glob",
++        "fdir",
+         "micromatch",
++        "readdirp",
++        "tinyglobby",
++        "vite",
++        "vitest",
++        "rollup-plugin-visualizer",
+         "tailwindcss",
+         "tailwindcss-animate",
+         "@tailwindcss/typography",
+         "lovable-tagger",
+-        "typescript-eslint",
+-        "@typescript-eslint/eslint-plugin",
+-        "@typescript-eslint/parser",
+-        "@typescript-eslint/type-utils",
+         "@typescript-eslint/typescript-estree",
+-        "@typescript-eslint/utils",
+         "@types/jest",
+         "expect",
+         "jest-message-util",
++        "jest-util",
+     }
+ )
+ 
+@@ -189,7 +201,7 @@ def evaluate_report(report: Any) -> bool:
+                 )
+             if name not in EXPECTED_DEPENDENTS:
+                 raise GateFailure(
+-                    f"{name} now reaches {PACKAGE}; R3 covers only the build/test "
++                    f"{name} now reaches {PACKAGE}; R5 covers only the build/test "
+                     "tooling it was accepted for - re-establish runtime non-exposure"
+                 )
+             exception_used = True
+@@ -216,7 +228,7 @@ def evaluate_report(report: Any) -> bool:
+ 
+ 
+ def check_installed_lineage(lockfile: Dict[str, Any]) -> None:
+-    """Every installed braces - under its own name or an alias - is the
++    """Every installed picomatch - under its own name or an alias - is the
+     accepted version."""
+     packages = lockfile.get("packages")
+     if not isinstance(packages, dict):
+@@ -230,15 +242,23 @@ def check_installed_lineage(lockfile: Dict[str, Any]) -> None:
+     }
+     if not versions:
+         raise GateFailure(f"no installed {PACKAGE} in package-lock.json")
+-    wrong = {p: v for p, v in versions.items() if v != INSTALLED_VERSION}
++    wrong = {p: v for p, v in versions.items() if v not in INSTALLED_VERSIONS}
+     if wrong:
+         raise GateFailure(
+-            f"installed {PACKAGE} is not the accepted {INSTALLED_VERSION}: {wrong}"
++            f"installed {PACKAGE} is not an accepted version {sorted(INSTALLED_VERSIONS)}: {wrong}"
+         )
+ 
+ 
++_TEST_SOURCE = re.compile(r"(^|/)(__tests__|tests)/|\.(test|spec)\.[cm]?[jt]sx?$")
++
++
++def _is_test_source(relative: str) -> bool:
++    """A test file or test helper: run by vitest, never bundled into the client."""
++    return bool(_TEST_SOURCE.search(relative))
++
++
+ def check_runtime_sources(client_dir: Path) -> None:
+-    """Application source imports no package of the braces chain."""
++    """Application source imports no package of the picomatch chain."""
+     src = client_dir / "src"
+     if not src.is_dir():
+         raise GateFailure(f"no application source tree at {src}")
+@@ -246,6 +266,8 @@ def check_runtime_sources(client_dir: Path) -> None:
+     for path in sorted(src.rglob("*")):
+         if path.suffix not in SOURCE_SUFFIXES or not path.is_file():
+             continue
++        if _is_test_source(path.relative_to(client_dir).as_posix()):
++            continue  # R5: vitest is in the chain; test files are never in the built bundle
+         text = path.read_text(encoding="utf-8", errors="replace")
+         for match in _CHAIN_IMPORT.finditer(text):
+             offenders.append(
+@@ -253,7 +275,7 @@ def check_runtime_sources(client_dir: Path) -> None:
+             )
+     if offenders:
+         raise GateFailure(
+-            f"application source imports the {PACKAGE} chain, which R3 accepted "
++            f"application source imports the {PACKAGE} chain, which R5 accepted "
+             f"only as build/test tooling: {offenders}"
+         )
+ 
+@@ -263,13 +285,13 @@ _PRERELEASE = re.compile(r"^\d+\.\d+\.\d+-[0-9A-Za-z.-]+$")
+ 
+ 
+ def check_no_patched_release(published: Any) -> None:
+-    """Fail when braces has published a release above the affected range, or
++    """Fail when picomatch has published a release above the affected range, or
+     when the list cannot be read with certainty."""
+     if isinstance(published, str):
+         published = [published]
+     if not isinstance(published, list) or not published:
+-        raise GateFailure("could not read the published braces versions")
+-    ceiling = tuple(int(p) for p in INSTALLED_VERSION.split("."))
++        raise GateFailure("could not read the published picomatch versions")
++    ceiling = tuple(int(p) for p in PATCH_CEILING.split("."))
+     newer = []
+     for version in published:
+         text = version.split("+", 1)[0] if isinstance(version, str) else None
+diff --git a/.github/scripts/test_npm_audit_gate.py b/.github/scripts/test_npm_audit_gate.py
+index eb0bc38..db77b5c 100644
+--- a/.github/scripts/test_npm_audit_gate.py
++++ b/.github/scripts/test_npm_audit_gate.py
+@@ -1,7 +1,8 @@
+-"""The braces exception gate passes exactly one advisory, until its expiry.
++"""R5 (PROPOSED, for authorised security review): the picomatch exception gate passes
++exactly one advisory, until its expiry.
+ 
+ The base fixture is the real `npm audit --json` of projectDMS/client on
+-2026-10-03 (17 HIGH, all resolving to GHSA-vfj7-8cjw-p6xm; 3 MODERATE).
++2026-11-17 (20 HIGH, all resolving to GHSA-fc5q-39xc-vjpf; 11 MODERATE).
+ Every case mutates a copy of it.
+ """
+ 
+@@ -21,18 +22,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
+ import npm_audit_gate as gate  # noqa: E402
+ 
+ FIXTURE = (
+-    Path(__file__).resolve().parent / "fixtures" / "npm_audit_braces_2026-10-03.json"
++    Path(__file__).resolve().parent / "fixtures" / "npm_audit_picomatch_2026-11-17.json"
+ )
+-BEFORE_EXPIRY = dt.date(2026, 10, 3)
++BEFORE_EXPIRY = dt.date(2026, 11, 17)
+ LOCKFILE = {
+     "lockfileVersion": 3,
+     "packages": {
+         "": {"name": "client"},
+-        "node_modules/braces": {"version": "3.0.3"},
++        "node_modules/picomatch": {"version": "2.3.2"},
++        "node_modules/vite/node_modules/picomatch": {"version": "4.0.4"},
+         "node_modules/micromatch": {"version": "4.0.8"},
+     },
+ }
+-PUBLISHED = ["2.3.2", "3.0.0", "3.0.1", "3.0.2", "3.0.3"]
++PUBLISHED = ["2.3.2", "3.0.2", "4.0.4", "4.0.5", "4.0.6", "4.0.7"]
+ 
+ 
+ def _report() -> Dict[str, Any]:
+@@ -106,14 +108,14 @@ def _add_high(
+ # 1 --------------------------------------------------------------------------------------
+ 
+ 
+-def test_the_current_braces_advisory_alone_passes_with_the_exception_banner(tmp_path):
++def test_the_current_picomatch_advisory_alone_passes_with_the_exception_banner(tmp_path):
+     message = _gate(tmp_path, _Npm(_report()))
+     assert "TEMPORARY OWNER-APPROVED SECURITY EXCEPTION" in message
+-    assert "GHSA-vfj7-8cjw-p6xm" in message and "expires 2026-11-05" in message
++    assert "GHSA-fc5q-39xc-vjpf" in message and "expires 2026-12-17" in message
+ 
+ 
+ def test_the_last_day_still_passes(tmp_path):
+-    assert "EXCEPTION" in _gate(tmp_path, _Npm(_report()), today=dt.date(2026, 11, 5))
++    assert "EXCEPTION" in _gate(tmp_path, _Npm(_report()), today=dt.date(2026, 12, 17))
+ 
+ 
+ def test_a_clean_report_passes_without_the_exception(tmp_path):
+@@ -140,15 +142,15 @@ def test_a_clean_report_passes_without_the_exception(tmp_path):
+ # 2 / 3 ----------------------------------------------------------------------------------
+ 
+ 
+-def test_braces_plus_an_unrelated_high_fails(tmp_path):
++def test_picomatch_plus_an_unrelated_high_fails(tmp_path):
+     report = _report()
+     _add_high(report, "left-pad", "GHSA-aaaa-bbbb-cccc")
+     with pytest.raises(gate.GateFailure, match="not covered by the exception"):
+         _gate(tmp_path, _Npm(report))
+ 
+ 
+-def test_a_high_hidden_behind_a_braces_dependent_fails(tmp_path):
+-    """A package npm marks HIGH through braces AND through another HIGH root."""
++def test_a_high_hidden_behind_a_picomatch_dependent_fails(tmp_path):
++    """A package npm marks HIGH through picomatch AND through another HIGH root."""
+     report = _report()
+     _add_high(report, "left-pad", "GHSA-aaaa-bbbb-cccc")
+     report["vulnerabilities"]["micromatch"]["via"].append("left-pad")
+@@ -172,10 +174,10 @@ def test_a_package_marked_critical_fails_even_through_the_excepted_advisory(tmp_
+         _gate(tmp_path, _Npm(report))
+ 
+ 
+-def test_braces_itself_turning_critical_fails(tmp_path):
++def test_picomatch_itself_turning_critical_fails(tmp_path):
+     report = _report()
+-    report["vulnerabilities"]["braces"]["severity"] = "critical"
+-    report["vulnerabilities"]["braces"]["via"][0]["severity"] = "critical"
++    report["vulnerabilities"]["picomatch"]["severity"] = "critical"
++    report["vulnerabilities"]["picomatch"]["via"][0]["severity"] = "critical"
+     with pytest.raises(gate.GateFailure, match="CRITICAL"):
+         _gate(tmp_path, _Npm(report))
+ 
+@@ -186,23 +188,23 @@ def test_braces_itself_turning_critical_fails(tmp_path):
+ @pytest.mark.parametrize(
+     "field, value",
+     [
+-        ("url", "https://github.com/advisories/GHSA-vfj7-8cjw-p6xx"),  # wrong GHSA
++        ("url", "https://github.com/advisories/GHSA-fc5q-39xc-vjpx"),  # wrong GHSA
+         ("source", 1240993),  # a re-issued advisory
+         ("range", "<=3.0.4"),  # widened range
+-        ("name", "braces-fork"),  # wrong package
++        ("name", "picomatch-fork"),  # wrong package
+         ("dependency", "micromatch"),  # wrong package
+     ],
+ )
+ def test_a_changed_advisory_identity_fails(tmp_path, field, value):
+     report = _report()
+-    report["vulnerabilities"]["braces"]["via"][0][field] = value
++    report["vulnerabilities"]["picomatch"]["via"][0][field] = value
+     with pytest.raises(gate.GateFailure, match="not covered by the exception"):
+         _gate(tmp_path, _Npm(report))
+ 
+ 
+ def test_the_same_ghsa_on_another_package_fails(tmp_path):
+     report = _report()
+-    advisory = copy.deepcopy(report["vulnerabilities"]["braces"]["via"][0])
++    advisory = copy.deepcopy(report["vulnerabilities"]["picomatch"]["via"][0])
+     advisory["name"] = advisory["dependency"] = "minimatch"
+     report["vulnerabilities"]["minimatch"] = {
+         "name": "minimatch",
+@@ -218,18 +220,18 @@ def test_the_same_ghsa_on_another_package_fails(tmp_path):
+         _gate(tmp_path, _Npm(report))
+ 
+ 
+-def test_an_installed_braces_outside_the_accepted_lineage_fails(tmp_path):
++def test_an_installed_picomatch_outside_the_accepted_lineage_fails(tmp_path):
+     lockfile = copy.deepcopy(LOCKFILE)
+-    lockfile["packages"]["node_modules/fast-glob/node_modules/braces"] = {
+-        "version": "2.3.2"
++    lockfile["packages"]["node_modules/fast-glob/node_modules/picomatch"] = {
++        "version": "3.0.2"
+     }
+-    with pytest.raises(gate.GateFailure, match="not the accepted 3.0.3"):
++    with pytest.raises(gate.GateFailure, match="not an accepted version"):
+         _gate(tmp_path, _Npm(_report()), lockfile=lockfile)
+ 
+ 
+-def test_no_installed_braces_fails(tmp_path):
++def test_no_installed_picomatch_fails(tmp_path):
+     lockfile = {"lockfileVersion": 3, "packages": {"": {}}}
+-    with pytest.raises(gate.GateFailure, match="no installed braces"):
++    with pytest.raises(gate.GateFailure, match="no installed picomatch"):
+         _gate(tmp_path, _Npm(_report()), lockfile=lockfile)
+ 
+ 
+@@ -237,21 +239,21 @@ def test_no_installed_braces_fails(tmp_path):
+ 
+ 
+ def test_after_expiry_fails(tmp_path):
+-    with pytest.raises(gate.GateFailure, match="expired on 2026-11-05"):
+-        _gate(tmp_path, _Npm(_report()), today=dt.date(2026, 11, 6))
++    with pytest.raises(gate.GateFailure, match="expired on 2026-12-17"):
++        _gate(tmp_path, _Npm(_report()), today=dt.date(2026, 12, 18))
+ 
+ 
+ @pytest.mark.parametrize(
+-    "published", [PUBLISHED + ["3.0.4"], PUBLISHED + ["3.1.0"], PUBLISHED + ["4.0.0"]]
++    "published", [PUBLISHED + ["4.0.8"], PUBLISHED + ["4.1.0"], PUBLISHED + ["5.0.0"]]
+ )
+-def test_a_patched_braces_release_fails_and_demands_the_upgrade(tmp_path, published):
++def test_a_patched_picomatch_release_fails_and_demands_the_upgrade(tmp_path, published):
+     with pytest.raises(gate.GateFailure, match="upgrade it instead"):
+         _gate(tmp_path, _Npm(_report(), view=published))
+ 
+ 
+ def test_a_pre_release_is_not_a_patched_release(tmp_path):
+     assert "EXCEPTION" in _gate(
+-        tmp_path, _Npm(_report(), view=PUBLISHED + ["3.0.4-beta.1"])
++        tmp_path, _Npm(_report(), view=PUBLISHED + ["4.0.8-beta.1"])
+     )
+ 
+ 
+@@ -282,7 +284,7 @@ def test_unreadable_published_versions_fail_closed(tmp_path):
+         json.dumps(
+             {
+                 "auditReportVersion": 2,
+-                "vulnerabilities": {"braces": {"severity": "high", "via": ["ghost"]}},
++                "vulnerabilities": {"picomatch": {"severity": "high", "via": ["ghost"]}},
+                 "metadata": {"vulnerabilities": {"high": 1}},
+             }
+         ),
+@@ -344,15 +346,15 @@ def test_main_returns_nonzero_on_failure_and_writes_the_raw_report(
+         json.loads(raw.read_text(encoding="utf-8"))["metadata"]["vulnerabilities"][
+             "high"
+         ]
+-        == 18
++        == 21  # the 20 HIGH of the picomatch report, plus the one added
+     )
+ 
+ 
+ # --- the runtime non-exposure basis (security review MEDIUM) ------------------------------
+ 
+ 
+-def test_a_new_package_reaching_braces_fails(tmp_path):
+-    """The acceptance rests on WHICH packages bring braces in. A new dependent
++def test_a_new_package_reaching_picomatch_fails(tmp_path):
++    """The acceptance rests on WHICH packages bring picomatch in. A new dependent
+     (say a runtime library that bundles micromatch) is a new exposure question."""
+     report = _report()
+     dependent = copy.deepcopy(report["vulnerabilities"]["micromatch"])
+@@ -367,9 +369,9 @@ def test_a_new_package_reaching_braces_fails(tmp_path):
+ 
+ 
+ def test_a_shrinking_dependent_set_still_passes(tmp_path):
+-    """Dropping a path to braces (e.g. upgrading typescript-eslint) is safe."""
++    """Dropping a path to picomatch (e.g. removing rollup-plugin-visualizer) is safe."""
+     report = _report()
+-    for name in [n for n in report["vulnerabilities"] if "typescript-eslint" in n]:
++    for name in ["rollup-plugin-visualizer"]:
+         del report["vulnerabilities"][name]
+         report["metadata"]["vulnerabilities"]["high"] -= 1
+         report["metadata"]["vulnerabilities"]["total"] -= 1
+@@ -380,11 +382,11 @@ def test_a_shrinking_dependent_set_still_passes(tmp_path):
+     "line",
+     [
+         'import micromatch from "micromatch";',
+-        "import { expand } from 'braces';",
++        "import { expand } from 'picomatch';",
+         'const chokidar = require("chokidar");',
+         'const fg = await import("fast-glob");',
+         'export { default } from "tailwindcss/lib/util";',
+-        'import plugin from "@typescript-eslint/parser";',
++        'import plugin from "@typescript-eslint/typescript-estree";',
+     ],
+ )
+ def test_application_source_importing_the_chain_fails(tmp_path, line):
+@@ -397,10 +399,10 @@ def test_application_source_importing_the_chain_fails(tmp_path, line):
+         gate.run_gate(client, runner=_Npm(_report()), today=BEFORE_EXPIRY)
+ 
+ 
+-def test_application_source_naming_braces_innocently_passes(tmp_path):
++def test_application_source_naming_picomatch_innocently_passes(tmp_path):
+     client = _client(tmp_path)
+     (client / "src" / "parse.ts").write_text(
+-        "let braces = 0;\n// micromatch is not used\n", encoding="utf-8"
++        "let picomatch = 0;\n// micromatch is not used\n", encoding="utf-8"
+     )
+     assert "EXCEPTION" in gate.run_gate(
+         client, runner=_Npm(_report()), today=BEFORE_EXPIRY
+@@ -443,10 +445,10 @@ def test_metadata_counts_must_match_the_report(tmp_path, field, value):
+         _gate(tmp_path, _Npm(report))
+ 
+ 
+-def test_an_aliased_braces_install_is_part_of_the_lineage(tmp_path):
++def test_an_aliased_picomatch_install_is_part_of_the_lineage(tmp_path):
+     lockfile = copy.deepcopy(LOCKFILE)
+-    lockfile["packages"]["node_modules/bx"] = {"name": "braces", "version": "2.3.2"}
+-    with pytest.raises(gate.GateFailure, match="not the accepted 3.0.3"):
++    lockfile["packages"]["node_modules/bx"] = {"name": "picomatch", "version": "3.0.2"}
++    with pytest.raises(gate.GateFailure, match="not an accepted version"):
+         _gate(tmp_path, _Npm(_report()), lockfile=lockfile)
+ 
+ 
+@@ -456,3 +458,18 @@ def test_an_aliased_braces_install_is_part_of_the_lineage(tmp_path):
+ def test_an_unparseable_published_version_fails_closed(tmp_path, published):
+     with pytest.raises(gate.GateFailure, match="unrecognised"):
+         _gate(tmp_path, _Npm(_report(), view=published))
++
++
++def test_test_sources_may_import_vitest_but_application_source_may_not_import_vite(tmp_path):
++    """R5: vitest is in the picomatch chain and every test file imports it; tests are
++    never bundled. Application code importing a chain package still fails."""
++    client = _client(tmp_path)
++    (client / "src" / "lib" / "__tests__").mkdir(parents=True)
++    (client / "src" / "lib" / "__tests__" / "a.test.ts").write_text('import { it } from "vitest";\n', encoding="utf-8")
++    (client / "src" / "tests").mkdir()
++    (client / "src" / "tests" / "setup.ts").write_text('import { vi } from "vitest";\n', encoding="utf-8")
++    (client / "src" / "lib" / "b.spec.tsx").write_text('import { expect } from "vitest";\n', encoding="utf-8")
++    assert "EXCEPTION" in gate.run_gate(client, runner=_Npm(_report()), today=BEFORE_EXPIRY)
++    (client / "src" / "lib" / "app.ts").write_text('import { defineConfig } from "vite";\n', encoding="utf-8")
++    with pytest.raises(gate.GateFailure, match="src/lib/app.ts"):
++        gate.run_gate(client, runner=_Npm(_report()), today=BEFORE_EXPIRY)

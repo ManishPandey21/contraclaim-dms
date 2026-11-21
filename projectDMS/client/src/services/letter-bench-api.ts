@@ -8,8 +8,12 @@ import type {
   DraftRole,
   EffectiveSkill,
   SkillAdminList,
+  SkillApproval,
+  SkillApprovalKind,
+  SkillApprovalList,
   SkillBinding,
-  SkillEvalReport,
+  SkillEvalRun,
+  SkillReviewQueue,
   SkillStep,
   SkillVersionSummary,
   TextSpan,
@@ -24,7 +28,7 @@ export async function fetchBenchAvailability(): Promise<BenchAvailability> {
 
 export async function openBench(payload: {
   incoming_document_id?: string;
-  trigger_type?: "variation";
+  trigger_type?: "variation" | "claim" | "determination" | "information_request";
   trigger_id?: string;
   role?: DraftRole;
 }): Promise<BenchOpenResponse> {
@@ -177,14 +181,64 @@ export async function importSkillBundle(input: {
   return data;
 }
 
+/** Publish on a passing server-side evaluation run (4B-41). */
 export async function publishSkillVersion(
   skillKey: string,
   version: string,
-  evalReport: SkillEvalReport
+  evalRunId: string
 ): Promise<SkillVersionSummary> {
   const { data } = await api.post<SkillVersionSummary>(
     `/skills/${encodeURIComponent(skillKey)}/versions/${encodeURIComponent(version)}/publish`,
-    { eval_report: evalReport }
+    { eval_run_id: evalRunId }
+  );
+  return data;
+}
+
+/** Run the version's golden set on the server. The run records the signed-in user as its evaluator. */
+export async function runSkillEvaluation(skillKey: string, version: string, note?: string): Promise<SkillEvalRun> {
+  const { data } = await api.post<SkillEvalRun>(`${versionPath(skillKey, version)}/eval-runs`, note ? { note } : {});
+  return data;
+}
+
+export async function fetchSkillEvalRuns(skillKey: string, version: string): Promise<SkillEvalRun[]> {
+  const { data } = await api.get<SkillEvalRun[]>(`${versionPath(skillKey, version)}/eval-runs`);
+  return data;
+}
+
+/** Drafts that ask a review from a role the signed-in user holds at platform scope. */
+export async function fetchSkillReviewQueue(): Promise<SkillReviewQueue> {
+  const { data } = await api.get<SkillReviewQueue>("/skills/review-queue");
+  return data;
+}
+
+/** One version with its text. A draft is readable only by a reviewer it names. */
+export async function fetchSkillVersionText(skillKey: string, version: string): Promise<{ skill_md: string }> {
+  const { data } = await api.get<{ skill_md: string }>(versionPath(skillKey, version));
+  return data;
+}
+
+const versionPath = (skillKey: string, version: string) =>
+  `/skills/${encodeURIComponent(skillKey)}/versions/${encodeURIComponent(version)}`;
+
+export async function fetchSkillApprovals(skillKey: string, version: string): Promise<SkillApprovalList> {
+  const { data } = await api.get<SkillApprovalList>(`${versionPath(skillKey, version)}/approvals`);
+  return data;
+}
+
+/** Record the signed-in user's approval. The server checks they hold `reviewerRole`. */
+export async function recordSkillApproval(
+  skillKey: string,
+  version: string,
+  input: { kind: SkillApprovalKind; reviewer_role: string; eval_run_id: string; comment?: string }
+): Promise<SkillApproval> {
+  const { data } = await api.post<SkillApproval>(`${versionPath(skillKey, version)}/approvals`, input);
+  return data;
+}
+
+export async function revokeSkillApproval(approvalId: string, reason: string): Promise<SkillApproval> {
+  const { data } = await api.post<SkillApproval>(
+    `/skills/approvals/${encodeURIComponent(approvalId)}/revoke`,
+    { reason }
   );
   return data;
 }

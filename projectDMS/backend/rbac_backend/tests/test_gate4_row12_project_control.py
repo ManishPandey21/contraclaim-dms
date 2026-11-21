@@ -287,7 +287,8 @@ def _held_names_satisfying(monkeypatch, permission: str, held: List[str]) -> Lis
     """
     satisfying = []
     for name in held:
-        probe = _DB(user=_user_doc(["probe"]), roles=[{"_id": "probe", "permissions": [name]}])
+        # SEC-1: a probe role of the user's own organisation (one naming none grants nothing there).
+        probe = _DB(user=_user_doc(["probe"]), roles=[{"_id": "probe", "organization_id": OWN_ORG, "permissions": [name]}])
         _wire(monkeypatch, probe)
         if asyncio.run(PermissionService().user_has_permission(ADMIN_ID, permission, log=False)):
             satisfying.append(name)

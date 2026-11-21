@@ -11,10 +11,11 @@
 #      settings resolve to that disposable server and to no other
 #   4. migrate_database --list, a --fail-on-warning dry run, then
 #      --apply --fail-on-warning, all inside the backend container
-#   5. checks the three Letter Bench migrations (20261114_0001 to _0003) by
-#      reading the server: collections, indexes with their uniqueness and
-#      partial filters, the three system skills at 1.0.0, and the unique
-#      indexes refusing a real duplicate
+#   5. checks the skill and claim migrations (20261114_0001 to 20261123_0001)
+#      by reading the server: collections, indexes with their uniqueness and
+#      partial filters, the three published letter skills at 1.0.0, the four
+#      claim and arbitration packs stored as unpublished drafts, and the
+#      unique indexes refusing a real duplicate
 #   6. applies again and proves nothing moved (idempotency), then --list again
 #   7. prints an evidence block to paste into
 #      docs/GATE_6_FRESH_INSTALL_EVIDENCE.md
@@ -37,7 +38,7 @@
 #   GATE6_BACKEND_IMAGE        use this image instead of building one. Its
 #                              org.opencontainers.image.revision label must
 #                              equal the checked-out commit.
-#   GATE6_EXPECTED_MIGRATIONS  catalogue size this run must find (default 22)
+#   GATE6_EXPECTED_MIGRATIONS  catalogue size this run must find (default 32)
 #   GATE6_MONGO_IMAGE          default mongo:8.0, the image CI uses
 #   GATE6_OUT_DIR              where step logs go (default: a new temp dir)
 #   GATE6_KEEP=1               leave the containers and network up afterwards
@@ -47,7 +48,7 @@
 set -Eeuo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-EXPECTED=${GATE6_EXPECTED_MIGRATIONS:-22}
+EXPECTED=${GATE6_EXPECTED_MIGRATIONS:-32}
 MONGO_IMAGE=${GATE6_MONGO_IMAGE:-mongo:8.0}
 # Lower case throughout: the name is also the server's hostname, and URL parsers
 # fold hostnames to lower case.
@@ -300,9 +301,9 @@ APPLY=$(py "$OUT_DIR/06-apply.stdout" "$SUMMARISE_RUN")
 ok "exit $APPLY_RC, $APPLY"
 
 # --------------------------------------------------------------------------- #
-# 3. The three Letter Bench migrations, read from the server
+# 3. The skill migrations (Letter Bench, and the draft packs), read from the server
 # --------------------------------------------------------------------------- #
-STEP="verify the Letter Bench migrations"
+STEP="verify the skill migrations"
 say "$STEP"
 # The expectations below are written out here, not imported from the migration
 # modules: a check that reads its expectation from the code under test passes
@@ -315,7 +316,7 @@ function check(name, pass, detail) {
 }
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
-const expectedCollections = ["skills", "skill_versions", "skill_bindings", "letter_position_boards", "letter_skill_steps"];
+const expectedCollections = ["skills", "skill_versions", "skill_bindings", "skill_approvals", "letter_position_boards", "letter_skill_steps", "skill_steps", "claim_notice_requirements", "claim_head_links", "claim_determinations", "claim_privileged", "claim_submissions"];
 const present = new Set(db.getCollectionNames());
 for (const name of expectedCollections) check("collection " + name + " exists", present.has(name));
 
@@ -324,6 +325,7 @@ const expectedIndexes = [
   ["skill_versions", "skill_version_unique", { skill_key: 1, version: 1 }, true, null],
   ["skill_versions", "skill_version_status", { skill_key: 1, status: 1 }, false, null],
   ["skill_bindings", "skill_binding_scope_unique", { organization_id: 1, project_id: 1, skill_key: 1 }, true, null],
+  ["skill_approvals", "skill_approvals_by_version", { skill_key: 1, version: 1, decided_at: 1 }, false, null],
   ["letter_position_boards", "bench_board_letter_unique", { letter_id: 1 }, true, null],
   ["letter_position_boards", "bench_board_scope_time", { organization_id: 1, project_id: 1, updated_at: -1 }, false, null],
   ["letter_position_boards", "bench_board_document_unique", { organization_id: 1, incoming_document_id: 1 }, true,
@@ -333,6 +335,38 @@ const expectedIndexes = [
   ["letter_skill_steps", "bench_step_letter_time", { letter_id: 1, created_at: 1 }, false, null],
   ["letter_skill_steps", "bench_step_idempotency_unique", { letter_id: 1, skill_key: 1, skill_hash: 1, input_hash: 1 }, true, null],
   ["letter_skill_steps", "bench_step_id_unique", { step_id: 1 }, true, null],
+  // 20261116_0001: Claim Bench and Notice Clock.
+  ["skill_steps", "skill_step_idempotency_unique", { subject_type: 1, subject_id: 1, skill_key: 1, skill_hash: 1, input_hash: 1 }, true, null],
+  ["skill_steps", "skill_step_id_unique", { step_id: 1 }, true, null],
+  ["skill_steps", "skill_step_parent_time", { parent_id: 1, created_at: 1 }, false, null],
+  ["claim_notice_requirements", "notice_requirement_current_unique", { organization_id: 1, project_id: 1, claim_type: 1 }, true,
+    { status: "current" }],
+  ["claim_notice_requirements", "notice_requirement_history", { organization_id: 1, project_id: 1, claim_type: 1, created_at: -1 }, false, null],
+  ["claims", "claim_origin_unique", { organization_id: 1, "origin.type": 1, "origin.id": 1 }, true,
+    { "origin.id": { $type: "string" } }],
+  // 20261117_0001: links from a head of claim to hindrances and key-date EOT records.
+  ["claim_head_links", "claim_head_link_active_unique", { claim_id: 1, head_id: 1, target_type: 1, target_id: 1 }, true,
+    { status: "active" }],
+  ["claim_head_links", "claim_head_link_claim_time", { claim_id: 1, status: 1, created_at: 1 }, false, null],
+  ["claim_head_links", "claim_head_link_target", { organization_id: 1, target_type: 1, target_id: 1, status: 1 }, false, null],
+  // 20261118_0001: determinations, the privileged claim store, submissions.
+  ["claim_determinations", "claim_determination_revision_unique", { claim_id: 1, origin: 1, revision: 1 }, true, null],
+  ["claim_determinations", "claim_determination_scope_status", { organization_id: 1, project_id: 1, status: 1 }, false, null],
+  ["claim_privileged", "claim_privileged_claim_kind_time", { claim_id: 1, kind: 1, created_at: -1 }, false, null],
+  ["claim_privileged", "claim_privileged_one_strategy_note", { claim_id: 1 }, true, { kind: "strategy_note" }],
+  ["claim_submissions", "claim_submission_claim_unique", { claim_id: 1 }, true, null],
+  // 20261119_0001: the link between claims and arbitration cases.
+  ["claims", "claim_arbitration_case", { organization_id: 1, arbitration_case_id: 1 }, false,
+    { arbitration_case_id: { $type: "string" } }],
+  ["arbitration_cases", "arbitration_case_claim_ids", { organization_id: 1, claim_ids: 1 }, false, null],
+  // 20261120_0001 (M-05): one matrix row per case and escalation origin, in every matrix collection.
+  ...["arbitration_chronology_matrix", "arbitration_claim_matrix", "arbitration_clause_matrix", "arbitration_counterclaim_matrix", "arbitration_defence_matrix", "arbitration_document_index", "arbitration_expert_alignment", "arbitration_issue_matrix", "arbitration_jurisdiction_matrix", "arbitration_notice_compliance", "arbitration_quantum_annexures", "arbitration_rejoinder_matrix"].map((name) =>
+    [name, "matrix_case_origin_unique", { case_id: 1, origin_key: 1 }, true, { origin_key: { $type: "string" } }]),
+  // 20261122_0001 (M-04): claims by contract.
+  ["claims", "claim_scope_contract", { organization_id: 1, project_id: 1, contract_id: 1 }, false, null],
+  // 20261123_0001 (M-01 part): evaluation runs by version and time; approvals by the run they name.
+  ["skill_eval_runs", "skill_eval_run_version_time", { skill_key: 1, version: 1, started_at: -1 }, false, null],
+  ["skill_approvals", "skill_approval_eval_run", { eval_run_id: 1 }, false, { eval_run_id: { $type: "string" } }],
 ];
 for (const [collection, name, key, unique, partial] of expectedIndexes) {
   const found = db.getCollection(collection).getIndexes().find((i) => i.name === name);
@@ -346,28 +380,47 @@ for (const [collection, name, key, unique, partial] of expectedIndexes) {
   );
 }
 const partials = expectedIndexes.filter((e) => e[4] !== null).length;
-check("partial unique indexes expected", partials === 2, partials + " declared");
+// 7 before 20261120_0001, which adds one per matrix collection (12); 20261123_0001 adds one.
+check("partial indexes expected", partials === 20, partials + " declared");
 
 const expectedSkills = ["indian-infra-contract-letters", "indian-infra-letter-analysis", "indian-infra-variations"];
+// Stored by 20261115_0001 as DRAFTS: unreviewed method text that must not be
+// usable for drafting until its technical and legal approvals exist.
+const expectedDrafts = ["indian-infra-arbitration-hearing", "indian-infra-arbitration-pleadings", "indian-infra-claims", "indian-infra-eot-claims"];
 const versions = db.skill_versions.find({}).sort({ skill_key: 1 }).toArray();
-check("skill_versions holds exactly the three system skills",
-  same(versions.map((v) => v.skill_key), expectedSkills), versions.length + " rows");
+check("skill_versions holds exactly the three published skills and the four draft packs",
+  same(versions.map((v) => v.skill_key), expectedSkills.concat(expectedDrafts).sort()), versions.length + " rows");
 for (const v of versions) {
-  check("skill " + v.skill_key + " seeded at 1.0.0, published, system-owned",
-    v.version === "1.0.0" && v.status === "published" && v.owner_scope === "system" && /^[0-9a-f]{64}$/.test(v.content_hash || ""),
-    "version=" + v.version + " status=" + v.status + " owner_scope=" + v.owner_scope);
+  const hashed = /^[0-9a-f]{64}$/.test(v.content_hash || "");
+  if (expectedDrafts.includes(v.skill_key)) {
+    const reviews = ((v.manifest || {}).required_approvals || []).map((r) => r.kind + ":" + r.reviewer_role).sort();
+    check("skill " + v.skill_key + " stored at 1.0.0 as an unpublished draft that names a legal approver",
+      v.version === "1.0.0" && v.status === "draft" && v.owner_scope === "system" && hashed &&
+        !v.published_at && !v.published_by && !v.eval_report && reviews.includes("legal:senior_legal_approver") &&
+        reviews.some((r) => r.startsWith("technical:")),
+      "status=" + v.status + " published_at=" + (v.published_at || null) + " required_approvals=" + JSON.stringify(reviews));
+  } else {
+    check("skill " + v.skill_key + " seeded at 1.0.0, published, system-owned",
+      v.version === "1.0.0" && v.status === "published" && v.owner_scope === "system" && hashed,
+      "version=" + v.version + " status=" + v.status + " owner_scope=" + v.owner_scope);
+  }
   print("SEED  " + v.skill_key + " " + v.version + " " + v.content_hash);
 }
 const skills = db.skills.find({}).sort({ skill_key: 1 }).toArray();
-check("skills holds exactly the three system skills",
+check("skills holds exactly the three published skills (a draft gets no latest-published pointer)",
   same(skills.map((s) => s.skill_key), expectedSkills), skills.length + " rows");
 for (const s of skills) {
   check("skill " + s.skill_key + " active, latest published 1.0.0",
     s.status === "active" && s.latest_published_version === "1.0.0" && s.owner_scope === "system");
 }
+check("no skill approval exists on a fresh install", db.skill_approvals.countDocuments({}) === 0,
+  db.skill_approvals.countDocuments({}) + " rows");
+check("no evaluation run exists on a fresh install", db.skill_eval_runs.countDocuments({}) === 0,
+  db.skill_eval_runs.countDocuments({}) + " rows");
 
 const ledger = db.schema_migrations.find({}).toArray().map((r) => r.version).sort();
-for (const version of ["20261114_0001", "20261114_0002", "20261114_0003"]) {
+for (const version of ["20261114_0001", "20261114_0002", "20261114_0003", "20261115_0001", "20261116_0001", "20261117_0001",
+  "20261118_0001", "20261119_0001", "20261120_0001", "20261121_0001", "20261121_0002", "20261122_0001", "20261123_0001"]) {
   check("ledger records " + version, ledger.includes(version));
 }
 print("ledger_rows=" + ledger.length);
@@ -390,7 +443,7 @@ for v in sorted(system_skill_versions(), key=lambda v: v.skill_key):
 SEEDED=$(grep '^SEED  ' "$OUT_DIR/07-bench.stdout")
 BUNDLED=$(grep '^SEED  ' "$OUT_DIR/08-bundled-hashes.stdout")
 [[ -n "$SEEDED" && "$SEEDED" == "$BUNDLED" ]] || die "stored skills differ from the bundled files: stored [$SEEDED] bundled [$BUNDLED]"
-ok "3 of 3 stored content hashes equal the bundled files"
+ok "7 of 7 stored content hashes equal the bundled files"
 
 STEP="unique indexes refuse a real duplicate"
 say "$STEP"
@@ -426,10 +479,105 @@ r = attempt(boards, { letter_id: "p1", organization_id: org });
 check("second board for the same letter is refused", r === "E11000 bench_board_letter_unique", r);
 r = attempt("skill_versions", { skill_key: "indian-infra-variations", version: "1.0.0", owner_scope: "gate6-probe" });
 check("a second 1.0.0 of a seeded skill is refused", r === "E11000 skill_version_unique", r);
+r = attempt("skill_versions", { skill_key: "indian-infra-claims", version: "1.0.0", owner_scope: "gate6-probe", status: "published" });
+check("a second 1.0.0 of a draft pack is refused", r === "E11000 skill_version_unique", r);
 
+// 20261116_0001. One notice period in force per project and claim type; history is free.
+const notice = "claim_notice_requirements";
+const scope = { organization_id: org, project_id: "p1", claim_type: "eot" };
+check("first current notice period is accepted", attempt(notice, { _id: "n1", ...scope, status: "current" }) === "inserted");
+r = attempt(notice, { _id: "n2", ...scope, status: "current" });
+check("a second current notice period for the same project and claim type is refused", r === "E11000 notice_requirement_current_unique", r);
+check("superseded notice periods are kept as history",
+  attempt(notice, { _id: "n3", ...scope, status: "superseded" }) === "inserted" &&
+  attempt(notice, { _id: "n4", ...scope, status: "superseded" }) === "inserted");
+check("another claim type on the project is accepted",
+  attempt(notice, { _id: "n5", ...scope, claim_type: "variation", status: "current" }) === "inserted");
+// One claim per record it was raised from; claims with no origin are unconstrained.
+check("two claims with no origin are both accepted",
+  attempt("claims", { _id: "gate6-c1", organization_id: org, origin: null }) === "inserted" &&
+  attempt("claims", { _id: "gate6-c2", organization_id: org }) === "inserted");
+check("first claim raised from a hindrance is accepted",
+  attempt("claims", { _id: "gate6-c3", organization_id: org, origin: { type: "hindrance", id: "h-1" } }) === "inserted");
+r = attempt("claims", { _id: "gate6-c4", organization_id: org, origin: { type: "hindrance", id: "h-1" } });
+check("a second claim raised from the same hindrance is refused", r === "E11000 claim_origin_unique", r);
+check("a claim raised from a letter with the same id is a different origin",
+  attempt("claims", { _id: "gate6-c5", organization_id: org, origin: { type: "letter_bench", id: "h-1" } }) === "inserted");
+// A skill step replayed with the same inputs cannot be stored twice.
+const stepKey = { subject_type: "claim_head", subject_id: "gate6:H1", skill_key: "indian-infra-claims", skill_hash: "x", input_hash: "y" };
+check("first skill step is accepted", attempt("skill_steps", { step_id: "gate6-s1", ...stepKey }) === "inserted");
+r = attempt("skill_steps", { step_id: "gate6-s2", ...stepKey });
+check("the same skill step replayed is refused", r === "E11000 skill_step_idempotency_unique", r);
+
+// 20261117_0001. One active link per record and head; removed links are history;
+// the same hindrance may serve another head.
+const links = "claim_head_links";
+const link = { organization_id: org, claim_id: "gate6-claim", head_id: "H1", target_type: "hindrance", target_id: "h-1" };
+check("first link from a head to a hindrance is accepted", attempt(links, { _id: "k1", ...link, status: "active" }) === "inserted");
+r = attempt(links, { _id: "k2", ...link, status: "active" });
+check("a second active link from the same head to the same hindrance is refused", r === "E11000 claim_head_link_active_unique", r);
+check("removed links to it are kept as history",
+  attempt(links, { _id: "k3", ...link, status: "removed" }) === "inserted" &&
+  attempt(links, { _id: "k4", ...link, status: "removed" }) === "inserted");
+check("the same hindrance can be linked to another head",
+  attempt(links, { _id: "k5", ...link, head_id: "H2", status: "active" }) === "inserted");
+
+// 20261118_0001. A determination revision is unique per claim and origin; a claim
+// has one strategy note and any number of simulations; one submission per claim.
+const dets = "claim_determinations", priv = "claim_privileged", subs = "claim_submissions";
+const det = { organization_id: org, claim_id: "gate6-claim", origin: "authored", revision: 1 };
+check("first determination revision is accepted", attempt(dets, { _id: "d1", ...det }) === "inserted");
+r = attempt(dets, { _id: "d2", ...det });
+check("the same revision of an authored determination is refused", r === "E11000 claim_determination_revision_unique", r);
+check("a received determination may carry the same revision number",
+  attempt(dets, { _id: "d3", ...det, origin: "received" }) === "inserted");
+check("a strategy note is accepted", attempt(priv, { _id: "p1", organization_id: org, claim_id: "gate6-claim", kind: "strategy_note" }) === "inserted");
+r = attempt(priv, { _id: "p2", organization_id: org, claim_id: "gate6-claim", kind: "strategy_note" });
+check("a second strategy note for the claim is refused", r === "E11000 claim_privileged_one_strategy_note", r);
+check("simulations of the same claim are many",
+  attempt(priv, { _id: "p3", organization_id: org, claim_id: "gate6-claim", kind: "simulation" }) === "inserted" &&
+  attempt(priv, { _id: "p4", organization_id: org, claim_id: "gate6-claim", kind: "simulation" }) === "inserted");
+check("first submission for a claim is accepted", attempt(subs, { _id: "u1", organization_id: org, claim_id: "gate6-claim" }) === "inserted");
+r = attempt(subs, { _id: "u2", organization_id: org, claim_id: "gate6-claim" });
+check("a second submission for the claim is refused", r === "E11000 claim_submission_claim_unique", r);
+
+// 20261120_0001 (M-05). One row per case and escalation origin; rows added by hand
+// (no origin) are unconstrained; the same origin in another case is another row.
+const matrix = "arbitration_claim_matrix";
+const mrow = { organization_id: org, case_id: "gate6-case", origin_key: "claim:gate6-claim:head:H1" };
+check("first escalated row is accepted", attempt(matrix, { _id: "m1", ...mrow }) === "inserted");
+r = attempt(matrix, { _id: "m2", ...mrow });
+check("the same origin in the same case is refused", r === "E11000 matrix_case_origin_unique", r);
+check("rows added by hand are unconstrained",
+  attempt(matrix, { _id: "m3", organization_id: org, case_id: "gate6-case" }) === "inserted" &&
+  attempt(matrix, { _id: "m4", organization_id: org, case_id: "gate6-case" }) === "inserted");
+check("the same origin in another case is accepted",
+  attempt(matrix, { _id: "m5", ...mrow, case_id: "gate6-case-2" }) === "inserted");
+
+// 20261123_0001. The approvals index is not unique: two reviewers' approvals may name the same run.
+check("two approvals naming the same evaluation run are both accepted",
+  attempt("skill_approvals", { _id: "a1", organization_id: org, skill_key: "gate6-probe", eval_run_id: "run-1" }) === "inserted" &&
+  attempt("skill_approvals", { _id: "a2", organization_id: org, skill_key: "gate6-probe", eval_run_id: "run-1" }) === "inserted");
+check("two runs of the same version are both kept",
+  attempt("skill_eval_runs", { _id: "r1", skill_key: "gate6-probe", version: "1.0.0", started_at: new Date() }) === "inserted" &&
+  attempt("skill_eval_runs", { _id: "r2", skill_key: "gate6-probe", version: "1.0.0", started_at: new Date() }) === "inserted");
+r = attempt("skill_eval_runs", { _id: "r1", skill_key: "gate6-probe", version: "1.0.0" });
+check("a run id is stored once", r === "E11000 _id_", r);
+db.skill_approvals.deleteMany({ skill_key: "gate6-probe" });
+db.skill_eval_runs.deleteMany({ skill_key: "gate6-probe" });
+
+for (const name of [dets, priv, subs, matrix]) db.getCollection(name).deleteMany({ organization_id: org });
 db.getCollection(boards).deleteMany({ organization_id: org });
 db.skill_versions.deleteMany({ owner_scope: "gate6-probe" });
-const left = db.getCollection(boards).countDocuments({}) + db.skill_versions.countDocuments({ owner_scope: "gate6-probe" });
+db.getCollection(links).deleteMany({ organization_id: org });
+db.getCollection(notice).deleteMany({ organization_id: org });
+db.claims.deleteMany({ organization_id: org });
+db.skill_steps.deleteMany({ subject_id: "gate6:H1" });
+const left = db.getCollection(boards).countDocuments({}) + db.skill_versions.countDocuments({ owner_scope: "gate6-probe" }) +
+  db.getCollection(notice).countDocuments({}) + db.claims.countDocuments({}) + db.skill_steps.countDocuments({}) +
+  db.getCollection(links).countDocuments({}) + db.getCollection(dets).countDocuments({}) +
+  db.getCollection(priv).countDocuments({}) + db.getCollection(subs).countDocuments({}) +
+  db.getCollection(matrix).countDocuments({}) + db.skill_approvals.countDocuments({}) + db.skill_eval_runs.countDocuments({});
 check("probe rows removed", left === 0, left + " left");
 if (failed) { print("PROBE FAILED=" + failed); quit(1); }
 print("PROBE=PASS");
@@ -520,7 +668,7 @@ RUN="docker run --rm --network <private> -e DATABASE_URL=mongodb://<disposable>:
   echo "  5. ${MIGRATE} --list"
   echo "       exit ${LIST_AFTER_RC}   ${LIST_AFTER_COUNTS}"
   echo
-  echo "Letter Bench migrations 20261114_0001 to _0003, read with mongosh: ${BENCH_PASSES} passed, 0 failed"
+  echo "Skill and claim migrations 20261114_0001 to 20261123_0001, read with mongosh: ${BENCH_PASSES} passed, 0 failed"
   grep -E '^(PASS|FAIL)' "$OUT_DIR/07-bench.stdout" | sed 's/^/  /'
   echo "Seeded skills (key, version, content hash) - equal to the files bundled in the image: YES"
   echo "$SEEDED" | sed 's/^SEED  /  /'

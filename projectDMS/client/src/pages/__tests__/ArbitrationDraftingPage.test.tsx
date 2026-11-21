@@ -16,11 +16,37 @@ const addReferencesMock = vi.fn();
 const removeReferenceMock = vi.fn();
 const generateMock = vi.fn();
 const updateDraftMock = vi.fn();
+const citationsMock = vi.fn();
+
+const gate = (allowed: boolean, reasons: { code: string; message: string; anchor?: string | null }[] = []) => ({
+  allowed,
+  reasons,
+  checked_on_action: ["Case readiness approval", "Plan approval", "Legal review approval"],
+});
+const CITATIONS = {
+  draft_id: "draft-1",
+  version: 2,
+  scratch: true,
+  counts: { verified: 0, unverified: 0, unresolved: 0, cited: 0, ledger: 0 },
+  items: [],
+  approval_blockers: [],
+  pleaded_head_gaps: [],
+  missing_evidence: [],
+  can_be_approved: false,
+  cannot_be_approved_reason: "This is a scratch draft with no case workspace.",
+  action_gates: {
+    approve: gate(false, [
+      { code: "scratch_draft", message: "A scratch draft has no case and cannot be approved. Attach it to a case.", anchor: "draft-case" },
+    ]),
+    filing_export: gate(false, [{ code: "not_approved", message: "The draft must be approved and locked before it is exported for filing.", anchor: "draft-approval" }]),
+  },
+};
 
 vi.mock("@/services/arbitration-drafting-api", () => ({
   listArbitrationDrafts: vi.fn().mockResolvedValue([]),
   createArbitrationDraft: vi.fn(),
   getArbitrationDraft: (...args: unknown[]) => getDraftMock(...args),
+  getArbitrationDraftCitations: (...args: unknown[]) => citationsMock(...args),
   generateArbitrationDraft: (...args: unknown[]) => generateMock(...args),
   prepareArbitrationDraftFromCase: vi.fn(),
   regenerateArbitrationSection: vi.fn(),
@@ -105,9 +131,15 @@ describe("ArbitrationDraftingPage (draft view)", () => {
       { source_type: "document", source_id: "doc-9", label: "Hindrance register", citation: "REG-9" },
     ]);
     addReferencesMock.mockResolvedValue(DRAFT);
+    citationsMock.mockResolvedValue(CITATIONS);
   });
 
   it("shows approve control and version history; approving calls the API", async () => {
+    getDraftMock.mockResolvedValue({ ...DRAFT, case_id: "case-1" });
+    citationsMock.mockResolvedValue({
+      ...CITATIONS, scratch: false, can_be_approved: true,
+      action_gates: { ...CITATIONS.action_gates, approve: gate(true) },
+    });
     renderDraftView();
     await waitFor(() => expect(getDraftMock).toHaveBeenCalledWith("draft-1"));
 
@@ -115,17 +147,82 @@ describe("ArbitrationDraftingPage (draft view)", () => {
     expect(screen.getByText("v1")).toBeInTheDocument();
     expect(screen.getByText("v2")).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("button", { name: /Approve/ }));
+    const approve = screen.getByRole("button", { name: /Approve/ });
+    await waitFor(() => expect(approve).toBeEnabled());
+    // What is still checked on approval is said, not hidden.
+    expect(screen.getByText(/Approve is available\. Checked when you approve: Case readiness approval/)).toBeInTheDocument();
+    await userEvent.click(approve);
     await waitFor(() => expect(approveMock).toHaveBeenCalledWith("draft-1"));
   });
 
-  it("shows the ungated banner for drafts without a case link and excludes register sources", async () => {
+  it("disables Approve with the server's reasons, each linked to where it is resolved (B4)", async () => {
+    getDraftMock.mockResolvedValue({ ...DRAFT, case_id: "case-1" });
+    citationsMock.mockResolvedValue({
+      ...CITATIONS,
+      scratch: false,
+      action_gates: {
+        ...CITATIONS.action_gates,
+        approve: gate(false, [
+          { code: "approval_blockers", message: "1 drafting blocker(s) must be resolved in a new version.", anchor: "draft-citations" },
+          { code: "self_approval", message: "You wrote or last changed this draft, so someone else must approve it.", anchor: null },
+        ]),
+      },
+    });
+    renderDraftView();
+    const status = await screen.findByText("Approve is not available yet:");
+    const approve = screen.getByRole("button", { name: /Approve/ });
+    expect(approve).toBeDisabled();
+    expect(approve).toHaveAttribute("aria-describedby", "draft-action-gate");
+    const link = screen.getByRole("link", { name: "1 drafting blocker(s) must be resolved in a new version." });
+    expect(link).toHaveAttribute("href", "#draft-citations");
+    expect(document.getElementById("draft-citations")).not.toBeNull();
+    expect(status.closest("[role=status]")).toHaveTextContent("someone else must approve it");
+    await userEvent.click(approve);
+    expect(approveMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps Approve disabled until the gate is known, and disables it for a scratch draft", async () => {
+    citationsMock.mockReturnValue(new Promise(() => undefined));
+    renderDraftView();
+    await waitFor(() => expect(getDraftMock).toHaveBeenCalled());
+    expect(screen.getByRole("button", { name: /Approve/ })).toBeDisabled();
+  });
+
+  it("disables filing export with its reasons and enables it when the gate allows", async () => {
+    const locked = { ...DRAFT, case_id: "case-1", status: "approved", is_locked: true };
+    getDraftMock.mockResolvedValue(locked);
+    citationsMock.mockResolvedValue({
+      ...CITATIONS,
+      scratch: false,
+      action_gates: {
+        approve: gate(true),
+        filing_export: gate(false, [
+          { code: "self_approval", message: "You wrote or last changed this draft, so someone else must export it.", anchor: null },
+        ]),
+      },
+    });
+    const { unmount } = renderDraftView();
+    expect(await screen.findByText("Export for filing is not available yet:")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Filing DOCX/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Filing PDF/ })).toBeDisabled();
+    unmount();
+
+    citationsMock.mockResolvedValue({
+      ...CITATIONS, scratch: false, action_gates: { approve: gate(true), filing_export: gate(true) },
+    });
+    renderDraftView();
+    await waitFor(() => expect(screen.getByRole("button", { name: /Filing DOCX/ })).toBeEnabled());
+    expect(screen.getByRole("button", { name: /Filing PDF/ })).toBeEnabled();
+  });
+
+  it("shows the scratch-draft banner for drafts without a case link and excludes register sources", async () => {
     updateDraftMock.mockResolvedValue({ ...DRAFT, excluded_register_ids: ["claim-1"] });
     renderDraftView();
     await waitFor(() => expect(getDraftMock).toHaveBeenCalled());
 
-    // DRAFT has no case_id -> the ungated warning is prominent.
-    expect(screen.getByText(/Ungated draft/)).toBeInTheDocument();
+    // DRAFT has no case_id -> it is named as a scratch draft, with what that means.
+    expect(screen.getByText(/Scratch draft\./)).toBeInTheDocument();
+    expect(screen.getAllByText(/cannot be\s+approved or exported for filing/).length).toBeGreaterThan(0);
 
     // The claim-register ledger row offers per-row exclusion.
     await userEvent.click(screen.getByRole("button", { name: "Exclude register source CL-001" }));

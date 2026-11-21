@@ -1,7 +1,9 @@
 """In-memory Mongo stand-in for skill-registry and Letter Bench tests.
 
 Supports what those services use: equality, ``$in``, dotted keys, ``$set`` /
-``$setOnInsert`` / ``$push``, upsert and sort. Not a general Mongo emulator.
+``$setOnInsert`` / ``$push`` / ``$inc``, upsert and sort. A ``session`` keyword
+is accepted and ignored (no concurrency to serialise). Not a general Mongo
+emulator.
 """
 
 from __future__ import annotations
@@ -20,23 +22,51 @@ class _Result:
 
 
 def _get(doc: Dict[str, Any], dotted: str) -> Any:
+    """Value at a dotted path. A path through an array yields every element's value,
+    as Mongo does (``chain.skill_key`` over a list of links)."""
     value: Any = doc
     for part in dotted.split("."):
-        if not isinstance(value, dict):
+        if isinstance(value, list):
+            value = [item.get(part) for item in value if isinstance(item, dict)]
+        elif isinstance(value, dict):
+            value = value.get(part)
+        else:
             return None
-        value = value.get(part)
     return value
+
+
+def _equals(actual: Any, expected: Any) -> bool:
+    # An array field matches a scalar when any element does.
+    if isinstance(actual, list) and not isinstance(expected, list):
+        return expected in actual
+    return actual == expected
+
+
+_OPERATORS = {"$in", "$nin", "$ne", "$exists", "$gt", "$gte", "$lt", "$lte"}
 
 
 def _match(doc: Dict[str, Any], query: Dict[str, Any]) -> bool:
     for key, expected in query.items():
         actual = _get(doc, key)
         if isinstance(expected, dict) and any(k.startswith("$") for k in expected):
-            if "$in" in expected and actual not in expected["$in"]:
+            unknown = {k for k in expected if k.startswith("$")} - _OPERATORS
+            if unknown:
+                # A fake that ignores an operator answers "match" for queries that would not
+                # match in MongoDB; refuse instead, so a test cannot pass on that.
+                raise NotImplementedError(f"FakeDB does not implement {sorted(unknown)}")
+            if "$in" in expected and not any(_equals(actual, option) for option in expected["$in"]):
                 return False
-            if "$ne" in expected and actual == expected["$ne"]:
+            if "$nin" in expected and any(_equals(actual, option) for option in expected["$nin"]):
                 return False
-        elif actual != expected:
+            if "$ne" in expected and _equals(actual, expected["$ne"]):
+                return False
+            if "$exists" in expected and (actual is not None) != bool(expected["$exists"]):
+                return False
+            for op, test in (("$gt", lambda a, b: a > b), ("$gte", lambda a, b: a >= b),
+                             ("$lt", lambda a, b: a < b), ("$lte", lambda a, b: a <= b)):
+                if op in expected and (actual is None or not test(actual, expected[op])):
+                    return False
+        elif not _equals(actual, expected):
             return False
     return True
 
@@ -69,30 +99,60 @@ class _Cursor:
 class FakeCollection:
     def __init__(self, docs: Optional[List[Dict[str, Any]]] = None) -> None:
         self.docs: List[Dict[str, Any]] = docs or []
+        self.indexes: Dict[str, Dict[str, Any]] = {"_id_": {"key": [("_id", 1)]}}
 
-    async def insert_one(self, doc: Dict[str, Any]) -> _Result:
+    async def index_information(self) -> Dict[str, Dict[str, Any]]:
+        return copy.deepcopy(self.indexes)
+
+    async def insert_one(self, doc: Dict[str, Any], **_: Any) -> _Result:
         stored = copy.deepcopy(doc)
         stored.setdefault("_id", ObjectId())
         self.docs.append(stored)
         return _Result(inserted_id=stored["_id"])
 
-    async def find_one(self, query: Dict[str, Any], projection: Any = None, sort: Any = None):
+    async def find_one(self, query: Dict[str, Any], projection: Any = None, sort: Any = None, **_: Any):
         matches = [doc for doc in self.docs if _match(doc, query)]
         if sort:
             key, direction = sort[0]
             matches.sort(key=lambda d: (d.get(key) is None, d.get(key)), reverse=direction < 0)
         return copy.deepcopy(matches[0]) if matches else None
 
-    def find(self, query: Optional[Dict[str, Any]] = None, projection: Any = None) -> _Cursor:
+    def find(self, query: Optional[Dict[str, Any]] = None, projection: Any = None, **_: Any) -> _Cursor:
         return _Cursor([doc for doc in self.docs if _match(doc, query or {})])
 
     @staticmethod
     def _apply(doc: Dict[str, Any], update: Dict[str, Any]) -> None:
-        doc.update(copy.deepcopy(update.get("$set", {})))
-        for key, value in update.get("$push", {}).items():
-            doc.setdefault(key, []).append(copy.deepcopy(value))
+        for key, value in update.get("$set", {}).items():
+            # A dotted key sets a nested field, as Mongo does.
+            target = doc
+            *parents, leaf = key.split(".")
+            for part in parents:
+                if not isinstance(target.get(part), dict):
+                    target[part] = {}
+                target = target[part]
+            target[leaf] = copy.deepcopy(value)
+        for operator in ("$push", "$addToSet"):
+            for key, value in update.get(operator, {}).items():
+                # Dotted paths and {"$each": [...]}, as Mongo applies them.
+                target = doc
+                *parents, leaf = key.split(".")
+                for part in parents:
+                    if not isinstance(target.get(part), dict):
+                        target[part] = {}
+                    target = target[part]
+                items = value["$each"] if isinstance(value, dict) and "$each" in value else [value]
+                current = target.setdefault(leaf, [])
+                for item in items:
+                    if operator == "$addToSet" and item in current:
+                        continue
+                    current.append(copy.deepcopy(item))
+        for key, value in update.get("$inc", {}).items():
+            doc[key] = (doc.get(key) or 0) + value
 
-    async def update_one(self, query: Dict[str, Any], update: Dict[str, Any], upsert: bool = False, **_: Any) -> _Result:
+    async def update_one(self, query: Dict[str, Any], update: Dict[str, Any], upsert: bool = False, **options: Any) -> _Result:
+        if options.get("array_filters"):
+            # Not modelled: a fake that ignored them would set a literal "$[name]" key and pass.
+            raise NotImplementedError("array_filters: test this write against a real MongoDB")
         for doc in self.docs:
             if _match(doc, query):
                 self._apply(doc, update)
@@ -127,7 +187,12 @@ class FakeCollection:
         return _Result(before - len(self.docs), before - len(self.docs))
 
     async def create_index(self, *args: Any, **kwargs: Any) -> str:
-        return kwargs.get("name", "index")
+        name = kwargs.get("name", "index")
+        keys = args[0] if args else kwargs.get("keys", [])
+        if isinstance(keys, str):
+            keys = [(keys, 1)]
+        self.indexes[name] = {"key": list(keys), **({"unique": True} if kwargs.get("unique") else {})}
+        return name
 
     async def count_documents(self, query: Dict[str, Any]) -> int:
         return sum(1 for doc in self.docs if _match(doc, query))
@@ -138,7 +203,15 @@ class FakeDB:
         self._collections: Dict[str, FakeCollection] = {}
 
     def __getitem__(self, name: str) -> FakeCollection:
-        return self._collections.setdefault(name, FakeCollection())
+        if name not in self._collections:
+            collection = FakeCollection()
+            if name == "skill_versions":
+                # As migration 20261114_0001 leaves a production database (T-4 gate).
+                collection.indexes["skill_version_unique"] = {
+                    "key": [("skill_key", 1), ("version", 1)], "unique": True,
+                }
+            self._collections[name] = collection
+        return self._collections[name]
 
     def __getattr__(self, name: str) -> FakeCollection:
         if name.startswith("_"):

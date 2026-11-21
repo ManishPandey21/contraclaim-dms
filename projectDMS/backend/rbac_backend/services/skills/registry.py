@@ -4,7 +4,9 @@ Invariants enforced here (not only in the router):
 
 - A published or deprecated version is write-once. Its text, references,
   manifest and hash never change; a correction is a new version.
-- Publishing requires a passing evaluation report and a clean guardrail scan.
+- Publishing requires a passing evaluation report and a clean guardrail scan,
+  and, where the manifest names them, technical and legal approvals bound to
+  this exact text and evaluation, given by people other than the publisher.
 - Resolution is deterministic: project binding, then organisation binding,
   then the latest published version. A disabled binding hides the skill.
 """
@@ -22,6 +24,7 @@ from ...models.skill import (
     Skill,
     SkillAdminListResponse,
     SkillBinding,
+    SkillApproval,
     SkillBindingRequest,
     SkillEvalReport,
     SkillKind,
@@ -31,8 +34,23 @@ from ...models.skill import (
     SkillVersionSummary,
 )
 from ...utils.datetime import now_utc
+from .approvals import (
+    SkillApprovalService,
+    approval_statuses,
+    describe_unsatisfied,
+    require_acceptable_report,
+    required_reviews,
+    revision_filter,
+)
+from .transactions import audit_skill_decision, run_in_transaction, session_kwargs
+from .version_index import require_skill_version_index
 from .loader import LoadedSkill
-from .system_skills import KNOWN_UNINSTALLED_SKILLS, system_skill_versions
+from .system_skills import (
+    AWAITING_APPROVAL_REASON,
+    KNOWN_UNINSTALLED_SKILLS,
+    system_skill_versions,
+    with_approval_floor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -168,13 +186,15 @@ class SkillRegistry:
         installed = {item.skill_key for item in result}
         for key, label in KNOWN_UNINSTALLED_SKILLS.items():
             if key not in installed:
+                # A hand-off target with only unpublished versions is installed
+                # but unreviewed: say so, rather than "Not installed".
                 result.append(
                     EffectiveSkill(
                         skill_key=key,
                         name=label,
                         kind="evaluation",
                         available=False,
-                        unavailable_reason="Not installed",
+                        unavailable_reason=AWAITING_APPROVAL_REASON if key in keys else "Not installed",
                     )
                 )
         return result
@@ -200,6 +220,10 @@ class SkillRegistry:
             pinned=bool(binding and binding.pinned_version),
             available=True,
         )
+
+    async def draft_versions(self) -> List[SkillVersion]:
+        """Every draft, for the reviewers' queue."""
+        return [item for item in await self._all_versions() if item.status == "draft"]
 
     async def admin_list(self, organization_id: Optional[str] = None) -> SkillAdminListResponse:
         versions = await self._all_versions()
@@ -233,6 +257,7 @@ class SkillRegistry:
                     eval_report=item.eval_report,
                     created_at=item.created_at,
                     published_at=item.published_at,
+                    required_approvals=required_reviews(item),
                 )
                 for item in versions
             ],
@@ -251,6 +276,9 @@ class SkillRegistry:
         guardrail_findings: Optional[List[Dict[str, Any]]] = None,
         bundle_file_id: Optional[str] = None,
     ) -> SkillVersion:
+        # The write below relies on skill_version_unique to stop a concurrent import
+        # writing a second document (T-4): verify it, never create it here.
+        await require_skill_version_index(self.db)
         existing = await self.get_version(loaded.skill_key, version)
         if existing and existing.status != "draft":
             raise HTTPException(
@@ -260,6 +288,20 @@ class SkillRegistry:
                     "Import the correction as a new version."
                 ),
             )
+        if existing and await SkillApprovalService(self.db).live_approvals(loaded.skill_key, version):
+            # Replacing reviewed text or policy under the same version number
+            # would leave reviewers' names on something they did not see.
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"{loaded.skill_key} {version} has approvals. Import the change as a new version, "
+                    "or have the approvals revoked first."
+                ),
+            )
+        # The server floor (plan D-05): a manifest may add reviews, never drop one.
+        manifest = manifest.model_copy(
+            update={"required_approvals": with_approval_floor(loaded.skill_key, list(manifest.required_approvals))}
+        )
         record = SkillVersion(
             skill_key=loaded.skill_key,
             version=version,
@@ -295,67 +337,172 @@ class SkillRegistry:
         version: str,
         eval_report: SkillEvalReport,
         published_by: Optional[str],
+        eval_run_id: Optional[str] = None,
     ) -> SkillVersion:
-        record = await self._require_db_version(skill_key, version)
-        if record.status != "draft":
+        """Publish a draft, in one transaction with the approval check (plan D-05a).
+
+        The version and its approvals are read inside the transaction, and the
+        version is written only if ``approval_revision`` is still the value read.
+        A concurrent record or revoke writes the same document, so one of the two
+        is aborted and retried: a publish can never commit on approvals that
+        were revoked or added after it looked.
+        """
+        require_acceptable_report(eval_report)
+        publisher = str(published_by or "")
+        if not publisher:
+            raise HTTPException(status_code=403, detail="Publishing needs an identified publisher")
+        if publisher == str(eval_report.recorded_by):
             raise HTTPException(
-                status_code=409, detail=f"{skill_key} {version} is already {record.status}"
+                status_code=409,
+                detail="The person who ran the evaluation cannot publish the version",
             )
-        if any(
-            str(finding.get("severity")) == "critical" for finding in record.guardrail_findings
-        ):
-            raise HTTPException(
-                status_code=422,
-                detail="This version contains text flagged as instruction manipulation and cannot be published.",
+        approvals_service = SkillApprovalService(self.db)
+
+        async def decide(session: Optional[Any]) -> SkillVersion:
+            kw = session_kwargs(session)
+            doc = await self.db[SKILL_VERSIONS].find_one({"skill_key": skill_key, "version": version}, **kw)
+            if not doc:
+                raise HTTPException(status_code=404, detail="Skill version not found")
+            record = SkillVersion(**doc)
+            if record.status != "draft":
+                raise HTTPException(
+                    status_code=409, detail=f"{skill_key} {version} is already {record.status}"
+                )
+            if any(
+                str(finding.get("severity")) == "critical" for finding in record.guardrail_findings
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail="This version contains text flagged as instruction manipulation and cannot be published.",
+                )
+            if not eval_report.passed:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Evaluation gate not met: score {eval_report.score:.2f} is below the "
+                        f"threshold {eval_report.threshold:.2f}, or no cases were run."
+                    ),
+                )
+            approvals = await approvals_service._list_in(skill_key, version, kw)
+            _require_approvals(record, eval_report, publisher, approvals)
+            result = await self.db[SKILL_VERSIONS].update_one(
+                {
+                    "skill_key": skill_key,
+                    "version": version,
+                    "status": "draft",
+                    "content_hash": record.content_hash,
+                    **revision_filter(record.approval_revision),
+                },
+                {
+                    "$set": {
+                        "status": "published",
+                        "eval_report": eval_report.model_dump(),
+                        "eval_run_id": eval_run_id,
+                        "published_by": publisher,
+                        "published_at": now_utc(),
+                    },
+                    "$inc": {"approval_revision": 1},
+                },
+                **kw,
             )
-        if not eval_report.passed:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"Evaluation gate not met: score {eval_report.score:.2f} is below the "
-                    f"threshold {eval_report.threshold:.2f}, or no cases were run."
-                ),
+            if not getattr(result, "matched_count", 0):
+                raise HTTPException(status_code=409, detail="Version changed while publishing; retry")
+            await audit_skill_decision(
+                self.db,
+                session,
+                action="skill.version.publish",
+                actor_id=publisher,
+                skill_key=skill_key,
+                version=version,
+                before={"status": "draft"},
+                after={"status": "published"},
+                metadata={
+                    "content_hash": record.content_hash,
+                    "eval_run_id": eval_run_id,
+                    "eval_score": eval_report.score,
+                    "eval_threshold": eval_report.threshold,
+                    "approval_ids": sorted(item.id or "" for item in approvals if item.revoked_at is None),
+                },
             )
-        now = now_utc()
-        result = await self.db[SKILL_VERSIONS].update_one(
-            {"skill_key": skill_key, "version": version, "status": "draft"},
-            {
-                "$set": {
-                    "status": "published",
-                    "eval_report": eval_report.model_dump(),
-                    "published_by": published_by,
-                    "published_at": now,
-                }
-            },
-        )
-        if not getattr(result, "matched_count", 0):
-            raise HTTPException(status_code=409, detail="Version changed while publishing; retry")
+            return record
+
+        record = await run_in_transaction(self.db, decide)
         await self._refresh_skill(record)
         return await self._require_db_version(skill_key, version)
 
     async def deprecate(
         self, skill_key: str, version: str, deprecated_by: Optional[str]
     ) -> SkillVersion:
-        record = await self.get_version(skill_key, version)
-        if record is None:
-            raise HTTPException(status_code=404, detail="Skill version not found")
-        if record.status != "published":
-            raise HTTPException(
-                status_code=409, detail=f"Only a published version can be deprecated ({record.status})"
+        """Deprecate a published version: one transaction for the read, any materialisation,
+        the status change and the audit event (4B-05).
+
+        A version that exists only in the bundle is first written to the database so the
+        deprecation is durable; that write is inside the same transaction, so a failure or
+        a refusal leaves no materialised copy behind. The copy's deterministic ``_id`` makes
+        two concurrent materialisations conflict (with or without the migration's
+        ``skill_version_unique`` index), and the retried one then reads the other's result. Without transactions (a standalone server) the
+        call is refused with 503 before anything is written.
+        """
+
+        async def decide(session: Optional[Any]) -> SkillVersion:
+            kw = session_kwargs(session)
+            doc = await self.db[SKILL_VERSIONS].find_one({"skill_key": skill_key, "version": version}, **kw)
+            if doc:
+                record = SkillVersion(**doc)
+            else:
+                bundled_match: Optional[SkillVersion] = next(
+                    (
+                        bundled
+                        for bundled in system_skill_versions()
+                        if bundled.skill_key == skill_key and bundled.version == version
+                    ),
+                    None,
+                )
+                if bundled_match is None:
+                    raise HTTPException(status_code=404, detail="Skill version not found")
+                record = bundled_match
+            if record.status != "published":
+                raise HTTPException(
+                    status_code=409, detail=f"Only a published version can be deprecated ({record.status})"
+                )
+            materialised = doc is None
+            if materialised:
+                # Bundled-only version: materialise it so the deprecation is durable. A
+                # deterministic _id makes two concurrent materialisations collide on the
+                # _id index, which every collection has, so this holds even where the
+                # migration's skill_version_unique index was never created (review finding 5).
+                materialised_doc = _strip_id(record.model_dump(by_alias=True))
+                materialised_doc["_id"] = f"bundled:{skill_key}@{version}"
+                await self.db[SKILL_VERSIONS].insert_one(materialised_doc, **kw)
+            result = await self.db[SKILL_VERSIONS].update_one(
+                {"skill_key": skill_key, "version": version, "status": "published"},
+                {
+                    "$set": {
+                        "status": "deprecated",
+                        "deprecated_by": deprecated_by,
+                        "deprecated_at": now_utc(),
+                    },
+                    "$inc": {"approval_revision": 1},
+                },
+                **kw,
             )
-        if record.id is None:
-            # Bundled-only version: materialise it so the deprecation is durable.
-            await self.db[SKILL_VERSIONS].insert_one(_strip_id(record.model_dump(by_alias=True)))
-        await self.db[SKILL_VERSIONS].update_one(
-            {"skill_key": skill_key, "version": version, "status": "published"},
-            {
-                "$set": {
-                    "status": "deprecated",
-                    "deprecated_by": deprecated_by,
-                    "deprecated_at": now_utc(),
-                }
-            },
-        )
+            if not getattr(result, "matched_count", 0):
+                raise HTTPException(status_code=409, detail="The version changed at the same time; reload")
+            await audit_skill_decision(
+                self.db,
+                session,
+                action="skill.version.deprecate",
+                actor_id=deprecated_by,
+                skill_key=skill_key,
+                version=version,
+                before={"status": "published"},
+                after={"status": "deprecated"},
+                metadata={"cause": "direct", "materialised": materialised},
+            )
+            return record
+
+        await require_skill_version_index(self.db)  # T-4: verified, never created here
+        record = await run_in_transaction(self.db, decide)
         await self._refresh_skill(record)
         return await self._require_db_version(skill_key, version)
 
@@ -398,6 +545,12 @@ class SkillRegistry:
             raise HTTPException(status_code=404, detail="Skill version not found")
         return SkillVersion(**doc)
 
+    async def refresh_published_pointer(self, skill_key: str, version: str) -> None:
+        """Recompute the skill's latest-published pointer after a status change made elsewhere."""
+        record = await self.get_version(skill_key, version)
+        if record is not None:
+            await self._refresh_skill(record)
+
     async def _refresh_skill(self, record: SkillVersion) -> None:
         published = [
             item.version
@@ -420,6 +573,36 @@ class SkillRegistry:
                 }
             },
             upsert=True,
+        )
+
+
+def _require_approvals(
+    record: SkillVersion, eval_report: SkillEvalReport, publisher: str, approvals: List[SkillApproval]
+) -> None:
+    """Every required review satisfied, by different people, none of them the publisher's legal sign-off."""
+    statuses = approval_statuses(record, eval_report, approvals)
+    unsatisfied = describe_unsatisfied(statuses)
+    if unsatisfied:
+        raise HTTPException(
+            status_code=422,
+            detail="Approval gate not met: " + "; ".join(unsatisfied),
+        )
+    reviewers = [item.approval.reviewer_user_id for item in statuses if item.approval is not None]
+    if len(set(reviewers)) != len(reviewers):
+        # Plan D-07: two required reviews from one person are one review.
+        raise HTTPException(
+            status_code=409,
+            detail="Each required review must come from a different person",
+        )
+    if str(eval_report.recorded_by) in reviewers:
+        raise HTTPException(status_code=409, detail="The person who ran the evaluation cannot also approve it")
+    if any(
+        item.kind == "legal" and item.approval and item.approval.reviewer_user_id == publisher
+        for item in statuses
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="The legal signatory cannot publish the version they approved",
         )
 
 

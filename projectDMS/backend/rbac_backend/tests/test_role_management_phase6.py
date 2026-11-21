@@ -28,7 +28,7 @@ class _Collection:
     def __init__(self, docs: List[Dict[str, Any]] | None = None):
         self.docs = [dict(doc) for doc in (docs or [])]
 
-    async def find_one(self, query: Dict[str, Any]):
+    async def find_one(self, query: Dict[str, Any], *_args, **_kwargs):
         for doc in self.docs:
             if self._matches(doc, query):
                 return dict(doc)
@@ -57,8 +57,21 @@ class _Collection:
             return _Result(matched_count=1, modified_count=1)
         return _Result(matched_count=0, modified_count=0)
 
+    def find(self, query: Dict[str, Any] | None = None, *_args, **_kwargs):
+        docs = [dict(doc) for doc in self.docs if self._matches(doc, query or {})]
+
+        class _Cursor:
+            async def to_list(self, length=None):
+                return docs
+
+        return _Cursor()
+
     def _matches(self, doc: Dict[str, Any], query: Dict[str, Any]) -> bool:
         for key, expected in (query or {}).items():
+            if key == "$or":
+                if not any(self._matches(doc, branch) for branch in expected):
+                    return False
+                continue
             actual = doc.get(key)
             if isinstance(expected, dict) and "$in" in expected:
                 if actual not in expected["$in"] and str(actual) not in {str(item) for item in expected["$in"]}:
@@ -114,6 +127,27 @@ class _DB:
                 },
             ]
         )
+
+
+# SEC-2: role creation reads the role's organisation, and the creator's own grants
+# (users, roles, permission catalogue) to check delegation.
+_DB_INIT = _DB.__init__
+
+
+def _db_init(self):
+    _DB_INIT(self)
+    self.organizations = _Collection([{"_id": "org-A"}, {"_id": "org-B"}])
+    self.projects = _Collection([{"_id": "proj-A", "organization_id": "org-A"}])
+    self.permissions = _Collection([])
+    self.users = _Collection(
+        [
+            {"_id": "org-admin-user", "roles": ["orgadmin"], "organization_id": "org-A", "organizations": ["org-A"]},
+            {"_id": "project-admin-user", "roles": ["projectadmin"], "organization_id": "org-A", "projects": ["proj-A"]},
+        ]
+    )
+
+
+_DB.__init__ = _db_init
 
 
 class _RoleService(RoleService):
@@ -240,8 +274,10 @@ def _super_admin():
 @pytest.mark.parametrize(
     "name,org_admin_status",
     [
-        ("project-user", 400),  # resolves one hop to projectuser; a lookalike would leave every holder with nothing
-        ("Organization User", 400),
+        # resolves one hop to projectuser; a lookalike would leave every holder with nothing.
+        # SEC-2: projectuser is now a reserved built-in key, so an org admin is refused first (403).
+        ("project-user", 403),
+        ("Organization User", 403),  # review R-1: orguser is a reserved built-in key
         ("org-admin", 403),  # already a reserved key for non-superadmins
         ("Super Admin", 403),  # a system key: never for non-superadmins
     ],
@@ -265,11 +301,12 @@ async def test_a_non_superadmin_cannot_create_a_role_named_as_a_system_key(name)
 
 
 async def test_no_actor_may_rename_a_role_to_another_roles_legacy_spelling():
-    for actor in (_org_admin(), _super_admin()):
+    # SEC-2: projectuser is a reserved built-in key, so an org admin is refused first (403).
+    for actor, expected in ((_org_admin(), 403), (_super_admin(), 400)):
         db = _DB()
         with pytest.raises(RoleServiceError) as exc:
             await _RoleService(db).update_role("custom-org-role", RoleUpdate(name="project-user"), actor)
-        assert exc.value.status_code == 400
+        assert exc.value.status_code == expected
         assert db.roles.docs[0]["name"] == "Custom Org Role"
 
 

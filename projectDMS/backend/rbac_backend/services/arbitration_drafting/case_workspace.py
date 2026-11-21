@@ -10,7 +10,8 @@ import uuid
 import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from types import SimpleNamespace
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from fastapi import HTTPException, status
 from pymongo.errors import DuplicateKeyError
@@ -173,6 +174,11 @@ SERVER_CONTROLLED_MATRIX_FIELDS = {
     "last_material_editor_id",
     "last_review_action",
     "material_contributor_ids",
+    # Where a row was carried from (claim escalation). Written by the server only:
+    # chronology authority is resolved against the claim it names (JG-5), so a
+    # client must not be able to name one.
+    "origin",
+    "origin_key",
     "last_reviewed_at",
     "last_reviewed_by",
     "permission_approved_at",
@@ -218,6 +224,23 @@ def _strip_row_ownership(body: Dict[str, Any], owner: Dict[str, Any]) -> None:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Matrix row ownership is server-controlled: " + ", ".join(changed),
         )
+
+
+def _filing_projection(version: Dict[str, Any]) -> Dict[str, Any]:
+    """The approved version as it goes into a filing bundle (JG-5(f) control 6).
+
+    Its integrity is checked on the stored record first; the bundle then carries a
+    source schedule of evidence only. Case analysis and register rows are context:
+    an approved version cannot cite one (that blocks approval), and none is filed.
+    """
+    from .citation_states import context_policy_stamp, ledger_context_class
+
+    ledger = list(version.get("source_ledger") or [])
+    return {
+        **version,
+        "source_ledger": [row for row in ledger if not ledger_context_class(row)],
+        "source_schedule": {"scope": "evidence_only", "context_policy": context_policy_stamp()},
+    }
 
 
 def _matrix_review_defaults(matrix_slug: str) -> Dict[str, Any]:
@@ -312,6 +335,19 @@ from ..publication_policy import (
 )
 
 
+#: A case that has not been soft-deleted. ``ArbitrationCase.deleted_at`` defaults
+#: to None and is stored as null, so ``{"$exists": False}`` matched no case
+#: created through ``create_case``: on a real MongoDB every such case answered
+#: 404 and the register listed none (found by the Phase 4b end-to-end test,
+#: reproduced on 34d664a). ``None`` matches a missing field and an explicit null;
+#: a soft-deleted case carries a timestamp and stays excluded. Matrix rows and
+#: drafts declare no ``deleted_at`` field, so their ``$exists`` queries are right.
+CASE_NOT_DELETED: Dict[str, Any] = {"deleted_at": None}
+
+#: Attempts to assign an exhibit number when concurrent rows take the same one.
+EXHIBIT_NUMBER_ATTEMPTS = 8
+
+
 class ArbitrationCaseWorkspaceService:
     def __init__(self, db: Any) -> None:
         self.db = db
@@ -338,7 +374,7 @@ class ArbitrationCaseWorkspaceService:
         limit: int = 100,
     ) -> List[Dict[str, Any]]:
         query = dict(scope or {})
-        query["deleted_at"] = {"$exists": False}
+        query.update(CASE_NOT_DELETED)
         for key in ["project_id", "contract_id", "status"]:
             if filters.get(key):
                 query[key] = filters[key]
@@ -359,7 +395,7 @@ class ArbitrationCaseWorkspaceService:
         instead of leaking existence. Internal service calls omit it because the
         route has already verified access.
         """
-        query: Dict[str, Any] = {"_id": case_id, "deleted_at": {"$exists": False}}
+        query: Dict[str, Any] = {"_id": case_id, **CASE_NOT_DELETED}
         if scope:
             query.update(scope)
         case = await self.db.arbitration_cases.find_one(query)
@@ -373,7 +409,7 @@ class ArbitrationCaseWorkspaceService:
         update["updated_by"] = _actor_id(current_user)
         update["updated_at"] = datetime.utcnow()
         updated = await self.db.arbitration_cases.find_one_and_update(
-            {"_id": case_id, "deleted_at": {"$exists": False}},
+            {"_id": case_id, **CASE_NOT_DELETED},
             {"$set": _jsonable(update)},
             return_document=True,
         )
@@ -404,10 +440,28 @@ class ArbitrationCaseWorkspaceService:
             )
         return self.db[collection_name]
 
-    async def list_matrix_rows(self, case_id: str, matrix_slug: str, *, draft_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def list_matrix_rows(
+        self,
+        case_id: str,
+        matrix_slug: str,
+        *,
+        draft_id: Optional[str] = None,
+        with_case_rows: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """The case's rows of one matrix; with ``draft_id``, those bound to that draft.
+
+        ``with_case_rows`` (JG-5) is how a pleading's workflow reads the case: the
+        rows bound to its draft *and* the case-level rows (no draft), which is where
+        the case workspace and claim escalation put them. Rows bound to another
+        draft are still left out. Without it, a draft-linked workflow saw only
+        draft-bound rows - in a Statement of Claim case, none - so its matrix gate
+        never cleared, while readiness counted the same case rows as ready.
+        """
         await self.get_case(case_id)
         query: Dict[str, Any] = {"case_id": case_id, "deleted_at": {"$exists": False}}
-        if draft_id:
+        if draft_id and with_case_rows:
+            query["$or"] = [{"draft_id": draft_id}, {"draft_id": None}]
+        elif draft_id:
             query["draft_id"] = draft_id
         rows = await _collect(self._collection(matrix_slug).find(query).sort("created_at", 1))
         if matrix_slug == "document-index":
@@ -426,7 +480,11 @@ class ArbitrationCaseWorkspaceService:
         matrix_slug: str,
         payload: ArbitrationMatrixRowCreate,
         current_user: Any,
+        *,
+        server_fields: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        """``server_fields`` are written as given after the client body is cleaned:
+        the server's own provenance (``origin``, ``origin_key``), never a client's."""
         case = await self.get_case(case_id)
         body = _clean_payload(payload.model_dump(exclude_none=True))
         if matrix_slug in PARAGRAPH_POSITION_MATRICES and body.get("draft_id"):
@@ -440,6 +498,7 @@ class ArbitrationCaseWorkspaceService:
         if str(body.get("status") or "").strip().lower() in APPROVAL_STATUS_VALUES:
             body.pop("status", None)
         body.update(_matrix_review_defaults(matrix_slug))
+        body.update(server_fields or {})
         now = datetime.utcnow()
         row = ArbitrationMatrixRow(
             **body,
@@ -452,8 +511,27 @@ class ArbitrationCaseWorkspaceService:
             updated_by=_actor_id(current_user),
             updated_at=now,
         ).model_dump(by_alias=True)
-        row = await self._assign_exhibit_if_needed(case_id, matrix_slug, row)
-        await self._collection(matrix_slug).insert_one(_jsonable(row))
+        chosen_number = matrix_slug == "document-index" and bool(row.get("exhibit_number"))
+        for attempt in range(EXHIBIT_NUMBER_ATTEMPTS):
+            row = await self._assign_exhibit_if_needed(case_id, matrix_slug, row)
+            try:
+                await self._collection(matrix_slug).insert_one(_jsonable(row))
+                break
+            except DuplicateKeyError as exc:
+                if "origin_key" in (((exc.details or {}).get("keyPattern")) or {}):
+                    # M-05 / 4B-36: this (case, origin) row exists already. Escalation reads
+                    # that as "already carried"; it is not an exhibit-number clash.
+                    raise
+                # D-17 / 4B-35: exhibit numbers are unique per case (a unique index on
+                # case_id + exhibit_id). A number the user chose is refused; a number
+                # this service assigned lost a race and is re-assigned from the new maximum.
+                if matrix_slug != "document-index" or chosen_number or attempt == EXHIBIT_NUMBER_ATTEMPTS - 1:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="That exhibit number is already used in this case; choose another or leave it blank",
+                    )
+                row.pop("exhibit_number", None)
+                row.pop("exhibit_id", None)
         await self._touch_case(case_id, current_user)
         return row
 
@@ -501,16 +579,22 @@ class ArbitrationCaseWorkspaceService:
             update.update({key: numbered.get(key) for key in ("exhibit_prefix", "exhibit_number", "exhibit_id")})
         # Compare-and-set on the revision this edit was computed from, so an edit
         # and a review can never both apply to the same content.
-        updated = await collection.find_one_and_update(
-            {
-                "_id": row_id,
-                "case_id": case_id,
-                "deleted_at": {"$exists": False},
-                "edit_revision": prior.get("edit_revision"),
-            },
-            {"$set": _jsonable(update)},
-            return_document=True,
-        )
+        try:
+            updated = await collection.find_one_and_update(
+                {
+                    "_id": row_id,
+                    "case_id": case_id,
+                    "deleted_at": {"$exists": False},
+                    "edit_revision": prior.get("edit_revision"),
+                },
+                {"$set": _jsonable(update)},
+                return_document=True,
+            )
+        except DuplicateKeyError:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="That exhibit number is already used in this case; reload and retry",
+            )
         if not updated:
             if existing:
                 raise HTTPException(
@@ -564,9 +648,11 @@ class ArbitrationCaseWorkspaceService:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Reviewer role is not required for this matrix row")
         # A reviewer specialty comes only from the actor's own signed role claim.
         # Assignments route work; none - new or already on record - confers it.
-        role = enforce_matrix_reviewer_role(claimed_role, current_user, [])
+        role = enforce_matrix_reviewer_role(
+            claimed_role, current_user, [], roles=await self.reviewer_roles(case, current_user)
+        )
         if action == "assign":
-            await self._require_qualified_assignee(payload.reviewer_user_id, role)
+            await self._require_qualified_assignee(payload.reviewer_user_id, role, case)
         comments = list(row.get("review_comments") or [])
         approval_log = list(row.get("approval_log") or [])
 
@@ -780,7 +866,7 @@ class ArbitrationCaseWorkspaceService:
             )
         actor = _actor_id(current_user)
         enforce_author_approver_separation(current_user, approval_barred_actors(row), gate="rejoinder permission")
-        approver_role = resolve_gate_role("legal_review", current_user)
+        approver_role = resolve_gate_role("legal_review", current_user, roles=await self.reviewer_roles(case, current_user))
         # Interrupted decisions on this case are cleaned up here, on a write path,
         # never by a reader. Readers refuse those grants regardless, so a cleanup
         # failure is logged and does not block this decision.
@@ -900,8 +986,19 @@ class ArbitrationCaseWorkspaceService:
         await self.readiness(case_id)
         return updated
 
-    async def _require_qualified_assignee(self, user_id: Any, role: str) -> None:
-        """403 unless the assignee is an active user holding this reviewer role's claim.
+    async def reviewer_roles(self, case: Mapping[str, Any], user: Any) -> set[str]:
+        """The reviewer roles ``user`` holds for this case: scoped assignments plus their role list."""
+        from ..reviewer_assignments import arbitration_reviewer_roles
+
+        return await arbitration_reviewer_roles(
+            self.db,
+            user,
+            organization_id=str(case.get("organization_id") or "") or None,
+            project_id=str(case.get("project_id") or "") or None,
+        )
+
+    async def _require_qualified_assignee(self, user_id: Any, role: str, case: Mapping[str, Any]) -> None:
+        """403 unless the assignee is an active user holding this reviewer role for the case.
 
         Fails closed when the user record cannot be found or read.
         """
@@ -914,8 +1011,17 @@ class ArbitrationCaseWorkspaceService:
                 assignee = await users.find_one({"_id": {"$in": _expand_object_ids([str(user_id)])}})
             except Exception:
                 assignee = None
+        held: set[str] = set()
+        if assignee:
+            principal = SimpleNamespace(
+                id=str(assignee.get("_id")),
+                roles=[str(item) for item in (assignee.get("roles") or []) if item],
+                organization_id=assignee.get("organization_id"),
+                organizations=list(assignee.get("organizations") or []),
+            )
+            held = await self.reviewer_roles(case, principal)
         qualified = bool(assignee) and assignee.get("is_active", True) is not False and bool(
-            actor_roles(assignee) & MATRIX_ROLE_CLAIMS.get(role, frozenset())
+            held & MATRIX_ROLE_CLAIMS.get(role, frozenset())
         )
         if not qualified:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="The assignee does not hold this reviewer role")
@@ -1074,7 +1180,9 @@ class ArbitrationCaseWorkspaceService:
             )
         artifact = await self._readiness_artifact_state(case, draft_type)
         actor = _actor_id(current_user)
-        approver_role = resolve_gate_role("readiness", current_user)
+        approver_role = resolve_gate_role(
+            "readiness", current_user, roles=await self.reviewer_roles(case, current_user)
+        )
         if request.reviewer_role and str(request.reviewer_role).strip().lower() != approver_role:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -1102,7 +1210,7 @@ class ArbitrationCaseWorkspaceService:
         ).model_dump(by_alias=True)
         await self.db.arbitration_workflow_approvals.insert_one(_jsonable(receipt))
         updated = await self.db.arbitration_cases.find_one_and_update(
-            {"_id": case_id, "deleted_at": {"$exists": False}},
+            {"_id": case_id, **CASE_NOT_DELETED},
             {
                 "$set": {
                     "status": ArbitrationCaseStatus.READY_FOR_DRAFTING.value,
@@ -1606,7 +1714,7 @@ class ArbitrationCaseWorkspaceService:
         case_id = row.get("case_id")
         if not row.get("source_id") or not case_id:
             return None
-        case = await self.db.arbitration_cases.find_one({"_id": case_id, "deleted_at": {"$exists": False}})
+        case = await self.db.arbitration_cases.find_one({"_id": case_id, **CASE_NOT_DELETED})
         found = await self._case_scoped_source(case or {}, row.get("source_id"))
         if not found:
             return None
@@ -2311,7 +2419,7 @@ class ArbitrationCaseWorkspaceService:
         return manifest, exhibit_files
 
     async def _authorize_filing_bundle(self, payload: Dict[str, Any], export_format: str, current_user: Any) -> Dict[str, Any]:
-        resolve_gate_role("export", current_user)
+        resolve_gate_role("export", current_user, roles=await self.reviewer_roles(payload.get("case") or {}, current_user))
         drafts = payload.get("drafts") or []
         enforce_author_approver_separation(
             current_user,
@@ -2419,7 +2527,8 @@ class ArbitrationCaseWorkspaceService:
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Filing bundle contains a validation-defective approved version")
             case = await self.get_case(case_id)
             await self.require_readiness_approval(case, draft)
-            out.append({**draft, "latest_version": approved, "approved_version": approved})
+            filed = _filing_projection(approved)
+            out.append({**draft, "latest_version": filed, "approved_version": filed})
         return out
 
     def _filing_bundle_markdown(self, payload: Dict[str, Any]) -> str:
