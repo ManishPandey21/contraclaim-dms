@@ -378,7 +378,9 @@ class BillingWebhookService:
         review = subscription.get("financial_review") if isinstance(subscription.get("financial_review"), dict) else {}
         if problem is None:
             if review.get("state") == "open":
-                update.pop("billing_status", None)
+                # Review 13 R13-3: the review label is restored (not left at a failure's label), so
+                # a later event's label is what settlement keeps.
+                update["billing_status"] = "financial_review"
             return None
         kind = "renewal" if renewal else "initial"
         outcome = await payment_discrepancies.record(

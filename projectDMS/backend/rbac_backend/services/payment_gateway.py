@@ -23,6 +23,7 @@ from .payment_gateway_reliability import (
     GatewayCallError,
     GatewayCallPolicy,
     GatewayOutcomeUnknown,
+    GatewayUnavailable,
     ProviderSubscriptionState,
     bounded_session,
     call_provider,
@@ -385,8 +386,9 @@ class RazorpayGateway(PaymentGatewayInterface):
                         metadata={"short_url": entity.get("short_url"), **notes},
                     )
             if len(items) < 100:
-                break
-        return None
+                return None  # the whole window was read
+        # Review 13 R13-4: the bounded scan ended before the window did - not proof of absence.
+        raise GatewayUnavailable("The reference search did not cover the whole window", cause_type="SearchIncomplete")
 
     async def create_customer(
         self, *, organization_id: str, name: str, email: Optional[str] = None

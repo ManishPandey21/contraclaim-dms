@@ -176,13 +176,13 @@ def _billing_label_after_review(sub: Dict[str, Any], review: Dict[str, Any], las
     otherwise the label from before the review."""
     if str(sub.get("status") or "").strip().lower() == "cancelled":
         return "inactive"
+    current = str(sub.get("billing_status") or "")
+    if current and current not in {"financial_review", "review"}:
+        return current  # review 13 R13-3: set by an event after the last payment (halt, failure)
     if last_payment == "paid":
         return "active"
     if last_payment == "failed":
         return "past_due"
-    current = str(sub.get("billing_status") or "")
-    if current and current not in {"financial_review", "review"}:
-        return current
     before = str(review.get("billing_status_before") or "")
     return before if before and before not in {"review", "financial_review"} else "active"
 

@@ -163,8 +163,11 @@ def test_reference_search_scans_bounded_pages_and_matches_the_note() -> None:
     assert found is not None and found.gateway_subscription_id == "hit"
     assert [c[1]["skip"] for c in client.calls] == [0, 100]
     client = FakeClient(all=[{"items": [{"id": f"s{i}", "notes": {}} for i in range(100)]}] * 6)
-    assert _run(_gateway(client).find_subscription_by_reference(reference="op_1")) is None
+    with pytest.raises(rel.GatewayUnavailable):  # review 13 R13-4: an incomplete scan is not "absent"
+        _run(_gateway(client).find_subscription_by_reference(reference="op_1"))
     assert len(client.calls) == 5, "bounded: never an unbounded scan"
+    client = FakeClient(all=[{"items": [{"id": "s1", "notes": {}}]}])
+    assert _run(_gateway(client).find_subscription_by_reference(reference="op_1")) is None, "whole window read"
 
 
 def test_the_bounded_session_adds_timeouts_unless_the_caller_gave_one(monkeypatch: pytest.MonkeyPatch) -> None:
