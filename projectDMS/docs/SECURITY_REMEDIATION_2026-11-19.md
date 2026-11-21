@@ -592,11 +592,11 @@ Full record: `docs/DEF4_BILLING_PERMISSION_SEPARATION.md` §17 and `docs/M1_BUIL
 
 | Item | Flag (default) | Implemented | Locally verified | CI-verified (exact head) | Security-approved | Production-accepted |
 |---|---|---|---|---|---|---|
-| WS4 provider reliability (timeouts, outcome_unknown, durable checkout, cycle-end reading) | always on | Yes (`8b6733e`, `71402c3`) | Yes | CI_PENDING | No | No |
-| WS1 checkout replacement | `CHECKOUT_REPLACEMENT_ENABLED=false` | Yes, inactive (`f40a89f`, `71402c3`) | Yes | CI_PENDING | No | No (activation needs owner approval; Razorpay scheduled start unverified) |
-| WS2 payment amount mismatch policy | `PAYMENT_MISMATCH_POLICY=off` | Yes, inactive (`21ac55c`, `71402c3`) | Yes | CI_PENDING | No | No (grace length and activation need owner approval) |
-| WS3 P-05 legacy bindings and old cancellations | read-only | Yes (`9c64db2`, `71402c3`) | Yes | CI_PENDING | No | Not run on production |
-| WS5 M1 shadow evaluator | `BUILT_IN_ROLE_ASSIGNMENTS=off` (`on` refused) | Shadow only (`e661b92`, `71402c3`) | Yes | CI_PENDING | No | No (M1 approval) |
+| WS4 provider reliability (timeouts, outcome_unknown, durable checkout, cycle-end reading) | always on | Yes (`8b6733e`, `71402c3`) | Yes | Yes: run 44895171828 on `1b77419` (final code; Gitleaks red, known) | No | No |
+| WS1 checkout replacement | `CHECKOUT_REPLACEMENT_ENABLED=false` | Yes, inactive (`f40a89f`, `71402c3`) | Yes | Yes: run 44895171828 on `1b77419` (final code; Gitleaks red, known) | No | No (activation needs owner approval; Razorpay scheduled start unverified) |
+| WS2 payment amount mismatch policy | `PAYMENT_MISMATCH_POLICY=off` | Yes, inactive (`21ac55c`, `71402c3`) | Yes | Yes: run 44895171828 on `1b77419` (final code; Gitleaks red, known) | No | No (grace length and activation need owner approval) |
+| WS3 P-05 legacy bindings and old cancellations | read-only | Yes (`9c64db2`, `71402c3`) | Yes | Yes: run 44895171828 on `1b77419` (final code; Gitleaks red, known) | No | Not run on production |
+| WS5 M1 shadow evaluator | `BUILT_IN_ROLE_ASSIGNMENTS=off` (`on` refused) | Shadow only (`e661b92`, `71402c3`) | Yes | Yes: run 44895171828 on `1b77419` (final code; Gitleaks red, known) | No | No (M1 approval) |
 
 ### Verdict per workstream (each defect or gap reproduced on real MongoDB at the commit before its change)
 
@@ -629,4 +629,4 @@ Review 10 (cold, given the code): 17 findings - 1 High (R10-1, latent), 4 Medium
 | M1: built-in roles reach every organisation of the user; shadow covers the policy gate only | High (pre-existing) | P-05, security review, owner approval |
 | Gitleaks 2 historical findings; picomatch R5 | - | Authorised security review |
 
-**CI:** CI_PENDING
+**CI:** exact-head run 44895171828 on `1b77419` (the final code; later commits are docs only): backend 8,485 passed, 1,461 skipped, 4 xfailed; exhibit confinement 20; real MongoDB "all 107 module(s) ran: 1367 test case(s)", 1,367 passed, none skipped; frontend (lint, unit, mocked Playwright, build), dependency scan and Docker build/scan passed; **Gitleaks failed** on its 2 known findings. **Local at `1b77419`:** backend unit suite 8,458 passed, 0 failed (135 skipped, 4 xfailed); payment, M1 and P-05 suites on real MongoDB 359 passed; mypy staged gate passed; ruff unchanged on every touched file (one pre-existing finding in `monetization_service.py`). CI success is not security approval.

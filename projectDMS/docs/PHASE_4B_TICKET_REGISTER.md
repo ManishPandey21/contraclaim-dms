@@ -448,13 +448,15 @@ Records: DEF-4 §17; M1 §8; security report (eleventh pass). Commits: `8b6733e`
 
 | Item | Flag (default) | Implemented | Locally verified | CI-verified (exact head) | Security-approved | Production-accepted |
 |---|---|---|---|---|---|---|
-| WS4 provider reliability (timeouts, outcome_unknown, durable checkout, cycle-end reading) | always on | Yes (`8b6733e`, `71402c3`) | Yes | CI_PENDING | No | No |
-| WS1 checkout replacement | `CHECKOUT_REPLACEMENT_ENABLED=false` | Yes, inactive (`f40a89f`, `71402c3`) | Yes | CI_PENDING | No | No (activation needs owner approval; Razorpay scheduled start unverified) |
-| WS2 payment amount mismatch policy | `PAYMENT_MISMATCH_POLICY=off` | Yes, inactive (`21ac55c`, `71402c3`) | Yes | CI_PENDING | No | No (grace length and activation need owner approval) |
-| WS3 P-05 legacy bindings and old cancellations | read-only | Yes (`9c64db2`, `71402c3`) | Yes | CI_PENDING | No | Not run on production |
-| WS5 M1 shadow evaluator | `BUILT_IN_ROLE_ASSIGNMENTS=off` (`on` refused) | Shadow only (`e661b92`, `71402c3`) | Yes | CI_PENDING | No | No (M1 approval) |
+| WS4 provider reliability (timeouts, outcome_unknown, durable checkout, cycle-end reading) | always on | Yes (`8b6733e`, `71402c3`) | Yes | Yes: run 44895171828 on `1b77419` (final code; Gitleaks red, known) | No | No |
+| WS1 checkout replacement | `CHECKOUT_REPLACEMENT_ENABLED=false` | Yes, inactive (`f40a89f`, `71402c3`) | Yes | Yes: run 44895171828 on `1b77419` (final code; Gitleaks red, known) | No | No (activation needs owner approval; Razorpay scheduled start unverified) |
+| WS2 payment amount mismatch policy | `PAYMENT_MISMATCH_POLICY=off` | Yes, inactive (`21ac55c`, `71402c3`) | Yes | Yes: run 44895171828 on `1b77419` (final code; Gitleaks red, known) | No | No (grace length and activation need owner approval) |
+| WS3 P-05 legacy bindings and old cancellations | read-only | Yes (`9c64db2`, `71402c3`) | Yes | Yes: run 44895171828 on `1b77419` (final code; Gitleaks red, known) | No | Not run on production |
+| WS5 M1 shadow evaluator | `BUILT_IN_ROLE_ASSIGNMENTS=off` (`on` refused) | Shadow only (`e661b92`, `71402c3`) | Yes | Yes: run 44895171828 on `1b77419` (final code; Gitleaks red, known) | No | No (M1 approval) |
 
 Tests added: `test_provider_reliability_mongo.py` (12), `test_checkout_replacement_mongo.py` (23), `test_payment_mismatch_policy_mongo.py` (7), `test_m1_shadow_evaluator_mongo.py` (8), `test_payment_review10_mongo.py` (14), additions to `test_p05_payment_integrity_mongo.py`; unit `test_payment_gateway_reliability.py` (34), `test_payment_and_m1_flags.py` (13). Mutants: WS4 24/24, WS5 9/10 + 1 equivalent, WS1 22/22, WS3 8/8, WS2 15/16 + 1 equivalent, review 10 fixes 18/18.
+
+**CI:** exact-head run 44895171828 on `1b77419` (the final code; later commits are docs only): backend 8,485 passed, 1,461 skipped, 4 xfailed; exhibit confinement 20; real MongoDB "all 107 module(s) ran: 1367 test case(s)", 1,367 passed, none skipped; frontend (lint, unit, mocked Playwright, build), dependency scan and Docker build/scan passed; **Gitleaks failed** on its 2 known findings. **Local at `1b77419`:** backend unit suite 8,458 passed, 0 failed (135 skipped, 4 xfailed); payment, M1 and P-05 suites on real MongoDB 359 passed; mypy staged gate passed; ruff unchanged on every touched file (one pre-existing finding in `monetization_service.py`). CI success is not security approval.
 
 **Owner decisions opened by this pass:** activate (or not) `CHECKOUT_REPLACEMENT_ENABLED`, `PAYMENT_MISMATCH_POLICY` with a grace length, `BUILT_IN_ROLE_ASSIGNMENTS=shadow` on staging; the legacy remediation sequence (DEF-4 §17.4); adding the Razorpay SDK dependency; verifying Razorpay `start_at` in test mode; any proration/credit arrangement.
 
