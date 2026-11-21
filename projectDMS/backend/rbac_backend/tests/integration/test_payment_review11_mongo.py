@@ -156,9 +156,14 @@ def test_r11_5_binding_conflict_blocks_scope(monkeypatch, provider) -> None:
             assert r.status_code == 409
             retried = await _call(env, "/plan-settings/operations/op_bc/retry", None, STEP)
             assert retried.status_code == 409
+            # Review 12 R12-2: the provider created it - never closed as "not created".
+            wrong = await _call(env, "/plan-settings/operations/op_bc/resolve",
+                                {"resolution": "not_created_at_provider", "reason": "checked the provider dashboard",
+                                 "provider_checked_manually": True}, STEP)
+            assert wrong.status_code == 409 and "holds a subscription" in wrong.text, wrong.text[:200]
             resolved = await _call(env, "/plan-settings/operations/op_bc/resolve",
-                                   {"resolution": "not_created_at_provider", "reason": "checked the provider dashboard",
-                                    "provider_checked_manually": True}, STEP)
+                                   {"resolution": "provider_subscription_cancelled",
+                                    "reason": "cancelled it in the provider dashboard", "provider_checked_manually": True}, STEP)
             assert resolved.status_code == 200 and resolved.json()["status"] == "resolved", resolved.text[:200]
 
     _run(scenario())

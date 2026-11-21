@@ -143,13 +143,15 @@ async def resolve(db: Any, doc_id: str, *, outcome: str, reason: str, actor: Opt
         review = (sub or {}).get("financial_review") or {}
         if sub and review.get("state") == "open":
             opened = review.get("opened_at")
-            paid_since = bool(await db.billing_records.find_one(
-                {"subscription_id": sid, "record_status": "paid",
-                 **({"created_at": {"$gte": opened}} if isinstance(opened, datetime) else {})}, {"_id": 1}))
+            latest = await db.billing_records.find_one(
+                {"subscription_id": sid, "record_status": {"$in": ["paid", "failed"]},
+                 **({"created_at": {"$gte": opened}} if isinstance(opened, datetime) else {})},
+                {"record_status": 1}, sort=[("created_at", -1)])
+            last_payment = (latest or {}).get("record_status")
             await db.subscriptions.update_one(
                 {"_id": sub["_id"], "financial_review.state": "open"},
                 {"$set": {"financial_review.state": "settled", "financial_review.settled_at": moment,
-                          "billing_status": _billing_label_after_review(sub, review, paid_since),
+                          "billing_status": _billing_label_after_review(sub, review, last_payment),
                           "payment_review_required": False, "updated_at": moment}})
             closed = True
             # Review 11 (R10-10): a discrepancy recorded between the check above and this close
@@ -167,17 +169,20 @@ async def resolve(db: Any, doc_id: str, *, outcome: str, reason: str, actor: Opt
     return {"id": doc_id, "status": outcome, "review_closed": closed}
 
 
-def _billing_label_after_review(sub: Dict[str, Any], review: Dict[str, Any], paid_since: bool) -> str:
-    """Review 10 R10-9 / review 11: the label follows what happened. A later event that set
-    the billing label (``payment.failed``: past due; a cancellation: inactive) is kept; a
-    verified payment during the review means active; otherwise the label from before."""
+def _billing_label_after_review(sub: Dict[str, Any], review: Dict[str, Any], last_payment: Optional[str]) -> str:
+    """Review 10 R10-9 / reviews 11-12: the label follows what happened last. A cancelled
+    subscription is inactive; otherwise the latest payment outcome during the review (a
+    verified payment: active; a failed one: past due) decides; then a label a later event set;
+    otherwise the label from before the review."""
+    if str(sub.get("status") or "").strip().lower() == "cancelled":
+        return "inactive"
+    if last_payment == "paid":
+        return "active"
+    if last_payment == "failed":
+        return "past_due"
     current = str(sub.get("billing_status") or "")
     if current and current not in {"financial_review", "review"}:
         return current
-    if str(sub.get("status") or "").strip().lower() == "cancelled":
-        return "inactive"
-    if paid_since:
-        return "active"
     before = str(review.get("billing_status_before") or "")
     return before if before and before not in {"review", "financial_review"} else "active"
 

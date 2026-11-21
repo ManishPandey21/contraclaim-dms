@@ -788,7 +788,7 @@ class CheckoutResolution(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    resolution: str = Field(pattern="^not_created_at_provider$")
+    resolution: str = Field(pattern="^(not_created_at_provider|provider_subscription_cancelled)$")
     reason: str = Field(min_length=10, max_length=500)
     provider_checked_manually: bool = False
 
@@ -818,7 +818,8 @@ async def resolve_unknown_checkout(
     )
     try:
         return await service.resolve_unknown_checkout(
-            stored, current_user, reason=payload.reason, provider_checked_manually=payload.provider_checked_manually)
+            stored, current_user, reason=payload.reason, provider_checked_manually=payload.provider_checked_manually,
+            resolution=payload.resolution)
     except (OperationConflict, PurchaseInProgress) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
