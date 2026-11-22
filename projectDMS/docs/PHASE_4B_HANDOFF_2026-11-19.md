@@ -277,6 +277,10 @@ Full record: DEF-4 §17, M1 §8, security report (eleventh pass). Baseline `6913
 
 **Next dependency-ready action:** with authorised read-only access, run P-05 (`payment_integrity_impact`, `legacy_binding_and_cancellation_reconciliation`, `built_in_role_scope_impact`) and the read-only cancellation reconciliation; then owner decisions on the flags, the grace length, the remediation sequence (DEF-4 §17.4) and the Razorpay SDK dependency (§17.6).
 
+## Release closure (2026-11-22, scope freeze)
+
+Phase 4b feature development is frozen. The single release register, operator package for P-01 to P-16, security evidence package, staging checklist, legal and expert asks, GO/NO-GO (**NO-GO**) and the post-release backlog are in [`PHASE_4B_RELEASE_ACCEPTANCE_PACKAGE_2026-11-22.md`](PHASE_4B_RELEASE_ACCEPTANCE_PACKAGE_2026-11-22.md). Baseline: HEAD `02747c0`, final code `1b77419`, CI run 44899347550 on HEAD green except Gitleaks (2 known findings). No code, flag, gate, migration or production state changed.
+
 ## Blockers before production authorisation
 
 1. P-01 to P-16 production readings with authorised read-only access (AQ-11). This includes:

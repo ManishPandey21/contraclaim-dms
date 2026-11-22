@@ -17,6 +17,10 @@ Totals at `19f6d61`: 25 Implemented, 3 Partial, 21 Not started. After commit `87
 3. **Production evidence**: the production or staging reading the ticket depends on (AQ-11). "Pending" means not read; it is never read as zero.
 4. **Owner acceptance**: the owner's decision, per ticket and for Phase 4b as a whole. **Phase 4b final acceptance: Pending.** Acceptance of a ticket as implemented is not acceptance for production release.
 
+### Release closure (2026-11-22)
+
+The consolidated release-readiness register and GO/NO-GO decision (NO-GO) are in [`PHASE_4B_RELEASE_ACCEPTANCE_PACKAGE_2026-11-22.md`](PHASE_4B_RELEASE_ACCEPTANCE_PACKAGE_2026-11-22.md). It supersedes the "Pending CI" cells below for 4B-20, 4B-43 and 4B-44: their proof tests ran in the final-code run 44895171828 (whole suite green except Gitleaks).
+
 ### Status by stage
 
 CI column derived mechanically from CI run 398 (`f31ace1`, 2026-11-17): each row's proof files were matched against the run's real-Mongo module list (56 modules, 891 passed, 0 skipped) and the general step's skip list; frontend and mocked Playwright tests passed in the same run. A Partial ticket's CI pass covers only the part built.
