@@ -412,6 +412,34 @@ With `PAYMENT_PROVIDER=noop`, none of this calls a provider. Code: `services/pay
 | 4.4 Payment residuals | Pending | | | |
 | 4.5 WS4 always-on | Pending | | | |
 | 4.6 Migration and legacy risks | Pending | | | |
+| 4.8 S-0 repository visibility | Pending | | | |
+
+### 4.8 Reviewer pages: publication status (2026-11-22)
+
+**Pages prepared:**
+- *ContraClaim DMS — Phase 4b Security Release Review*: this section 4, plus a decision register and a final-recommendation block.
+- *ContraClaim DMS — JG-5(f) Pleading Validation Legal Review*: section 6.1 and the policy in full.
+
+| Item | State |
+|---|---|
+| Security review page URL | **None: prepared, not published** |
+| Legal review page URL | **None: prepared, not published** |
+| Prepared on | 2026-11-22 |
+| Source commit referenced by both pages | `70d63b56e9c1643df2e7d4fd0d186e1d0621f6da` |
+| Required access | Security page: the named security reviewer and the release owners. Legal page: the named legal reviewer and the release owners, and it may be more restricted. Read and comment only; no anonymous access; no link sharing; access grants logged |
+| Security reviewer | Pending (not yet named or authorised) |
+| Legal reviewer | Pending (not yet named or authorised) |
+| Formal approval status | **Pending**, both registers |
+
+**Why the pages are not published.**
+- No approved private documentation destination is configured for this work.
+- **This repository is public** (`ManishPandey21/contraclaim-dms`, read 2026-11-22), so the pages were not added to it.
+- No restricted repository, wiki or review portal is reachable from the preparing session.
+- No reviewer identity has been given, so no access could be granted or tested.
+
+The prepared copies are held outside the repository, in the preparing session's private scratch space, which only the release owner can open. Repository visibility was **not** changed.
+
+**New finding S-0.** Because the repository is public, this package, the security remediation report, the DEF-4 and M1 analyses (including open High findings) and the secret-scan exception request are publicly readable today. This is recorded for the security reviewer and the release owner. Changing visibility needs their explicit authorisation.
 
 ---
 
