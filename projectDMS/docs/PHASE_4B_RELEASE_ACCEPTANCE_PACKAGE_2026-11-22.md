@@ -439,6 +439,26 @@ With `PAYMENT_PROVIDER=noop`, none of this calls a provider. Code: `services/pay
 
 The prepared copies are held outside the repository, in the preparing session's private scratch space, which only the release owner can open. Repository visibility was **not** changed.
 
+**Update, 2026-11-22 (second pass): publication still blocked.**
+
+| Item | State |
+|---|---|
+| Private repositories reachable from the preparing session | None |
+| `ManishPandey21/ContraClaim` | Not accessible, so not inspected |
+| Proposed destination | Dedicated private review repositories, with security and legal kept separately permissioned. Preferably owned by an organisation, so reviewers can be given read-only roles |
+| Prepared pages | Staged privately at the proposed destination paths, byte-identical to the drafts |
+| S-0 exposure assessment | Prepared privately as an annex to the security page |
+| Access and sign-off plan | Prepared privately |
+| Created, granted or published | Nothing |
+| Owner actions required | Authorise the destination; name the security owner and the legal reviewer |
+| Security decision (S-0 to S-8 and final recommendation) | **Pending** |
+| Legal decision | **Pending** |
+
+**S-0 summary.**
+
+- A full-history secret scan of all public branches found no live credential.
+- The assessment's other findings and its recommendation are recorded **only** in the private annex, for the security owner.
+
 **New finding S-0.** Because the repository is public, this package, the security remediation report, the DEF-4 and M1 analyses (including open High findings) and the secret-scan exception request are publicly readable today. This is recorded for the security reviewer and the release owner. Changing visibility needs their explicit authorisation.
 
 ---
