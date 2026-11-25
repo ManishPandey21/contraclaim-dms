@@ -199,16 +199,25 @@ def test_super_admin_and_single_organisation_scope_checks_are_unchanged_when_on(
 
 
 def test_a_cached_grant_never_crosses_a_mode_change(monkeypatch) -> None:
+    """With a real runtime Redis (``SECURITY_REDIS_URI``), so the permission cache is in play.
+
+    The first version of this test ran without a runtime Redis and never reached the cache;
+    the 2026-11-25 mutation run showed it (removing the mode check survived)."""
+    from rbac_backend.tests.integration.test_security_redis_mongo import _cached, _redis_env
+
     async def scenario() -> None:
-        async with _env(monkeypatch) as env:
+        async with _redis_env(monkeypatch, "available") as env:
             from rbac_backend.services.permission_service import PermissionService
 
             user_id = await _person(env, "m1on_cache", ["orgadmin"], primary=ORG_A, listed=[ORG_A, ORG_B])
             service = PermissionService()
             _mode(monkeypatch, "off")
             assert await service.user_has_permission(user_id, "organizations:read", organization_id=ORG_B, log=False)
+            cached = await _cached(user_id)
+            assert cached is not None and cached.get("built_in_role_mode") == "off"  # the cache really holds it
             _mode(monkeypatch, "on")
             assert not await service.user_has_permission(user_id, "organizations:read", organization_id=ORG_B, log=False)
+            assert (await _cached(user_id) or {}).get("built_in_role_mode") == "on"
             assert await service.user_has_permission(user_id, "organizations:read", organization_id=ORG_A, log=False)
             _mode(monkeypatch, "off")
             assert await service.user_has_permission(user_id, "organizations:read", organization_id=ORG_B, log=False)
@@ -315,5 +324,124 @@ def test_checkout_scope_and_the_perspective_default_need_the_role_assigned_there
             await _authorize_checkout_scope(for_a, admin, policy)
             assert not await perspective._is_organisation_admin(admin, ORG_B)
             assert await perspective._is_organisation_admin(admin, ORG_A)
+
+    _run(scenario())
+
+
+# --------------------------------------------------------------------------- #
+# Mutation-testing follow-up (2026-11-25): each case below pins a boundary that the first
+# mutation run showed no test reached.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_project_row_never_carries_an_organisation_tier_key_and_no_context_means_no_built_in_role(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            from rbac_backend.services import built_in_role_scope as scope_rules
+
+            user_id = await _person(env, "m1on_rowkeys", ["orguser", "projectadmin"], primary=ORG_A, listed=[ORG_A, ORG_B])
+            await _assign(env, user_id, "orguser", project_id=PROJ_B1)
+            await _assign(env, user_id, "projectadmin", project_id=PROJ_B1)
+            principal = _Principal(user_id, ["orguser", "projectadmin"], ORG_A, [ORG_A, ORG_B])
+            orphan = _Principal("m1on-rowkeys-orphan", ["orgadmin", "superadmin"], None, [ORG_A])
+            _mode(monkeypatch, "on")
+            # role_names_in: the project row restores the project-tier key in B, never the organisation-tier one.
+            assert await scope_rules.role_names_in(env.db, principal, {"orguser", "projectadmin"}, ORG_B) == {"projectadmin"}
+            # grant_scopes: the organisation-tier key keeps its primary scope only; the project-tier key gains B1.
+            assert await scope_rules.grant_scopes(env.db, principal, "orguser") == [
+                {"organization_id": ORG_A, "project_id": None, "built_in": "orguser"}
+            ]
+            assert {"organization_id": ORG_B, "project_id": PROJ_B1, "built_in": "projectadmin"} in await scope_rules.grant_scopes(
+                env.db, principal, "projectadmin"
+            )
+            # No target and no primary organisation: tenant built-in keys count nowhere; platform keys stay.
+            assert await scope_rules.role_names_in(env.db, orphan, {"orgadmin", "superadmin"}, None) == {"superadmin"}
+
+    _run(scenario())
+
+
+def test_a_bare_built_in_key_without_a_role_document_counts_only_with_a_primary_organisation(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            from rbac_backend.services.permission_service import PermissionService
+
+            bare = "user"  # a tenant built-in key with no seeded role document
+            assert await env.db.roles.count_documents({"$or": [{"_id": bare}, {"key": bare}, {"name": bare}]}) == 0
+            orphan_id = await _person(env, "m1on_bare_orphan", [bare], primary=None, listed=[ORG_A])
+            homed_id = await _person(env, "m1on_bare_homed", [bare], primary=ORG_A)
+            service = PermissionService()
+            orphan_doc = await env.db.users.find_one({"username": "m1on_bare_orphan"})
+            homed_doc = await env.db.users.find_one({"username": "m1on_bare_homed"})
+            _mode(monkeypatch, "off")
+            assert bare in (await service.scoped_grants(env.db, orphan_doc))[1]
+            _mode(monkeypatch, "on")
+            assert bare not in (await service.scoped_grants(env.db, orphan_doc))[1]
+            assert bare in (await service.scoped_grants(env.db, homed_doc))[1]
+            assert orphan_id and homed_id
+
+    _run(scenario())
+
+
+def test_row_visibility_for_a_built_in_role_outside_build_scope_query_is_unchanged_when_on(monkeypatch) -> None:
+    """permission_scope_query: a built-in assignment scope is not a custom grant (on == off)."""
+
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            from rbac_backend.core.security import permission_scope_query
+
+            user_id = await _person(env, "m1on_rows", ["contraclaim_billing_admin"], primary=ORG_A)
+            principal = _Principal(user_id, ["contraclaim_billing_admin"], ORG_A, [ORG_A])
+            _mode(monkeypatch, "off")
+            off = await permission_scope_query(principal, "subscription.usage.view", organization_id=ORG_A, db=env.db)
+            _mode(monkeypatch, "on")
+            on = await permission_scope_query(principal, "subscription.usage.view", organization_id=ORG_A, db=env.db)
+            assert on == off == {"_id": {"$in": []}}
+
+    _run(scenario())
+
+
+def test_effective_services_never_widen_to_a_secondary_organisations_projects_when_on(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            await _person(env, "m1on_widen", ["contraclaim_billing_admin"], primary=ORG_A, listed=[ORG_A, ORG_B])
+            _mode(monkeypatch, "off")
+            assert _billing_state_shown(await _effective(env, "m1on_widen"), "projects", PROJ_B1)  # today's M1 reach
+            _mode(monkeypatch, "on")
+            effective = await _effective(env, "m1on_widen")
+            # Not even the reduced (operational) state: B's projects are not widened into at all.
+            assert PROJ_B1 not in (effective.get("projects") or {})
+            assert _billing_state_shown(effective, "projects", PROJ_A1)
+
+    _run(scenario())
+
+
+def test_the_perspective_administrator_must_hold_orgadmin_in_that_organisation_when_on(monkeypatch) -> None:
+    """Organisation-wide in B through an orguser row is not being B's Organization Admin."""
+
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            from rbac_backend.services.project_perspective import ProjectPerspectiveService
+
+            user_id = await _person(env, "m1on_persp", ["orgadmin", "orguser"], primary=ORG_A, listed=[ORG_A, ORG_B])
+            await _assign(env, user_id, "orguser", organization_id=ORG_B)
+            admin = _Principal(user_id, ["orgadmin", "orguser"], ORG_A, [ORG_A, ORG_B])
+            perspective = ProjectPerspectiveService(env.db)
+            _mode(monkeypatch, "on")
+            assert await perspective.scope.has_organization_wide_scope(admin, organization_id=ORG_B)
+            assert not await perspective._is_organisation_admin(admin, ORG_B)
+            assert await perspective._is_organisation_admin(admin, ORG_A)
+
+    _run(scenario())
+
+
+def test_a_reviewer_key_counts_nowhere_when_the_case_organisation_cannot_be_read(monkeypatch) -> None:
+    async def scenario() -> None:
+        async with _env(monkeypatch) as env:
+            from rbac_backend.services.reviewer_assignments import arbitration_reviewer_roles
+
+            reviewer = _Principal("m1on-reviewer-unknown", ["legal_reviewer"], ORG_A, [ORG_A])
+            _mode(monkeypatch, "on")
+            missing = "0" * 24  # a well-formed project id that does not exist
+            assert "legal_reviewer" not in await arbitration_reviewer_roles(env.db, reviewer, organization_id=None, project_id=missing)
 
     _run(scenario())

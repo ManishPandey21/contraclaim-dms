@@ -264,7 +264,7 @@ The pinned exposures in `test_m1_cross_org_role_combinations_mongo.py` keep asse
 
 - **Not yet a release condition met.** Every §5 step is still open: P-05, an owner decision for each `assignments_needing_a_decision`, assignments written grant-before-revoke, `shadow` on staging, `on` on staging with two deployed passes, a security review of this code, and a release decision. Until `on` is activated, M1 remains as it is today in production.
 - **Shadow is now incomplete.** The shadow evaluator (§8) compares the policy gate only. It does not shadow the other sites listed above, so a zero shadow count does not prove `on` is safe for those sites.
-- **Letter templates.** `LetterTemplateService._resolve_scope` takes the organisation from the payload for an Org Admin, so for creation it is not bounded by membership or assignment. This was found while auditing and has not been confirmed through the route. It is recorded for the security owner, not changed under the scope freeze.
+- **Letter templates.** Superseded: the creation path was confirmed through the API and fixed in `e2f7ded` (below).
 
 ### Verification and audit (owner instructions 2026-11-25, second round)
 
@@ -355,3 +355,26 @@ The pinned exposures in `test_m1_cross_org_role_combinations_mongo.py` keep asse
   - two `legacy_v0` OCR rollback-path limits;
   - one raster inset on a native page (region OCR is a follow-up);
   - **one security gap:** `decode_oidc_id_token` accepts an id_token with no `exp`. It is pre-existing, marked strict, and to be fixed separately. It is recorded for the security reviewer.
+
+**Real MongoDB at `e2f7ded`, run as in CI** (CI's module list and environment, one process, Redis on): 1,381 passed, 0 failed, 0 skipped; "all 109 module(s) ran: 1381 test case(s)". The module order that produced the 429 earlier now passes.
+
+### Mutation testing of the new authorisation checks (2026-11-25)
+
+24 mutants: 21 over the M1 enforcement sites and 3 over the letter-template fix. One at a time, against the module that owns the check, with CI's environment (Redis included).
+
+- **Harness fault first.** The first run reported every mutant "SURVIVED" with no output. Its result filter used `\d`, which `grep -E` does not support, so no summary line was seen. The results were discarded, and the filter was fixed and checked: the unmutated baseline passes and mutant 0 is caught.
+- **First valid run:** 15 of 24 caught. The 9 survivors exposed real gaps in the tests, none in the code:
+
+| Mutant | Check removed or weakened | Why it survived | Test added or changed |
+|---|---|---|---|
+| M2 | `permission_scope_query` ignores built-in assignment scopes | No test held a built-in role outside `build_scope_query`'s keys | Billing administrator's row visibility is identical with the flag on and off |
+| M3 | Cache entry must match the current mode | The cache test ran without a runtime Redis, so the cache was never used (in CI too) | Cache test rewritten on a real runtime Redis; it asserts the cached entry and its mode |
+| M4 | Bare built-in key with no document and no primary organisation | Every persona's role had a seeded document | `user` key (no document): counted with a primary organisation, not without |
+| M6, M7 | A project row confers project-tier keys only | Only HTTP outcomes were checked, and `orguser` decides none of them | `role_names_in` and `grant_scopes` checked directly for an `orguser` project row |
+| M9 | No target and no primary organisation: no tenant built-in key | Not exercised | Orphan principal: only the platform key remains |
+| M14 | Effective-services widening needs the billing role assigned in that organisation | The assertion looked for billing fields, which a later step strips anyway | B's project must be absent from the response altogether |
+| M18 | Perspective administrator needs `orgadmin` assigned there | Redundant with the organisation-wide check, except for a user who is organisation-wide in B through another key | `orgadmin` in A plus an `orguser` row in B: not B's administrator |
+| M20 | An unreadable case project gives the legacy reviewer key nowhere | Every test's project existed | A well-formed project id that does not exist |
+
+- **Final run:** see the update below this table.
+

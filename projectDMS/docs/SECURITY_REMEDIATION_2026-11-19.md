@@ -657,9 +657,46 @@ Full record: `docs/M1_BUILT_IN_ROLE_SCOPING.md` §9. Evidence: `tests/integratio
 
 | Implemented | CI-verified | Security-approved | Production-accepted |
 |---|---|---|---|
-| Yes, behind the flag | Pending (this pass) | No: needs the security owner's review of this code | No: the M1 §5 plan (P-05, assignment decisions, grant before revoke, staging `shadow` then `on` with two deployed passes, release decision) is still open |
+| Yes, behind the flag (`e44fd79`; tests strengthened after mutation, see below) | Yes on `e44fd79` and `e2f7ded` (backend, real MongoDB, frontend, dependency scan, Docker); Gitleaks red on its 2 known findings only. Final commit: see the verification addendum | No: needs the security owner's review of this code | No: the M1 §5 plan (P-05, assignment decisions, grant before revoke, staging `shadow` then `on` with two deployed passes, release decision) is still open |
 
 **Residual.**
 - The shadow evaluator covers the policy gate only.
 - The `AuthorizationService` tiers do not honour explicit assignment rows, so they fail closed.
-- A letter-template creation path found in the audit takes the organisation from the payload. It is unconfirmed and recorded for the security owner.
+- The letter-template creation path found in the audit was confirmed and fixed (addendum below).
+
+### M1 verification addendum (owner instructions 2026-11-25, second round)
+
+**Provisional acceptance.** The owner accepted the M1 implementation at `e44fd79` provisionally, subject to the verification below. **M1 closure: Pending. Production activation: Not approved.**
+
+**New finding, fixed: cross-tenant letter-template creation (High, pre-existing).**
+- **Confirmed through the real API at `e44fd79`.** An Organization Admin of A, with no membership in B, created an organisation template in B (200). A Project Admin created a template on its own project labelled with organisation B (200).
+- **Fix (`e2f7ded`).** Before a template is stored, its project must belong to its organisation (for every caller), and the write rule of `check_letter_template_access` must pass for the new scope.
+- **Tests.** `test_letter_template_tenant_isolation_mongo.py` (2) fail before the fix and pass after. They cover create, read, update, delete, list and a filter naming B; a Super Admin control reads B's templates.
+- **Mutation.** 3 of 3 mutants on the fix are caught.
+- The router has no duplicate, share or publish route.
+
+**Rate-limit 429 (`test_m4_global_pricing_mongo`).** Not dismissed on isolation. Root cause: in-process rate-limit counters (no Redis) shared across modules for fixed seeded user ids. Reproduced by ordering two modules; fixed in the test environment only (`_env` clears the counters). Production limits unchanged.
+
+**Local suites at `e2f7ded`.**
+- Backend unit suite: 8,461 passed, 0 failed, 135 skipped (environment services absent), 4 xfailed.
+- Real MongoDB, run as in CI: 1,381 passed, 0 failed, 0 skipped; all 109 modules ran.
+
+**Pre-existing gap surfaced by the xfail review (for the security owner).** `decode_oidc_id_token` accepts an id_token with no `exp`. It is pinned by a strict xfail and is not changed here.
+
+**Mutation testing: 24 mutants over every new authorisation check.**
+- First valid run: 15 caught, 9 survived. The survivors were gaps in the tests, not the code. The most material: the M1 cache test never reached the cache, because no runtime Redis was configured. It now runs on a real Redis and asserts the cached entry and its mode.
+- Tests were added or tightened for each survivor (M1 §9, "Mutation testing").
+- Final result: recorded in M1 §9 with the commit that carries the strengthened tests.
+
+**Separate statuses.**
+
+| Item | Status |
+|---|---|
+| Implementation | Done behind `BUILT_IN_ROLE_ASSIGNMENTS` (default `off`) |
+| CI | Green except Gitleaks (2 known findings) on `e44fd79` and `e2f7ded`; final commit pending |
+| Production evidence (P-05, R-PAY, P-01 to P-16) | Pending: no operator or host access |
+| Staging passes | Pending: no staging owner or environment named |
+| Security approval | Pending (security owner) |
+| Legal approval | Pending (unchanged; JG-5(f)) |
+| Owner acceptance | Provisional for the implementation; M1 closure Pending |
+

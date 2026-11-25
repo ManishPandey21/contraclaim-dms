@@ -189,8 +189,9 @@ Full records: the security report and DEF-4 §11–17. "Fixed" means implemented
 | A1, A2 (review 8) | High | Pre-existing | Fixed | No | Security owner |
 | R6-5 to R6-8 subscription lifecycle | Low to Medium | Pre-existing | Fixed | No | Security owner |
 | R10-1 to R14-3 (reviews 10 to 14) | One High latent, then Medium and Low | Introduced and fixed | Fixed | No | Security owner |
-| **M1** built-in roles reach every organisation a user belongs to | **High** | **Pre-existing; live in production today** | Audited; shadow evaluator built (default `off`); **not remediated** | **Conditional, and the security owner's call.** Releasing does not introduce or widen M1; it is live at `34d664a`. P-05 `built_in_role_scope_impact` measures who is exposed (`users_reaching_more_than_one_organisation`, `org_wide_role_reaching_a_secondary_organisation`). If that count is zero, the exposure is nil today. If it is not zero, the security owner decides between accepting the risk with a date and holding the release. Remediation is designed (M1 §4) and needs approval; it is not new scope | Security owner, then release owner |
+| **M1** built-in roles reach every organisation a user belongs to | **High** | **Pre-existing; live in production today** | Audited; shadow evaluator built; **remediation implemented behind `BUILT_IN_ROLE_ASSIGNMENTS=on` (default `off`, not activated) on 2026-11-25; see section 10** | **Conditional, and the security owner's call.** Releasing does not introduce or widen M1; it is live at `34d664a`. P-05 `built_in_role_scope_impact` measures who is exposed (`users_reaching_more_than_one_organisation`, `org_wide_role_reaching_a_secondary_organisation`). If that count is zero, the exposure is nil today. If it is not zero, the security owner decides between accepting the risk with a date and holding the release. Remediation is designed (M1 §4) and needs approval; it is not new scope | Security owner, then release owner |
 | R10-17 M1 design interpretation | Info | Introduced | Recorded | No | Backlog |
+| Letter-template cross-tenant creation (found in the M1 audit) | High | Pre-existing | **Fixed** in `e2f7ded`, with tests and mutants (section 10) | No, if signed off | Security owner |
 | N3 host-clock stamps; N4 older plan resurfaces | Low | Introduced, or by design | Recorded | No | Backlog |
 | R6-3 residual (gateway moved, local write refused) | Low | Narrowed window | Recorded | No | Backlog |
 | Gitleaks: two historical findings | — | Pre-existing in branch history | Exception **submitted, not applied**; gate unchanged and red | **Yes.** A mandatory CI gate fails | Security owner |
@@ -683,3 +684,43 @@ These are recorded, not scheduled. None meets the scope-freeze rule today. If a 
 | Date | Event |
 |---|---|
 | 2026-11-22 | Package written at HEAD `02747c0` under the scope freeze. No code, flag, gate, exception, migration or production state changed. No production or staging access was used. |
+
+## 10. M1 remediation status (2026-11-25; owner instructions, second round)
+
+The owner accepted the M1 implementation at `e44fd79` **provisionally**, subject to the verification below. This section updates sections 4.3, 7.3 (B-4, C-4) and 8 (BL-1). It does not change the decision.
+
+**Authorisation as given by the owner.**
+
+| Item | Status |
+|---|---|
+| Development and remediation | Approved |
+| Testing and staging preparation | Approved |
+| Authorised read-only production assessments | Approved (no operator or host access yet; nothing read) |
+| M1 closure | **Pending** |
+| Production feature flag activation | **Not approved** |
+| PR #114 merge | **Not approved** |
+| Production deployment | **Not approved** |
+| Phase 4b release | **NO-GO** |
+
+**Status, kept separate.**
+
+| Item | Status | Evidence |
+|---|---|---|
+| Implementation | Done behind the flag, default `off`; nothing written, migrated or activated | `e44fd79` (enforcement), `e2f7ded` (template fix, test isolation) |
+| CI | Green except Gitleaks (2 known historical findings, B-2) on `e44fd79` (run 45670781616) and `e2f7ded` (run 45674184192, backend and real-MongoDB steps). Final commit: see the record in M1 §9 | GitHub Actions |
+| Local suites at `e2f7ded` | Backend unit: 8,461 passed, 0 failed. Real MongoDB as in CI: 1,381 passed, 0 skipped, all 109 modules | M1 §9 |
+| Mutation testing | 24 mutants over the new checks; first valid run 15 caught, 9 survivors closed with new or corrected tests | M1 §9 |
+| Production evidence | **Pending.** P-05 `built_in_role_scope_impact`, R-PAY and P-01 to P-16 are unread, never zero | B-1 |
+| Assignment migration | Planned only (M1 §10): dry run, owner decision per assignment, grant before revoke, authority-change hooks per user | M1 §10 |
+| Staging | Planned only: `shadow`, then `on` by full restart, then two consecutive deployed passes | M1 §10; B-7 |
+| Security approval | Pending (security owner; S-4 approved the remediation for implementation and verification only) | Private review workspace |
+| Legal approval | Pending (unchanged) | B-5 |
+| Owner acceptance | Provisional for the implementation; M1 closure Pending | This section |
+
+**Residual risks.**
+- The shadow evaluator covers the policy gate only; a zero divergence count does not prove the other sites safe under `on`.
+- The `AuthorizationService` tiers do not honour explicit assignment rows (they fail closed): a user given a secondary organisation by a row may be refused there by those tiers until this is extended.
+- A migration that writes or revokes rows must call the authority-change hooks per user; otherwise a cached grant can outlive a revoked row by up to the cache TTL (3,600 s).
+- Workers can disagree on the mode during a rolling change; activation must be a full restart.
+- `decode_oidc_id_token` accepts an id_token without `exp` (pre-existing; strict xfail); for the security owner.
+
