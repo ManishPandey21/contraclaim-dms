@@ -265,3 +265,82 @@ The pinned exposures in `test_m1_cross_org_role_combinations_mongo.py` keep asse
 - **Not yet a release condition met.** Every §5 step is still open: P-05, an owner decision for each `assignments_needing_a_decision`, assignments written grant-before-revoke, `shadow` on staging, `on` on staging with two deployed passes, a security review of this code, and a release decision. Until `on` is activated, M1 remains as it is today in production.
 - **Shadow is now incomplete.** The shadow evaluator (§8) compares the policy gate only. It does not shadow the other sites listed above, so a zero shadow count does not prove `on` is safe for those sites.
 - **Letter templates.** `LetterTemplateService._resolve_scope` takes the organisation from the payload for an Org Admin, so for creation it is not bounded by membership or assignment. This was found while auditing and has not been confirmed through the route. It is recorded for the security owner, not changed under the scope freeze.
+
+### Verification and audit (owner instructions 2026-11-25, second round)
+
+**Letter templates: confirmed and fixed.** This finding is outside M1. It was pre-existing, needed no membership in B, and is a proven cross-tenant write.
+
+- **Reproduced through the real API at `e44fd79`.**
+  - An Org Admin of A, who is not a member of B, created an organisation template in B (**200**).
+  - A Project Admin created a template on its own project labelled with organisation B (**200**).
+  - Read, update, delete and list of B's templates were already refused.
+- **Fix.** `LetterTemplateService._authorize_new_template_scope` now checks two things before a template is stored:
+  - a project template's project must belong to the template's organisation, for everyone including Super Admin;
+  - the write rule of `check_letter_template_access` must pass for the new template's scope.
+- **Tests.** `tests/integration/test_letter_template_tenant_isolation_mongo.py` (2 tests) covers:
+  - create in B, refused 403, with nothing stored;
+  - read, update and delete of B's templates, refused 403;
+  - list, which shows no B template;
+  - a list filter naming B, refused 403;
+  - a Super Admin control, which reads them (200).
+- **Scope of the router.** The template router has no duplicate, share or publish routes. No other router creates templates.
+
+**Rate-limit 429 in `test_m4_global_pricing_mongo`: root cause.**
+
+- **Cause.** With no Redis configured, `RateLimiter` keeps its counters in a class-level dictionary shared by the whole process. The test environment seeds users with fixed ids. In CI's single-process real-MongoDB step, earlier modules' role mutations as `org_admin` therefore count against the role-mutation window (20 per 60 s). A later test then gets 429 instead of the 403 it asserts. It depends on order and timing.
+- **Reproduced locally.** `test_security_remediation_mongo.py` followed by `test_m4_global_pricing_mongo.py` gave the 429.
+- **Not a security fault.** The request is still refused, but the assertion goes unverified.
+- **Fix, in the test environment only.** `_env` clears the in-process counters when each fresh environment starts. The same pair now passes. Production limits are unchanged.
+
+**Audit items.**
+
+| Item | Finding |
+|---|---|
+| Direct role-name checks that bypass the resolver | **Changed under `on`:** the §9 table plus templates. **Already bounded to the primary organisation:** `build_scope_query`, `authorize_scope`, `smtp_settings_service`, `deep_planning`, user role assignment (`routers/users.py`), `check_user_access`. **Gated by an assignment-scoped call:** tag creation (`check_organization_access`). **Arbitration gates:** every caller of `resolve_gate_role` and `enforce_gate_role` passes `arbitration_reviewer_roles` (scoped). The bare role list is used only when no roles are passed, and no caller does that |
+| WebSocket | No role or organisation decision; authentication only |
+| Search, AI retrieval | Search is scoped under `on`. Retrieval uses `has_organization_wide_scope` (scoped) |
+| Exports and downloads | Go through `PolicyService.authorize`, whose permission grants are scoped |
+| Who can write `role_assignments` | **Nothing in the application.** It has no route or service writer; only an index is created. Rows can come only from an approved migration |
+| Primary organisation manipulation | Only a Super Admin can change a user's `organization_id` or `organizations` (`_enforce_update_stays_in_scope`). Such a change is an authority change: the cache is invalidated before the write. There is no self-service route that edits them |
+| Revocation and caches | The only authorisation cache is the Redis permission cache, with a TTL of 3,600 s. Each entry records the M1 mode and is ignored under another mode. Role, membership and organisation changes invalidate it (`begin_authority_change`). **Requirement:** a migration that writes or revokes `role_assignments` rows must call `begin_authority_change` and `complete_grant_change` for each user. Otherwise a cached grant can outlive a revoked row by up to the TTL. There is no in-process authorisation cache |
+| Flag transitions across workers | Each worker reads its own setting. A cache entry made under one mode is never served under another, so during a rolling change each worker answers by its own mode with no stale crossover. The two modes can differ between workers until all have restarted. Plan activation as a full restart, not a rolling one |
+| Fail-closed | A read error on `role_assignments` propagates. The permission check turns errors into a refusal, and the scope checks into a request failure, never a grant. An unknown flag value is refused at start-up. The flag defaults to `off` (legacy) only when unset |
+
+## 10. Assignment migration, staging validation and rollback (plan; nothing run)
+
+**Inputs, each required before any write:**
+
+1. **The P-05 reading** `built_in_role_scope_impact`, read-only, on production. Its outputs: `affected_users`, `proposed_scoped_assignments` and `assignments_needing_a_decision`.
+2. **An owner decision for every `assignments_needing_a_decision` row**, keyed by user, role and organisation or project:
+   - **keep:** write an explicit row;
+   - **drop:** no row, so the reach ends when `on` is activated.
+3. **Approval of this plan** by the security owner.
+
+**Migration: grant before revoke, idempotent, dry run first.**
+
+- **Writes.** For each kept secondary reach, the migration writes one `role_assignments` row: `{user_id, role_key, organization_id | project_id, status: "active", granted_by: "<migration id>", granted_at, decision_ref}`.
+- **Never touched.** Bare role keys stay on the user, and no user document changes. The primary organisation needs no row.
+- **Before each write:**
+  - check the row is new, by a unique key on user, role, organisation and project;
+  - check the user is still a member there;
+  - check the key is a tenant built-in;
+  - check a project row carries a project-tier key only.
+- **Per user.** Call `begin_authority_change` and `complete_grant_change` around the write, so no cached grant outlives it.
+- **Dry run.** Prints counts only: rows that would be written, rows already present, rows refused and why.
+- **Apply.** Runs only with separate approval, on staging first.
+
+**Staging validation (flag order: `off` → `shadow` → `on`):**
+
+1. Restore a copy of production into staging. Read P-05 there and confirm it matches production.
+2. Write the approved assignments on staging (dry run, then apply).
+3. **`shadow`:** run typical traffic, plus the staging E2E journey. Read `built_in_role_shadow_divergence`. Every remaining `would_deny` must be an intended drop. The shadow covers the policy gate only, so also exercise the §9 sites, using `test_m1_enforcement_mongo.py` against the staging stack's personas.
+4. **`on`,** applied by a **full restart** of every backend and worker, not a rolling one. Then two consecutive deployed E2E passes, with no skipped or retried tests.
+5. Hand over to the security owner for review of the code and the staging evidence. Then the release decision.
+
+**Rollback:**
+
+| Step | Rollback |
+|---|---|
+| `on` | Set the flag to `shadow` or `off` and restart. Cache entries are mode-bound, so no `on` grant is served afterwards |
+| Assignments | Rows are additive and are ignored with the flag `off`. To remove them, set `status: "revoked"` per row and call the authority-change hooks per user. Nothing else is touched |
+| Bare keys | Unchanged, so there is no rollback to do. Removing the bare-key meaning is §5 step 6, a separate release |

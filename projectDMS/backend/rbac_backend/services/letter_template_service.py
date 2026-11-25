@@ -139,6 +139,30 @@ class LetterTemplateService:
 
         raise TemplateError("Not authorized to create templates", 403)
 
+    async def _authorize_new_template_scope(self, scope: Dict[str, Any], current_user: Any) -> None:
+        """A new template may be placed only where its author could change it (2026-11-25).
+
+        ``_resolve_scope`` takes the organisation and project from the request body; until this
+        check the create route verified only the ``letter_templates:create`` permission, so an
+        Organization Admin of one organisation could create templates in any other, and a project
+        role could label its own project with another organisation. Now:
+
+        - a project template's project must belong to the template's organisation (everyone,
+          Super Admin included: a mislabelled template is never stored);
+        - the same rule as updating it (``AuthorizationService.check_letter_template_access``
+          with a write action) must pass for the new template's scope.
+        """
+        from .authorization_service import AuthorizationService
+        from .scope_service import ScopeService
+
+        project_id = scope.get("project_id")
+        organization_id = scope.get("organization_id")
+        if project_id and not await ScopeService().project_belongs_to_organization(
+            project_id=str(project_id), organization_id=str(organization_id or "")
+        ):
+            raise TemplateError("The project does not belong to the template's organization", 403)
+        await AuthorizationService().check_letter_template_access(current_user, scope, "create")
+
     async def create_template(
         self, data: LetterTemplateCreate, current_user: Any
     ) -> LetterTemplate:
@@ -151,6 +175,7 @@ class LetterTemplateService:
         )
 
         scope = self._resolve_scope(payload, current_user)
+        await self._authorize_new_template_scope(scope, current_user)
         payload.update(scope)
         payload["sections"] = normalized_sections
         payload["version"] = 1

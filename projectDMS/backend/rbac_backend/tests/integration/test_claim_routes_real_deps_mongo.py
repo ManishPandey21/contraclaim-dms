@@ -118,6 +118,16 @@ async def _env(monkeypatch: pytest.MonkeyPatch, mode: str = "primary") -> AsyncI
     saved = (database_module.client, database_module.database)
     database_module.client = mongo
     database_module.database = db
+    # Each environment is a fresh app state: the in-process rate-limit counters (class-level,
+    # shared by every RateLimiter in the process when no Redis is configured) start empty.
+    # Without this, the fixed seeded user ids carry earlier modules' requests into a later
+    # test's window, and that test sees 429 instead of the answer it asserts (2026-11-25:
+    # test_m4_global_pricing_mongo, CI run 45020648950 attempt 1). Production limits are
+    # unchanged.
+    from rbac_backend.utils.rate_limiter import RateLimiter
+
+    RateLimiter._shared_buckets.clear()
+    RateLimiter._shared_user_requests.clear()
     try:
         await _seed(db)
         # The skill registry's indexes as the governed migration creates them in production
