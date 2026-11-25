@@ -344,3 +344,14 @@ The pinned exposures in `test_m1_cross_org_role_combinations_mongo.py` keep asse
 | `on` | Set the flag to `shadow` or `off` and restart. Cache entries are mode-bound, so no `on` grant is served afterwards |
 | Assignments | Rows are additive and are ignored with the flag `off`. To remove them, set `status: "revoked"` per row and call the authority-change hooks per user. Nothing else is touched |
 | Bare keys | Unchanged, so there is no rollback to do. Removing the bare-key meaning is §5 step 6, a separate release |
+
+**Local suites at `e2f7ded`:**
+- **Backend unit suite:** 8,461 passed, 0 failed, 135 skipped, 4 xfailed.
+- **Skipped (135):** all need services absent here. These are the same skips as before this work:
+  - a disposable real Qdrant, `CORRESPONDENCE_QDRANT_TEST_URL`: about 115 tests;
+  - FalkorDB at `localhost:6380`: 8;
+  - OCR binaries, real audit PDFs, live golden QA credentials, a real Redis integration URL, and environment-backed API smoke tests: the rest.
+- **Xfailed (4), each documented in its test:**
+  - two `legacy_v0` OCR rollback-path limits;
+  - one raster inset on a native page (region OCR is a follow-up);
+  - **one security gap:** `decode_oidc_id_token` accepts an id_token with no `exp`. It is pre-existing, marked strict, and to be fixed separately. It is recorded for the security reviewer.
