@@ -377,4 +377,3 @@ The pinned exposures in `test_m1_cross_org_role_combinations_mongo.py` keep asse
 | M20 | An unreadable case project gives the legacy reviewer key nowhere | Every test's project existed | A well-formed project id that does not exist |
 
 - **Final run, at `8809a12` (strengthened tests), every mutant together: 24 of 24 caught**, 21 over M1 and 3 over the letter-template fix; the working tree was restored after each. With the tests unmutated, the module gives 18 passed (with Redis; CI's real-MongoDB step sets `SECURITY_REDIS_URI`).
-

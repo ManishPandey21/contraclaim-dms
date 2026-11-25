@@ -699,4 +699,3 @@ Full record: `docs/M1_BUILT_IN_ROLE_SCOPING.md` §9. Evidence: `tests/integratio
 | Security approval | Pending (security owner) |
 | Legal approval | Pending (unchanged; JG-5(f)) |
 | Owner acceptance | Provisional for the implementation; M1 closure Pending |
-

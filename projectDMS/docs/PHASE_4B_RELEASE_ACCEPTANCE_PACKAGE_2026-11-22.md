@@ -723,4 +723,3 @@ The owner accepted the M1 implementation at `e44fd79` **provisionally**, subject
 - A migration that writes or revokes rows must call the authority-change hooks per user; otherwise a cached grant can outlive a revoked row by up to the cache TTL (3,600 s).
 - Workers can disagree on the mode during a rolling change; activation must be a full restart.
 - `decode_oidc_id_token` accepts an id_token without `exp` (pre-existing; strict xfail); for the security owner.
-
