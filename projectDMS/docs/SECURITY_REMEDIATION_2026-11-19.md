@@ -688,12 +688,14 @@ Full record: `docs/M1_BUILT_IN_ROLE_SCOPING.md` §9. Evidence: `tests/integratio
 - Tests were added or tightened for each survivor (M1 §9, "Mutation testing").
 - **Final result at `8809a12`: 24 of 24 caught** (21 M1, 3 letter-template).
 
+**CI at `dab7c34` (run 45690348817; code identical to `8809a12`, docs only since):** backend lint and unit tests, exhibit confinement and the real-MongoDB step (which fails on any skip, so the strengthened M1 module and its Redis cache test ran) passed; frontend and dependency scan passed; Docker building at the time of writing; Gitleaks failed on its 2 known findings only. Runs on `8809a12` (45682984331) and `cd7fb6d` (45684857081) stopped at pre-commit (trailing blank lines in three docs, fixed in `dab7c34`) and ran no backend tests.
+
 **Separate statuses.**
 
 | Item | Status |
 |---|---|
 | Implementation | Done behind `BUILT_IN_ROLE_ASSIGNMENTS` (default `off`) |
-| CI | Green except Gitleaks (2 known findings) on `e44fd79` and `e2f7ded`; final commit pending |
+| CI | Green except Gitleaks (2 known findings) on `e44fd79`, `e2f7ded` and the final head `dab7c34` (run 45690348817; Docker pending at writing) |
 | Production evidence (P-05, R-PAY, P-01 to P-16) | Pending: no operator or host access |
 | Staging passes | Pending: no staging owner or environment named |
 | Security approval | Pending (security owner) |

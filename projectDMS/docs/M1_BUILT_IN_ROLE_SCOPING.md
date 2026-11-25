@@ -377,3 +377,5 @@ The pinned exposures in `test_m1_cross_org_role_combinations_mongo.py` keep asse
 | M20 | An unreadable case project gives the legacy reviewer key nowhere | Every test's project existed | A well-formed project id that does not exist |
 
 - **Final run, at `8809a12` (strengthened tests), every mutant together: 24 of 24 caught**, 21 over M1 and 3 over the letter-template fix; the working tree was restored after each. With the tests unmutated, the module gives 18 passed (with Redis; CI's real-MongoDB step sets `SECURITY_REDIS_URI`).
+
+**CI at `dab7c34` (run 45690348817; code identical to `8809a12`, docs only since):** backend lint and unit tests, exhibit confinement and the real-MongoDB step (which fails on any skip, so the strengthened M1 module and its Redis cache test ran) passed; frontend and dependency scan passed; Docker building at the time of writing; Gitleaks failed on its 2 known findings only. Runs on `8809a12` (45682984331) and `cd7fb6d` (45684857081) stopped at pre-commit (trailing blank lines in three docs, fixed in `dab7c34`) and ran no backend tests.

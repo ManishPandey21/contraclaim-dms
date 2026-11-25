@@ -707,7 +707,7 @@ The owner accepted the M1 implementation at `e44fd79` **provisionally**, subject
 | Item | Status | Evidence |
 |---|---|---|
 | Implementation | Done behind the flag, default `off`; nothing written, migrated or activated | `e44fd79` (enforcement), `e2f7ded` (template fix, test isolation) |
-| CI | Green except Gitleaks (2 known historical findings, B-2) on `e44fd79` (run 45670781616) and `e2f7ded` (run 45674184192, backend and real-MongoDB steps). Final commit: see the record in M1 §9 | GitHub Actions |
+| CI | Green except Gitleaks (2 known historical findings, B-2) on `e44fd79` (run 45670781616) and `e2f7ded` (run 45674184192, backend and real-MongoDB steps). Final head `dab7c34` (run 45690348817): backend, real MongoDB (strengthened M1 tests included), frontend, dependency scan green; Docker pending at writing; Gitleaks red on the 2 known findings only | GitHub Actions |
 | Local suites at `e2f7ded` | Backend unit: 8,461 passed, 0 failed. Real MongoDB as in CI: 1,381 passed, 0 skipped, all 109 modules | M1 §9 |
 | Mutation testing | 24 mutants over the new checks; first valid run 15 caught; 9 survivors closed with new or corrected tests; **final run at `8809a12`: 24 of 24 caught** | M1 §9 |
 | Production evidence | **Pending.** P-05 `built_in_role_scope_impact`, R-PAY and P-01 to P-16 are unread, never zero | B-1 |
