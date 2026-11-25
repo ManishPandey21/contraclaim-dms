@@ -14,6 +14,7 @@ import re
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, ValidationError
 
+from ..core.permissions import REVIEWER_ROLE_KEYS
 from ..core.security import (
     create_access_token, get_password_hash, verify_password, get_current_user, CurrentUser, require_permission
 )
@@ -25,7 +26,9 @@ from ..services.authentication_service import AuthenticationService, SessionRevo
 from ..services.credential_fields import CREDENTIAL_VERSION_CLAIM
 from ..services.authorization_service import AuthorizationService
 from ..services.permission_service import PermissionService
-from ..services.role_service import RoleService
+from ..services.role_service import RoleService, RoleServiceError
+from ..services.role_grants import role_is_built_in
+from ..services.account_status import object_account_is_active
 from ..models.user_models import (
     User, UserCreate, UserUpdate, UserResponse, UserListResponse,
     LoginRequest, LoginResponse, TokenResponse
@@ -182,8 +185,8 @@ class UserController:
                     status.HTTP_401_UNAUTHORIZED
                 )
 
-            # Check if user is disabled
-            if user.disabled:
+            # Check if user is disabled (SEC-4: the one rule, disabled or is_active false)
+            if not object_account_is_active(user):
                 await self.audit_logger.log_login_failed(
                     validated_email,
                     "account_disabled",
@@ -258,6 +261,7 @@ class UserController:
             validated_data = await self._validate_user_input(user_data)
             # Every later check, and the stored record, sees canonical role ids only.
             validated_data.roles = await self._resolve_assigned_roles(validated_data.roles)
+            self._refuse_new_reviewer_roles(validated_data.roles, [])
 
             # Check for existing user
             existing_user = await self.user_service.check_user_exists(
@@ -271,6 +275,15 @@ class UserController:
 
             # Validate role assignments and organizational context
             await self._validate_user_context(validated_data, current_user)
+            await self._fence_added_roles(
+                current_user,
+                validated_data.roles or [],
+                target_org=validated_data.organization_id,
+                target_organizations=list(validated_data.organizations or []),
+                target_projects=list(validated_data.projects or []),
+                target_active=not bool(getattr(validated_data, "disabled", False))
+                and getattr(validated_data, "is_active", True) is not False,
+            )
 
             # Create user
             user = await self.user_service.create_user(
@@ -454,11 +467,42 @@ class UserController:
             if validated_update.roles is not None:
                 # Resolve before judging: an alias must be judged as the role it becomes.
                 validated_update.roles = await self._resolve_assigned_roles(validated_update.roles)
+                self._refuse_new_reviewer_roles(validated_update.roles, getattr(existing_user, "roles", []) or [])
+                target_org = (
+                    validated_update.organization_id
+                    if getattr(validated_update, "organization_id", None) is not None
+                    else getattr(existing_user, "organization_id", None)
+                )
+                target_projects = (
+                    list(validated_update.projects)
+                    if getattr(validated_update, "projects", None) is not None
+                    else list(getattr(existing_user, "projects", []) or [])
+                )
+                target_organizations = (
+                    list(validated_update.organizations)
+                    if getattr(validated_update, "organizations", None) is not None
+                    else list(getattr(existing_user, "organizations", []) or [])
+                )
+                disabled = getattr(validated_update, "disabled", None)
+                is_active = getattr(validated_update, "is_active", None)
+                target_active = (
+                    not bool(disabled if disabled is not None else getattr(existing_user, "disabled", False))
+                    and (is_active if is_active is not None else getattr(existing_user, "is_active", True)) is not False
+                )
                 await self._enforce_role_assignment_scope(
                     current_user,
                     validated_update.roles,
-                    getattr(existing_user, "organization_id", None),
-                    getattr(existing_user, "projects", []) or [],
+                    target_org,
+                    target_projects,
+                )
+                held = {str(role) for role in (getattr(existing_user, "roles", []) or [])}
+                await self._fence_added_roles(
+                    current_user,
+                    [role for role in validated_update.roles if str(role) not in held],
+                    target_org=target_org,
+                    target_organizations=target_organizations,
+                    target_projects=target_projects,
+                    target_active=target_active,
                 )
 
             # Check for conflicts if updating email or username
@@ -520,7 +564,7 @@ class UserController:
 
             # Invalidate sessions if other critical fields changed (a password
             # change was fenced above).
-            if any(field in changed_fields for field in ['roles', 'disabled']):
+            if any(field in changed_fields for field in ['roles', 'disabled', 'is_active']):
                 await self.authentication_service.invalidate_user_sessions(validated_user_id)
 
             # Build response
@@ -766,6 +810,21 @@ class UserController:
         if update_data.organization_id is not None:
             validated_fields['organization_id'] = update_data.organization_id
 
+        # DEF-3 (2026-11-19): `organizations` is membership to ScopeService and to the
+        # permission checks, and was silently dropped here, so a user moved to another
+        # organisation stayed a member of the old one. It is applied when sent; a move
+        # that does not say which memberships the user keeps is refused rather than
+        # guessed (no silent change of access either way).
+        if update_data.organizations is not None:
+            validated_fields['organizations'] = [str(org) for org in update_data.organizations if org]
+        elif update_data.organization_id is not None and str(update_data.organization_id) != str(
+            getattr(existing_user, "organization_id", "") or ""
+        ):
+            raise UserError(
+                "Moving a user to another organisation must also say which organisations they keep (organizations)",
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+
         if update_data.projects is not None:
             validated_fields['projects'] = update_data.projects
 
@@ -896,6 +955,25 @@ class UserController:
             user_data.projects or [],
         )
 
+    @staticmethod
+    def _refuse_new_reviewer_roles(requested_roles: List[str], held_roles: List[str]) -> None:
+        """A reviewer role is granted by a reviewer assignment, never by a role list (plan D-06).
+
+        A role list has no scope, no expiry, no reason and no grantor. A reviewer
+        role already on a user's list is left alone, so editing that user does
+        not strip it; adding one is refused for every caller.
+        """
+        held = {str(role).strip().lower() for role in held_roles or []}
+        added = sorted(
+            {str(role).strip().lower() for role in requested_roles or []} & REVIEWER_ROLE_KEYS - held
+        )
+        if added:
+            raise UserError(
+                "A reviewer role is granted on the Reviewer roles screen, with a scope, a reason and an end date. "
+                f"It cannot be added to a user's role list: {', '.join(added)}",
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+
     async def _resolve_assigned_roles(self, requested_roles: List[str]) -> List[str]:
         """Resolve every requested role to exactly one active role document.
 
@@ -1014,6 +1092,94 @@ class UserController:
                 if target_projects_set and not target_projects_set.issubset(actor_projects):
                     raise UserError("Not authorized to assign roles outside your project scope", status.HTTP_403_FORBIDDEN)
 
+    async def _fence_added_roles(
+        self,
+        current_user: CurrentUser,
+        added_roles: List[str],
+        *,
+        target_org: Optional[str],
+        target_organizations: List[str],
+        target_projects: List[str],
+        target_active: bool,
+    ) -> None:
+        """Refuse a role that does not fit the user it is given to (SEC-3).
+
+        Judged for every caller, Super Admin included, and for roles being added only
+        (a role the user already holds is left alone: no production role is changed
+        by editing an unrelated field). A built-in role keeps its existing rules
+        (``_enforce_role_assignment_scope``). For a custom role:
+
+        - no new role for a disabled account (409);
+        - a role naming no organisation and no project only for a user bound to no
+          organisation, by a Super Admin (403);
+        - an organisation role only for a user of that organisation (403);
+        - a project role only for a user assigned to that project, which must belong
+          to the user's organisation and still be active (403);
+        - the caller must be able to delegate every permission on it, in its
+          organisation and project (SEC-2, 403).
+        """
+        if not added_roles:
+            return
+        if not target_active:
+            raise UserError("Roles cannot be given to a disabled account", status.HTTP_409_CONFLICT)
+        actor_is_superadmin = "superadmin" in set(current_user.roles or [])
+        user_orgs = {str(org) for org in [target_org, *(target_organizations or [])] if org}
+        projects = {str(project) for project in target_projects or [] if project}
+        db = self.user_service.db
+        for role_id in added_roles:
+            role = await self.role_service.get_role_by_id(str(role_id)) or await self.role_service.get_role_by_name(
+                str(role_id)
+            )
+            if role is None:
+                raise UserError(f"Unknown role: {role_id}", status.HTTP_400_BAD_REQUEST)
+            descriptor = {
+                "_id": str(role.id),
+                "name": role.name,
+                "is_system": bool(getattr(role, "is_system", False)),
+                "scope": getattr(role, "scope", None),
+            }
+            if role_is_built_in(descriptor):
+                continue
+            role_org = str(role.organization_id) if getattr(role, "organization_id", None) else None
+            role_project = str(role.project_id) if getattr(role, "project_id", None) else None
+            if not role_org and not role_project:
+                if not actor_is_superadmin or user_orgs:
+                    raise UserError(
+                        f"The role '{role.name}' names no organisation, so it cannot be given to an organisation's user",
+                        status.HTTP_403_FORBIDDEN,
+                    )
+            if role_org and str(target_org or "") != role_org:
+                raise UserError(
+                    f"The role '{role.name}' belongs to another organisation",
+                    status.HTTP_403_FORBIDDEN,
+                )
+            if role_project:
+                if role_project not in projects:
+                    raise UserError(
+                        f"The role '{role.name}' is for a project this user is not assigned to",
+                        status.HTTP_403_FORBIDDEN,
+                    )
+                from bson import ObjectId
+
+                candidates: List[Any] = [role_project]
+                if ObjectId.is_valid(role_project):
+                    candidates.append(ObjectId(role_project))
+                project = await db.projects.find_one({"_id": {"$in": candidates}}, {"organization_id": 1, "is_active": 1})
+                if not project or str(project.get("organization_id") or "") != str(target_org or ""):
+                    raise UserError(
+                        f"The role '{role.name}' is for a project of another organisation",
+                        status.HTTP_403_FORBIDDEN,
+                    )
+                if project.get("is_active") is False:
+                    raise UserError(
+                        f"The role '{role.name}' is for a project that is no longer active",
+                        status.HTTP_403_FORBIDDEN,
+                    )
+            try:
+                await self.role_service.ensure_role_delegable(current_user, role)
+            except RoleServiceError as exc:
+                raise UserError(str(exc), exc.status_code) from exc
+
     async def _build_user_response(
         self,
         user: User,
@@ -1036,11 +1202,10 @@ class UserController:
         organizations = getattr(user, "organizations", []) or []
         permissions = getattr(user, "permissions", []) or []
         if include_effective_permissions:
-            effective_permissions = await self.permission_service.get_effective_permission_names(
+            # What the evaluator grants, even when that is nothing (never the stored field).
+            permissions = await self.permission_service.get_effective_permission_names(
                 str(getattr(user, "id", ""))
             )
-            if effective_permissions:
-                permissions = effective_permissions
         is_active = not bool(getattr(user, "disabled", False))
         is_verified = bool(getattr(user, "is_verified", False))
         preferences = getattr(user, "preferences", None) or {

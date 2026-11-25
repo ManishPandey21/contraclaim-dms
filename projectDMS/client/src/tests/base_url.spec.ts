@@ -310,6 +310,8 @@ describe("API base URL configuration", () => {
     const config = adapter.mock.calls[0][0];
     const headers = new Headers(config.headers);
     expect(headers.get("X-Step-Up-Token")).toBe("step-token");
+    // R6-7: a plan change carries an idempotency key, so a retry continues the same operation.
+    expect(headers.get("Idempotency-Key")).toBeTruthy();
   });
 
   it("redirects expired user creation sessions to login instead of the public landing page", async () => {

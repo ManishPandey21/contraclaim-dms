@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
@@ -53,9 +55,11 @@ from ..services.arbitration_drafting import ArbitrationCaseWorkspaceService, Arb
 from ..services.arbitration_drafting.case_workspace import MATRIX_COLLECTIONS
 from ..services.arbitration_drafting.permission_receipts import annotate_permission_states
 from ..services.policy_service import PolicyService
+from ..utils.error_handler import BaseDomainError
 from ..services.step_up_service import require_step_up
 from ..services.arbitration_drafting.workflow_service import ArbitrationWorkflowService
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/arbitration", tags=["arbitration-drafting"])
 
 
@@ -77,6 +81,15 @@ async def _load_and_authorize(draft_id: str, permission: str, db, current_user, 
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Arbitration draft not found")
     await policy.authorize_document(current_user, permission, draft, resource_type="arbitration_draft")
     return draft
+
+
+async def _may(policy: PolicyService, current_user: Any, permission: str, draft: Dict[str, Any]) -> bool:
+    """Whether the caller holds ``permission`` on the draft, asked as the action asks it, without raising."""
+    try:
+        await policy.authorize_document(current_user, permission, draft, resource_type="arbitration_draft")
+    except (BaseDomainError, HTTPException):
+        return False
+    return True
 
 
 async def _load_case_and_authorize(case_id: str, permission: str, db, current_user, policy) -> Dict[str, Any]:
@@ -104,7 +117,9 @@ async def list_arbitration_cases(
         current_user,
         Permissions.ARBITRATION_VIEW,
         resource_type="arbitration_case",
-        organization_id=organization_id,
+        # C-26: the subscription check needs an organisation. The pages send none, so fall
+        # back to the active selection, as the other register routes do.
+        organization_id=organization_id or getattr(current_user, "organization_id", None),
         project_id=project_id,
         audit=False,
     )
@@ -633,7 +648,9 @@ async def list_arbitration_drafts(
         current_user,
         Permissions.ARBITRATION_VIEW,
         resource_type="arbitration_draft",
-        organization_id=organization_id,
+        # C-26: the subscription check needs an organisation. The pages send none, so fall
+        # back to the active selection, as the other register routes do.
+        organization_id=organization_id or getattr(current_user, "organization_id", None),
         project_id=project_id,
         audit=False,
     )
@@ -650,9 +667,24 @@ async def list_arbitration_drafts(
     return [ArbitrationDraft(**row) for row in await ArbitrationDraftingService(db).list_drafts(scope, filters, skip=skip, limit=limit)]
 
 
+IMPLICIT_SCRATCH_WARNING = (
+    "This draft was created as a scratch draft because the request named no case. A scratch draft can be "
+    "neither approved nor exported for filing. Send scratch=true, or a case_id, explicitly: requests without "
+    "either will be refused once this compatibility mode ends."
+)
+
+
+def _caseless_mode() -> str:
+    from ..core.config import settings
+
+    return str(getattr(settings, "ARBITRATION_CASELESS_DRAFT_MODE", "implicit_scratch") or "implicit_scratch").strip().lower()
+
+
 @router.post("/drafts", response_model=ArbitrationDraftDetail, status_code=status.HTTP_201_CREATED)
 async def create_arbitration_draft(
     payload: ArbitrationDraftCreate,
+    request: Request,
+    response: Response,
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
@@ -665,7 +697,39 @@ async def create_arbitration_draft(
         organization_id=org,
         project_id=payload.project_id,
     )
-    return ArbitrationDraftDetail(**await ArbitrationDraftingService(db).create_draft(payload, current_user))
+    if payload.case_id:
+        # Attaching is editing the case's set of drafts (4B-38).
+        await _load_case_and_authorize(payload.case_id, Permissions.ARBITRATION_EDIT, db, current_user, policy)
+    implicit = not payload.case_id and not payload.scratch
+    if implicit and _caseless_mode() == "strict":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "scratch_required",
+                "user_message": (
+                    "Select the arbitration case this draft belongs to. A draft with no case is a scratch draft: "
+                    "it can be neither approved nor exported for filing, and must be asked for explicitly."
+                ),
+                "detail": "Send scratch=true, or a case_id.",
+            },
+        )
+    created = ArbitrationDraftDetail(**await ArbitrationDraftingService(db).create_draft(payload, current_user))
+    if implicit:
+        # D-26 (4B-45): an older caller that names neither. It gets a scratch draft (no gate is
+        # bypassed: a scratch draft cannot be approved or filed), told so, and is logged.
+        response.headers["Deprecation"] = "true"
+        response.headers["Warning"] = '299 - "Case-less draft created as scratch; send scratch=true or case_id"'
+        created.warnings.append(IMPLICIT_SCRATCH_WARNING)
+        logger.warning(
+            "arbitration.caseless_draft.implicit_scratch draft_id=%s user_id=%s organization_id=%s "
+            "project_id=%s user_agent=%r",
+            created.id,
+            getattr(current_user, "id", None),
+            org,
+            payload.project_id,
+            (request.headers.get("user-agent") or "")[:200],
+        )
+    return created
 
 
 @router.get("/drafts/{draft_id}", response_model=ArbitrationDraftDetail)
@@ -688,6 +752,9 @@ async def update_arbitration_draft(
     policy: PolicyService = Depends(get_policy),
 ):
     await _load_and_authorize(draft_id, Permissions.ARBITRATION_EDIT, db, current_user, policy)
+    if payload.case_id:
+        # Attaching a draft to a case: the case must be one the caller may edit (4B-38, C-20).
+        await _load_case_and_authorize(payload.case_id, Permissions.ARBITRATION_EDIT, db, current_user, policy)
     return ArbitrationDraftDetail(**await ArbitrationDraftingService(db).update_draft(draft_id, payload, current_user))
 
 
@@ -730,6 +797,29 @@ async def refresh_arbitration_source_ledger(
         current_user,
         include_unverified_graph_links=body.include_unverified_graph_links,
     )
+
+
+@router.get("/drafts/{draft_id}/citations")
+async def get_arbitration_draft_citations(
+    draft_id: str,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    """Each citation in the latest version as verified, unverified or unresolved,
+    with what blocks approval. The same computation the approval gate uses."""
+    draft = await _load_and_authorize(draft_id, Permissions.ARBITRATION_VIEW, db, current_user, policy)
+    service = ArbitrationDraftingService(db)
+    view = await service.citation_view(draft_id)
+    # 4B-39 (B4): what stands between this draft and Approve or filing Export, for this
+    # caller. Every reason listed is one the action itself refuses on.
+    view["action_gates"] = await service.action_gates(
+        draft_id,
+        str(getattr(current_user, "id", "") or "") or None,
+        may_approve=await _may(policy, current_user, Permissions.ARBITRATION_APPROVE, draft),
+        may_export=await _may(policy, current_user, Permissions.ARBITRATION_EXPORT, draft),
+    )
+    return view
 
 
 @router.get("/drafts/{draft_id}/source-ledger")

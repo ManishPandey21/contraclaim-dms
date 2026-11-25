@@ -14,6 +14,7 @@ from bson import ObjectId
 from pydantic import ConfigDict
 from ..services.permission_service import PermissionService, fetch_role_documents
 from ..services.credential_fields import credential_version, token_credential_version
+from ..services.account_status import account_is_active
 from .role_reference import ROLE_ALIASES as _ROLE_REFERENCE_ALIASES, normalize_role_key, resolve_role_reference
 from ..utils.audit_logger import get_audit_logger
 
@@ -231,7 +232,7 @@ async def resolve_stored_principal(db, actor_reference: Any) -> CurrentUser:
         raise StoredPrincipalUnavailableError(
             f"stored actor reference {reference!r} resolves to no user"
         )
-    if user.get("disabled"):
+    if not account_is_active(user):
         raise StoredPrincipalUnavailableError(
             f"stored actor reference {reference!r} resolves to a disabled account"
         )
@@ -272,6 +273,10 @@ async def principal_from_access_token(token: str, db) -> Optional[CurrentUser]:
             return None
         user = await db.users.find_one({"email": email})
         if not user:
+            return None
+        # SEC-4: a disabled account stops authenticating on its next request,
+        # whatever its token's expiry and whether or not a session store exists.
+        if not account_is_active(user):
             return None
         user_id_str = str(user["_id"])
 
@@ -401,7 +406,12 @@ async def get_current_user(request: Request, db = Depends(get_db)):
             raise credentials_exception
 
         # Try load real user if possible
-        user_doc = await db.users.find_one({"_id": x_user_id}) or await db.users.find_one({"email": x_user_id})
+        id_candidates: List[Any] = [x_user_id]
+        if ObjectId.is_valid(str(x_user_id)):
+            id_candidates.append(ObjectId(str(x_user_id)))  # review: an ObjectId id must be found too
+        user_doc = await db.users.find_one({"_id": {"$in": id_candidates}}) or await db.users.find_one({"email": x_user_id})
+        if user_doc is not None and not account_is_active(user_doc):
+            raise credentials_exception  # SEC-4: a disabled account stops here too
         username = (user_doc.get("username") if user_doc else None) or str(x_user_id)
         first_name = (user_doc.get("first_name") or user_doc.get("firstName")) if user_doc else None
         last_name = (user_doc.get("last_name") or user_doc.get("lastName")) if user_doc else None
@@ -746,6 +756,110 @@ def build_scope_query(
         return q
 
     return {"_id": {"$in": []}}
+
+
+#: Role keys ``build_scope_query`` answers for. A principal holding any of them is
+#: answered by that function alone; ``permission_scope_query`` never widens it.
+SCOPE_QUERY_ROLE_KEYS = frozenset(
+    {
+        "superadmin",
+        "superuser",
+        "orgadmin",
+        "orguser",
+        "projectadmin",
+        "projectuser",
+        "contraclaim_expert_drafter",
+        "contraclaim_expert_reviewer",
+        "contraclaim_drafting_manager",
+        "contract_expert",
+    }
+)
+
+
+async def permission_scope_query(
+    current_user: CurrentUser,
+    permission: str,
+    *,
+    organization_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    org_field: str = "organization_id",
+    project_field: Optional[str] = "project_id",
+    id_field: str = "_id",
+    db: Any = None,
+) -> Dict[str, Any]:
+    """Row visibility for a list gated on ``permission`` (JG-7(c)); opt-in per call site.
+
+    Built-in roles: exactly ``build_scope_query``. A principal with none of them
+    (custom roles only) used to get deny-all; now it sees rows only where it holds
+    ``permission`` **by name** (no ``*``) through a custom role that applies
+    (SEC-1: an active role of the organisation it is a member of, or of a project it
+    is assigned to), in the organisation of the request or its own, never another:
+
+    - an organisation role: that organisation's rows (one project, if one is named);
+    - project roles: those projects' rows only.
+
+    Holding a custom role is never enough by itself, a platform role grants no rows,
+    a disabled account gets none, and the filter always names the organisation
+    (never ``{}``, never a top-level ``$or``, so call sites may add keys).
+    """
+    query = build_scope_query(current_user, organization_id, project_id, org_field, project_field, id_field)
+    roles = {str(role).lower() for role in (current_user.roles or [])}
+    deny: Dict[str, Any] = {"_id": {"$in": []}}
+    if roles & SCOPE_QUERY_ROLE_KEYS or not permission:
+        return query
+    from .database import get_database
+
+    db = db if db is not None else await get_database()
+    service = PermissionService()
+    service.db = db
+    if project_id is not None:
+        # The project's own organisation decides (SEC-1 boundary); unresolvable fails closed.
+        resolved, _ = await service.resolve_request_scope(db, organization_id, project_id)
+        if resolved == PermissionService.UNRESOLVED_ORGANISATION:
+            return deny
+        target_org = str(resolved)
+    else:
+        target_org = str(organization_id or getattr(current_user, "organization_id", None) or "")
+    if not target_org:
+        return deny
+    candidates: List[Any] = [current_user.id]
+    try:
+        candidates.append(ObjectId(str(current_user.id)))
+    except Exception:
+        pass
+    user_doc = await db.users.find_one({"_id": {"$in": candidates}})
+    if not user_doc or not account_is_active(user_doc):
+        return deny
+    grants, _ = await service.scoped_grants(db, user_doc)
+    matching: List[Dict[str, Any]] = []
+    for grant in service.grants_naming(grants, permission):
+        scope = grant.get("scope")
+        # M1 (on): a built-in role's assignment scope is not a custom grant; row visibility for
+        # built-in roles stays with build_scope_query.
+        if (
+            isinstance(scope, dict)
+            and not scope.get("platform")
+            and not scope.get("built_in")
+            and str(scope.get("organization_id") or "") == target_org
+        ):
+            matching.append(scope)
+    if not matching:
+        return deny
+    org_wide = any(not scope.get("project_id") for scope in matching)
+    projects = sorted({str(scope["project_id"]) for scope in matching if scope.get("project_id")})
+    field = project_field or id_field
+    if project_id is not None:
+        requested = str(project_id)
+        if not org_wide and requested not in projects:
+            return deny
+        if org_wide and requested not in projects:
+            owner = await db.projects.find_one({"_id": {"$in": _expand_object_ids([requested])}}, {"organization_id": 1})
+            if not owner or str(owner.get("organization_id") or "") != target_org:
+                return deny
+        return {org_field: target_org, field: {"$in": _expand_object_ids([requested])}}
+    if org_wide:
+        return {org_field: target_org}
+    return {org_field: target_org, field: {"$in": _expand_object_ids(projects)}}
 
 
 def validate_role_assignment(actor: CurrentUser, target_roles: List[str]) -> None:

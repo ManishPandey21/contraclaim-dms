@@ -1,4 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
+import DraftCitationPanel from "@/components/arbitration/DraftCitationPanel";
+import { plainStatus } from "@/lib/plain-language";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -52,6 +54,9 @@ import {
   ArbitrationReferenceInput,
   addArbitrationDraftReferences,
   approveArbitrationDraft,
+  getArbitrationDraftCitations,
+  type DraftActionGate,
+  type DraftCitations,
   createArbitrationDraft,
   exportArbitrationDraft,
   exportArbitrationFilingDraft,
@@ -140,7 +145,8 @@ interface FormState {
 const initialForm = (kind: string): FormState => ({
   organization_id: "",
   project_id: "",
-  case_id: "none",
+  // No default: a draft belongs to a case unless a scratch draft is chosen by name.
+  case_id: "",
   include_registers: "yes",
   title: DRAFT_TYPES[kind]?.label || "Arbitration Draft",
   dispute_type: "eot_delay",
@@ -198,6 +204,8 @@ const ArbitrationDraftingPage: React.FC = () => {
   const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState("");
   const [approving, setApproving] = useState(false);
+  // B4 (4B-39): Approve and filing Export follow the server's gates for this draft and caller.
+  const [citations, setCitations] = useState<DraftCitations | null>(null);
   const [draftMode, setDraftMode] = useState<"deterministic" | "llm">("deterministic");
   const [evidenceQuery, setEvidenceQuery] = useState("");
   const [evidenceResults, setEvidenceResults] = useState<ArbitrationReferenceInput[]>([]);
@@ -263,12 +271,17 @@ const ArbitrationDraftingPage: React.FC = () => {
       toast.error("Project and title are required");
       return;
     }
+    if (!form.case_id) {
+      toast.error("Select the case this draft belongs to, or choose a scratch draft");
+      return;
+    }
     setSaving(true);
     try {
       const payload: ArbitrationDraftCreatePayload = {
         organization_id: form.organization_id || undefined,
         project_id: form.project_id,
         case_id: form.case_id && form.case_id !== "none" ? form.case_id : undefined,
+        scratch: form.case_id === "none",
         include_register_sources: form.include_registers !== "no",
         draft_type: draftType.value,
         party_role: form.party_role,
@@ -408,6 +421,20 @@ const ArbitrationDraftingPage: React.FC = () => {
     }
   };
 
+  useEffect(() => {
+    if (!draft?._id) {
+      setCitations(null);
+      return;
+    }
+    let active = true;
+    getArbitrationDraftCitations(draft._id)
+      .then((data) => active && setCitations(data))
+      .catch(() => active && setCitations(null));
+    return () => {
+      active = false;
+    };
+  }, [draft?._id, draft?.current_version, draft?.status, draft?.is_locked]);
+
   const approveDraft = async () => {
     if (!draft) return;
     setApproving(true);
@@ -519,6 +546,14 @@ const ArbitrationDraftingPage: React.FC = () => {
     const displayedVersion = viewedVersion || latestVersion;
     const displayedMarkdown = displayedVersion?.full_markdown || "";
     const selectedReferences = draft?.selected_references || [];
+    const approveGate = citations?.action_gates?.approve;
+    const exportGate = citations?.action_gates?.filing_export;
+    // Disabled until the gate is known: a click the server would refuse is not offered.
+    const mayApprove = Boolean(approveGate?.allowed);
+    const mayExport = Boolean(exportGate?.allowed);
+    const shownGate: { label: string; gate: DraftActionGate } | null = isLocked
+      ? exportGate && draft?.case_id ? { label: "Export for filing", gate: exportGate } : null
+      : approveGate ? { label: "Approve", gate: approveGate } : null;
     return (
       <div className="space-y-6 p-6">
         <div className="flex flex-wrap items-start justify-between gap-4">
@@ -554,7 +589,12 @@ const ArbitrationDraftingPage: React.FC = () => {
                 Return for Revision
               </Button>
             ) : (
-              <Button variant="outline" onClick={approveDraft} disabled={approving || !draft || !markdown}>
+              <Button
+                variant="outline"
+                onClick={approveDraft}
+                disabled={approving || !draft || !markdown || !mayApprove}
+                aria-describedby={!mayApprove ? "draft-action-gate" : undefined}
+              >
                 {approving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CheckCircle2 className="mr-2 h-4 w-4" />}
                 Approve
               </Button>
@@ -569,11 +609,21 @@ const ArbitrationDraftingPage: React.FC = () => {
             </Button>
             {isLocked && draft.case_id ? (
               <>
-                <Button variant="outline" onClick={() => exportDraft("docx", true)} disabled={!markdown}>
+                <Button
+                  variant="outline"
+                  onClick={() => exportDraft("docx", true)}
+                  disabled={!markdown || !mayExport}
+                  aria-describedby={!mayExport ? "draft-action-gate" : undefined}
+                >
                   <Download className="mr-2 h-4 w-4" />
                   Filing DOCX
                 </Button>
-                <Button variant="outline" onClick={() => exportDraft("pdf", true)} disabled={!markdown}>
+                <Button
+                  variant="outline"
+                  onClick={() => exportDraft("pdf", true)}
+                  disabled={!markdown || !mayExport}
+                  aria-describedby={!mayExport ? "draft-action-gate" : undefined}
+                >
                   <Download className="mr-2 h-4 w-4" />
                   Filing PDF
                 </Button>
@@ -582,16 +632,44 @@ const ArbitrationDraftingPage: React.FC = () => {
           </div>
         </div>
 
+        {shownGate && (
+          <div
+            id="draft-action-gate"
+            role="status"
+            className={`rounded-md border p-3 text-sm ${
+              shownGate.gate.allowed ? "border-slate-200 bg-slate-50" : "border-red-300 bg-red-50 text-red-950"
+            }`}
+          >
+            {shownGate.gate.allowed ? (
+              <p>
+                {shownGate.label} is available. Checked when you {shownGate.label.toLowerCase()}:{" "}
+                {shownGate.gate.checked_on_action.join(", ")}.
+              </p>
+            ) : (
+              <>
+                <p className="font-medium">{shownGate.label} is not available yet:</p>
+                <ul className="list-disc pl-5">
+                  {shownGate.gate.reasons.map((reason) => (
+                    <li key={reason.code}>
+                      {reason.anchor ? <a className="underline" href={`#${reason.anchor}`}>{reason.message}</a> : reason.message}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+          </div>
+        )}
+
         {!loading && draft && !draft.case_id && (
-          <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+          <div id="draft-case" className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
             <div>
-              <span className="font-medium">Ungated draft.</span> This draft is not linked to a case workspace, so the
-              matrix readiness gate (jurisdiction, limitation, quantum, expert alignment) was not applied.{" "}
+              <span className="font-medium">Scratch draft.</span> This draft has no case workspace. It cannot be
+              approved or exported for filing, and any download is watermarked.{" "}
               <Link to="/arbitration/cases" className="underline">
-                Link it to a case workspace
+                Attach it to a case workspace
               </Link>{" "}
-              for a gated filing.
+              to bring it under the case gates.
             </div>
           </div>
         )}
@@ -606,7 +684,7 @@ const ArbitrationDraftingPage: React.FC = () => {
             <section className="rounded-md border bg-background p-4">
               <div className="mb-3 flex flex-wrap items-center gap-2">
                 <Badge variant="outline">{pretty(draft?.draft_type)}</Badge>
-                <Badge variant="neutral">{draft?.status}</Badge>
+                <Badge variant="neutral">{plainStatus("arbitration_draft", draft?.status)}</Badge>
                 <Badge variant="outline">Version {draft?.current_version || 0}</Badge>
                 {isLocked && (
                   <Badge variant="outline" className="border-emerald-300 text-emerald-700">
@@ -760,7 +838,7 @@ const ArbitrationDraftingPage: React.FC = () => {
               )}
 
               {versions.length > 0 && (
-                <Card>
+                <Card id="draft-versions">
                   <CardHeader>
                     <CardTitle className="text-base">Version History</CardTitle>
                     <CardDescription>Every generation and manual edit is an immutable version</CardDescription>
@@ -839,13 +917,16 @@ const ArbitrationDraftingPage: React.FC = () => {
                 </Card>
               )}
 
-              <Card>
+              <Card id="draft-citations">
                 <CardHeader>
                   <CardTitle className="text-base">Evidence Status</CardTitle>
                   <CardDescription>Source ledger and missing proof markers</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-3 text-sm">
-                  <div>Sources: {sourceLedger.length || draft?.selected_references?.length || 0}</div>
+                  {draft && <DraftCitationPanel draftId={draft._id} version={draft.current_version} data={citations} />}
+                  <div className="text-xs text-muted-foreground">
+                    Sources in the ledger: {sourceLedger.length || draft?.selected_references?.length || 0}
+                  </div>
                   {selectedReferences.length > 0 && (
                     <div className="space-y-2">
                       <div className="text-xs font-medium text-muted-foreground">Selected references</div>
@@ -909,7 +990,7 @@ const ArbitrationDraftingPage: React.FC = () => {
               </Card>
 
               {(approvalBlockers.length > 0 || safetyWarnings.length > 0) && (
-                <Card>
+                <Card id="draft-validation">
                   <CardHeader>
                     <CardTitle className="flex items-center gap-2 text-base">
                       <AlertTriangle className="h-4 w-4 text-amber-600" />
@@ -1002,13 +1083,13 @@ const ArbitrationDraftingPage: React.FC = () => {
                   </Select>
                 </div>
                 <div className="space-y-2">
-                  <Label>Case workspace (recommended)</Label>
+                  <Label>Case workspace</Label>
                   <Select value={form.case_id} onValueChange={(value) => update("case_id", value)}>
                     <SelectTrigger>
-                      <SelectValue placeholder="Link a case workspace" />
+                      <SelectValue placeholder="Select a case" />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="none">None — ungated draft</SelectItem>
+                      <SelectItem value="none">No case: scratch draft (cannot be approved or filed)</SelectItem>
                       {cases
                         .filter((item) => !form.project_id || item.project_id === form.project_id)
                         .map((item) => (
@@ -1157,7 +1238,7 @@ const ArbitrationDraftingPage: React.FC = () => {
                     <TableCell className="font-medium">{item.title}</TableCell>
                     <TableCell>{pretty(item.draft_type)}</TableCell>
                     <TableCell>
-                      <Badge variant="outline">{item.status}</Badge>
+                      <Badge variant="outline">{plainStatus("arbitration_draft", item.status)}</Badge>
                     </TableCell>
                     <TableCell>{item.current_version || 0}</TableCell>
                     <TableCell className="text-right">

@@ -355,3 +355,111 @@ real-Mongo suites against a MongoDB 8.0.5 replica set.
 **The correct statement of the scan result is "pip-audit and the backend image
 scan passed with a time-bound owner-approved exception (R4)", never
 "0 vulnerabilities".**
+
+
+## R5 (PROPOSED, not applied): GHSA-fc5q-39xc-vjpf, picomatch ReDoS through single-branch repeated extglobs
+
+**Status: proposal for authorised security review. Nothing in the gate is changed.**
+`.github/scripts/npm_audit_gate.py` still fails on this advisory, so the dependency
+scan stays red (CI run 407 on `b80d3d3`, step "Scan frontend dependencies") until a
+reviewer decides. Recorded 2026-11-17.
+
+### What the advisory says
+
+GitHub advisory GHSA-fc5q-39xc-vjpf, severity high: picomatch is vulnerable to a
+regular-expression denial of service when a glob *pattern* uses single-branch
+repeated extglobs. Affected range as `npm audit` reports it: `<=4.0.7`.
+
+### Is there a supported fix?
+
+No, as of 2026-11-17. `npm view picomatch versions` lists 4.0.7 (published
+2026-08-24) as the newest release, and it is inside the affected range; the 2.x and
+3.x lines (2.3.2, 3.0.2) are affected too. `npm audit` reports `fixAvailable: false`
+for picomatch itself. Upgrading parents does not help: every parent resolves to an
+affected picomatch. So no override or upgrade can clear it today.
+
+### Dependency chain (from `npm ls picomatch` and the audit report)
+
+All 20 HIGH entries in `npm audit` trace to this one advisory (checked by walking each
+entry's `via` chain to its root advisories): `picomatch` itself and 19 parents -
+`vite`, `vitest`, `tinyglobby`, `fdir`, `tailwindcss`, `tailwindcss-animate`,
+`@tailwindcss/typography`, `chokidar`, `anymatch`, `readdirp`, `micromatch`,
+`fast-glob`, `rollup-plugin-visualizer`, `lovable-tagger`,
+`@typescript-eslint/typescript-estree`, `@types/jest`, `expect`, `jest-util`,
+`jest-message-util`. picomatch 4.0.4 sits under vite, vitest, tinyglobby, fdir and
+rollup-plugin-visualizer; 2.3.2 under tailwindcss (chokidar, micromatch, readdirp,
+anymatch) and jest-util. All are build, lint or test tooling.
+
+### Reachability
+
+- **Application source: none.** No file under `projectDMS/client/src` imports
+  picomatch, micromatch, minimatch or any glob library.
+- **Patterns are not user input.** The advisory needs an attacker-chosen *pattern*.
+  The patterns here come from build configuration (`vite.config.ts`,
+  `tailwind.config.ts` content globs, `eslint.config.js`, vitest include lists),
+  written by the repository's maintainers.
+- **Deployed client image: absent by construction.** The runtime stage copies only
+  `dist/` and `scripts/serve-dist.mjs` (`client/Dockerfile`, `COPY --from=builder`),
+  serves static files with `node:` built-ins, and carries no application
+  `node_modules` (the same properties R3 records, checked by CI's "Client runtime
+  image carries no package manager" step and the image scan, both green in run 405).
+  Not re-verified on an image built from `b80d3d3` in this session (no Docker here).
+
+### Classification proposed
+
+Build-time tooling only; not exploitable from a request to the application; no
+patched release exists. Same class as R3.
+
+### The review package (prepared 2026-11-17; NOT applied)
+
+Owner instruction 2026-11-17: prepare an advisory-specific exception of at most 30 days
+for authorised review; do not activate it or change the gate until the security owner
+approves. The package is `projectDMS/docs/hotfix/R5_PICOMATCH_GATE_PROPOSED.patch`, a
+`git apply`-able patch to `.github/scripts/` that `git apply --check` accepts on the
+branch tip. Nothing in `.github/` is changed until it is applied after approval.
+
+What the patch does, in `npm_audit_gate.py` (it replaces R3, which expired 2026-11-05
+and whose package, braces, no longer appears in the audit):
+
+- **Pinned identity:** GHSA-fc5q-39xc-vjpf, package `picomatch`, npm source id 1247710,
+  range `<=4.0.7`. Any change to any of them fails.
+- **Pinned lineage:** installed versions exactly {2.3.2, 4.0.4} (from
+  `package-lock.json`), aliases included; anything else fails.
+- **Pinned dependents:** the 20 packages npm reports HIGH through it today (dependency-
+  chain evidence: `npm ls picomatch` and the audit's `via` chains). A new package
+  reaching picomatch fails; a path removed is fine.
+- **Runtime absence:** application source under `client/src` importing any chain
+  package fails. Test files and test helpers (`__tests__/`, `tests/`, `*.test.*`,
+  `*.spec.*`) are excluded from that check, because vitest is itself in the chain and
+  every test imports it; tests are never bundled. **This exclusion is a design point
+  for the reviewer:** R3 did not need it.
+- **Expiry:** `EXPIRES = 2026-12-17` as proposed, 30 days from 2026-11-17; the reviewer
+  sets it to at most 30 days from the approval date. After it, the gate fails.
+- **Automatic invalidation:** any stable picomatch release above 4.0.7 published on
+  npm fails the gate with "upgrade it instead"; an unreadable version list fails closed.
+- Unchanged from R3: any CRITICAL fails; any other HIGH fails; npm or report errors
+  fail closed; the banner prints on every passing run.
+
+Negative controls, in `test_npm_audit_gate.py` (57 cases, run on the patched copy:
+57 passed): picomatch plus an unrelated HIGH; a HIGH hidden behind a dependent; any
+CRITICAL; the advisory turning critical; each identity field changed; the same GHSA on
+another package; an installed version outside the lineage; an aliased install; no
+installed picomatch; one day after expiry; a patched release (4.0.8, 4.1.0, 5.0.0); a
+pre-release (not a fix); unreadable or unparseable version lists; malformed or failed
+npm output; metadata counts that disagree; a new dependent; application code importing
+`vite` (fails) while test files import `vitest` (passes). The base fixture is the real
+`npm audit --json` of the client on 2026-11-17 (20 HIGH, 11 MODERATE).
+
+Run against the real client with the patch: the gate passes with the exception banner.
+Without the patch (the repository as it is): the gate fails on GHSA-fc5q-39xc-vjpf, and
+stays failing.
+
+**To apply after approval:** `git apply projectDMS/docs/hotfix/R5_PICOMATCH_GATE_PROPOSED.patch`,
+set `EXPIRES` to the approved date, run `python -m pytest -q .github/scripts/test_npm_audit_gate.py`,
+and record the approval (who, when, expiry) here.
+
+### Remediation when a fix is published
+
+`npm update` (or an `overrides` entry for `picomatch`) to the first patched 2.x and
+4.x releases, `npm ci` with the lockfile check, then the full client suite, build
+and image scan. The exception, if granted, is removed in the same commit.

@@ -36,10 +36,10 @@ Gate 3's execution plan; it is not a licence to ship a page with no error state.
 ## Counts
 
 - Source: `client/src/routes.tsx`
-- Routes: **99**
-- Authenticated routes: **92**
-- Routes owing an empty state: **63**
-- Routes owing a loading state: **92**
+- Routes: **103**
+- Authenticated routes: **96**
+- Routes owing an empty state: **67**
+- Routes owing a loading state: **96**
 
 ## The inventory
 
@@ -74,7 +74,8 @@ Gate 3's execution plan; it is not a licence to ship a page with no error state.
 | `/chronology/:chronologyId/review` | GET | yes | `ChronologyBuilderPage` | yes | yes | MISSING - no fault-injection coverage yet |
 | `/chronology/new` | GET | yes | `ChronologyBuilderPage` | yes | yes | MISSING - no fault-injection coverage yet |
 | `/claims` | GET | yes | `ClaimsRegisterPage` | yes | yes | MISSING - no fault-injection coverage yet |
-| `/claims/:id` | GET | yes | `ClaimDetailPage` | no | yes | `client/src/pages/__tests__/ClaimDetailPage.document-links.test.tsx` |
+| `/claims/:id` | GET | yes | `ClaimRoute` | yes | yes | `client/src/pages/__tests__/ClaimBenchPage.test.tsx` |
+| `/claims/:id/record` | GET | yes | `ClaimDetailPage` | no | yes | `client/src/pages/__tests__/ClaimDetailPage.document-links.test.tsx` |
 | `/concerns` | GET | yes | `ConcernsPage` | yes | yes | MISSING - no fault-injection coverage yet |
 | `/contract-master/prototype` | GET | yes | `ContractMasterPrototypePage` | no | yes | `client/src/pages/__tests__/ContractMasterPrototypePage.test.tsx` |
 | `/contract-master/workspace` | GET | yes | `ContractMasterWorkspacePage` | yes | yes | `client/e2e/contract-master.spec.ts` |
@@ -117,7 +118,7 @@ Gate 3's execution plan; it is not a licence to ship a page with no error state.
 | `/letters/:id/strategic-plan` | GET | yes | `LetterStrategicPlanPage` | no | yes | MISSING - no fault-injection coverage yet |
 | `/letters/:id/strategy` | GET | yes | `LetterStrategicPlanPage` | no | yes | MISSING - no fault-injection coverage yet |
 | `/letters/bench/new` | GET | yes | `BenchOpenRoute` | no | yes | MISSING - no fault-injection coverage yet |
-| `/letters/skills` | GET | yes | `SkillAdminPage` | yes | yes | MISSING - no fault-injection coverage yet |
+| `/letters/skills` | GET | yes | `SkillAdminPage` | yes | yes | `client/src/pages/__tests__/SkillAdminPage.errors.test.tsx` |
 | `/login` | GET | no | `LoginPage` | no | yes | `client/src/pages/__tests__/LoginPage.login.test.tsx` |
 | `/notifications` | GET | yes | `NotificationCenterPage` | yes | yes | MISSING - no fault-injection coverage yet |
 | `/observability` | GET | yes | `ObservabilityPage` | yes | yes | MISSING - no fault-injection coverage yet |
@@ -134,9 +135,12 @@ Gate 3's execution plan; it is not a licence to ship a page with no error state.
 | `/reports` | GET | yes | `ReportsAnalyticsPage` | yes | yes | MISSING - no fault-injection coverage yet |
 | `/representatives` | GET | yes | `RepresentativesPage` | yes | yes | MISSING - no fault-injection coverage yet |
 | `/retrieval-console` | GET | yes | `RetrievalConsolePage` | yes | yes | MISSING - no fault-injection coverage yet |
+| `/reviewer-roles` | GET | yes | `ReviewerAssignmentsPage` | yes | yes | `client/src/pages/__tests__/ReviewerAssignmentsPage.errors.test.tsx` |
 | `/security-terms` | GET | yes | `SecurityTermsPage` | no | yes | MISSING - no fault-injection coverage yet |
 | `/settings` | GET | yes | `SettingsPage` | no | yes | MISSING - no fault-injection coverage yet |
 | `/share/:id` | GET | yes | `ShareDocumentPage` | no | yes | MISSING - no fault-injection coverage yet |
+| `/skill-reviews` | GET | yes | `SkillAdminPage` | yes | yes | `client/src/pages/__tests__/SkillAdminPage.errors.test.tsx` |
+| `/skills` | GET | yes | `SkillAdminPage` | yes | yes | `client/src/pages/__tests__/SkillAdminPage.errors.test.tsx` |
 | `/sla` | GET | yes | `SLATrackerPage` | yes | yes | MISSING - no fault-injection coverage yet |
 | `/subscription-management` | GET | yes | `SubscriptionManagementPage` | yes | yes | MISSING - no fault-injection coverage yet |
 | `/tags` | GET | yes | `TagsPage` | yes | yes | MISSING - no fault-injection coverage yet |

@@ -11,7 +11,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { CheckCircle2, Loader2, RotateCcw, Send, UserPlus } from "lucide-react";
+import { enhancedApi } from "@/services/enhanced-api";
+import { formatDateIN } from "@/lib/format-in";
 import { toast } from "sonner";
 import {
   ApprovalRecord,
@@ -38,13 +47,21 @@ const STATE_LABEL: Record<ApprovalState, string> = {
   returned: "Returned",
 };
 
-const STATE_COLOR: Record<ApprovalState, string> = {
-  draft: "bg-gray-500",
-  assigned: "bg-blue-500",
-  in_review: "bg-amber-500",
-  approved: "bg-green-600",
-  returned: "bg-red-500",
+const STATE_VARIANT: Record<ApprovalState, "neutral" | "primary" | "warning" | "success" | "danger"> = {
+  draft: "neutral",
+  assigned: "primary",
+  in_review: "warning",
+  approved: "success",
+  returned: "danger",
 };
+
+interface Person {
+  id: string;
+  name: string;
+}
+
+const personName = (u: { first_name?: string; last_name?: string; username?: string; email?: string }) =>
+  [u.first_name, u.last_name].filter(Boolean).join(" ").trim() || u.username || u.email || "Unnamed user";
 
 const ClaimApprovalDialog: React.FC<Props> = ({ claimId, claimTitle, open, onOpenChange }) => {
   const [record, setRecord] = useState<ApprovalRecord | null>(null);
@@ -52,6 +69,11 @@ const ClaimApprovalDialog: React.FC<Props> = ({ claimId, claimTitle, open, onOpe
   const [busy, setBusy] = useState(false);
   const [reviewer, setReviewer] = useState("");
   const [comment, setComment] = useState("");
+  // People the reviewer can be picked from. Empty when the list could not be
+  // read (not everyone may list users): the id field is offered instead.
+  const [people, setPeople] = useState<Person[]>([]);
+  const nameOf = (id?: string | null) =>
+    (id && people.find((person) => person.id === id)?.name) || id || "";
 
   const load = useCallback(async () => {
     if (!claimId) return;
@@ -72,6 +94,29 @@ const ClaimApprovalDialog: React.FC<Props> = ({ claimId, claimTitle, open, onOpe
       void load();
     }
   }, [open, load]);
+
+  useEffect(() => {
+    if (!open) return;
+    let active = true;
+    enhancedApi
+      .getUsers()
+      .then((users) => {
+        if (!active) return;
+        setPeople(
+          (users || [])
+            .filter((u) => !u.disabled)
+            .map((u) => ({ id: String(u.id || u._id || ""), name: personName(u) }))
+            .filter((person) => person.id)
+            .sort((a, b) => a.name.localeCompare(b.name)),
+        );
+      })
+      .catch(() => {
+        if (active) setPeople([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [open]);
 
   const run = async (fn: () => Promise<ApprovalRecord>, ok: string) => {
     setBusy(true);
@@ -107,23 +152,39 @@ const ClaimApprovalDialog: React.FC<Props> = ({ claimId, claimTitle, open, onOpe
           <div className="space-y-4">
             <div className="flex items-center gap-2">
               <span className="text-sm text-muted-foreground">State:</span>
-              <Badge className={STATE_COLOR[record.state]}>{STATE_LABEL[record.state]}</Badge>
+              <Badge variant={STATE_VARIANT[record.state]}>{STATE_LABEL[record.state]}</Badge>
               {record.reviewer_id && (
                 <span className="text-sm text-muted-foreground">
-                  · reviewer <span className="font-medium">{record.reviewer_id}</span>
+                  · reviewer <span className="font-medium">{nameOf(record.reviewer_id)}</span>
                 </span>
               )}
             </div>
 
             {canAssign && (
               <div className="space-y-2 rounded-md border p-3">
-                <Label>Assign reviewer (user id)</Label>
+                <Label htmlFor="claim-reviewer">Assign reviewer</Label>
                 <div className="flex gap-2">
-                  <Input
-                    value={reviewer}
-                    onChange={(e) => setReviewer(e.target.value)}
-                    placeholder="reviewer user id"
-                  />
+                  {people.length > 0 ? (
+                    <Select value={reviewer} onValueChange={setReviewer}>
+                      <SelectTrigger id="claim-reviewer" className="flex-1">
+                        <SelectValue placeholder="Choose a reviewer" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {people.map((person) => (
+                          <SelectItem key={person.id} value={person.id}>
+                            {person.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  ) : (
+                    <Input
+                      id="claim-reviewer"
+                      value={reviewer}
+                      onChange={(e) => setReviewer(e.target.value)}
+                      placeholder="Reviewer's user id (the user list is not available to you)"
+                    />
+                  )}
                   <Button
                     disabled={busy || !reviewer.trim()}
                     onClick={() =>
@@ -183,11 +244,11 @@ const ClaimApprovalDialog: React.FC<Props> = ({ claimId, claimTitle, open, onOpe
                     <li key={i} className="flex justify-between gap-2">
                       <span>
                         <span className="font-medium">{h.action}</span>
-                        {h.actor_id ? ` by ${h.actor_id}` : ""}
+                        {h.actor_id ? ` by ${nameOf(h.actor_id)}` : ""}
                         {h.comment ? ` — ${h.comment}` : ""}
                       </span>
                       <span className="text-muted-foreground">
-                        {h.at ? new Date(h.at).toLocaleString() : ""}
+                        {formatDateIN(h.at)}
                       </span>
                     </li>
                   ))}

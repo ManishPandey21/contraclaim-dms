@@ -31,6 +31,19 @@ class ScopeService:
     def role_names(user: Any) -> Set[str]:
         return {str(role).lower() for role in (getattr(user, "roles", []) or []) if role}
 
+    async def role_names_in(self, user: Any, organization_id: Optional[str] = None) -> Set[str]:
+        """The role names that count in ``organization_id`` (M1).
+
+        ``BUILT_IN_ROLE_ASSIGNMENTS`` off or shadow: ``role_names(user)``, unchanged. ``on``:
+        a tenant built-in key counts only in the primary organisation or where an explicit
+        ``role_assignments`` row puts it (``services.built_in_role_scope``)."""
+        from . import built_in_role_scope
+
+        names = self.role_names(user)
+        if not built_in_role_scope.enforced():
+            return names
+        return await built_in_role_scope.role_names_in(await self._get_db(), user, names, organization_id)
+
     @staticmethod
     def account_type(user: Any) -> str:
         return str(getattr(user, "account_type", None) or AccountType.CLIENT_USER.value)
@@ -105,7 +118,6 @@ class ScopeService:
 
         org_ids = await self.client_organization_ids(user)
         project_ids = await self.client_project_ids(user)
-        roles = self.role_names(user)
 
         if organization_id and str(organization_id) not in org_ids:
             return False
@@ -118,7 +130,11 @@ class ScopeService:
                 return False
             if str(project_id) in project_ids:
                 return True
-            if roles & ORGANIZATION_WIDE_ROLE_KEYS and organization_id and str(organization_id) in org_ids:
+            if (
+                organization_id
+                and str(organization_id) in org_ids
+                and (await self.role_names_in(user, str(organization_id))) & ORGANIZATION_WIDE_ROLE_KEYS
+            ):
                 return True
             return False
 
@@ -137,7 +153,10 @@ class ScopeService:
             return False
         if not self.role_names(user) & ORGANIZATION_WIDE_ROLE_KEYS:
             return False
-        return str(organization_id) in await self.client_organization_ids(user)
+        if str(organization_id) not in await self.client_organization_ids(user):
+            return False
+        # M1 (on): the organisation-wide role must be assigned in this organisation.
+        return bool((await self.role_names_in(user, str(organization_id))) & ORGANIZATION_WIDE_ROLE_KEYS)
 
     async def active_expert_allocations(
         self,

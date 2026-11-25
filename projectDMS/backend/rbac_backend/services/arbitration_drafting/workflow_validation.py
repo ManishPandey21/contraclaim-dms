@@ -5,6 +5,13 @@ import re
 from typing import Any, Dict, Iterable, List, Optional
 
 from ...core.config import settings
+from .citation_refs import ADJACENT_DUPLICATE_SOURCE_REF_RE, SOURCE_REF_RE, is_verified_status
+from .citation_states import (
+    CONTEXT_EXEMPTION_POLICY_HASH,
+    context_policy_stamp,
+    is_exempt_context_row,
+    is_pleaded_head_blocker,
+)
 from .context import PRODUCIBLE_QUALITY_FLAGS
 from .workflow_repository import artifact_hash
 
@@ -51,10 +58,9 @@ VALIDATION_BRANCHES = (
     "source_drift",
 )
 
-_CITATION_RE = re.compile(r"\[((?:S\d+)|(?:SRC-\d+))(?::[^\]]+)?\]")
-_ADJACENT_DUPLICATE_CITATION_RE = re.compile(
-    r"(\[(?:(?:S\d+)|(?:SRC-\d+))(?::[^\]]+)?\])(?:\s+\1)+"
-)
+# One parser for the validator and the workflow (D-17, 4B-35).
+_CITATION_RE = SOURCE_REF_RE
+_ADJACENT_DUPLICATE_CITATION_RE = ADJACENT_DUPLICATE_SOURCE_REF_RE
 _AMOUNT_RE = re.compile(
     r"\b(?:INR|USD|EUR|GBP|AED|SAR|QAR|\u20b9|\$|\u20ac|\u00a3)\s*[0-9][0-9,]*(?:\.\d+)?\b",
     flags=re.IGNORECASE,
@@ -155,6 +161,14 @@ class ArbitrationValidationOrchestrator:
         existing_blockers = [str(item) for item in structured.get("approval_blockers") or []]
         existing_warnings = [str(item) for item in (structured.get("validation_warnings") or version.get("warnings") or [])]
         missing_evidence = [str(item) for item in version.get("missing_evidence") or []]
+        # JG-5(f): the context rows the save-time validator exempted (it alone knew the
+        # draft's case and project), honoured only under the policy now in force.
+        recorded_policy = structured.get("context_policy") or {}
+        recorded_exempt = (
+            {str(key) for key in structured.get("context_rows_exempted") or []}
+            if recorded_policy.get("hash") == CONTEXT_EXEMPTION_POLICY_HASH
+            else set()
+        )
         version_hash = str(version.get("version_hash") or artifact_hash({
             "draft_id": version.get("draft_id"),
             "version": version.get("version"),
@@ -213,7 +227,10 @@ class ArbitrationValidationOrchestrator:
             elif branch == "legal_structure":
                 for item in combined:
                     lower = item.lower()
-                    if any(token in lower for token in ("paragraph", "jurisdiction", "limitation", "notice", "relief", "section", "case workspace")):
+                    if is_pleaded_head_blocker(item) or any(
+                        token in lower
+                        for token in ("paragraph", "jurisdiction", "limitation", "notice", "relief", "section", "case workspace")
+                    ):
                         severity = "blocker" if item in existing_blockers else "warning"
                         issues.append(_issue(branch, "legal_structure_review", item, severity=severity))
                 if not markdown.strip():
@@ -253,6 +270,10 @@ class ArbitrationValidationOrchestrator:
                         issues.append(_issue(branch, "exhibit_unavailable", item, severity=severity))
             elif branch == "source_drift":
                 for row in ledger:
+                    if str(row.get("source_key")) in recorded_exempt and is_exempt_context_row(
+                        row, markdown, row.get("context_scope")
+                    ):
+                        continue  # uncited context, not relied on in the filing (JG-5(f))
                     source_key = str(row.get("source_key") or row.get("source_id") or "unknown")
                     flags = {str(flag).lower() for flag in row.get("quality_flags") or []}
                     verification = str(row.get("verification_status") or "").lower()
@@ -266,10 +287,7 @@ class ArbitrationValidationOrchestrator:
                         and row.get("sha256")
                         and str(row.get("current_sha256")) != str(row.get("sha256"))
                     )
-                    if flags.intersection(BLOCKING_QUALITY_FLAGS) or verification in {
-                        "draft", "needs_review", "pending", "selected", "unverified",
-                        "authority_denied",
-                    } or revision_drift or content_drift:
+                    if flags.intersection(BLOCKING_QUALITY_FLAGS) or not is_verified_status(verification) or revision_drift or content_drift:
                         issues.append(
                             _issue(
                                 branch,
@@ -290,6 +308,9 @@ class ArbitrationValidationOrchestrator:
                 "status": branch_status,
                 "issues": normalized,
                 "claim_source_spans": claim_source_spans,
+                # JG-5(f) control 8: the context policy, and the rows it exempted, on the record.
+                "context_policy": context_policy_stamp(),
+                "context_rows_exempted": sorted(recorded_exempt) if branch == "source_drift" else [],
                 "authoritative": False,
             }
             artifact["artifact_hash"] = artifact_hash(artifact)

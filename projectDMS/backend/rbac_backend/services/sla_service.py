@@ -80,6 +80,29 @@ def _item(claim: Dict[str, Any], kind: str, due: datetime, days_remaining: int, 
     }
 
 
+def window_days(value: Any) -> Optional[int]:
+    """A notice window as whole days (1 to 365), or None.
+
+    ``sla_rules`` is edited by hand and has held strings ("28"); ``timedelta(days="28")``
+    raised and took the SLA routes down (C-13). Numbers and numeric strings are
+    accepted; anything else is ignored with a warning, and the default applies.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+    elif isinstance(value, str) and value.strip():
+        try:
+            number = float(value.strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    if not number.is_integer() or not 1 <= number <= 365:
+        return None
+    return int(number)
+
+
 def compute_sla_items(
     claims: Iterable[Dict[str, Any]],
     *,
@@ -101,8 +124,9 @@ def compute_sla_items(
             days_remaining, state = _classify(response_due, now, approaching_days)
             items.append(_item(claim, "response", response_due, days_remaining, state))
 
-        # Time-bar only matters while notice is still outstanding.
-        event_date = _as_datetime(claim.get("event_date"))
+        # Time-bar only matters while notice is still outstanding. The period
+        # runs from awareness where that is recorded, otherwise from the event.
+        event_date = _as_datetime(claim.get("awareness_date")) or _as_datetime(claim.get("event_date"))
         if event_date is not None and not claim.get("notice_date"):
             window = windows.get(str(claim.get("type") or "other"), windows["other"])
             time_bar = event_date + timedelta(days=window)
@@ -124,16 +148,30 @@ class SlaService:
 
         return await get_database()
 
-    async def notice_windows_for(self, organization_id: Optional[str]) -> Dict[str, int]:
-        """Default windows overlaid with any per-org override in ``sla_rules``."""
+    async def notice_window_overrides_for(self, organization_id: Optional[str]) -> Dict[str, int]:
+        """Only the windows this organisation has set itself in ``sla_rules``."""
         if not organization_id:
-            return dict(DEFAULT_NOTICE_WINDOWS)
+            return {}
         db = await self._get_db()
         try:
             rule = await db.sla_rules.find_one({"organization_id": organization_id})
         except Exception:  # pragma: no cover - defensive (collection optional)
             rule = None
-        override = (rule or {}).get("notice_windows") or {}
+        windows: Dict[str, int] = {}
+        for claim_type, value in dict((rule or {}).get("notice_windows") or {}).items():
+            days = window_days(value)
+            if days is None:
+                logger.warning(
+                    "sla_rules notice window ignored: organization=%s type=%s value is not a whole number of days",
+                    organization_id, claim_type,
+                )
+                continue
+            windows[str(claim_type)] = days
+        return windows
+
+    async def notice_windows_for(self, organization_id: Optional[str]) -> Dict[str, int]:
+        """Default windows overlaid with any per-org override in ``sla_rules``."""
+        override = await self.notice_window_overrides_for(organization_id)
         return {**DEFAULT_NOTICE_WINDOWS, **override}
 
     async def list_sla(

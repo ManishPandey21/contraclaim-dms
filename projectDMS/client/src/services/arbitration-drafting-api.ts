@@ -38,6 +38,9 @@ export interface ArbitrationClaimHeadInput {
 
 export interface ArbitrationDraftCreatePayload {
   case_id?: string | null;
+  /** Always sent (D-26, 4B-45): true for a draft with no case, a scratch draft asked for by
+   * name; false with a case. Required here so no caller can leave it out. */
+  scratch: boolean;
   organization_id?: string | null;
   project_id: string;
   contract_id?: string | null;
@@ -377,5 +380,45 @@ export async function cancelArbitrationWorkflow(caseId: string, runId: string, s
     `/arbitration/cases/${caseId}/workflows/${runId}/cancel`,
     { state_version: stateVersion, reason },
   );
+  return data;
+}
+
+// Evidence controls: each citation in the latest version as verified,
+// unverified or unresolved, by the same computation the approval gate uses.
+export type CitationState = "verified" | "unverified" | "unresolved";
+
+/** Whether Approve or filing Export would be accepted, and why not (4B-39, B4). Every
+ * reason is one the action itself refuses on; `checked_on_action` names what is checked
+ * only when the action is taken. */
+export interface DraftActionGate {
+  allowed: boolean;
+  reasons: { code: string; message: string; anchor?: string | null }[];
+  checked_on_action: string[];
+}
+
+export interface DraftCitations {
+  draft_id: string;
+  version: number | null;
+  scratch: boolean;
+  counts: { verified: number; unverified: number; unresolved: number; cited: number; ledger: number };
+  items: {
+    kind?: "source" | "exhibit";
+    exhibit_id?: string | null;
+    source_key: string;
+    state: CitationState;
+    uses: number;
+    label?: string | null;
+    reason?: string | null;
+  }[];
+  approval_blockers: string[];
+  pleaded_head_gaps: { claim: string; missing: string[] }[];
+  missing_evidence: string[];
+  can_be_approved: boolean;
+  cannot_be_approved_reason?: string | null;
+  action_gates?: { approve: DraftActionGate; filing_export: DraftActionGate };
+}
+
+export async function getArbitrationDraftCitations(draftId: string) {
+  const { data } = await api.get<DraftCitations>(`/arbitration/drafts/${draftId}/citations`);
   return data;
 }

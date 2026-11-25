@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { rolesAfterEdit } from "@/lib/reviewer-roles";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -405,7 +406,8 @@ const UsersPage = () => {
         username: sanitizedUsername,
         first_name: firstName,
         last_name: lastName,
-        roles: [backendRole],
+        // The form edits the access role only; any other role the user holds is kept.
+        roles: rolesAfterEdit(editUser.roles, backendRole),
         organization_id: formData.organization || undefined,
         projects: formData.project ? [formData.project] : [],
       });

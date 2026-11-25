@@ -26,7 +26,7 @@ import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 
 from bson import ObjectId
 from fastapi import HTTPException
@@ -185,9 +185,15 @@ class LetterBenchService:
         registry: Optional[SkillRegistry] = None,
         executor: Optional[SkillExecutor] = None,
         config: Any = settings,
+        determination_source: Optional[Callable[[str, str, Any], Awaitable[Any]]] = None,
     ) -> None:
+        """``determination_source`` loads a determination letter's content (4B-31): given the
+        determination id, the purpose and the caller, it authorises the caller on the claim and
+        returns its ``DeterminationLetterSource``. The router supplies it, so this module does
+        not import the claim services."""
         from .service import DraftRunService  # local import: service imports this module
 
+        self.determination_source = determination_source
         self.db = db
         self.config = config
         self.drafts = draft_service or DraftRunService(db)
@@ -225,6 +231,40 @@ class LetterBenchService:
                 detail="This letter is no longer in drafting, so its positions and reply cannot be changed.",
             )
         return letter
+
+    async def _authorize_read(self, letter_id: str, current_user: Any) -> Tuple[Letter, bool]:
+        """Authorise a read. Returns the letter and whether it was read as its opener.
+
+        The rule is ``_authorize``'s. One addition (JG-2): the person who opened the
+        board may read it, read-only, while they can still request drafting in the
+        letter's organisation and project. A client drafter who opens a Letter Bench
+        from a determination would otherwise be refused the board they just made
+        (``drafting.request.view`` comes only with a staff expert allocation, and is
+        not widened). Nobody else gains a read, and no write changes.
+        """
+        try:
+            return await self._authorize(letter_id, current_user), False
+        except HTTPException as refused:
+            if refused.status_code != 403:
+                raise
+            user_id = _user_id(current_user)
+            board = await self.boards.find_one({"letter_id": str(letter_id)}, {"created_by": 1})
+            if not user_id or not board or str(board.get("created_by") or "") != user_id:
+                raise
+        letter = await self.drafts.letter_service.get_letter(letter_id)
+        if not letter:
+            raise HTTPException(status_code=404, detail="Letter not found")
+        await self.drafts.policy_service.authorize(
+            current_user,
+            "drafting.request.create",
+            resource_type="letter",
+            resource_id=str(letter_id),
+            organization_id=str(getattr(letter, "organization_id", "") or ""),
+            project_id=str(getattr(letter, "project_id", "") or ""),
+            letter_id=str(letter_id),
+        )
+        self.ensure_enabled(str(getattr(letter, "organization_id", "") or ""))
+        return letter, True
 
     @staticmethod
     def _ensure_idle(board: PositionBoard) -> None:
@@ -364,6 +404,7 @@ class LetterBenchService:
         """Create the letter and its board from a document or a record. Idempotent."""
         trigger: Optional[Dict[str, Any]] = None
         incoming_text = ""
+        determination_role: Optional[str] = None
         if request.incoming_document_id:
             document = await self._document(request.incoming_document_id)
             if not document:
@@ -376,6 +417,21 @@ class LetterBenchService:
             subject = f"Re: {document.get('subject') or reference}"
             recipient = str(document.get("from") or "")
             origin_key = {"incoming_document_id": str(request.incoming_document_id)}
+        elif request.trigger_type == "claim":
+            organization_id, project_id, title, subject, recipient, trigger, incoming_text = (
+                await self._claim_trigger(str(request.trigger_id), current_user)
+            )
+            origin_key = {"trigger.type": "claim", "trigger.id": str(request.trigger_id)}
+        elif request.trigger_type in ("determination", "information_request"):
+            source = await self._determination_trigger(
+                str(request.trigger_id), request.trigger_type, current_user
+            )
+            organization_id, project_id = source.organization_id, source.project_id
+            title, subject, recipient = source.title, source.subject, "[CONFIRM: addressee]"
+            trigger, incoming_text = source.trigger, clean_incoming_text(source.text)
+            # The letter is written as the party that made the determination.
+            determination_role = source.role
+            origin_key = {"trigger.type": request.trigger_type, "trigger.id": str(request.trigger_id)}
         else:
             from ..variation_service import VariationService
 
@@ -434,7 +490,7 @@ class LetterBenchService:
                 letter_id=existing["letter_id"], created=False, board_version=existing.get("board_version", 0)
             )
 
-        role = request.role or await self._default_role(organization_id, project_id)
+        role = determination_role or request.role or await self._default_role(organization_id, project_id)
         user_id = _user_id(current_user) or "system"
         letter = await self.drafts.letter_service.create_letter(
             Letter(
@@ -478,6 +534,67 @@ class LetterBenchService:
             )
         return BenchOpenResponse(letter_id=board.letter_id, created=True, board_version=0)
 
+    async def _claim_trigger(self, claim_id: str, current_user: Any) -> tuple:
+        """Origin of a letter drafted from a claim (its notice, typically).
+
+        The text handed to the analysis is the claim's own record: what
+        happened, the dates, the clauses relied on and the heads. Nothing is
+        added that the register does not hold.
+        """
+        from ..claim_service import ClaimService
+
+        record = await ClaimService(self.db).get(claim_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Claim not found")
+        await self.drafts.policy_service.authorize_document(
+            current_user, "dms.claim.view", record, resource_type="claim"
+        )
+        reference = record.get("claim_ref") or record.get("title") or claim_id
+        heads = ((record.get("bench") or {}).get("heads")) or []
+        clauses = list(record.get("contract_clauses") or [])
+        for head in heads:
+            for ref in head.get("clause_refs") or []:
+                if ref not in clauses:
+                    clauses.append(ref)
+
+        def _day(value: Any) -> str:
+            return str(value)[:10] if value else ""
+
+        parts = [
+            f"Claim {reference}: {record.get('title') or ''}".strip(),
+            str(record.get("description") or ""),
+            f"Event date: {_day(record.get('event_date'))}" if record.get("event_date") else "",
+            f"Became aware on: {_day(record.get('awareness_date'))}" if record.get("awareness_date") else "",
+            f"Notice served on: {_day(record.get('notice_date'))}" if record.get("notice_date") else "",
+            ("Clauses relied on: " + ", ".join(f"Sub-Clause {ref}" for ref in clauses)) if clauses else "",
+            *[
+                f"Head of claim: {head.get('title')}. {head.get('event_summary') or ''}".strip()
+                for head in heads
+            ],
+        ]
+        trigger = {
+            "type": "claim",
+            "id": claim_id,
+            "label": f"Claim {reference}",
+            "status": str(record.get("status") or ""),
+            "claim_type": str(record.get("type") or ""),
+        }
+        return (
+            str(record.get("organization_id") or ""),
+            str(record.get("project_id") or "") or None,
+            f"Notice for claim {reference}",
+            f"Notice of claim: {record.get('title') or reference}",
+            "[CONFIRM: addressee]",
+            trigger,
+            clean_incoming_text("\n\n".join(part for part in parts if part)),
+        )
+
+    async def _determination_trigger(self, determination_id: str, purpose: str, current_user: Any) -> Any:
+        """Origin of a determination letter or a request for information (4B-31)."""
+        if self.determination_source is None:
+            raise HTTPException(status_code=503, detail="Letters from a determination are not available here")
+        return await self.determination_source(determination_id, purpose, current_user)
+
     async def _letter_exists(self, letter_id: str) -> bool:
         try:
             return bool(await self.db.letters.find_one({"_id": ObjectId(str(letter_id))}))
@@ -501,7 +618,7 @@ class LetterBenchService:
 
     # -------------------------------------------------------------------- get
     async def get(self, letter_id: str, current_user: Any) -> BenchResponse:
-        letter = await self._authorize(letter_id, current_user)
+        letter, by_opener = await self._authorize_read(letter_id, current_user)
         board = await self._load_board(letter_id)
         steps = await self._expire_abandoned(letter_id, await self._steps(letter_id), board)
         board.deadline = logic.refresh_deadline(board.deadline)
@@ -514,7 +631,8 @@ class LetterBenchService:
             steps=[SkillStepSummary(**step.model_dump()) for step in steps],
             gate=logic.compute_gate(board, steps),
             rollout_mode=self.availability(board.organization_id).rollout_mode,
-            read_only=status.lower() in READ_ONLY_STATUSES,
+            # The opener reads without drafting rights (JG-2): the board is shown read-only.
+            read_only=by_opener or status.lower() in READ_ONLY_STATUSES,
         )
 
     async def list_skills(self, letter_id: str, current_user: Any) -> List[Any]:
@@ -524,12 +642,12 @@ class LetterBenchService:
         who can see the chain on a letter can see which skills could be added
         to it. Names, versions and availability only; never skill text.
         """
-        await self._authorize(letter_id, current_user)
+        await self._authorize_read(letter_id, current_user)
         board = await self._load_board(letter_id)
         return await self.registry.list_effective(board.organization_id, board.project_id)
 
     async def get_step(self, letter_id: str, step_id: str, current_user: Any) -> SkillStep:
-        await self._authorize(letter_id, current_user)
+        await self._authorize_read(letter_id, current_user)
         doc = await self.steps.find_one({"letter_id": str(letter_id), "step_id": step_id})
         if not doc:
             raise HTTPException(status_code=404, detail="Skill step not found")
@@ -653,7 +771,7 @@ class LetterBenchService:
             request = DraftRunCreateRequest(mode="background", draft_type="fresh", role=board.role)
             analysis = IncomingLetterAnalysis(
                 subject=getattr(letter, "subject", None),
-                issue_type="variation" if (board.trigger or {}).get("type") == "variation" else "other",
+                issue_type=_trigger_issue_type(board.trigger),
                 issue_type_source="system_default",
                 main_request=condense_text(text, 500),
                 clauses_cited=extract_clause_refs(text),
@@ -1881,6 +1999,17 @@ class _SingleDocumentService:
 
     async def get_documents_by_ids(self, _ids: List[str]) -> List[Any]:
         return [self._document]
+
+
+def _trigger_issue_type(trigger: Optional[Dict[str, Any]]) -> str:
+    """Issue type of a letter started from a record rather than from a letter."""
+    kind = (trigger or {}).get("type")
+    if kind == "variation":
+        return "variation"
+    if kind == "claim":
+        # A delay claim routes to the EOT skill; any other claim to the claims skill.
+        return "delay" if (trigger or {}).get("claim_type") == "eot" else "claim"
+    return "other"
 
 
 def _find(board: PositionBoard, assertion_id: str) -> Assertion:

@@ -14,6 +14,8 @@ from ..contract_scope_resolver import (
 )
 from ..document_relationship_service import DocumentRelationshipService
 from ..evidence_graph_service import EvidenceGraphService
+from .citation_refs import CITATION_VERIFIED_STATUSES
+from .citation_states import is_case_analysis
 from .matrix_evidence_authority import matrix_clause_fence
 from .matrix_registry import MATRIX_COLLECTIONS
 from .permission_receipts import VERIFIED, rejoinder_permission_states
@@ -45,6 +47,34 @@ REVIEW_ONLY_SOURCE_STATUSES = {
     "pending",
     "under_review",
 }
+
+
+#: Statuses that withdraw a source's standing whatever else the row says.
+NEGATIVE_SOURCE_STATUSES = {"stale", "authority_denied", "revoked", "withdrawn"}
+_APPROVAL_FIELDS = ("verification_status", "human_approval_status", "approval_status", "readiness_status", "status")
+
+
+def ledger_verification_status(row: Dict[str, Any], *preferred: str) -> str:
+    """The status a ledger row carries into citation checks (D-17, C-11).
+
+    Previously each builder took its first field ``or "approved"``, so a row with
+    no status at all, admitted only because review sources were included, became
+    verified, and a row whose first field was not an approval (an alignment or an
+    issue's open/closed state) was reported by that field.
+
+    Now: a negative status (stale, authority denied, ...) wins; otherwise an
+    approval-family status in the citation allow-list wins; otherwise the first
+    non-empty preferred field; otherwise ``unverified``. Never ``approved`` by default.
+    """
+    values = [str(row.get(key) or "").strip().lower() for key in (*preferred, *_APPROVAL_FIELDS)]
+    present = [value for value in values if value]
+    for value in present:
+        if value in NEGATIVE_SOURCE_STATUSES:
+            return value
+    for value in present:
+        if value in CITATION_VERIFIED_STATUSES:
+            return value
+    return present[0] if present else "unverified"
 
 
 async def _collect(cursor: Any) -> List[Dict[str, Any]]:
@@ -168,6 +198,7 @@ from ..publication_policy import (
     authoritative_fact_text,
     authoritative_summary,
     consumable_derived_text,
+    escalated_claim_id,
     document_id_candidates,
     is_consumable,
     resolve_derived_authority,
@@ -286,6 +317,7 @@ PRODUCIBLE_QUALITY_FLAGS = frozenset(
 class ArbitrationContextBuilder:
     def __init__(self, db: Any) -> None:
         self.db = db
+        self._claim_head_counts: Dict[str, int] = {"approved": 0, "awaiting_approval": 0}
 
     async def build(
         self,
@@ -302,6 +334,7 @@ class ArbitrationContextBuilder:
             draft, references, current_user=current_user
         )
         source_ledger = [self._ledger_row(ref, idx) for idx, ref in enumerate(references, start=1)]
+        self._claim_head_counts = {"approved": 0, "awaiting_approval": 0}
         source_ledger.extend(
             await self._case_workspace_sources(
                 draft,
@@ -336,6 +369,7 @@ class ArbitrationContextBuilder:
             "draft": draft,
             "source_ledger": source_ledger,
             "matrix_context": matrix_context,
+            "claim_head_counts": dict(self._claim_head_counts),
             "claim_heads": claim_heads,
             "paragraph_responses": paragraph_responses,
             "missing_evidence": missing,
@@ -781,6 +815,9 @@ class ArbitrationContextBuilder:
             "verification_status": ref.get("metadata", {}).get("verification_status") or ref.get("verification_status") or "selected",
             "is_user_supplied": ref.get("source_type") == "manual_fact",
             "source_origin": ref.get("metadata", {}).get("source_origin") or "selected_reference",
+            # Never context (JG-5(f), control 1): only the server's own case-analysis and
+            # register builders classify a row as context, whatever a reference claims.
+            "ledger_context": None,
             "quality_flags": [],
             "metadata": ref.get("metadata") or {},
             "source_hash": "",
@@ -905,9 +942,11 @@ class ArbitrationContextBuilder:
                 "page_numbers": [],
                 "clause_number": None,
                 "letter_no": None,
-                "verification_status": row.get("approval_status") or "approved",
+                "verification_status": ledger_verification_status(row, "approval_status"),
                 "is_user_supplied": True,
                 "source_origin": "case_jurisdiction_matrix",
+                "ledger_context": "case_analysis",
+                "context_scope": {"case_id": str(case_id)},
                 "matrix_row_id": row.get("_id"),
                 "quality_flags": [],
                 "metadata": {
@@ -954,7 +993,9 @@ class ArbitrationContextBuilder:
             ledger_row = {
                 "source_key": f"S{offset + len(out) + 1}",
                 "source_id": str(row.get("expert_report_source_id") or row.get("_id")),
-                "source_type": "expert_report",
+                # With a report, the report (document-governed); without one, the
+                # approved alignment row itself (JG-5).
+                "source_type": "expert_report" if row.get("expert_report_source_id") else "expert_alignment",
                 "allowed_use": "expert",
                 "permitted_uses": ["expert", "fact"],
                 "label": f"{row.get('expert_type') or 'expert'} alignment: claim {row.get('claim_no')}",
@@ -963,7 +1004,7 @@ class ArbitrationContextBuilder:
                 "page_numbers": [],
                 "clause_number": None,
                 "letter_no": None,
-                "verification_status": row.get("alignment_status") or row.get("approval_status") or "approved",
+                "verification_status": ledger_verification_status(row, "approval_status"),
                 "is_user_supplied": False,
                 "source_origin": "case_expert_alignment",
                 "matrix_row_id": row.get("_id"),
@@ -1071,7 +1112,7 @@ class ArbitrationContextBuilder:
                 "page_numbers": authoritative.get("page_numbers") or row.get("page_numbers") or [],
                 "clause_number": None,
                 "letter_no": row.get("letter_no"),
-                "verification_status": row.get("verification_status") or row.get("human_approval_status") or "approved",
+                "verification_status": ledger_verification_status(row, "verification_status", "human_approval_status"),
                 "is_user_supplied": False,
                 "source_origin": "case_document_index",
                 "matrix_row_id": row.get("_id"),
@@ -1117,17 +1158,27 @@ class ArbitrationContextBuilder:
             if not _is_verified_source(row, include_review_sources=include_review_sources):
                 continue
             event = await self._load_chronology_event(row)
+            # JG-5: a row claim escalation carried names no event and no
+            # document - its date and wording came from the claim register - so
+            # it is cited as itself, an application record (`chronology_entry`).
+            carried = not row.get("chronology_event_id") and not row.get("source_document_id") and bool(
+                escalated_claim_id(row)
+            )
             # `row["event"]` is `f"{title}. {description}"` composed by the
             # adapter from the source document's extracted span, so the LABEL
             # carries the same text the snippet below is gated on. A label is
             # not free-standing metadata here: it is displayed, and it is what
             # counsel picks evidence by.
-            gated_event = await consumable_derived_text(
-                self.db,
-                row,
-                "event",
-                source_id=row.get("source_document_id")
-                or (event or {}).get("source_document_id"),
+            gated_event = (
+                str(row.get("event") or "")
+                if carried
+                else await consumable_derived_text(
+                    self.db,
+                    row,
+                    "event",
+                    source_id=row.get("source_document_id")
+                    or (event or {}).get("source_document_id"),
+                )
             )
             if gated_event:
                 title = gated_event
@@ -1158,7 +1209,7 @@ class ArbitrationContextBuilder:
             ledger_row = {
                 "source_key": f"S{offset + len(out) + 1}",
                 "source_id": str(row.get("chronology_event_id") or row.get("_id")),
-                "source_type": "chronology_event",
+                "source_type": "chronology_entry" if carried else "chronology_event",
                 "allowed_use": allowed,
                 "permitted_uses": sorted(set([allowed, "chronology", "fact"])),
                 "label": condense(title, 180),
@@ -1268,7 +1319,7 @@ class ArbitrationContextBuilder:
                 "page_numbers": row.get("page_numbers") or [],
                 "clause_number": row.get("clause_number"),
                 "letter_no": None,
-                "verification_status": row.get("approval_status") or "approved",
+                "verification_status": ledger_verification_status(row, "approval_status"),
                 "is_user_supplied": False,
                 "source_origin": "case_clause_matrix",
                 "matrix_row_id": row.get("_id"),
@@ -1327,9 +1378,11 @@ class ArbitrationContextBuilder:
                 "page_numbers": [],
                 "clause_number": ", ".join(_string_list(row.get("clause_ids"))) or None,
                 "letter_no": None,
-                "verification_status": row.get("status") or row.get("approval_status") or "approved",
+                "verification_status": ledger_verification_status(row, "approval_status", "status"),
                 "is_user_supplied": True,
                 "source_origin": "case_issue_matrix",
+                "ledger_context": "case_analysis",
+                "context_scope": {"case_id": str(case_id)},
                 "matrix_row_id": row.get("_id"),
                 "quality_flags": [],
                 "metadata": {"case_id": case_id, "matrix": "issue-matrix", "matrix_row_id": row.get("_id"), "issue_type": row.get("issue_type")},
@@ -1346,6 +1399,9 @@ class ArbitrationContextBuilder:
         include_review_sources: bool,
         context_warnings: List[str],
     ) -> List[Dict[str, Any]]:
+        # Counted for the Statement of Claim gate: a head still awaiting
+        # approval is not in the ledger, and must not disappear silently.
+        self._claim_head_counts = {"approved": 0, "awaiting_approval": 0}
         matrix_specs = [
             ("claim-matrix", self.db.arbitration_claim_matrix, "claim_matrix", "claim_no", "claim_head", "facts", "claim"),
             ("defence-matrix", self.db.arbitration_defence_matrix, "defence_matrix", "source_claim_no", "defence", "positive_case", "fact"),
@@ -1362,6 +1418,10 @@ class ArbitrationContextBuilder:
             # receipt backs it; the stored flag alone is not enough.
             permission_states = await rejoinder_permission_states(self.db, rows) if slug == "rejoinder-matrix" else {}
             for row in rows:
+                if slug == "claim-matrix":
+                    # Counted by the row's own approval, whatever this request includes.
+                    approved_head = _is_verified_source(row, include_review_sources=False)
+                    self._claim_head_counts["approved" if approved_head else "awaiting_approval"] += 1
                 if not _is_verified_source(row, include_review_sources=include_review_sources):
                     continue
                 if slug == "claim-matrix":
@@ -1385,7 +1445,7 @@ class ArbitrationContextBuilder:
                     "page_numbers": [],
                     "clause_number": ", ".join(_string_list(row.get("clause_ids"))) or None,
                     "letter_no": None,
-                    "verification_status": row.get("readiness_status") or row.get("approval_status") or "approved",
+                    "verification_status": ledger_verification_status(row, "readiness_status", "approval_status"),
                     "is_user_supplied": False,
                     "source_origin": f"case_{slug}",
                     "matrix_row_id": row.get("_id"),
@@ -1398,6 +1458,13 @@ class ArbitrationContextBuilder:
                         "notice_ids": row.get("notice_ids") or [],
                         "calculation_id": row.get("calculation_id"),
                         "amount_or_days": row.get("amount_or_days"),
+                        # The four elements a pleaded head is checked for
+                        # (citation_states.pleaded_head_gaps). Read by the
+                        # validator only; no prompt uses them.
+                        "clause_ids": _string_list(row.get("clause_ids")),
+                        "facts": row.get("facts"),
+                        "causation": row.get("causation"),
+                        "relief": row.get("relief"),
                         "new_matter": row.get("new_matter"),
                         "permission_required": row.get("permission_required"),
                         "permission_obtained": (
@@ -1446,7 +1513,7 @@ class ArbitrationContextBuilder:
                 "page_numbers": [],
                 "clause_number": None,
                 "letter_no": None,
-                "verification_status": row.get("approval_status") or "approved",
+                "verification_status": ledger_verification_status(row, "approval_status"),
                 "is_user_supplied": False,
                 "source_origin": "case_quantum_annexure",
                 "matrix_row_id": row.get("_id"),
@@ -1509,7 +1576,7 @@ class ArbitrationContextBuilder:
                 "page_numbers": [],
                 "clause_number": row.get("clause") or row.get("clause_number"),
                 "letter_no": row.get("notice_ref"),
-                "verification_status": row.get("approval_status") or "approved",
+                "verification_status": ledger_verification_status(row, "approval_status"),
                 "is_user_supplied": False,
                 "source_origin": "case_notice_compliance",
                 "matrix_row_id": row.get("_id"),
@@ -1609,6 +1676,8 @@ class ArbitrationContextBuilder:
                 "verification_status": row.get("status") or "register",
                 "is_user_supplied": False,
                 "source_origin": "claim_register",
+                "ledger_context": "project_register",
+                "context_scope": {"project_id": str(draft.get("project_id") or "")},
                 "quality_flags": [],
                 "metadata": {
                     "claim_type": row.get("type"),
@@ -1662,6 +1731,8 @@ class ArbitrationContextBuilder:
                 "verification_status": row.get("status") or "register",
                 "is_user_supplied": False,
                 "source_origin": "variation_register",
+                "ledger_context": "project_register",
+                "context_scope": {"project_id": str(draft.get("project_id") or "")},
                 "quality_flags": [],
                 "metadata": {"variation_type": row.get("variation_type"), "linked_document_ids": row.get("linked_document_ids") or []},
                 "source_hash": "",
@@ -1725,6 +1796,8 @@ class ArbitrationContextBuilder:
                 "verification_status": row.get("status") or "register",
                 "is_user_supplied": False,
                 "source_origin": "ipc_register",
+                "ledger_context": "project_register",
+                "context_scope": {"project_id": str(draft.get("project_id") or "")},
                 "quality_flags": [],
                 "metadata": {
                     "ipc_date": row.get("ipc_date"),
@@ -1793,6 +1866,8 @@ class ArbitrationContextBuilder:
                 "verification_status": row.get("bg_status") or "register",
                 "is_user_supplied": False,
                 "source_origin": "bank_guarantee_register",
+                "ledger_context": "project_register",
+                "context_scope": {"project_id": str(draft.get("project_id") or "")},
                 "quality_flags": [],
                 "metadata": {
                     "bg_type": row.get("bg_type"),
@@ -2238,7 +2313,9 @@ class ArbitrationContextBuilder:
                 flags.append("unverified_ai_suggestion")
             row["quality_flags"] = sorted(set(flags))
             row["evidence_strength"] = "strong" if not flags else ("medium" if flags == ["missing_snippet"] else "needs_review")
-        if any("user_supplied" in row.get("quality_flags", []) for row in rows):
+        # Approved case analysis (issues, jurisdiction checks) is flagged user_supplied so it is
+        # never cited as evidence, but it is not a manual fact: it does not raise this warning (JG-5).
+        if any("user_supplied" in row.get("quality_flags", []) and not is_case_analysis(row) for row in rows):
             context_warnings.append("Manual fact sources are not independent evidence and require legal review.")
         if any("unverified_ai_suggestion" in row.get("quality_flags", []) for row in rows):
             context_warnings.append("Source ledger includes unverified AI graph suggestions.")

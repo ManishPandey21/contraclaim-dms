@@ -32,20 +32,10 @@ from ..models.key_date import (
     SubmissionOutcome,
 )
 from .audit_event_service import AuditEventService
+from .key_date_determination_rule import EFFECTIVE_RESULTS, FINAL_DETERMINATION_STATUSES, operative_determinations
 from .key_date_service import KeyDateError, _as_dt, current_key_date, format_date
 
 
-FINAL_DETERMINATION_STATUSES = {
-    EOTDeterminationStatus.GRANTED.value,
-    EOTDeterminationStatus.PARTIALLY_GRANTED.value,
-    EOTDeterminationStatus.REJECTED.value,
-    EOTDeterminationStatus.NO_EXTENSION.value,
-    EOTDeterminationStatus.SUPERSEDED.value,
-}
-EFFECTIVE_RESULTS = {
-    EOTDeterminationResult.GRANTED.value,
-    EOTDeterminationResult.PARTIALLY_GRANTED.value,
-}
 OPEN_SUBMISSION_STATUSES = {
     EOTSubmissionStatus.SUBMITTED.value,
     EOTSubmissionStatus.LOCKED.value,
@@ -1173,23 +1163,8 @@ class KeyDateRevisionService:
         Shared by the date recomputation and the summary label so the header can
         never name a determination that governs no milestone.
         """
-        superseded_ids = {
-            str(value)
-            for row in determinations
-            if row.get("frozen_at")
-            for value in row.get("supersedes_determination_ids") or []
-        }
-        applicable = [
-            row for row in determinations
-            if row.get("frozen_at")
-            and _enum_value(row.get("status")) in FINAL_DETERMINATION_STATUSES
-            and str(row.get("_id")) not in superseded_ids
-        ]
-        applicable.sort(key=lambda row: (
-            _as_dt(row.get("determination_date")) or _as_dt(row.get("frozen_at")) or datetime.min,
-            _as_dt(row.get("frozen_at")) or datetime.min,
-            str(row.get("_id")),
-        ))
+        # The one rule, shared with the Claim Bench's Delay Lab (D-15).
+        applicable = operative_determinations(determinations)
         for determination in applicable:
             for item in determination.get("items") or []:
                 if _enum_value(item.get("determination_result")) not in EFFECTIVE_RESULTS:

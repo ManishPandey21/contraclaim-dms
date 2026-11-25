@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any, Awaitable, Callable, Iterable, Optional, TypeVar
 
 from fastapi import HTTPException
+from . import claim_contract_scope as contract_scope
 from ..core.permissions import Permissions
 from ..models.document_relationship import (
     DocumentRelationship,
@@ -331,6 +332,11 @@ class DocumentRelationshipService:
                 raise DocumentRelationshipError("Relationship role is not valid for this target", 422)
             document = await self._document(actor, context, link.document_id)
             self._require_role_semantics(link.relationship_role, document)
+            if context.target_type == "claim" and contract_scope.conflicts(context.entity, document):
+                # 4B-23 (D-23): a document or letter of another contract never supports this claim.
+                raise DocumentRelationshipError(
+                    contract_scope.message(context.entity, [contract_scope.document_label(document or {})]), 422
+                )
             version_id = link.document_version_id
             if version_id:
                 version = await self.db.document_versions.find_one(
@@ -562,6 +568,79 @@ class DocumentRelationshipService:
         )
         return None
 
+    async def _prepare_frozen_links(
+        self,
+        actor: Any,
+        context: EntityContext,
+        stored_links: Iterable[dict[str, Any]],
+        *,
+        session: Any = None,
+    ) -> list[tuple[dict[str, Any], dict[str, Any], str]]:
+        """Each link with its Document and current version; refuses (409) what cannot be frozen."""
+        prepared: list[tuple[dict[str, Any], dict[str, Any], str]] = []
+        for stored in stored_links:
+            document = await self._document(
+                actor,
+                context,
+                str(stored.get("document_id") or ""),
+                session=session,
+            )
+            version_id = str((document or {}).get("current_version_id") or "")
+            if not version_id:
+                raise DocumentRelationshipError(
+                    "Every frozen relationship requires a current Document version",
+                    409,
+                )
+            version = await self.db.document_versions.find_one(
+                {
+                    "_id": version_id,
+                    "document_id": str(stored.get("document_id") or ""),
+                },
+                session=session,
+            )
+            if not version:
+                raise DocumentRelationshipError(
+                    "Current Document version is missing or does not belong to Document",
+                    409,
+                )
+            if not version.get("file_object_id"):
+                raise DocumentRelationshipError(
+                    "Current Document version has no immutable file artifact",
+                    409,
+                )
+            prepared.append((stored, document or {}, version_id))
+        return prepared
+
+    async def freeze_preflight(self, actor: Any, target_type: str, target_id: str) -> None:
+        """Every check ``freeze`` makes before it writes, without writing (4B-36).
+
+        A caller that must not leave a half-done change (escalation reserves a
+        claim for a case before freezing it, and nothing unfreezes) runs this
+        first. Legacy document ids are checked as the links ``freeze`` would
+        create from them. Already frozen passes: the caller decides.
+        """
+        context = await self._target(actor, target_type, target_id, manage=True, freeze=True)
+        adapter = self.registry.get(context.target_type)
+        if context.frozen:
+            return
+        if not adapter.supports_freeze:
+            raise DocumentRelationshipError(f"{context.target_type} evidence freeze is not supported", 409)
+        legacy_ids = list(context.entity.get("linked_document_ids") or [])
+        if legacy_ids and context.target_type != "claim":
+            raise DocumentRelationshipError("Legacy relationship intent is ambiguous and requires manual review", 409)
+        links = await self.db.entity_document_links.find(
+            {
+                "organization_id": context.organization_id,
+                "project_id": context.project_id,
+                "target_type": context.target_type,
+                "target_id": context.target_id,
+                "removed_at": None,
+            }
+        ).to_list(length=None)
+        linked = {str(link.get("document_id") or "") for link in links}
+        links.extend({"document_id": str(item)} for item in legacy_ids if str(item) not in linked)
+        await self._prepare_frozen_links(actor, context, links)
+
     async def freeze(
         self,
         actor: Any,
@@ -621,39 +700,7 @@ class DocumentRelationshipService:
             *,
             session: Any = None,
         ) -> list[tuple[dict[str, Any], dict[str, Any], str]]:
-            prepared: list[tuple[dict[str, Any], dict[str, Any], str]] = []
-            for stored in stored_links:
-                document = await self._document(
-                    actor,
-                    context,
-                    str(stored.get("document_id") or ""),
-                    session=session,
-                )
-                version_id = str((document or {}).get("current_version_id") or "")
-                if not version_id:
-                    raise DocumentRelationshipError(
-                        "Every frozen relationship requires a current Document version",
-                        409,
-                    )
-                version = await self.db.document_versions.find_one(
-                    {
-                        "_id": version_id,
-                        "document_id": str(stored.get("document_id") or ""),
-                    },
-                    session=session,
-                )
-                if not version:
-                    raise DocumentRelationshipError(
-                        "Current Document version is missing or does not belong to Document",
-                        409,
-                    )
-                if not version.get("file_object_id"):
-                    raise DocumentRelationshipError(
-                        "Current Document version has no immutable file artifact",
-                        409,
-                    )
-                prepared.append((stored, document or {}, version_id))
-            return prepared
+            return await self._prepare_frozen_links(actor, context, stored_links, session=session)
 
         preflight_links = await self.db.entity_document_links.find(
             {
@@ -750,6 +797,76 @@ class DocumentRelationshipService:
             )
             for stored, document, version_id in committed
         ]
+
+    async def lift_freeze(
+        self,
+        actor: Any,
+        target_type: str,
+        target_id: str,
+        *,
+        frozen_at: Any,
+        versions_before: dict[str, Optional[str]],
+        reason: str,
+    ) -> None:
+        """Reverse one freeze exactly (4B-37, D-18): the claim's own escalation freeze.
+
+        Only the freeze stamped ``frozen_at`` is lifted: the claim must still carry
+        that stamp, and only links frozen at that instant are released. Each link
+        gets back the version it had before (``versions_before``, recorded by the
+        caller before freezing; a link not listed had none). A freeze made at any
+        other time is left as it is. Claims only. One transaction; audited.
+        """
+        context = await self._target(actor, target_type, target_id, manage=True, freeze=True)
+        adapter = self.registry.get(context.target_type)
+        lift = getattr(adapter, "lift_freeze", None)
+        if lift is None:
+            raise DocumentRelationshipError(f"{context.target_type} evidence freeze cannot be lifted", 409)
+        actor_id = getattr(actor, "id", None)
+
+        async def persist(session: Any) -> None:
+            await lift(self.db, context, frozen_at=frozen_at, session=session)
+            links = await self.db.entity_document_links.find(
+                {
+                    "organization_id": context.organization_id,
+                    "project_id": context.project_id,
+                    "target_type": context.target_type,
+                    "target_id": context.target_id,
+                    "frozen_at": frozen_at,
+                },
+                session=session,
+            ).to_list(length=None)
+            for link in links:
+                released = await self.db.entity_document_links.update_one(
+                    {"_id": link.get("_id"), "_revision": int(link.get("_revision") or 1)},
+                    {
+                        "$set": {
+                            "frozen_at": None,
+                            "frozen_by": None,
+                            "document_version_id": versions_before.get(str(link.get("_id"))),
+                        },
+                        "$inc": {"_revision": 1},
+                    },
+                    session=session,
+                )
+                if not getattr(released, "matched_count", 0):
+                    raise DocumentRelationshipError("Document relationship changed while the freeze was lifted", 409)
+            await self.audit.emit(
+                action="document_relationships.unfrozen",
+                actor_id=actor_id,
+                resource_type=context.target_type,
+                resource_id=context.target_id,
+                organization_id=context.organization_id,
+                project_id=context.project_id,
+                before={"evidence_frozen_at": frozen_at},
+                after={"evidence_frozen_at": None, "links_released": len(links)},
+                reason=reason,
+                session=session,
+            )
+
+        try:
+            await self._run_transaction(persist)
+        except RuntimeError as exc:
+            raise DocumentRelationshipError(str(exc), 409) from exc
 
     async def get(self, actor: Any, link_id: str) -> DocumentRelationshipView:
         """The current state of one link row, including a removal tombstone.

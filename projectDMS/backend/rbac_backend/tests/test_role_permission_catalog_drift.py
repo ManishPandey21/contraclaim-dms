@@ -186,12 +186,14 @@ async def test_permission_service_returns_effective_permission_names_for_current
     names = set(await service.get_effective_permission_names("user-1"))
 
     assert {
-        "custom:direct",
         "dms.document.view",
         "dms.document.delete",
         "dms.admin",
         "users:read",
     }.issubset(names)
+    # The user document's own `permissions` field is not read by any check, so it is
+    # not advertised either (2026-11-19 reconciliation; this used to expect it).
+    assert "custom:direct" not in names
 
 
 async def test_user_has_permission_handles_raw_role_permissions_without_catalog_match():

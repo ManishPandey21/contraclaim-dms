@@ -246,6 +246,8 @@ class _Collection:
 
 class _Database:
     def __init__(self) -> None:
+        # Creating a claim reads the project's contracts (4B-18); this project has none.
+        self.contract_master = _Collection("contract_master")
         self.claims = _Collection(
             "claims",
             [

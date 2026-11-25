@@ -25,6 +25,9 @@ PRIVILEGED_MATRIX_FIELDS = {
     "last_material_editor_id",
     "last_review_action",
     "material_contributor_ids",
+    # Where claim escalation carried the row from (JG-5): written by the server only.
+    "origin",
+    "origin_key",
     "last_reviewed_at",
     "last_reviewed_by",
     "permission_approved_at",
@@ -329,6 +332,9 @@ class ArbitrationCaseUpdate(BaseModel):
 class ArbitrationCase(ArbitrationCaseBase):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), alias="_id")
     status: ArbitrationCaseStatus = ArbitrationCaseStatus.INTAKE
+    # Claims escalated into this case. When set, the case's claim records are
+    # these and no others; a case with none falls back to its project's claims.
+    claim_ids: List[str] = Field(default_factory=list)
     readiness_score: int = 0
     readiness_blockers: List[Dict[str, Any]] = Field(default_factory=list)
     readiness_approved_by: Optional[str] = None
@@ -680,6 +686,9 @@ class ArbitrationDraftBase(BaseModel):
 
 
 class ArbitrationDraftCreate(ArbitrationDraftBase):
+    # A draft with no case workspace is a scratch draft and must be asked for by
+    # name: it can be neither approved nor exported for filing.
+    scratch: bool = False
     selected_references: List[ArbitrationSelectedReferenceCreate] = Field(default_factory=list)
     claim_heads: List[ArbitrationClaimHeadCreate] = Field(default_factory=list)
 
@@ -711,6 +720,9 @@ class ArbitrationDraft(ArbitrationDraftBase):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), alias="_id")
     status: ArbitrationDraftStatus = ArbitrationDraftStatus.DRAFT
     is_locked: bool = False
+    # True while the draft has no case workspace. Cleared when it is attached to
+    # one, from which point every case gate applies to it.
+    is_scratch: bool = False
     current_version: int = 0
     latest_generation_run_id: Optional[str] = None
     created_by: Optional[str] = None
@@ -780,6 +792,8 @@ class ArbitrationGenerationRun(BaseModel):
 
 
 class ArbitrationDraftDetail(ArbitrationDraft):
+    # D-26: e.g. "created as a scratch draft because the request named no case".
+    warnings: List[str] = Field(default_factory=list)
     selected_references: List[ArbitrationSelectedReference] = Field(default_factory=list)
     claim_heads: List[ArbitrationClaimHead] = Field(default_factory=list)
     paragraph_responses: List[ArbitrationParagraphResponse] = Field(default_factory=list)

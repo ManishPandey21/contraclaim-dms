@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import hashlib
 import inspect
 import json
@@ -39,7 +40,9 @@ from .generator import ArbitrationDraftGenerator, PROMPT_VERSION, SECTION_KEYS_B
 from .llm_generator import LLMDraftGenerator
 from .case_workspace import ArbitrationCaseWorkspaceService
 from .repository import ArbitrationDraftingRepository, _jsonable
+from .citation_states import classify_citations
 from .validator import ArbitrationDraftValidator
+from .action_gates import approve_gate, export_gate, refuse_unless
 from .approval_policy import REVOKED_REJOINDER_PERMISSION, enforce_author_approver_separation, resolve_gate_role
 from .workflow_governance import (
     require_approved_plan_for_generation,
@@ -73,6 +76,8 @@ _DRAFT_HASH_FIELDS = [
 ]
 
 
+logger = logging.getLogger(__name__)
+
 def stable_generation_input_hash(
     context: Dict[str, Any],
     *,
@@ -99,6 +104,11 @@ def stable_generation_input_hash(
         "prompt_version": PROMPT_VERSION,
         "source_policy": SOURCE_POLICY,
     }
+    skill = context.get("pleading_skill") or None
+    if skill:
+        # Present only when a published pleadings skill is in use, so every hash
+        # made without one is unchanged.
+        payload["pleading_skill"] = {"content_hash": skill.get("content_hash"), "role": skill.get("role")}
     raw = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -146,6 +156,7 @@ from ..contract_scope_resolver import (
 from ..publication_policy import (
     authoritative_fact_text,
     authoritative_summary,
+    document_id_candidates,
     is_consumable,
     resolve_document_authority,
 )
@@ -170,11 +181,32 @@ class ArbitrationDraftingService:
         self.validator = ArbitrationDraftValidator()
         self.exporter = ArbitrationDraftExporter()
 
+    async def case_for_draft(self, case_id: str, organization_id: Any, project_id: Any) -> Dict[str, Any]:
+        """The case a draft is attached to: it must exist (404) and belong to the draft's
+        organisation and project (409). Plan 4B-38, C-20: a draft attached to a missing or
+        foreign case lost its scratch mark and escaped every case gate."""
+        case = await self.case_workspace.get_case(str(case_id))
+        if str(case.get("organization_id") or "") != str(organization_id or "") or str(
+            case.get("project_id") or ""
+        ) != str(project_id or ""):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "draft_case_scope_mismatch",
+                    "user_message": "That arbitration case belongs to another project. Choose a case of this draft's project.",
+                    "detail": None,
+                },
+            )
+        return case
+
     async def create_draft(self, payload: ArbitrationDraftCreate, current_user: Any) -> Dict[str, Any]:
-        draft_payload = payload.model_dump(exclude={"selected_references", "claim_heads"})
+        draft_payload = payload.model_dump(exclude={"selected_references", "claim_heads", "scratch"})
         draft_payload["organization_id"] = payload.organization_id or getattr(current_user, "organization_id", None)
+        if payload.case_id:
+            await self.case_for_draft(payload.case_id, draft_payload["organization_id"], payload.project_id)
         draft = ArbitrationDraft(
             **draft_payload,
+            is_scratch=not payload.case_id,
             created_by=_actor_id(current_user),
             updated_at=datetime.utcnow(),
         ).model_dump(by_alias=True)
@@ -222,6 +254,13 @@ class ArbitrationDraftingService:
     async def update_draft(self, draft_id: str, payload: ArbitrationDraftUpdate, current_user: Any) -> Dict[str, Any]:
         draft = await self._load_unlocked(draft_id)
         update = payload.model_dump(exclude_unset=True)
+        if "case_id" in update:
+            if update["case_id"]:
+                await self.case_for_draft(
+                    update["case_id"], draft.get("organization_id"), update.get("project_id", draft.get("project_id"))
+                )
+            # Attached to a case, a scratch draft stops being one; detached, it becomes one.
+            update["is_scratch"] = not update["case_id"]
         update["updated_at"] = datetime.utcnow()
         update["updated_by"] = _actor_id(current_user)
         updated = await self.repo.update_draft(draft_id, update)
@@ -325,7 +364,8 @@ class ArbitrationDraftingService:
         if payload.source_pleading_document_id:
             source = await self.db.documents.find_one(
                 {
-                    "_id": payload.source_pleading_document_id,
+                    # documents._id is ObjectId-keyed; the payload holds the string form.
+                    "_id": {"$in": document_id_candidates(payload.source_pleading_document_id)},
                     "organization_id": draft.get("organization_id"),
                     "project_id": draft.get("project_id"),
                 }
@@ -465,6 +505,9 @@ class ArbitrationDraftingService:
         )
         if pleading_plan:
             context["pleading_plan"] = dict(pleading_plan)
+        pleading_skill = await self._pleading_skill(draft)
+        if pleading_skill:
+            context["pleading_skill"] = pleading_skill
         latest = await self.repo.latest_version(draft_id)
         if run_type == GenerationRunType.SECTION_REGENERATION:
             if not payload.section_key:
@@ -610,6 +653,10 @@ class ArbitrationDraftingService:
                 "retrieval_queries": retrieval_queries,
                 "validation_warnings": warnings,
                 "approval_blockers": safety_report["approval_blockers"],
+                "context_policy": safety_report.get("context_policy"),
+                "context_rows_exempted": safety_report.get("context_rows_exempted") or [],
+                "citations": safety_report["citations"]["counts"],
+                "pleaded_head_gaps": safety_report["pleaded_head_gaps"],
                 "legal_review_required": bool(warnings or generated["missing_evidence"]),
                 "context_warnings": context.get("context_warnings") or [],
             }
@@ -669,7 +716,12 @@ class ArbitrationDraftingService:
                     "updated_by": _actor_id(current_user),
                 },
             )
-            await self._emit("generated", draft, current_user, after={"version": version_no, "warnings": warnings})
+            await self._emit("generated", draft, current_user, after={
+                "version": version_no,
+                "warnings": warnings,
+                "context_policy": safety_report.get("context_policy"),
+                "context_rows_exempted": safety_report.get("context_rows_exempted") or [],
+            })
             detail = await self.detail(draft_id)
             if deterministic_run_id:
                 detail["_workflow_generation_run_id"] = deterministic_run_id
@@ -703,6 +755,10 @@ class ArbitrationDraftingService:
                 "input_hash": input_hash,
                 "validation_warnings": warnings,
                 "approval_blockers": safety_report["approval_blockers"],
+                "context_policy": safety_report.get("context_policy"),
+                "context_rows_exempted": safety_report.get("context_rows_exempted") or [],
+                "citations": safety_report["citations"]["counts"],
+                "pleaded_head_gaps": safety_report["pleaded_head_gaps"],
                 "legal_review_required": bool(warnings or context["missing_evidence"]),
                 "manual_version": True,
             },
@@ -717,7 +773,11 @@ class ArbitrationDraftingService:
         version["version_hash"] = immutable_version_hash(version)
         await self.repo.create_version(version)
         await self.repo.update_draft(draft_id, {"current_version": version_no, "updated_at": datetime.utcnow(), "updated_by": _actor_id(current_user)})
-        await self._emit("version_saved", draft, current_user, after={"version": version_no})
+        await self._emit("version_saved", draft, current_user, after={
+            "version": version_no,
+            "context_policy": safety_report.get("context_policy"),
+            "context_rows_exempted": safety_report.get("context_rows_exempted") or [],
+        })
         return version
 
     async def list_versions(self, draft_id: str) -> List[Dict[str, Any]]:
@@ -731,6 +791,103 @@ class ArbitrationDraftingService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft version not found")
         return row
 
+    async def _pleading_skill(self, draft: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """The published pleadings skill for this draft's project, compiled for the party it acts for.
+
+        None unless a version has been published, which needs the technical
+        review and the independent legal approval, and unless the project states
+        a party the skill supports. Nothing unpublished is ever compiled.
+        """
+        # Imported here, and in this order: the skill engine and the letter
+        # drafting package import each other, and only this order resolves.
+        from ..letter_drafting import prompts as _letter_prompts  # noqa: F401
+        from ..skills.compiler import compile_skill
+        from ..skills.registry import SkillRegistry
+        from ..skills.system_skills import PLEADINGS_SKILL_KEY
+
+        organization_id = str(draft.get("organization_id") or "") or None
+        project_id = draft.get("project_id")
+        try:
+            version, _binding, _reason = await SkillRegistry(self.db).resolve(
+                PLEADINGS_SKILL_KEY, organization_id, project_id
+            )
+            if version is None:
+                return None
+            project = await self.db.projects.find_one({"_id": project_id})
+            role = str((project or {}).get("contractual_capacity") or "")
+            if role not in set(version.manifest.roles_supported or []):
+                return None
+            compiled = compile_skill(version, role)
+        except Exception as exc:  # a skill problem must never stop a draft being generated
+            logger.warning("pleadings skill not used for draft %s: %s", draft.get("_id"), exc)
+            return None
+        return {
+            "skill_key": version.skill_key,
+            "version": version.version,
+            "content_hash": version.content_hash,
+            "role": role,
+            "block": compiled.block,
+        }
+
+    async def citation_view(self, draft_id: str) -> Dict[str, Any]:
+        """Citation states of the latest version, and what stands between it and approval.
+
+        Read from the stored version: its text, its own ledger and the blockers
+        recorded when it was made. Nothing is recomputed against newer evidence,
+        because approval acts on that version as it stands.
+        """
+        draft = await self._load(draft_id)
+        latest = await self.repo.latest_version(draft_id)
+        scratch = not draft.get("case_id")
+        if not latest:
+            return {
+                "draft_id": draft_id, "version": None, "scratch": scratch,
+                "counts": {"verified": 0, "unverified": 0, "unresolved": 0, "cited": 0, "ledger": 0},
+                "items": [], "approval_blockers": [], "pleaded_head_gaps": [], "missing_evidence": [],
+                "can_be_approved": False,
+                "cannot_be_approved_reason": "No version has been generated or saved.",
+            }
+        structured = latest.get("structured_output") or {}
+        classification = classify_citations(str(latest.get("full_markdown") or ""), latest.get("source_ledger") or [])
+        blockers = list(structured.get("approval_blockers") or [])
+        missing = list(latest.get("missing_evidence") or [])
+        if scratch:
+            reason: Optional[str] = (
+                "This is a scratch draft with no case workspace. It cannot be approved or exported for filing; "
+                "attach it to a case to bring it under the case gates."
+            )
+        elif blockers or missing or latest.get("validation_status") != "passed":
+            reason = "The blockers listed must be resolved in a new version before approval."
+        else:
+            reason = None
+        return {
+            "draft_id": draft_id,
+            "version": latest.get("version"),
+            "scratch": scratch,
+            "counts": classification["counts"],
+            "items": classification["items"],
+            "approval_blockers": blockers,
+            "pleaded_head_gaps": structured.get("pleaded_head_gaps") or [],
+            "missing_evidence": missing,
+            # The workflow gates (readiness, plan, legal review) are checked at
+            # approval itself; this says only whether the evidence allows it.
+            "can_be_approved": reason is None,
+            "cannot_be_approved_reason": reason,
+        }
+
+    async def action_gates(
+        self, draft_id: str, actor_id: Optional[str], *, may_approve: bool, may_export: bool
+    ) -> Dict[str, Any]:
+        """Approve and filing Export: allowed, or why not (4B-39, B4). See action_gates.py."""
+        draft = await self._load(draft_id)
+        latest = await self.repo.latest_version(draft_id)
+        approved_no = draft.get("approved_version")
+        approved = await self.repo.get_version(draft_id, int(approved_no)) if approved_no else None
+        return {
+            "approve": approve_gate(draft, latest, actor_id, may_approve=may_approve),
+            "filing_export": export_gate(draft, approved, actor_id, may_export=may_export),
+        }
+
     async def approve(
         self,
         draft_id: str,
@@ -739,8 +896,18 @@ class ArbitrationDraftingService:
         workflow_run: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         draft = await self._load(draft_id)
-        resolve_gate_role("draft", current_user)
+        # B4 (4B-39): the same gate the screen shows, first, so a disabled Approve is
+        # exactly a refused approval. The router has checked the permission.
+        refuse_unless(approve_gate(draft, await self.repo.latest_version(draft_id), _actor_id(current_user), may_approve=True))
+        # The case's scoped reviewer assignments count, as at every other gate (JG-5).
+        resolve_gate_role("draft", current_user, roles=await self._case_reviewer_roles(draft, current_user))
         await self.case_workspace.assert_case_ready_for_draft(draft)
+        if draft.get("case_id"):
+            # Delay evidence the case's claims were escalated on has not moved on since
+            # (owner decision 2026-11-18); a stale snapshot is reviewed before a new approval.
+            from ..claim_evidence_snapshots import assert_current_for_case
+
+            await assert_current_for_case(self.db, str(draft["case_id"]))
         if draft.get("current_version", 0) < 1:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Generate or save a version before approval")
         latest = await self.repo.latest_version(draft_id)
@@ -796,6 +963,14 @@ class ArbitrationDraftingService:
         await self._emit("approved", draft, current_user, after=updated)
         return await self.detail(draft_id)
 
+    async def _case_reviewer_roles(self, draft: Dict[str, Any], current_user: Any) -> Optional[set]:
+        """Reviewer roles ``current_user`` holds for the draft's case: role claims plus the case's
+        scoped assignments. None for a draft with no case (role claims alone then decide)."""
+        if not draft.get("case_id"):
+            return None
+        case = await self.case_workspace.get_case(str(draft.get("case_id")))
+        return await self.case_workspace.reviewer_roles(case, current_user)
+
     async def return_for_revision(self, draft_id: str, reason: str, current_user: Any) -> Dict[str, Any]:
         draft = await self._load(draft_id)
         updated = await self.repo.update_draft(
@@ -818,7 +993,16 @@ class ArbitrationDraftingService:
 
     async def export(self, draft_id: str, fmt: str, current_user: Any) -> bytes:
         draft = await self._load(draft_id)
-        resolve_gate_role("export", current_user)
+        approved_no = draft.get("approved_version")
+        refuse_unless(
+            export_gate(
+                draft,
+                await self.repo.get_version(draft_id, int(approved_no)) if approved_no else None,
+                _actor_id(current_user),
+                may_export=True,
+            )
+        )
+        resolve_gate_role("export", current_user, roles=await self._case_reviewer_roles(draft, current_user))
         if not draft.get("case_id"):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,

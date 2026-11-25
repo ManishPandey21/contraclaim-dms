@@ -22,16 +22,23 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 
 from pydantic import BaseModel, ValidationError
 
-from ...models.letter_bench import OUTPUT_SCHEMAS
 from ...models.skill import SkillVersion
 from ..letter_drafting.prompts import PromptRegistry, render_prompt
 from .compiler import CompiledSkill, attach_skill_block, compile_skill
+from .schemas import get_schema
 
 logger = logging.getLogger(__name__)
 
 LLMCallable = Callable[[str, int], Awaitable[str]]
 FALLBACK_SENTINEL = "Answer unavailable"
 DEFAULT_SKILL_MODEL = "gpt-4o"
+
+
+def skill_model_name() -> str:
+    """Model used for skill steps: ``SKILL_MODEL`` when set, else the default."""
+    from ...core.config import settings
+
+    return str(getattr(settings, "SKILL_MODEL", "") or DEFAULT_SKILL_MODEL)
 
 
 class SkillStepError(RuntimeError):
@@ -99,8 +106,9 @@ async def _default_llm(prompt: str, max_tokens: int) -> str:
     from ...config.document_processing_config import DocumentProcessingConfig
     from ...retrieval.generator import LLMGenerator
 
-    generator = LLMGenerator(DocumentProcessingConfig(openai_model=DEFAULT_SKILL_MODEL))
-    reply = await generator.generate(prompt, max_tokens=max_tokens, model=DEFAULT_SKILL_MODEL)
+    model = skill_model_name()
+    generator = LLMGenerator(DocumentProcessingConfig(openai_model=model))
+    reply = await generator.generate(prompt, max_tokens=max_tokens, model=model)
     if not reply or reply.startswith(FALLBACK_SENTINEL):
         # LLMGenerator swallows provider errors into a canned sentence. For
         # drafting content that sentence must never be treated as output.
@@ -113,11 +121,11 @@ class SkillExecutor:
         self,
         prompt_registry: PromptRegistry,
         llm: Optional[LLMCallable] = None,
-        model_name: str = DEFAULT_SKILL_MODEL,
+        model_name: Optional[str] = None,
     ) -> None:
         self.prompt_registry = prompt_registry
         self.llm = llm or _default_llm
-        self.model_name = model_name
+        self.model_name = model_name or skill_model_name()
 
     async def run(
         self,
@@ -135,7 +143,7 @@ class SkillExecutor:
         """``skip_llm`` (a reason) runs the deterministic fallback without calling
         the model at all, and records the reason on the degraded step."""
         schema_key = schema_key or version.manifest.output_schema_key
-        schema = OUTPUT_SCHEMAS.get(schema_key)
+        schema = get_schema(schema_key)
         if schema is None:
             raise SkillStepError(f"Unknown output schema {schema_key}")
         compiled = compile_skill(version, role, overlay_text=overlay_text)

@@ -3,8 +3,19 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List
 
+from .citation_refs import has_citation, source_refs
+from .citation_states import (
+    claim_head_set_blockers,
+    classify_citations,
+    context_policy_stamp,
+    exempt_context_keys,
+    ledger_context_class,
+    is_unverified_source,
+    pleaded_head_blockers,
+    pleaded_head_gaps,
+)
 
-_SOURCE_CITATION_RE = re.compile(r"\[(S\d+):[^\]]+\]")
+
 _ISO_DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 _SLASH_DATE_RE = re.compile(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b")
 _AMOUNT_RE = re.compile(
@@ -17,7 +28,12 @@ _FACTUAL_VERB_RE = re.compile(
     r"\b(?:was|were|caused|failed|delayed|issued|submitted|notified|incurred|paid|completed|breached|withheld|terminated)\b",
     re.IGNORECASE,
 )
-_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+# A full stop after an exhibit abbreviation ("Ex. C-12", "Annex. A/7") does not end the
+# sentence, so the exhibit stays in the sentence it supports (4B-35).
+_SENTENCE_RE = re.compile(
+    r"(?<!\bEx\.)(?<!\bExh\.)(?<!\bAnn\.)(?<!\bAnnex\.)(?<!\bNo\.)(?<=[.!?])\s+|\n+",
+    re.IGNORECASE,
+)
 _NON_ENTITY_PHRASES = {
     "statement of claim",
     "statement of defence",
@@ -55,14 +71,19 @@ class ArbitrationDraftValidator:
             warnings.append(message)
             approval_blockers.append(message)
 
-        cited_keys = {match.group(1) for match in _SOURCE_CITATION_RE.finditer(markdown)}
+        cited_keys = set(source_refs(markdown))
         unknown_keys = sorted(cited_keys - source_keys)
         if unknown_keys:
             message = f"Draft cites sources not present in the source ledger: {', '.join(unknown_keys)}."
             warnings.append(message)
             approval_blockers.append(message)
 
-        source_text = _flatten_text(source_ledger)
+        draft = context.get("draft") or {}
+        scope = {"case_id": draft.get("case_id"), "project_id": draft.get("project_id")}
+        exempted_keys = set(exempt_context_keys(source_ledger, markdown, scope))
+        # JG-5(f) control 5: context rows (case analysis, registers) never support an
+        # amount, date, clause or name in the pleading; only evidence does.
+        source_text = _flatten_text([row for row in source_ledger if not ledger_context_class(row)])
         draft_text = _flatten_text(context.get("draft") or {})
         supported_text = f"{source_text} {draft_text}"
         unsupported_amounts = sorted({item.group(0) for item in _AMOUNT_RE.finditer(markdown) if item.group(0) not in supported_text})
@@ -103,7 +124,7 @@ class ArbitrationDraftValidator:
             if (
                 len(normalized) >= 40
                 and _FACTUAL_VERB_RE.search(normalized)
-                and not _SOURCE_CITATION_RE.search(normalized)
+                and not has_citation(normalized)
                 and "[Evidence required]" not in normalized
             ):
                 unsupported_assertions.append(normalized[:180])
@@ -128,17 +149,44 @@ class ArbitrationDraftValidator:
             approval_blockers.append(message)
 
         unverified_selected = [
-            row
-            for row in source_ledger
-            if row.get("is_user_supplied")
-            or str(row.get("verification_status") or "").lower() in {"draft", "needs_review", "pending", "selected", "unverified"}
+            row for row in source_ledger if is_unverified_source(row) and str(row.get("source_key")) not in exempted_keys
         ]
         if unverified_selected:
             message = "Draft source ledger contains user-supplied or unverified selected evidence that is not admissible for filing."
             warnings.append(message)
             approval_blockers.append(message)
 
+        # Correction C. The states shown beside a draft are computed here, once,
+        # by the same function the screens read, and an unverified citation is
+        # named rather than left inside the general ledger blocker above.
+        citations = classify_citations(markdown, source_ledger)
+        unverified_cited = [item["source_key"] for item in citations["items"] if item["state"] == "unverified"]
+        # D-17: an exhibit reference ("Ex. C-12") is a citation like any other, and one
+        # the case's exhibit list cannot resolve blocks approval by name.
+        unresolved_exhibits = [
+            item["source_key"] for item in citations["items"] if item.get("kind") == "exhibit" and item["state"] == "unresolved"
+        ]
+        if unresolved_exhibits:
+            message = f"Draft cites exhibits that are not in the case's exhibit list: {', '.join(unresolved_exhibits)}."
+            warnings.append(message)
+            approval_blockers.append(message)
+        if unverified_cited:
+            message = f"Draft cites sources that are not yet verified: {', '.join(unverified_cited)}."
+            warnings.append(message)
+            approval_blockers.append(message)
+
         matrix_context = context.get("matrix_context") or {}
+        head_gaps: List[Dict[str, Any]] = []
+        if context.get("draft", {}).get("draft_type") == "statement_of_claim":
+            # Each pleaded head must carry provision, event, causal link, quantified
+            # relief and notice, and the records behind any figure it pleads.
+            head_gaps = pleaded_head_gaps(matrix_context)
+            for message in [
+                *claim_head_set_blockers(matrix_context, context.get("claim_head_counts")),
+                *pleaded_head_blockers(matrix_context),
+            ]:
+                warnings.append(message)
+                approval_blockers.append(message)
         self._duplication_warnings(matrix_context, warnings)
         self._global_claim_warnings(matrix_context, warnings)
 
@@ -183,6 +231,12 @@ class ArbitrationDraftValidator:
             "approval_blockers": approval_blockers,
             "legal_review_required": bool(warnings),
             "source_count": len(source_ledger),
+            "citations": citations,
+            "pleaded_head_gaps": head_gaps,
+            # Audit trail (JG-5(f) control 8): the policy this verdict was reached under,
+            # and the ledger rows it treated as uncited context.
+            "context_policy": context_policy_stamp(),
+            "context_rows_exempted": sorted(exempted_keys),
         }
 
     def _duplication_warnings(self, matrix_context: Dict[str, Any], warnings: List[str]) -> None:

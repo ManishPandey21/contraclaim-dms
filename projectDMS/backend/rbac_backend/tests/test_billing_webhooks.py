@@ -58,11 +58,20 @@ class _FakeColl:
         self.docs.append(dict(doc))
         return SimpleNamespace(inserted_id=f"id-{len(self.docs)}")
 
-    async def find_one(self, query):
+    async def find_one(self, query, projection=None, sort=None):
         for d in self.docs:
             if all(d.get(k) == v for k, v in query.items()):
                 return dict(d)
         return None
+
+    def find(self, query, projection=None):
+        matches = [dict(d) for d in self.docs if all(d.get(k) == v for k, v in query.items())]
+
+        class _Cursor:
+            async def to_list(self, length=None):
+                return matches if length is None else matches[:length]
+
+        return _Cursor()
 
     async def update_one(self, query, update):
         for d in self.docs:
@@ -79,6 +88,7 @@ class _FakeDB:
         self.billing_records = _FakeColl()
         self.subscription_history = _FakeColl()
         self.plans = _FakeColl()
+        self.audit_events = _FakeColl()
 
 
 def _seed_subscription(db, *, sub_id="sub-1", gateway_sub_id="sub_rzp_1", status="pending"):

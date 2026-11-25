@@ -44,6 +44,7 @@ export function errorMessage(error: unknown, fallback: string): string {
   if (isAxiosError(error)) {
     const detail = error.response?.data?.detail;
     if (typeof detail === "string") return detail;
+    if (detail && typeof detail === "object" && typeof detail.user_message === "string") return detail.user_message;
     if (detail && typeof detail === "object" && typeof detail.message === "string") return detail.message;
   }
   return error instanceof Error && error.message ? error.message : fallback;

@@ -114,7 +114,7 @@ export interface PositionBoard {
   stage: BoardStage;
   role: DraftRole;
   incoming_document_id?: string | null;
-  trigger?: { type: string; id: string; label: string; status?: string } | null;
+  trigger?: BoardTrigger | null;
   incoming_text: string;
   incoming_meta: {
     letter_no?: string | null;
@@ -249,6 +249,94 @@ export interface SkillEvalReport {
   case_count: number;
   signed_off_by?: string | null;
   notes?: string | null;
+  /** User id of whoever ran the evaluation. Required when the version needs approvals. */
+  recorded_by?: string | null;
+}
+
+export type SkillApprovalKind = "technical" | "legal";
+
+export interface SkillApprovalRequirement {
+  kind: SkillApprovalKind;
+  reviewer_role: string;
+}
+
+/** A reviewer's decision, bound to the text and the evaluation result they saw. */
+/** A server-side evaluation run (4B-41). Made by the server, never typed in; kept unchanged. */
+export interface SkillEvalRun {
+  _id: string;
+  skill_key: string;
+  version: string;
+  content_hash: string;
+  policy_hash: string;
+  suite_key: string;
+  suite_hash: string;
+  model: string;
+  prompt_key: string;
+  prompt_version?: number | null;
+  recorded_by: string;
+  threshold: number;
+  case_count: number;
+  passed: boolean;
+  failures: string[];
+  scores: {
+    element_agreement: number;
+    element_agreement_by_type: Record<string, number>;
+    classification_agreement?: number | null;
+    degraded_rate: number;
+    schema_validity: number;
+  };
+  matters: {
+    matter_id: string;
+    degraded: boolean;
+    schema_valid: boolean;
+    hard_failures: string[];
+    elements: Record<string, [string | null, string | null]>;
+    classification?: [string | null, string | null] | null;
+  }[];
+  cost: { model_calls: number; prompt_characters: number; output_characters: number };
+  note?: string | null;
+  /** Whether the golden set could support an approval (4B-42): not synthetic, composition and provenance met. */
+  suite_ready?: boolean;
+  suite_problems?: string[];
+  started_at: string;
+  completed_at?: string | null;
+}
+
+export interface SkillApproval {
+  _id?: string;
+  id?: string;
+  skill_key: string;
+  version: string;
+  content_hash: string;
+  /** Hash of the manifest the approval was given under; absent on approvals recorded before 4B-04. */
+  policy_hash?: string | null;
+  eval_suite: string;
+  eval_report_hash: string;
+  eval_score?: number | null;
+  eval_threshold?: number | null;
+  eval_case_count?: number | null;
+  eval_recorded_by?: string | null;
+  /** The server-side run the approval was given against (4B-41). */
+  eval_run_id?: string | null;
+  kind: SkillApprovalKind;
+  reviewer_role: string;
+  reviewer_user_id: string;
+  comment?: string | null;
+  decided_at: string;
+  revoked_at?: string | null;
+  revoked_by?: string | null;
+  revoke_reason?: string | null;
+}
+
+export interface SkillApprovalList {
+  skill_key: string;
+  version: string;
+  content_hash: string;
+  /** The version's manifest hash; an approval must carry the same one. */
+  policy_hash?: string | null;
+  /** Reviews required, the server's floor included. */
+  required: SkillApprovalRequirement[];
+  approvals: SkillApproval[];
 }
 
 export interface SkillVersionSummary {
@@ -262,6 +350,29 @@ export interface SkillVersionSummary {
   eval_report?: SkillEvalReport | null;
   created_at?: string | null;
   published_at?: string | null;
+  required_approvals?: SkillApprovalRequirement[];
+}
+
+export interface SkillReviewQueueItem {
+  skill_key: string;
+  version: string;
+  name: string;
+  kind: SkillKind;
+  content_hash: string;
+  created_at?: string | null;
+  reviews: Array<{
+    kind: SkillApprovalKind;
+    reviewer_role: string;
+    mine: boolean;
+    given: boolean;
+    given_by_me: boolean;
+  }>;
+  waiting_on_me: boolean;
+}
+
+export interface SkillReviewQueue {
+  my_roles: string[];
+  items: SkillReviewQueueItem[];
 }
 
 export interface SkillBinding {
@@ -293,3 +404,26 @@ export const VERDICT_DESCRIPTIONS: Record<Verdict, string> = {
 };
 
 export const VERDICT_ORDER: Verdict[] = ["entitlement", "partial", "none", "need_information"];
+
+/** Where a board came from. Determination letters (4B-31) also carry findings and information items. */
+export interface BoardTrigger {
+  type: string;
+  id: string;
+  label: string;
+  status?: string;
+  heads?: {
+    head_id: string;
+    head_title: string;
+    result?: string | null;
+    days?: number | null;
+    amount?: number | null;
+    findings?: string;
+  }[];
+  information_items?: {
+    head_id: string;
+    head_title: string;
+    item: string;
+    deadline?: string | null;
+    consequence?: string | null;
+  }[];
+}

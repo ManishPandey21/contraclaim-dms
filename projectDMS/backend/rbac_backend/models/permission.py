@@ -249,6 +249,8 @@ DEFAULT_PERMISSIONS = [
     {"name": "dms.claim.delete", "description": "Delete Claims", "category": "document_management", "resource": "dms.claim", "action": "delete", "is_system": True},
     {"name": "dms.claim.manage", "description": "Manage Claims", "category": "document_management", "resource": "dms.claim", "action": "admin", "is_system": True},
     {"name": "dms.claim.assess", "description": "Assess Claims (AI)", "category": "document_management", "resource": "dms.claim", "action": "admin", "is_system": True},
+    {"name": "dms.claim.determine", "description": "Make and approve official determinations of claims", "category": "document_management", "resource": "dms.claim", "action": "admin", "is_system": True},
+    {"name": "dms.claim.strategy.read", "description": "View privileged claim analysis (simulations and strategy notes)", "category": "document_management", "resource": "dms.claim", "action": "read", "is_system": True},
 
     # --- Contract appraisal ---
     {"name": "dms.contract.appraisal.view", "description": "View Contract Appraisal", "category": "document_management", "resource": "dms.contract.appraisal", "action": "read", "is_system": True},

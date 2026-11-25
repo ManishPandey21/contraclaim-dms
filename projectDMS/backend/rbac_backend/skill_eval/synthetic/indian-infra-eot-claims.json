@@ -1,0 +1,580 @@
+{
+  "matters": [
+    {
+      "composition": [
+        "true_concurrency"
+      ],
+      "labels": {
+        "classification": {
+          "expected": "employer",
+          "field": "risk_owner"
+        },
+        "elements": {
+          "criticality": "critical"
+        }
+      },
+      "matter_id": "E01",
+      "payload": {
+        "contract_form": "Not resolved for this project. Do not assume an edition.",
+        "inputs": "None.",
+        "material": "Access was given late while the Contractor's steel was also late; both lay on the critical path for the same weeks.",
+        "sources": "- Clause 8.4: indexed",
+        "subject": "Late access and late steel",
+        "task": "Classify who carries the risk of this delay event and whether it is shown to be critical."
+      },
+      "provenance": {
+        "source": "synthetic"
+      },
+      "record": {
+        "clauses": [
+          "8.4"
+        ],
+        "notice_days": [
+          28
+        ],
+        "privileged_markers": [
+          "internal settlement range"
+        ]
+      },
+      "role": "contractor"
+    },
+    {
+      "composition": [
+        "true_concurrency"
+      ],
+      "labels": {
+        "classification": {
+          "expected": "employer",
+          "field": "risk_owner"
+        },
+        "elements": {
+          "criticality": "critical"
+        }
+      },
+      "matter_id": "E02",
+      "payload": {
+        "contract_form": "Not resolved for this project. Do not assume an edition.",
+        "inputs": "None.",
+        "material": "Drawings were late while the Contractor lacked labour on the same critical activities.",
+        "sources": "- Clause 8.4: indexed\n- Clause 1.9: indexed",
+        "subject": "Drawings and labour shortage",
+        "task": "Classify who carries the risk of this delay event and whether it is shown to be critical."
+      },
+      "provenance": {
+        "source": "synthetic"
+      },
+      "record": {
+        "clauses": [
+          "8.4",
+          "1.9"
+        ],
+        "notice_days": [
+          28
+        ],
+        "privileged_markers": [
+          "internal settlement range"
+        ]
+      },
+      "role": "engineer"
+    },
+    {
+      "composition": [
+        "true_concurrency"
+      ],
+      "labels": {
+        "classification": {
+          "expected": "employer",
+          "field": "risk_owner"
+        },
+        "elements": {
+          "criticality": "critical"
+        }
+      },
+      "matter_id": "E03",
+      "payload": {
+        "contract_form": "Not resolved for this project. Do not assume an edition.",
+        "inputs": "None.",
+        "material": "The utility diversion ran late while the Contractor's crane was broken down on the same critical path.",
+        "sources": "- Clause 4.12: indexed\n- Clause 8.4: indexed",
+        "subject": "Utility diversion and plant breakdown",
+        "task": "Classify who carries the risk of this delay event and whether it is shown to be critical."
+      },
+      "provenance": {
+        "source": "synthetic"
+      },
+      "record": {
+        "clauses": [
+          "4.12",
+          "8.4"
+        ],
+        "notice_days": [
+          28
+        ],
+        "privileged_markers": [
+          "internal settlement range"
+        ]
+      },
+      "role": "employer"
+    },
+    {
+      "composition": [
+        "true_concurrency"
+      ],
+      "labels": {
+        "classification": {
+          "expected": "employer",
+          "field": "risk_owner"
+        },
+        "elements": {
+          "criticality": "critical"
+        }
+      },
+      "matter_id": "E04",
+      "payload": {
+        "contract_form": "Not resolved for this project. Do not assume an edition.",
+        "inputs": "None.",
+        "material": "The Engineer's suspension overlapped the Contractor's late formwork delivery on critical activities.",
+        "sources": "- Clause 8.8: indexed\n- Clause 8.4: indexed",
+        "subject": "Suspension and late formwork",
+        "task": "Classify who carries the risk of this delay event and whether it is shown to be critical."
+      },
+      "provenance": {
+        "source": "synthetic"
+      },
+      "record": {
+        "clauses": [
+          "8.8",
+          "8.4"
+        ],
+        "notice_days": [
+          28
+        ],
+        "privileged_markers": [
+          "internal settlement range"
+        ]
+      },
+      "role": "contractor"
+    },
+    {
+      "composition": [
+        "neutral_event"
+      ],
+      "labels": {
+        "classification": {
+          "expected": "neutral",
+          "field": "risk_owner"
+        },
+        "elements": {
+          "criticality": "critical"
+        }
+      },
+      "matter_id": "E05",
+      "payload": {
+        "contract_form": "Not resolved for this project. Do not assume an edition.",
+        "inputs": "None.",
+        "material": "Rainfall in July exceeded the ten-year average and stopped earthworks on the critical path.",
+        "sources": "- Clause 8.5: indexed",
+        "subject": "Exceptional rainfall",
+        "task": "Classify who carries the risk of this delay event and whether it is shown to be critical."
+      },
+      "provenance": {
+        "source": "synthetic"
+      },
+      "record": {
+        "clauses": [
+          "8.5"
+        ],
+        "notice_days": [
+          28
+        ],
+        "privileged_markers": [
+          "internal settlement range"
+        ]
+      },
+      "role": "contractor"
+    },
+    {
+      "composition": [
+        "neutral_event"
+      ],
+      "labels": {
+        "classification": {
+          "expected": "neutral",
+          "field": "risk_owner"
+        },
+        "elements": {
+          "criticality": "critical"
+        }
+      },
+      "matter_id": "E06",
+      "payload": {
+        "contract_form": "Not resolved for this project. Do not assume an edition.",
+        "inputs": "None.",
+        "material": "Government restrictions stopped work for twelve days across the site.",
+        "sources": "- Clause 19.1: indexed",
+        "subject": "Epidemic restrictions",
+        "task": "Classify who carries the risk of this delay event and whether it is shown to be critical."
+      },
+      "provenance": {
+        "source": "synthetic"
+      },
+      "record": {
+        "clauses": [
+          "19.1"
+        ],
+        "notice_days": [
+          28
+        ],
+        "privileged_markers": [
+          "internal settlement range"
+        ]
+      },
+      "role": "engineer"
+    },
+    {
+      "composition": [
+        "superseded_determination"
+      ],
+      "labels": {
+        "classification": {
+          "expected": "employer",
+          "field": "risk_owner"
+        },
+        "elements": {
+          "criticality": "critical"
+        }
+      },
+      "matter_id": "E07",
+      "payload": {
+        "contract_form": "Not resolved for this project. Do not assume an edition.",
+        "inputs": "None.",
+        "material": "The Engineer's first determination of the access delay was replaced by a second determination; the claim rests on the first.",
+        "sources": "- Clause 3.5: indexed\n- Clause 8.4: indexed",
+        "subject": "Revised determination of an earlier delay",
+        "task": "Classify who carries the risk of this delay event and whether it is shown to be critical."
+      },
+      "provenance": {
+        "source": "synthetic"
+      },
+      "record": {
+        "clauses": [
+          "3.5",
+          "8.4"
+        ],
+        "notice_days": [
+          28
+        ],
+        "privileged_markers": [
+          "internal settlement range"
+        ]
+      },
+      "role": "contractor"
+    },
+    {
+      "composition": [
+        "superseded_determination"
+      ],
+      "labels": {
+        "classification": {
+          "expected": "undetermined",
+          "field": "risk_owner"
+        },
+        "elements": {
+          "criticality": "unproven"
+        }
+      },
+      "matter_id": "E08",
+      "payload": {
+        "contract_form": "Not resolved for this project. Do not assume an edition.",
+        "inputs": "None.",
+        "material": "A determination granting time for drawings was withdrawn and replaced; the request relies on the withdrawn one.",
+        "sources": "- Clause 3.5: indexed\n- Clause 8.4: indexed",
+        "subject": "Determination withdrawn after review",
+        "task": "Classify who carries the risk of this delay event and whether it is shown to be critical."
+      },
+      "provenance": {
+        "source": "synthetic"
+      },
+      "record": {
+        "clauses": [
+          "3.5",
+          "8.4"
+        ],
+        "notice_days": [
+          28
+        ],
+        "privileged_markers": [
+          "internal settlement range"
+        ]
+      },
+      "role": "employer"
+    },
+    {
+      "composition": [
+        "no_critical_path_proof"
+      ],
+      "labels": {
+        "classification": {
+          "expected": "employer",
+          "field": "risk_owner"
+        },
+        "elements": {
+          "criticality": "unproven"
+        }
+      },
+      "matter_id": "E09",
+      "payload": {
+        "contract_form": "Not resolved for this project. Do not assume an edition.",
+        "inputs": "None.",
+        "material": "Signage drawings were late; the signage activity had float and no programme shows it on the critical path.",
+        "sources": "- Clause 1.9: indexed\n- Clause 8.4: indexed",
+        "subject": "Late signage drawings",
+        "task": "Classify who carries the risk of this delay event and whether it is shown to be critical."
+      },
+      "provenance": {
+        "source": "synthetic"
+      },
+      "record": {
+        "clauses": [
+          "1.9",
+          "8.4"
+        ],
+        "notice_days": [
+          28
+        ],
+        "privileged_markers": [
+          "internal settlement range"
+        ]
+      },
+      "role": "contractor"
+    },
+    {
+      "composition": [
+        "no_critical_path_proof"
+      ],
+      "labels": {
+        "classification": {
+          "expected": "employer",
+          "field": "risk_owner"
+        },
+        "elements": {
+          "criticality": "unproven"
+        }
+      },
+      "matter_id": "E10",
+      "payload": {
+        "contract_form": "Not resolved for this project. Do not assume an edition.",
+        "inputs": "None.",
+        "material": "Landscaping access was late; no updated programme is on record.",
+        "sources": "- Clause 2.1: indexed\n- Clause 8.4: indexed",
+        "subject": "Late landscaping access",
+        "task": "Classify who carries the risk of this delay event and whether it is shown to be critical."
+      },
+      "provenance": {
+        "source": "synthetic"
+      },
+      "record": {
+        "clauses": [
+          "2.1",
+          "8.4"
+        ],
+        "notice_days": [
+          28
+        ],
+        "privileged_markers": [
+          "internal settlement range"
+        ]
+      },
+      "role": "contractor"
+    },
+    {
+      "composition": [
+        "windows_method"
+      ],
+      "labels": {
+        "classification": {
+          "expected": "employer",
+          "field": "risk_owner"
+        },
+        "elements": {
+          "criticality": "critical"
+        }
+      },
+      "matter_id": "E11",
+      "payload": {
+        "contract_form": "Not resolved for this project. Do not assume an edition.",
+        "inputs": "None.",
+        "material": "The Contractor's windows analysis shows the critical path moving to the station roof in window 3.",
+        "sources": "- Clause 8.4: indexed",
+        "subject": "Windows analysis of station works",
+        "task": "Classify who carries the risk of this delay event and whether it is shown to be critical."
+      },
+      "provenance": {
+        "source": "synthetic"
+      },
+      "record": {
+        "clauses": [
+          "8.4"
+        ],
+        "notice_days": [
+          28
+        ],
+        "privileged_markers": [
+          "internal settlement range"
+        ]
+      },
+      "role": "engineer"
+    },
+    {
+      "composition": [
+        "windows_method"
+      ],
+      "labels": {
+        "classification": {
+          "expected": "contractor",
+          "field": "risk_owner"
+        },
+        "elements": {
+          "criticality": "not_critical"
+        }
+      },
+      "matter_id": "E12",
+      "payload": {
+        "contract_form": "Not resolved for this project. Do not assume an edition.",
+        "inputs": "None.",
+        "material": "A windows analysis shows the depot delay absorbed by float in window 2.",
+        "sources": "- Clause 8.4: indexed",
+        "subject": "Windows analysis of depot works",
+        "task": "Classify who carries the risk of this delay event and whether it is shown to be critical."
+      },
+      "provenance": {
+        "source": "synthetic"
+      },
+      "record": {
+        "clauses": [
+          "8.4"
+        ],
+        "notice_days": [
+          28
+        ],
+        "privileged_markers": [
+          "internal settlement range"
+        ]
+      },
+      "role": "employer"
+    },
+    {
+      "composition": [],
+      "labels": {
+        "classification": {
+          "expected": "contractor",
+          "field": "risk_owner"
+        },
+        "elements": {
+          "criticality": "critical"
+        }
+      },
+      "matter_id": "E13",
+      "payload": {
+        "contract_form": "Not resolved for this project. Do not assume an edition.",
+        "inputs": "None.",
+        "material": "The Contractor resequenced viaduct pours for its own convenience, delaying the critical path.",
+        "sources": "- Clause 8.4: indexed",
+        "subject": "Contractor's own resequencing",
+        "task": "Classify who carries the risk of this delay event and whether it is shown to be critical."
+      },
+      "provenance": {
+        "source": "synthetic"
+      },
+      "record": {
+        "clauses": [
+          "8.4"
+        ],
+        "notice_days": [
+          28
+        ],
+        "privileged_markers": [
+          "internal settlement range"
+        ]
+      },
+      "role": "contractor"
+    },
+    {
+      "composition": [],
+      "labels": {
+        "classification": {
+          "expected": "employer",
+          "field": "risk_owner"
+        },
+        "elements": {
+          "criticality": "critical"
+        }
+      },
+      "matter_id": "E14",
+      "payload": {
+        "contract_form": "Not resolved for this project. Do not assume an edition.",
+        "inputs": "None.",
+        "material": "Employer-supplied rails arrived 40 days late on the critical path.",
+        "sources": "- Clause 2.5: indexed\n- Clause 8.4: indexed",
+        "subject": "Late rails",
+        "task": "Classify who carries the risk of this delay event and whether it is shown to be critical."
+      },
+      "provenance": {
+        "source": "synthetic"
+      },
+      "record": {
+        "clauses": [
+          "2.5",
+          "8.4"
+        ],
+        "notice_days": [
+          28
+        ],
+        "privileged_markers": [
+          "internal settlement range"
+        ]
+      },
+      "role": "contractor"
+    },
+    {
+      "composition": [],
+      "labels": {
+        "classification": {
+          "expected": "employer",
+          "field": "risk_owner"
+        },
+        "elements": {
+          "criticality": "critical"
+        }
+      },
+      "matter_id": "E15",
+      "payload": {
+        "contract_form": "Not resolved for this project. Do not assume an edition.",
+        "inputs": "None.",
+        "material": "The Engineer's approval of the design took 45 days against the 21 allowed, on the critical path.",
+        "sources": "- Clause 5.2: indexed\n- Clause 8.4: indexed",
+        "subject": "Late design approval",
+        "task": "Classify who carries the risk of this delay event and whether it is shown to be critical."
+      },
+      "provenance": {
+        "source": "synthetic"
+      },
+      "record": {
+        "clauses": [
+          "5.2",
+          "8.4"
+        ],
+        "notice_days": [
+          28
+        ],
+        "privileged_markers": [
+          "internal settlement range"
+        ]
+      },
+      "role": "contractor"
+    }
+  ],
+  "prompt_key": "letter_drafting.v3.skill_step",
+  "skill_key": "indian-infra-eot-claims",
+  "suite_key": "indian-infra-eot-claims-synthetic"
+}

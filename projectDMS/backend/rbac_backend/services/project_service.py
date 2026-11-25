@@ -10,6 +10,8 @@ from ..core.database import get_database
 from ..utils.error_handler import ProjectError, ValidationError
 from ..utils.audit_logger import AuditLogger
 
+from .permission_service import AuthorityChangeUnavailableError
+
 logger = logging.getLogger(__name__)
 
 class ProjectServiceError(Exception):
@@ -311,6 +313,12 @@ class ProjectService:
             except:
                 query_id = project_id
 
+            # Review (2026-11-19): a project role stops counting once its project is
+            # inactive, so the members' cached grants must not outlive the change.
+            from .permission_service import begin_authority_change, complete_grant_change, project_member_ids
+
+            members = await project_member_ids(db, project_id)
+            await begin_authority_change(members)
             # Soft delete (mark as inactive)
             result = await db.projects.update_one(
                 {"_id": query_id},
@@ -323,8 +331,11 @@ class ProjectService:
                 }
             )
 
+            await complete_grant_change(members)
             return result.modified_count > 0
 
+        except AuthorityChangeUnavailableError:
+            raise  # a 503, not "not found": the change could not be announced, so it was not made
         except Exception as e:
             logger.error(f"Failed to delete project {project_id}: {str(e)}")
             return False

@@ -199,7 +199,8 @@ PAGE_STATES: Dict[str, PageStates] = {
     # is rendered but has no test of its own yet, so it is declared untested.
     "LetterBenchPage": _fetching(),
     "BenchOpenRoute": _fetching(empty=False),
-    "SkillAdminPage": _fetching(),
+    "SkillAdminPage": _fetching(error="client/src/pages/__tests__/SkillAdminPage.errors.test.tsx"),
+    "ReviewerAssignmentsPage": _fetching(error="client/src/pages/__tests__/ReviewerAssignmentsPage.errors.test.tsx"),
     "LetterReviewPage": _fetching(empty=False),
     "LetterApprovalPage": _fetching(empty=False),
     "LetterCompletedPage": _fetching(empty=False),
@@ -214,6 +215,9 @@ PAGE_STATES: Dict[str, PageStates] = {
         empty=False,
         error="client/src/pages/__tests__/ClaimDetailPage.document-links.test.tsx",
     ),
+    # `/claims/:id`: the Claim Bench where the server has it on, the record page
+    # elsewhere. Its empty state is "open the board"; its error state is tested.
+    "ClaimRoute": _fetching(error="client/src/pages/__tests__/ClaimBenchPage.test.tsx"),
     "SLATrackerPage": _fetching(),
     "KeyDateRegisterPage": _fetching(),
     "KeyDateDetailPage": _fetching(

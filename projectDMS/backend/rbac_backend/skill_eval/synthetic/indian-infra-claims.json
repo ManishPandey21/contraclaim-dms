@@ -1,0 +1,630 @@
+{
+  "matters": [
+    {
+      "composition": [
+        "straightforward"
+      ],
+      "labels": {
+        "classification": {
+          "expected": "excusable",
+          "field": "classification"
+        },
+        "elements": {
+          "causation": "supported",
+          "contractual_basis": "supported",
+          "event": "supported",
+          "notice": "supported",
+          "quantum": "weak"
+        }
+      },
+      "matter_id": "C01",
+      "payload": {
+        "clauses": "Sub-Clause 2.1. Sub-Clause 20.1. Notice within 28 days under Sub-Clause 20.1.",
+        "event_summary": "Access to the depot site was given on 2026-03-20; the programme date was 2026-03-02. Notice served 2026-03-25.",
+        "facts": "Access to the depot site was given on 2026-03-20; the programme date was 2026-03-02. Notice served 2026-03-25.",
+        "kind": "time and money",
+        "title": "Late access to the depot site"
+      },
+      "provenance": {
+        "source": "synthetic"
+      },
+      "record": {
+        "clauses": [
+          "2.1",
+          "20.1"
+        ],
+        "notice_days": [
+          28
+        ],
+        "privileged_markers": [
+          "internal settlement range"
+        ]
+      },
+      "role": "contractor"
+    },
+    {
+      "composition": [
+        "straightforward"
+      ],
+      "labels": {
+        "classification": {
+          "expected": "compensable",
+          "field": "classification"
+        },
+        "elements": {
+          "causation": "supported",
+          "contractual_basis": "supported",
+          "event": "supported",
+          "notice": "supported",
+          "quantum": "supported"
+        }
+      },
+      "matter_id": "C02",
+      "payload": {
+        "clauses": "Sub-Clause 8.8. Sub-Clause 20.1. Notice within 28 days under Sub-Clause 20.1.",
+        "event_summary": "The Engineer suspended viaduct works on 2026-05-04 by letter ENG/114. Notice served 2026-05-10.",
+        "facts": "The Engineer suspended viaduct works on 2026-05-04 by letter ENG/114. Notice served 2026-05-10.",
+        "kind": "time and money",
+        "title": "Suspension ordered by the Engineer"
+      },
+      "provenance": {
+        "source": "synthetic"
+      },
+      "record": {
+        "clauses": [
+          "8.8",
+          "20.1"
+        ],
+        "notice_days": [
+          28
+        ],
+        "privileged_markers": [
+          "internal settlement range"
+        ]
+      },
+      "role": "contractor"
+    },
+    {
+      "composition": [
+        "variation_derived"
+      ],
+      "labels": {
+        "classification": {
+          "expected": "compensable",
+          "field": "classification"
+        },
+        "elements": {
+          "causation": "weak",
+          "contractual_basis": "supported",
+          "event": "supported",
+          "notice": "supported",
+          "quantum": "weak"
+        }
+      },
+      "matter_id": "C03",
+      "payload": {
+        "clauses": "Sub-Clause 13.1. Sub-Clause 13.3.",
+        "event_summary": "The Contractor claims extra piling under instruction VO-07 dated 2026-02-11. The instruction is on record.",
+        "facts": "The Contractor claims extra piling under instruction VO-07 dated 2026-02-11. The instruction is on record.",
+        "kind": "time and money",
+        "title": "Contractor claim for extra piling"
+      },
+      "provenance": {
+        "source": "synthetic"
+      },
+      "record": {
+        "clauses": [
+          "13.1",
+          "13.3"
+        ],
+        "notice_days": [
+          28
+        ],
+        "privileged_markers": [
+          "internal settlement range"
+        ]
+      },
+      "role": "engineer"
+    },
+    {
+      "composition": [
+        "variation_derived"
+      ],
+      "labels": {
+        "classification": {
+          "expected": "compensable",
+          "field": "classification"
+        },
+        "elements": {
+          "causation": "weak",
+          "contractual_basis": "supported",
+          "event": "supported",
+          "notice": "supported",
+          "quantum": "missing"
+        }
+      },
+      "matter_id": "C04",
+      "payload": {
+        "clauses": "Sub-Clause 13.1. Sub-Clause 13.3. Sub-Clause 20.1. Notice within 28 days under Sub-Clause 20.1.",
+        "event_summary": "Finishes were revised by instruction VO-12 dated 2026-06-02. The Contractor priced the change on 2026-06-20.",
+        "facts": "Finishes were revised by instruction VO-12 dated 2026-06-02. The Contractor priced the change on 2026-06-20.",
+        "kind": "time and money",
+        "title": "Claim for revised station finishes"
+      },
+      "provenance": {
+        "source": "synthetic"
+      },
+      "record": {
+        "clauses": [
+          "13.1",
+          "13.3",
+          "20.1"
+        ],
+        "notice_days": [
+          28
+        ],
+        "privileged_markers": [
+          "internal settlement range"
+        ]
+      },
+      "role": "employer"
+    },
+    {
+      "composition": [
+        "late_notice",
+        "late_notice_without_prejudice"
+      ],
+      "labels": {
+        "classification": {
+          "expected": "excusable",
+          "field": "classification"
+        },
+        "elements": {
+          "causation": "supported",
+          "contractual_basis": "supported",
+          "event": "supported",
+          "notice": "weak",
+          "quantum": "weak"
+        }
+      },
+      "matter_id": "C05",
+      "payload": {
+        "clauses": "Sub-Clause 4.12. Sub-Clause 20.1. Notice within 28 days under Sub-Clause 20.1.",
+        "event_summary": "Utility diversion finished on 2026-04-30, 40 days late. Notice served 2026-06-15. The Employer records no prejudice.",
+        "facts": "Utility diversion finished on 2026-04-30, 40 days late. Notice served 2026-06-15. The Employer records no prejudice.",
+        "kind": "time and money",
+        "title": "Utility diversion delay, notice late"
+      },
+      "provenance": {
+        "source": "synthetic"
+      },
+      "record": {
+        "clauses": [
+          "4.12",
+          "20.1"
+        ],
+        "notice_days": [
+          28
+        ],
+        "privileged_markers": [
+          "internal settlement range"
+        ]
+      },
+      "role": "contractor"
+    },
+    {
+      "composition": [
+        "late_notice",
+        "late_notice_with_prejudice"
+      ],
+      "labels": {
+        "classification": {
+          "expected": "undetermined",
+          "field": "classification"
+        },
+        "elements": {
+          "causation": "weak",
+          "contractual_basis": "supported",
+          "event": "supported",
+          "notice": "weak",
+          "quantum": "weak"
+        }
+      },
+      "matter_id": "C06",
+      "payload": {
+        "clauses": "Sub-Clause 13.1. Sub-Clause 20.1. Notice within 28 days under Sub-Clause 20.1.",
+        "event_summary": "The concourse design changed on 2026-01-10. Notice served 2026-03-20. The Employer shows it lost the chance to re-sequence works.",
+        "facts": "The concourse design changed on 2026-01-10. Notice served 2026-03-20. The Employer shows it lost the chance to re-sequence works.",
+        "kind": "time and money",
+        "title": "Design change to the concourse, notice late"
+      },
+      "provenance": {
+        "source": "synthetic"
+      },
+      "record": {
+        "clauses": [
+          "13.1",
+          "20.1"
+        ],
+        "notice_days": [
+          28
+        ],
+        "privileged_markers": [
+          "internal settlement range"
+        ]
+      },
+      "role": "contractor"
+    },
+    {
+      "composition": [
+        "late_notice"
+      ],
+      "labels": {
+        "classification": {
+          "expected": "excusable",
+          "field": "classification"
+        },
+        "elements": {
+          "causation": "weak",
+          "contractual_basis": "supported",
+          "event": "supported",
+          "notice": "weak",
+          "quantum": "weak"
+        }
+      },
+      "matter_id": "C07",
+      "payload": {
+        "clauses": "Sub-Clause 8.5. Sub-Clause 20.1. Notice within 28 days under Sub-Clause 20.1.",
+        "event_summary": "Rainfall exceeded the ten-year average in July 2026. Notice served 2026-09-30.",
+        "facts": "Rainfall exceeded the ten-year average in July 2026. Notice served 2026-09-30.",
+        "kind": "time and money",
+        "title": "Weather claim, notice late"
+      },
+      "provenance": {
+        "source": "synthetic"
+      },
+      "record": {
+        "clauses": [
+          "8.5",
+          "20.1"
+        ],
+        "notice_days": [
+          28
+        ],
+        "privileged_markers": [
+          "internal settlement range"
+        ]
+      },
+      "role": "engineer"
+    },
+    {
+      "composition": [
+        "global_claim"
+      ],
+      "labels": {
+        "classification": {
+          "expected": "undetermined",
+          "field": "classification"
+        },
+        "elements": {
+          "causation": "missing",
+          "contractual_basis": "weak",
+          "event": "weak",
+          "notice": "supported",
+          "quantum": "missing"
+        }
+      },
+      "matter_id": "C08",
+      "payload": {
+        "clauses": "Sub-Clause 20.1. Notice within 28 days under Sub-Clause 20.1.",
+        "event_summary": "The Contractor claims a single sum for disruption across the project without linking costs to events.",
+        "facts": "The Contractor claims a single sum for disruption across the project without linking costs to events.",
+        "kind": "time and money",
+        "title": "Global claim for disruption"
+      },
+      "provenance": {
+        "source": "synthetic"
+      },
+      "record": {
+        "clauses": [
+          "20.1"
+        ],
+        "notice_days": [
+          28
+        ],
+        "privileged_markers": [
+          "internal settlement range"
+        ]
+      },
+      "role": "employer"
+    },
+    {
+      "composition": [
+        "global_claim"
+      ],
+      "labels": {
+        "classification": {
+          "expected": "undetermined",
+          "field": "classification"
+        },
+        "elements": {
+          "causation": "missing",
+          "contractual_basis": "weak",
+          "event": "weak",
+          "notice": "supported",
+          "quantum": "weak"
+        }
+      },
+      "matter_id": "C09",
+      "payload": {
+        "clauses": "Sub-Clause 8.4. Sub-Clause 20.1. Notice within 28 days under Sub-Clause 20.1.",
+        "event_summary": "The Contractor claims prolongation costs for the whole delay period as one sum, with no event-by-event build-up.",
+        "facts": "The Contractor claims prolongation costs for the whole delay period as one sum, with no event-by-event build-up.",
+        "kind": "time and money",
+        "title": "Global claim for prolongation"
+      },
+      "provenance": {
+        "source": "synthetic"
+      },
+      "record": {
+        "clauses": [
+          "8.4",
+          "20.1"
+        ],
+        "notice_days": [
+          28
+        ],
+        "privileged_markers": [
+          "internal settlement range"
+        ]
+      },
+      "role": "engineer"
+    },
+    {
+      "composition": [
+        "missing_records"
+      ],
+      "labels": {
+        "classification": {
+          "expected": "compensable",
+          "field": "classification"
+        },
+        "elements": {
+          "causation": "weak",
+          "contractual_basis": "supported",
+          "event": "supported",
+          "notice": "supported",
+          "quantum": "missing"
+        }
+      },
+      "matter_id": "C10",
+      "payload": {
+        "clauses": "Sub-Clause 8.8. Sub-Clause 20.1. Notice within 28 days under Sub-Clause 20.1.",
+        "event_summary": "Plant stood idle during the suspension of 2026-05-04. No plant logs are on record.",
+        "facts": "Plant stood idle during the suspension of 2026-05-04. No plant logs are on record.",
+        "kind": "time and money",
+        "title": "Idle plant with no plant records"
+      },
+      "provenance": {
+        "source": "synthetic"
+      },
+      "record": {
+        "clauses": [
+          "8.8",
+          "20.1"
+        ],
+        "notice_days": [
+          28
+        ],
+        "privileged_markers": [
+          "internal settlement range"
+        ]
+      },
+      "role": "contractor"
+    },
+    {
+      "composition": [
+        "missing_records"
+      ],
+      "labels": {
+        "classification": {
+          "expected": "compensable",
+          "field": "classification"
+        },
+        "elements": {
+          "causation": "weak",
+          "contractual_basis": "supported",
+          "event": "supported",
+          "notice": "supported",
+          "quantum": "missing"
+        }
+      },
+      "matter_id": "C11",
+      "payload": {
+        "clauses": "Sub-Clause 2.1. Sub-Clause 20.1. Notice within 28 days under Sub-Clause 20.1.",
+        "event_summary": "Labour stood idle while access was denied. Muster rolls for the period are not on record.",
+        "facts": "Labour stood idle while access was denied. Muster rolls for the period are not on record.",
+        "kind": "time and money",
+        "title": "Labour standing time without muster rolls"
+      },
+      "provenance": {
+        "source": "synthetic"
+      },
+      "record": {
+        "clauses": [
+          "2.1",
+          "20.1"
+        ],
+        "notice_days": [
+          28
+        ],
+        "privileged_markers": [
+          "internal settlement range"
+        ]
+      },
+      "role": "contractor"
+    },
+    {
+      "composition": [],
+      "labels": {
+        "classification": {
+          "expected": "excusable",
+          "field": "classification"
+        },
+        "elements": {
+          "causation": "supported",
+          "contractual_basis": "supported",
+          "event": "supported",
+          "notice": "supported",
+          "quantum": "weak"
+        }
+      },
+      "matter_id": "C12",
+      "payload": {
+        "clauses": "Sub-Clause 1.9. Sub-Clause 20.1. Notice within 28 days under Sub-Clause 20.1.",
+        "event_summary": "Drawings for the depot roof were issued on 2026-02-28; the drawing schedule date was 2026-02-01. Notice served 2026-03-05.",
+        "facts": "Drawings for the depot roof were issued on 2026-02-28; the drawing schedule date was 2026-02-01. Notice served 2026-03-05.",
+        "kind": "time and money",
+        "title": "Delayed drawings for the depot"
+      },
+      "provenance": {
+        "source": "synthetic"
+      },
+      "record": {
+        "clauses": [
+          "1.9",
+          "20.1"
+        ],
+        "notice_days": [
+          28
+        ],
+        "privileged_markers": [
+          "internal settlement range"
+        ]
+      },
+      "role": "contractor"
+    },
+    {
+      "composition": [],
+      "labels": {
+        "classification": {
+          "expected": "compensable",
+          "field": "classification"
+        },
+        "elements": {
+          "causation": "weak",
+          "contractual_basis": "supported",
+          "event": "supported",
+          "notice": "supported",
+          "quantum": "weak"
+        }
+      },
+      "matter_id": "C13",
+      "payload": {
+        "clauses": "Sub-Clause 4.12. Sub-Clause 20.1. Notice within 28 days under Sub-Clause 20.1.",
+        "event_summary": "Rock was met at pier 14 at a level the site investigation did not show. Notice served 2026-04-08.",
+        "facts": "Rock was met at pier 14 at a level the site investigation did not show. Notice served 2026-04-08.",
+        "kind": "time and money",
+        "title": "Changed ground conditions at pier 14"
+      },
+      "provenance": {
+        "source": "synthetic"
+      },
+      "record": {
+        "clauses": [
+          "4.12",
+          "20.1"
+        ],
+        "notice_days": [
+          28
+        ],
+        "privileged_markers": [
+          "internal settlement range"
+        ]
+      },
+      "role": "contractor"
+    },
+    {
+      "composition": [],
+      "labels": {
+        "classification": {
+          "expected": "compensable",
+          "field": "classification"
+        },
+        "elements": {
+          "causation": "supported",
+          "contractual_basis": "supported",
+          "event": "supported",
+          "notice": "supported",
+          "quantum": "weak"
+        }
+      },
+      "matter_id": "C14",
+      "payload": {
+        "clauses": "Sub-Clause 2.5. Sub-Clause 20.1. Notice within 28 days under Sub-Clause 20.1.",
+        "event_summary": "Rails due on 2026-07-01 arrived on 2026-08-10. Notice served 2026-07-15.",
+        "facts": "Rails due on 2026-07-01 arrived on 2026-08-10. Notice served 2026-07-15.",
+        "kind": "time and money",
+        "title": "Employer-supplied rails delivered late"
+      },
+      "provenance": {
+        "source": "synthetic"
+      },
+      "record": {
+        "clauses": [
+          "2.5",
+          "20.1"
+        ],
+        "notice_days": [
+          28
+        ],
+        "privileged_markers": [
+          "internal settlement range"
+        ]
+      },
+      "role": "contractor"
+    },
+    {
+      "composition": [],
+      "labels": {
+        "classification": {
+          "expected": "contractor_risk",
+          "field": "classification"
+        },
+        "elements": {
+          "causation": "weak",
+          "contractual_basis": "missing",
+          "event": "supported",
+          "notice": "supported",
+          "quantum": "weak"
+        }
+      },
+      "matter_id": "C15",
+      "payload": {
+        "clauses": "Sub-Clause 13.8.",
+        "event_summary": "The Contractor claims steel price rise for 2026. The contract carries no price-adjustment clause.",
+        "facts": "The Contractor claims steel price rise for 2026. The contract carries no price-adjustment clause.",
+        "kind": "time and money",
+        "title": "Fluctuation in steel price"
+      },
+      "provenance": {
+        "source": "synthetic"
+      },
+      "record": {
+        "clauses": [
+          "13.8"
+        ],
+        "notice_days": [
+          28
+        ],
+        "privileged_markers": [
+          "internal settlement range"
+        ]
+      },
+      "role": "contractor"
+    }
+  ],
+  "prompt_key": "claims.v1.head_test",
+  "skill_key": "indian-infra-claims",
+  "suite_key": "indian-infra-claims-synthetic"
+}

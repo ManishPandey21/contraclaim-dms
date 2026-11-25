@@ -15,6 +15,7 @@ export type ClaimType =
   | "other";
 
 export type ClaimStatus =
+  | "potential"
   | "draft"
   | "notified"
   | "submitted"
@@ -24,14 +25,42 @@ export type ClaimStatus =
   | "disputed"
   | "closed";
 
+export type NoticeState = "open" | "due_soon" | "overdue" | "served_in_time" | "served_late";
+
+/**
+ * Where a claim stands against its notice period, computed by the server.
+ * Only `contract_verified` is the contract's own period, confirmed by a person
+ * against the quoted clause. Every other source is a figure to be checked.
+ */
+export interface NoticeAssessment {
+  basis: "awareness" | "event";
+  basis_date: string;
+  period_days: number;
+  period_source: "contract_verified" | "contract_unverified" | "organisation_rule" | "assumed_default";
+  /** True only for a contract period a person has verified against its clause. */
+  period_verified: boolean;
+  /** False while the claim's type is provisional: no type's period is this claim's yet. */
+  claim_type_confirmed?: boolean;
+  clause_no?: string | null;
+  requirement_id?: string | null;
+  due_date: string;
+  served_on?: string | null;
+  days_remaining?: number | null;
+  served_late_by_days?: number | null;
+  state: NoticeState;
+}
+
 export interface ClaimDTO {
   id: string;
   claim_ref?: string | null;
   type: ClaimType;
+  /** Whether a person chose the type; false while provisional, null on an older claim. */
+  type_confirmed?: boolean | null;
   title: string;
   description?: string | null;
   status: ClaimStatus;
   event_date?: string | null;
+  awareness_date?: string | null;
   notice_date?: string | null;
   submission_date?: string | null;
   response_due_date?: string | null;
@@ -44,6 +73,12 @@ export interface ClaimDTO {
   contract_clauses: string[];
   linked_document_ids: string[];
   linked_letter_ids: string[];
+  notice_assessment?: NoticeAssessment | null;
+  allowed_status_transitions: ClaimStatus[];
+  /** Outline of the claim's board; the board itself is read through the Claim Bench. */
+  head_count?: number;
+  bench_stage?: "heads" | "locked" | null;
+  origin?: { type: "hindrance" | "letter_bench"; id: string; label?: string | null } | null;
   organization_id?: string | null;
   project_id?: string | null;
   created_at?: string | null;
@@ -51,17 +86,30 @@ export interface ClaimDTO {
   evidence_frozen_at?: string | null;
   evidence_frozen_by?: string | null;
   evidence_freeze_reason?: string | null;
+  /** The contract the claim is made under; null on a claim with none identified (4B-18). */
+  contract_id?: string | null;
+  contract_label?: string | null;
+  /** What on this record needs attention, e.g. a legacy figure that needs re-entry. */
+  record_notes?: string[];
 }
 
 export interface ClaimPayload {
   title: string;
+  /** The contract the claim is made under. On an update it can only fill an empty one (4B-18). */
+  contract_id?: string;
   type?: ClaimType;
   claim_ref?: string;
-  description?: string;
+  /** null clears the field on an update (4B-12); undefined leaves it unchanged. */
+  description?: string | null;
   status?: ClaimStatus;
   amount_claimed?: number;
   currency?: string;
-  response_due_date?: string;
+  event_date?: string | null;
+  awareness_date?: string | null;
+  notice_date?: string | null;
+  response_due_date?: string | null;
+  eot_days_claimed?: number;
+  contract_clauses?: string[];
   project_id?: string;
   responsible_party_id?: string;
 }
@@ -73,6 +121,7 @@ function normalize(raw: any): ClaimDTO {
     contract_clauses: raw?.contract_clauses ?? [],
     linked_document_ids: raw?.linked_document_ids ?? [],
     linked_letter_ids: raw?.linked_letter_ids ?? [],
+    allowed_status_transitions: raw?.allowed_status_transitions ?? [],
   } as ClaimDTO;
 }
 
@@ -90,8 +139,52 @@ export async function getClaim(id: string): Promise<ClaimDTO> {
   return normalize(data);
 }
 
+export interface ClaimContractOptions {
+  options: Array<{ contract_id: string; label: string }>;
+  /** The contract used when none is chosen: the project's only one. */
+  selected: string | null;
+  /** Several contracts exist, so one must be chosen. */
+  must_choose: boolean;
+}
+
+/** The contracts a claim on this project can be made under, for the signed-in person. */
+export async function fetchClaimContractOptions(projectId: string): Promise<ClaimContractOptions> {
+  const { data } = await api.get<ClaimContractOptions>("/claims/contract-options", {
+    params: { project_id: projectId },
+  });
+  return data;
+}
+
+/** The three questions a claim starts from (4B-20, D-24). */
+export interface ClaimStartPayload {
+  project_id: string;
+  organization_id?: string;
+  what_happened: string;
+  /** yyyy-mm-dd */
+  aware_on: string;
+  contract_id?: string;
+}
+
+export interface ClaimStartResult {
+  claim: ClaimDTO;
+  head_id: string;
+  board_version: number;
+}
+
+/** Start a claim: the claim (a draft) and its board with the first head. */
+export async function startClaim(payload: ClaimStartPayload): Promise<ClaimStartResult> {
+  const { data } = await api.post("/claims/start", payload);
+  return { claim: normalize(data.claim), head_id: data.head_id, board_version: data.board_version };
+}
+
 export async function createClaim(payload: ClaimPayload): Promise<ClaimDTO> {
   const { data } = await api.post("/claims", payload);
+  return normalize(data);
+}
+
+/** Confirm the claim's type, or change it; a change withdraws notice decisions made under the old type. */
+export async function confirmClaimType(id: string, claimType: ClaimType, reason?: string): Promise<ClaimDTO> {
+  const { data } = await api.post(`/claims/${id}/type`, { claim_type: claimType, reason: reason || undefined });
   return normalize(data);
 }
 

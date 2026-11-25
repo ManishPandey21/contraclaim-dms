@@ -139,6 +139,11 @@ HISTORICAL_REVIEW_FIELDS = frozenset(
 #: what it relies on, and which response and pleading version it projects.
 REJOINDER_CONTENT_FIELDS = frozenset(
     {
+        # Server-written provenance (JG-5). Classified as content so the hash is
+        # exactly what it was before they were classified (unclassified fields are
+        # hashed too); a carried row's origin never changes.
+        "origin",
+        "origin_key",
         "case_id",
         "draft_id",
         "organization_id",

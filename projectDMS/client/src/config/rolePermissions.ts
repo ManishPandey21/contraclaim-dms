@@ -154,6 +154,29 @@ const DRAFTING_ROLES: Role[] = [
   Roles.ExpertReviewer,
 ];
 
+/**
+ * Permissions that only an explicit grant of the name confers: never the `*` wildcard,
+ * never the Super Admin role (backend core.permissions.SUPERADMIN_EXCLUDED_PERMISSIONS;
+ * tests/test_client_explicit_grant_permissions.py keeps the two lists equal).
+ */
+export const EXPLICIT_GRANT_PERMISSIONS: ReadonlySet<string> = new Set([
+  "dms.claim.determine",
+  "dms.claim.strategy.read",
+  "dms.claim.evidence.confirm_contract",
+  "dms.claim.signal.view",
+]);
+
+/** Window events meaning the signed-in account may have changed: `useRBAC` forgets what it
+ * knew and denies until the server answers. (Token refresh dispatches nothing.) */
+export const RBAC_ACCOUNT_EVENTS: readonly string[] = ["auth-state-changed"];
+
+/** Window events after which `useRBAC` re-reads the server in the background, keeping its
+ * current answer until the new one arrives. */
+export const RBAC_REVALIDATE_EVENTS: readonly string[] = [
+  "profile-updated", // the user's own profile changed
+  "tenant-scope-changed", // the navbar organisation or project selection changed
+];
+
 // Keep frontend aliases aligned with backend core.permissions.LEGACY_PERMISSION_ALIASES
 // plus the non-document org/project aliases retained by PermissionService.
 // Document access is intentionally canonical-only, matching backend policy.
@@ -200,6 +223,8 @@ export const PERMISSION_ALIASES: Record<string, string[]> = {
   "subscription.usage.view": ["reports:view"],
   "subscription.archive_access": [],
   "subscription.offboarding_export": [],
+  // M4: global plan, price and add-on catalogue writes; Super Admin or a platform role only.
+  "platform.pricing.manage": [],
   "organizations:read": ["orgs:view"],
   "organizations:create": ["orgs:create"],
   "organizations:update": ["orgs:edit"],
@@ -253,6 +278,9 @@ export const OPEN_AUTHENTICATED_ROUTES = [
   "/security-terms",
   "/profile",
   "/notifications",
+  // The reviewer's queue. A reviewer holds an identity, not a permission, so no
+  // permission can gate it; the server returns an empty queue to anyone else.
+  "/skill-reviews",
 ] as const;
 
 export const ROUTE_PERMISSIONS: Record<string, string[]> = {
@@ -280,6 +308,9 @@ export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   // letter_drafting.py), not `draft.request.view`.
   "/letters": ["drafting.request.view"],
   "/letter-quality": ["drafting.request.view"],
+  // Skill registry: managed by whoever may publish, and open to reviewers who
+  // can read skills so they can record the approval a draft asks of them.
+  "/skills": ["drafting.skill.publish", "drafting.skill.read"],
   "/letter-templates": ["letter_templates:read"],
   "/contracts": ["dms.document.view"],
   "/contracts/viewer": ["dms.document.view"],
@@ -310,7 +341,8 @@ export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   "/insurance": ["dms.insurance.view", "dms.document.view"],
   "/ipc-bills": ["dms.ipc.view", "dms.document.view"],
   "/concerns": ["concerns:read"],
-  "/admin/billing-catalog": ["billing.plan.manage", "system:admin"],
+  // M4: the catalogue is global; a tenant billing.plan.manage no longer edits it.
+  "/admin/billing-catalog": ["platform.pricing.manage", "system:admin"],
   "/retrieval-console": ["dms.document.view"],
   "/observability": ["reports:view", "system:admin"],
   // Contract Master (backend dms.contract.master.view aliased to projects:read).
@@ -330,6 +362,8 @@ export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   "/reports": ["reports:view"],
   "/health": ["system:admin"],
   "/users": ["users:read"],
+  // Granting a reviewer role needs user management in that organisation (server-checked).
+  "/reviewer-roles": ["users:update"],
   "/permissions": ["roles:read", "permissions:read"],
   "/plan-settings": ["billing.plan.view", "subscription.entitlement.manage"],
   "/subscription-management": ["billing.plan.view", "subscription.entitlement.manage", "subscription.upgrade"],

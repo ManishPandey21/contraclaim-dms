@@ -11,15 +11,18 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import { errorMessage } from "@/hooks/useLetterBench";
+import SkillPublishPanel from "@/components/skills/SkillPublishPanel";
+import { reviewerRoleLabel } from "@/lib/skill-approvals";
 import {
   deprecateSkillVersion,
   fetchSkillAdminList,
+  fetchSkillReviewQueue,
   importSkillBundle,
-  publishSkillVersion,
 } from "@/services/letter-bench-api";
-import type { SkillVersionSummary } from "@/types/letterBench";
+import type { SkillReviewQueueItem, SkillVersionSummary } from "@/types/letterBench";
 
 const ADMIN_KEY = ["letter-bench", "skills-admin"] as const;
+const QUEUE_KEY = ["skills", "review-queue"] as const;
 
 const DEFAULT_MANIFEST = JSON.stringify(
   {
@@ -40,13 +43,21 @@ const STATUS_TEXT = { draft: "Draft", published: "Published", deprecated: "Depre
 
 const SkillAdminPage: React.FC = () => {
   const client = useQueryClient();
-  const { data, isLoading, error } = useQuery({ queryKey: ADMIN_KEY, queryFn: () => fetchSkillAdminList() });
+  const { data, isLoading, error } = useQuery({
+    queryKey: ADMIN_KEY,
+    queryFn: () => fetchSkillAdminList(),
+    retry: false,
+  });
+  // A reviewer holds no publishing permission, so the list above is refused for
+  // them. Their queue is what they came for, and it needs no permission.
+  const queue = useQuery({ queryKey: QUEUE_KEY, queryFn: () => fetchSkillReviewQueue(), retry: false });
+  const [reviewing, setReviewing] = useState<SkillReviewQueueItem | null>(null);
+  const isReviewer = (queue.data?.my_roles.length ?? 0) > 0;
   const [file, setFile] = useState<File | null>(null);
   const [version, setVersion] = useState("");
   const [kind, setKind] = useState("evaluation");
   const [manifest, setManifest] = useState(DEFAULT_MANIFEST);
   const [evalFor, setEvalFor] = useState<SkillVersionSummary | null>(null);
-  const [evaluation, setEvaluation] = useState({ suite: "", score: "", threshold: "0.85", case_count: "", signed_off_by: "" });
   const refresh = () => client.invalidateQueries({ queryKey: ADMIN_KEY });
 
   const importBundle = useMutation({
@@ -58,22 +69,6 @@ const SkillAdminPage: React.FC = () => {
       void refresh();
     },
     onError: (failure) => toast.error(errorMessage(failure, "The bundle was rejected")),
-  });
-  const publish = useMutation({
-    mutationFn: (target: SkillVersionSummary) =>
-      publishSkillVersion(target.skill_key, target.version, {
-        suite: evaluation.suite,
-        score: Number(evaluation.score),
-        threshold: Number(evaluation.threshold),
-        case_count: Number(evaluation.case_count),
-        signed_off_by: evaluation.signed_off_by || null,
-      }),
-    onSuccess: () => {
-      toast.success("Published");
-      setEvalFor(null);
-      void refresh();
-    },
-    onError: (failure) => toast.error(errorMessage(failure, "The version could not be published")),
   });
   const deprecate = useMutation({
     mutationFn: (target: SkillVersionSummary) => deprecateSkillVersion(target.skill_key, target.version),
@@ -87,9 +82,6 @@ const SkillAdminPage: React.FC = () => {
   const versions = [...(data?.versions ?? [])].sort(
     (a, b) => a.skill_key.localeCompare(b.skill_key) || b.version.localeCompare(a.version, undefined, { numeric: true })
   );
-  const evaluationReady =
-    evaluation.suite.trim() && evaluation.score !== "" && evaluation.case_count !== "" && evaluation.threshold !== "";
-
   return (
     <div className="container mx-auto max-w-5xl space-y-6 p-2">
       <div className="flex items-center gap-3">
@@ -99,16 +91,79 @@ const SkillAdminPage: React.FC = () => {
           </Link>
         </Button>
         <div>
-          <h1 className="text-xl font-semibold">Drafting skills</h1>
+          <h1 className="text-xl font-semibold">Skills</h1>
           <p className="text-sm text-muted-foreground">
-            A skill is the method the drafting engine follows. Published versions never change; a correction is
-            a new version.
+            A skill is the method the engine follows when it analyses, evaluates or drafts. Published versions
+            never change; a correction is a new version. Claim and arbitration skills need technical and legal
+            approval before they can be published.
           </p>
         </div>
       </div>
 
+      {isReviewer && (
+        <section aria-labelledby="review-queue-heading" className="rounded-lg border">
+          <h2 id="review-queue-heading" className="border-b px-4 py-3 text-sm font-semibold">
+            Waiting for your review
+          </h2>
+          <p className="px-4 pt-3 text-sm text-muted-foreground">
+            You hold: {queue.data!.my_roles.map(reviewerRoleLabel).join(", ")}.
+          </p>
+          {queue.data!.items.length === 0 ? (
+            <p className="p-4 text-sm">No draft is asking for your review.</p>
+          ) : (
+            <ul className="divide-y">
+              {queue.data!.items.map((item) => (
+                <li
+                  key={`${item.skill_key}-${item.version}`}
+                  className="flex flex-wrap items-center justify-between gap-3 p-4 text-sm"
+                >
+                  <div>
+                    <p className="font-medium">
+                      {item.name} <span className="tabular-nums">{item.version}</span>
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {item.reviews
+                        .map(
+                          (review) =>
+                            `${reviewerRoleLabel(review.reviewer_role)}: ${
+                              review.given_by_me ? "given by you" : review.given ? "given" : "not yet given"
+                            }`
+                        )
+                        .join(" · ")}
+                    </p>
+                  </div>
+                  <Button size="sm" variant={item.waiting_on_me ? "default" : "outline"} onClick={() => setReviewing(item)}>
+                    {item.waiting_on_me ? "Review…" : "Open"}
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      )}
+
+      {reviewing && (
+        <SkillPublishPanel
+          key={`review-${reviewing.skill_key}-${reviewing.version}-${reviewing.content_hash}`}
+          reviewOnly
+          myRoles={queue.data?.my_roles ?? []}
+          version={{
+            skill_key: reviewing.skill_key,
+            version: reviewing.version,
+            name: reviewing.name,
+            content_hash: reviewing.content_hash,
+            required_approvals: reviewing.reviews.map(({ kind, reviewer_role }) => ({ kind, reviewer_role })),
+          }}
+          onClose={() => {
+            setReviewing(null);
+            void client.invalidateQueries({ queryKey: QUEUE_KEY });
+          }}
+          onPublished={() => undefined}
+        />
+      )}
+
       {isLoading && <Skeleton className="h-48 w-full" />}
-      {error && (
+      {error && !isReviewer && (
         <p role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
           {errorMessage(error, "Skills could not be loaded. You may not have permission to manage them.")}
         </p>
@@ -140,7 +195,14 @@ const SkillAdminPage: React.FC = () => {
                     </div>
                   </TableCell>
                   <TableCell className="tabular-nums">{item.version}</TableCell>
-                  <TableCell>{STATUS_TEXT[item.status]}</TableCell>
+                  <TableCell>
+                    {STATUS_TEXT[item.status]}
+                    {item.status === "draft" && (item.required_approvals?.length ?? 0) > 0 && (
+                      <div className="text-xs text-muted-foreground">
+                        Needs: {item.required_approvals!.map((r) => reviewerRoleLabel(r.reviewer_role)).join(", ")}
+                      </div>
+                    )}
+                  </TableCell>
                   <TableCell className="text-xs">
                     {item.eval_report
                       ? `${item.eval_report.suite}: ${item.eval_report.score.toFixed(2)} of ${item.eval_report.threshold.toFixed(2)} needed, ${item.eval_report.case_count} case${item.eval_report.case_count === 1 ? "" : "s"}${
@@ -152,7 +214,7 @@ const SkillAdminPage: React.FC = () => {
                   <TableCell className="text-right">
                     {item.status === "draft" && (
                       <Button size="sm" variant="outline" onClick={() => setEvalFor(item)}>
-                        Publish…
+                        {(item.required_approvals?.length ?? 0) > 0 ? "Review and publish…" : "Publish…"}
                       </Button>
                     )}
                     {item.status === "published" && (
@@ -178,48 +240,18 @@ const SkillAdminPage: React.FC = () => {
       )}
 
       {evalFor && (
-        <section aria-labelledby="publish-heading" className="space-y-3 rounded-lg border p-4">
-          <h2 id="publish-heading" className="text-sm font-semibold">
-            Publish {evalFor.name} {evalFor.version}
-          </h2>
-          <p className="text-sm text-muted-foreground">
-            Record the result of the golden-set evaluation. A version below its threshold cannot be published.
-          </p>
-          <div className="grid gap-3 sm:grid-cols-2">
-            {(
-              [
-                ["suite", "Evaluation suite", "text"],
-                ["case_count", "Cases run", "number"],
-                ["score", "Score (0 to 1)", "number"],
-                ["threshold", "Threshold (0 to 1)", "number"],
-                ["signed_off_by", "Signed off by", "text"],
-              ] as const
-            ).map(([key, label, type]) => (
-              <div key={key} className="space-y-1">
-                <label htmlFor={`eval-${key}`} className="text-xs font-medium">
-                  {label}
-                </label>
-                <Input
-                  id={`eval-${key}`}
-                  type={type}
-                  step={type === "number" ? "0.01" : undefined}
-                  value={evaluation[key]}
-                  onChange={(event) => setEvaluation((current) => ({ ...current, [key]: event.target.value }))}
-                />
-              </div>
-            ))}
-          </div>
-          <div className="flex gap-2">
-            <Button disabled={!evaluationReady || publish.isPending} onClick={() => publish.mutate(evalFor)}>
-              Publish
-            </Button>
-            <Button variant="ghost" onClick={() => setEvalFor(null)}>
-              Cancel
-            </Button>
-          </div>
-        </section>
+        <SkillPublishPanel
+          key={`${evalFor.skill_key}-${evalFor.version}-${evalFor.content_hash}`}
+          version={evalFor}
+          onClose={() => setEvalFor(null)}
+          onPublished={() => {
+            setEvalFor(null);
+            void refresh();
+          }}
+        />
       )}
 
+      {data && (
       <section aria-labelledby="import-heading" className="space-y-3 rounded-lg border p-4">
         <h2 id="import-heading" className="text-sm font-semibold">
           Import a skill bundle
@@ -288,6 +320,7 @@ const SkillAdminPage: React.FC = () => {
           Import as draft
         </Button>
       </section>
+      )}
     </div>
   );
 };

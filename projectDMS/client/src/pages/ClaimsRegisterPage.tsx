@@ -44,7 +44,6 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-  AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import {
   DropdownMenu,
@@ -54,12 +53,13 @@ import {
 } from "@/components/ui/dropdown-menu";
 import {
   AlertTriangle,
+  ChevronDown,
   ClipboardList,
   Clock,
   Download,
   Edit,
-  Eye,
   Loader2,
+  MoreHorizontal,
   PlusCircle,
   ShieldCheck,
   Sparkles,
@@ -69,6 +69,7 @@ import { toast } from "sonner";
 import {
   ClaimDTO,
   ClaimPayload,
+  type ClaimContractOptions,
   ClaimStatus,
   ClaimType,
   createClaim,
@@ -85,19 +86,31 @@ import ClaimTaskDialog from "@/components/claims/ClaimTaskDialog";
 import { getUpcoming } from "@/services/sla-api";
 import { useRegisterProjectScope } from "@/hooks/useRegisterProjectScope";
 import { scopeRefusalMessage } from "@/services/active-scope";
-import { buildSlaStateMap, type ClaimSla } from "@/lib/claims-helpers";
+import {
+  CLAIM_STATUS_LABEL,
+  CLAIM_TYPES,
+  NOTICE_BADGE_VARIANT,
+  apiErrorDetail,
+  buildSlaStateMap,
+  describeNotice,
+  parseClauseList,
+  type ClaimSla,
+} from "@/lib/claims-helpers";
+import ClaimContractField from "@/components/claims/ClaimContractField";
+import ClaimStatusPill from "@/components/claims/ClaimStatusPill";
+import ClaimSignalsStrip from "@/components/claim-bench/ClaimSignalsStrip";
+import EscalateDialog from "@/components/claim-bench/EscalateDialog";
+import StartClaimDialog, { type StartAnswers } from "@/components/claim-bench/StartClaimDialog";
 
-const CLAIM_TYPES: { value: ClaimType; label: string }[] = [
-  { value: "eot", label: "Extension of Time" },
-  { value: "variation", label: "Variation" },
-  { value: "payment_ipc", label: "Payment / IPC" },
-  { value: "loss_expense", label: "Loss & Expense" },
-  { value: "acceleration", label: "Acceleration" },
-  { value: "defect", label: "Defect" },
-  { value: "other", label: "Other" },
-];
+/** Claims the register offers for escalation; the server re-checks every one. */
+const NOT_ESCALATED = new Set(["closed", "agreed", "potential"]);
+const canEscalate = (claim: ClaimDTO) => !claim.evidence_frozen_at && !NOT_ESCALATED.has(claim.status);
+import { useClaimBenchOn } from "@/hooks/useClaimBenchOn";
+import { formatCrore, formatDateIN, formatINR, fromDateInput, toDateInput } from "@/lib/format-in";
+
 
 const CLAIM_STATUSES: { value: ClaimStatus; label: string }[] = [
+  { value: "potential", label: "Potential" },
   { value: "draft", label: "Draft" },
   { value: "notified", label: "Notified" },
   { value: "submitted", label: "Submitted" },
@@ -108,20 +121,7 @@ const CLAIM_STATUSES: { value: ClaimStatus; label: string }[] = [
   { value: "closed", label: "Closed" },
 ];
 
-const STATUS_COLOR: Record<ClaimStatus, string> = {
-  draft: "bg-gray-500",
-  notified: "bg-blue-500",
-  submitted: "bg-indigo-500",
-  under_review: "bg-amber-500",
-  agreed: "bg-green-600",
-  rejected: "bg-red-500",
-  disputed: "bg-red-700",
-  closed: "bg-gray-700",
-};
-
 const typeLabel = (t: ClaimType) => CLAIM_TYPES.find((x) => x.value === t)?.label || t;
-const fmtDate = (d?: string | null) => (d ? new Date(d).toLocaleDateString() : "—");
-const fmtAmount = (n?: number | null) => (n != null ? n.toLocaleString() : "—");
 
 interface ClaimForm {
   title: string;
@@ -129,8 +129,15 @@ interface ClaimForm {
   claim_ref: string;
   description: string;
   amount_claimed?: number;
+  currency: string;
+  event_date: string;
+  awareness_date: string;
+  notice_date: string;
   response_due_date: string;
+  eot_days_claimed?: number;
+  contract_clauses: string;
   project_id: string;
+  contract_id: string;
   status: ClaimStatus;
 }
 
@@ -140,8 +147,15 @@ const EMPTY_FORM: ClaimForm = {
   claim_ref: "",
   description: "",
   amount_claimed: undefined,
+  currency: "INR",
+  event_date: "",
+  awareness_date: "",
+  notice_date: "",
   response_due_date: "",
+  eot_days_claimed: undefined,
+  contract_clauses: "",
   project_id: "",
+  contract_id: "",
   status: "draft",
 };
 
@@ -151,11 +165,25 @@ const ClaimsRegisterPage: React.FC = () => {
   const [typeFilter, setTypeFilter] = useState<string>("all");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [dialogOpen, setDialogOpen] = useState(false);
+  // 4B-20 (D-24): a new claim starts from three questions where the Claim Bench is on.
+  const [starting, setStarting] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingClaim, setEditingClaim] = useState<ClaimDTO | null>(null);
+  // A claim with a Claim Bench board takes its amount and days from the heads (D-14, 4B-17).
+  const fromBoard = Boolean(editingId && editingClaim?.bench_stage);
+  const [deleteTarget, setDeleteTarget] = useState<ClaimDTO | null>(null);
   const [form, setForm] = useState<ClaimForm>({ ...EMPTY_FORM });
+  const [contractOptions, setContractOptions] = useState<ClaimContractOptions | null>(null);
   const [saving, setSaving] = useState(false);
   const [approvalClaim, setApprovalClaim] = useState<ClaimDTO | null>(null);
   const [assessClaim, setAssessClaim] = useState<ClaimDTO | null>(null);
+  // The free-text assessment is retired where the Claim Bench is on.
+  const benchOn = useClaimBenchOn();
+  // 4B-40: several claims of one project escalated together, from the register.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  // What the escalation dialog was opened for. Held apart from the selection so that the
+  // dialog, and the "Case created" result it shows, survive the selection being cleared.
+  const [escalating, setEscalating] = useState<{ ids: string[]; title: string; projectId: string | null } | null>(null);
   const [taskClaim, setTaskClaim] = useState<ClaimDTO | null>(null);
   const [slaMap, setSlaMap] = useState<Record<string, ClaimSla>>({});
   const [exportingId, setExportingId] = useState<string | null>(null);
@@ -202,22 +230,43 @@ const ClaimsRegisterPage: React.FC = () => {
     };
   }, []);
 
-  const openCreate = () => {
+  const openFullForm = (answers?: StartAnswers) => {
     setEditingId(null);
-    setForm({ ...EMPTY_FORM, project_id: selectedProjectId });
+    setEditingClaim(null);
+    setForm({
+      ...EMPTY_FORM,
+      project_id: selectedProjectId,
+      ...(answers
+        ? { description: answers.whatHappened, awareness_date: answers.awareOn, contract_id: answers.contractId }
+        : {}),
+    });
     setDialogOpen(true);
+  };
+
+  // Three questions where the Claim Bench is on and a project is selected; the full form otherwise.
+  const openCreate = () => {
+    if (benchOn && selectedProjectId) setStarting(true);
+    else openFullForm();
   };
 
   const openEdit = (c: ClaimDTO) => {
     setEditingId(c.id);
+    setEditingClaim(c);
     setForm({
       title: c.title,
       type: c.type,
       claim_ref: c.claim_ref || "",
       description: c.description || "",
       amount_claimed: c.amount_claimed ?? undefined,
-      response_due_date: c.response_due_date ? c.response_due_date.slice(0, 10) : "",
+      currency: c.currency || "INR",
+      event_date: toDateInput(c.event_date),
+      awareness_date: toDateInput(c.awareness_date),
+      notice_date: toDateInput(c.notice_date),
+      response_due_date: toDateInput(c.response_due_date),
+      eot_days_claimed: c.eot_days_claimed ?? undefined,
+      contract_clauses: c.contract_clauses.join(", "),
       project_id: c.project_id || "",
+      contract_id: c.contract_id || "",
       status: c.status,
     });
     setDialogOpen(true);
@@ -228,18 +277,34 @@ const ClaimsRegisterPage: React.FC = () => {
       toast.error("Title is required");
       return;
     }
+    // Several contracts on the project: one must be chosen for a new claim (D-23).
+    if (!editingId && contractOptions?.must_choose && !form.contract_id) {
+      toast.error("Choose the contract this claim is made under");
+      return;
+    }
     try {
       setSaving(true);
+      // When editing, an emptied field is sent as null so the server clears it
+      // (4B-12); left out, the old value would silently stay.
+      const cleared = editingId ? null : undefined;
+      // With a Claim Bench board the amount and days come from its heads (D-14); the
+      // server refuses a change, so they are not sent.
       const payload: ClaimPayload = {
         title: form.title.trim(),
         type: form.type,
         claim_ref: form.claim_ref || undefined,
-        description: form.description || undefined,
-        amount_claimed: form.amount_claimed,
-        response_due_date: form.response_due_date
-          ? new Date(form.response_due_date).toISOString()
-          : undefined,
+        description: form.description || cleared,
+        amount_claimed: fromBoard ? undefined : form.amount_claimed,
+        currency: form.currency.trim().toUpperCase() || undefined,
+        event_date: fromDateInput(form.event_date) ?? cleared,
+        awareness_date: fromDateInput(form.awareness_date) ?? cleared,
+        notice_date: fromDateInput(form.notice_date) ?? cleared,
+        response_due_date: fromDateInput(form.response_due_date) ?? cleared,
+        eot_days_claimed: fromBoard ? undefined : form.eot_days_claimed,
+        contract_clauses: parseClauseList(form.contract_clauses),
         project_id: form.project_id || undefined,
+        // A contract already on the claim is fixed and is not sent again.
+        contract_id: editingClaim?.contract_id ? undefined : form.contract_id || undefined,
         status: form.status,
       };
       if (editingId) await updateClaim(editingId, payload);
@@ -248,7 +313,7 @@ const ClaimsRegisterPage: React.FC = () => {
       toast.success(editingId ? "Claim updated" : "Claim created");
       setDialogOpen(false);
     } catch (error) {
-      toast.error(scopeRefusalMessage(error, "claim") || "Failed to save claim");
+      toast.error(scopeRefusalMessage(error, "claim") || apiErrorDetail(error) || "Failed to save claim");
     } finally {
       setSaving(false);
     }
@@ -258,8 +323,10 @@ const ClaimsRegisterPage: React.FC = () => {
     try {
       await setClaimStatus(c.id, statusValue);
       await load();
-    } catch {
-      toast.error("Failed to update status");
+      toast.success(`${c.claim_ref || "Claim"} moved to ${CLAIM_STATUS_LABEL[statusValue]}`);
+    } catch (error) {
+      // The server explains a refused move (scope, or a step the lifecycle does not allow).
+      toast.error(scopeRefusalMessage(error, "claim") || apiErrorDetail(error) || "Failed to update status");
     }
   };
 
@@ -275,13 +342,24 @@ const ClaimsRegisterPage: React.FC = () => {
     }
   };
 
+  const noticeAttention = claims.reduce(
+    (acc, c) => {
+      const state = c.notice_assessment?.state;
+      if (state === "overdue") acc.overdue += 1;
+      else if (state === "due_soon") acc.dueSoon += 1;
+      else if (state === "served_late") acc.late += 1;
+      return acc;
+    },
+    { overdue: 0, dueSoon: 0, late: 0 },
+  );
+
   const remove = async (c: ClaimDTO) => {
     try {
       await deleteClaim(c.id);
       await load();
       toast.success("Claim deleted");
-    } catch {
-      toast.error("Failed to delete claim");
+    } catch (error) {
+      toast.error(scopeRefusalMessage(error, "claim") || apiErrorDetail(error) || "Failed to delete claim");
     }
   };
 
@@ -295,10 +373,80 @@ const ClaimsRegisterPage: React.FC = () => {
         </Button>
       </div>
 
+      <ClaimSignalsStrip onRaised={() => void load()} />
+
+      {benchOn && selected.size > 0 && (() => {
+        const chosen = claims.filter((c) => selected.has(c.id));
+        const projects = new Set(chosen.map((c) => c.project_id || ""));
+        const oneProject = projects.size === 1 && !projects.has("");
+        return (
+          <div role="region" aria-label="Selected claims" className="mb-4 flex flex-wrap items-center gap-3 rounded-md border p-3 text-sm">
+            <span>
+              {chosen.length} claim{chosen.length === 1 ? "" : "s"} selected
+            </span>
+            <Button
+              size="sm"
+              onClick={() =>
+                setEscalating({
+                  ids: chosen.map((c) => c.id),
+                  title: chosen.length === 1 ? chosen[0].title : `${chosen[0]?.title ?? "Claims"} and others`,
+                  projectId: oneProject ? chosen[0].project_id : null,
+                })
+              }
+              disabled={!oneProject}
+            >
+              Escalate selected to arbitration
+            </Button>
+            {!oneProject && <span className="text-muted-foreground">Claims escalated together must belong to one project.</span>}
+            <Button size="sm" variant="ghost" onClick={() => setSelected(new Set())}>
+              Clear selection
+            </Button>
+          </div>
+        );
+      })()}
+
+      {benchOn && escalating && (
+        <EscalateDialog
+          claimIds={escalating.ids}
+          claimTitle={escalating.title}
+          projectId={escalating.projectId}
+          open
+          onOpenChange={(open) => {
+            if (!open) setEscalating(null);
+          }}
+          onEscalated={() => {
+            // The dialog stays open on its result ("Case created", "Open the case").
+            setSelected(new Set());
+            void load();
+          }}
+        />
+      )}
+
       <Card>
         <CardHeader>
           <CardTitle>Claims</CardTitle>
           <CardDescription>Track EOT, variation, payment and loss/expense claims.</CardDescription>
+          {noticeAttention.overdue + noticeAttention.dueSoon + noticeAttention.late > 0 && (
+            <p className="flex flex-wrap items-center gap-x-4 gap-y-1 pt-2 text-sm" role="status">
+              {noticeAttention.overdue > 0 && (
+                <span className="font-medium text-red-800">
+                  <AlertTriangle className="mr-1 inline h-4 w-4" />
+                  {noticeAttention.overdue} notice{noticeAttention.overdue === 1 ? "" : "s"} overdue
+                </span>
+              )}
+              {noticeAttention.dueSoon > 0 && (
+                <span className="font-medium text-amber-800">
+                  <Clock className="mr-1 inline h-4 w-4" />
+                  {noticeAttention.dueSoon} due within 7 days
+                </span>
+              )}
+              {noticeAttention.late > 0 && (
+                <span className="text-muted-foreground">
+                  {noticeAttention.late} served after the period
+                </span>
+              )}
+            </p>
+          )}
           <div className="flex gap-3 pt-3">
             <Select value={typeFilter} onValueChange={setTypeFilter}>
               <SelectTrigger className="w-48"><SelectValue placeholder="Type" /></SelectTrigger>
@@ -324,11 +472,17 @@ const ClaimsRegisterPage: React.FC = () => {
           <Table>
             <TableHeader>
               <TableRow>
+                {benchOn && (
+                  <TableHead className="w-8">
+                    <span className="sr-only">Select for escalation</span>
+                  </TableHead>
+                )}
                 <TableHead>Ref</TableHead>
                 <TableHead>Title</TableHead>
                 <TableHead>Type</TableHead>
                 <TableHead>Status</TableHead>
-                <TableHead>Amount</TableHead>
+                <TableHead>Notice</TableHead>
+                <TableHead className="text-right">Amount</TableHead>
                 <TableHead>Response due</TableHead>
                 <TableHead className="text-right">Actions</TableHead>
               </TableRow>
@@ -336,41 +490,97 @@ const ClaimsRegisterPage: React.FC = () => {
             <TableBody>
               {claims.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={7} className="text-center text-muted-foreground py-8">
-                    No claims yet.
+                  <TableCell colSpan={benchOn ? 9 : 8} className="text-center text-muted-foreground py-8">
+                    {typeFilter !== "all" || statusFilter !== "all"
+                      ? "No claims match these filters."
+                      : "No claims yet. Use New Claim to record the first one."}
                   </TableCell>
                 </TableRow>
               ) : (
                 claims.map((c) => (
                   <TableRow key={c.id}>
+                    {benchOn && (
+                      <TableCell>
+                        {canEscalate(c) ? (
+                          <input
+                            type="checkbox"
+                            aria-label={`Select ${c.claim_ref || c.title} for escalation`}
+                            checked={selected.has(c.id)}
+                            onChange={(event) =>
+                              setSelected((prev) => {
+                                const next = new Set(prev);
+                                if (event.target.checked) next.add(c.id);
+                                else next.delete(c.id);
+                                return next;
+                              })
+                            }
+                          />
+                        ) : null}
+                      </TableCell>
+                    )}
                     <TableCell className="font-mono text-xs">{c.claim_ref || "—"}</TableCell>
-                    <TableCell className="font-medium">{c.title}</TableCell>
+                    <TableCell className="font-medium">
+                      {c.title}
+                      {c.contract_label && (
+                        <div className="text-xs font-normal text-muted-foreground">{c.contract_label}</div>
+                      )}
+                      {(c.record_notes ?? []).map((note) => (
+                        <div key={note} role="note" className="text-xs font-normal text-amber-800">
+                          {note}
+                        </div>
+                      ))}
+                    </TableCell>
                     <TableCell>{typeLabel(c.type)}</TableCell>
                     <TableCell>
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <button type="button" className="cursor-pointer">
-                            <Badge className={STATUS_COLOR[c.status]}>
-                              {CLAIM_STATUSES.find((s) => s.value === c.status)?.label || c.status}
-                            </Badge>
-                          </button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="start">
-                          {CLAIM_STATUSES.map((s) => (
-                            <DropdownMenuItem key={s.value} onClick={() => changeStatus(c, s.value)}>
-                              {s.label}
-                            </DropdownMenuItem>
-                          ))}
-                        </DropdownMenuContent>
-                      </DropdownMenu>
+                      {c.allowed_status_transitions.length === 0 ? (
+                        <ClaimStatusPill status={c.status} />
+                      ) : (
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <button
+                              type="button"
+                              className="cursor-pointer rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                              aria-label={`Status ${CLAIM_STATUS_LABEL[c.status] || c.status}. Change status`}
+                            >
+                              <ClaimStatusPill status={c.status}>
+                                <ChevronDown className="h-3 w-3" aria-hidden />
+                              </ClaimStatusPill>
+                            </button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="start">
+                            {c.allowed_status_transitions.map((next) => (
+                              <DropdownMenuItem key={next} onClick={() => changeStatus(c, next)}>
+                                Move to {CLAIM_STATUS_LABEL[next] || next}
+                              </DropdownMenuItem>
+                            ))}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      )}
                     </TableCell>
-                    <TableCell>{fmtAmount(c.amount_claimed)}</TableCell>
+                    <TableCell>
+                      {(() => {
+                        const summary = describeNotice(c.notice_assessment);
+                        if (!summary) {
+                          return <span className="text-xs text-muted-foreground">No event date</span>;
+                        }
+                        return (
+                          <span title={summary.sentence}>
+                            <Badge variant={NOTICE_BADGE_VARIANT[summary.tone]} className="whitespace-nowrap">
+                              {summary.label}
+                            </Badge>
+                          </span>
+                        );
+                      })()}
+                    </TableCell>
+                    <TableCell className="whitespace-nowrap text-right tabular-nums" title={formatCrore(c.amount_claimed, c.currency)}>
+                      {formatINR(c.amount_claimed, c.currency)}
+                    </TableCell>
                     <TableCell>
                       <div className="flex items-center gap-2">
-                        <span>{fmtDate(c.response_due_date)}</span>
+                        <span className="whitespace-nowrap">{formatDateIN(c.response_due_date)}</span>
                         {slaMap[c.id] &&
                           (slaMap[c.id].state === "breached" ? (
-                            <Badge variant="destructive" className="gap-1">
+                            <Badge variant="danger" className="gap-1">
                               <AlertTriangle className="h-3 w-3" />
                               {Math.abs(slaMap[c.id].days_remaining)}d over
                             </Badge>
@@ -384,43 +594,38 @@ const ClaimsRegisterPage: React.FC = () => {
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-1">
-                        <Button variant="ghost" size="icon" className="h-8 w-8" title="Export evidence bundle" disabled={exportingId === c.id} onClick={() => exportBundle(c)}>
-                          {exportingId === c.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                        <Button variant="outline" size="sm" onClick={() => navigate(`/claims/${c.id}`)}>
+                          Open
                         </Button>
-                        <Button variant="ghost" size="icon" className="h-8 w-8" title="Open claim" onClick={() => navigate(`/claims/${c.id}`)}>
-                          <Eye className="h-4 w-4" />
-                        </Button>
-                        <Button variant="ghost" size="icon" className="h-8 w-8" title="New task from claim" onClick={() => setTaskClaim(c)}>
-                          <ClipboardList className="h-4 w-4" />
-                        </Button>
-                        <Button variant="ghost" size="icon" className="h-8 w-8" title="AI assessment" onClick={() => setAssessClaim(c)}>
-                          <Sparkles className="h-4 w-4 text-indigo-500" />
-                        </Button>
-                        <Button variant="ghost" size="icon" className="h-8 w-8" title="Approval workflow" onClick={() => setApprovalClaim(c)}>
-                          <ShieldCheck className="h-4 w-4" />
-                        </Button>
-                        <Button variant="ghost" size="icon" className="h-8 w-8" title="Edit" onClick={() => openEdit(c)}>
-                          <Edit className="h-4 w-4" />
-                        </Button>
-                        <AlertDialog>
-                          <AlertDialogTrigger asChild>
-                            <Button variant="ghost" size="icon" className="h-8 w-8" title="Delete">
-                              <Trash2 className="h-4 w-4 text-destructive" />
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button variant="ghost" size="icon" className="h-8 w-8" aria-label={`More actions for ${c.claim_ref || c.title}`}>
+                              {exportingId === c.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <MoreHorizontal className="h-4 w-4" />}
                             </Button>
-                          </AlertDialogTrigger>
-                          <AlertDialogContent>
-                            <AlertDialogHeader>
-                              <AlertDialogTitle>Delete claim?</AlertDialogTitle>
-                              <AlertDialogDescription>
-                                This permanently deletes &quot;{c.title}&quot;.
-                              </AlertDialogDescription>
-                            </AlertDialogHeader>
-                            <AlertDialogFooter>
-                              <AlertDialogCancel>Cancel</AlertDialogCancel>
-                              <AlertDialogAction onClick={() => remove(c)}>Delete</AlertDialogAction>
-                            </AlertDialogFooter>
-                          </AlertDialogContent>
-                        </AlertDialog>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuItem onClick={() => openEdit(c)}>
+                              <Edit className="mr-2 h-4 w-4" /> Edit details
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => setTaskClaim(c)}>
+                              <ClipboardList className="mr-2 h-4 w-4" /> New task
+                            </DropdownMenuItem>
+                            {!benchOn && (
+                              <DropdownMenuItem onClick={() => setAssessClaim(c)}>
+                                <Sparkles className="mr-2 h-4 w-4" /> AI assessment
+                              </DropdownMenuItem>
+                            )}
+                            <DropdownMenuItem onClick={() => setApprovalClaim(c)}>
+                              <ShieldCheck className="mr-2 h-4 w-4" /> Approval
+                            </DropdownMenuItem>
+                            <DropdownMenuItem disabled={exportingId === c.id} onClick={() => exportBundle(c)}>
+                              <Download className="mr-2 h-4 w-4" /> Export evidence bundle
+                            </DropdownMenuItem>
+                            <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={() => setDeleteTarget(c)}>
+                              <Trash2 className="mr-2 h-4 w-4" /> Delete
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
                       </div>
                     </TableCell>
                   </TableRow>
@@ -431,8 +636,47 @@ const ClaimsRegisterPage: React.FC = () => {
         </CardContent>
       </Card>
 
+      <AlertDialog open={deleteTarget !== null} onOpenChange={(o) => !o && setDeleteTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete claim?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently deletes &quot;{deleteTarget?.title}&quot;.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (deleteTarget) void remove(deleteTarget);
+                setDeleteTarget(null);
+              }}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {benchOn && selectedProjectId && (
+        <StartClaimDialog
+          open={starting}
+          projectId={selectedProjectId}
+          onOpenChange={setStarting}
+          onStarted={(result) => {
+            setStarting(false);
+            toast.success("Claim started");
+            navigate(`/claims/${result.claim.id}`);
+          }}
+          onMoreDetails={(answers) => {
+            setStarting(false);
+            openFullForm(answers);
+          }}
+        />
+      )}
+
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="sm:max-w-lg">
+        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>{editingId ? "Edit Claim" : "New Claim"}</DialogTitle>
             <DialogDescription>Capture the claim details and link it to a project.</DialogDescription>
@@ -459,22 +703,91 @@ const ClaimsRegisterPage: React.FC = () => {
                 <Input value={form.claim_ref} onChange={(e) => setForm({ ...form, claim_ref: e.target.value })} placeholder="MRP3/CON/EOT/001" />
               </div>
             </div>
-            <div className="grid grid-cols-2 gap-3">
+            <fieldset className="rounded-md border p-3">
+              <legend className="px-1 text-sm font-medium">Event and notice</legend>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <div>
+                  <Label htmlFor="claim-event-date">Event date</Label>
+                  <Input id="claim-event-date" type="date" value={form.event_date} onChange={(e) => setForm({ ...form, event_date: e.target.value })} />
+                </div>
+                <div>
+                  <Label htmlFor="claim-awareness-date">Became aware on</Label>
+                  <Input id="claim-awareness-date" type="date" value={form.awareness_date} onChange={(e) => setForm({ ...form, awareness_date: e.target.value })} />
+                </div>
+                <div>
+                  <Label htmlFor="claim-notice-date">Notice served on</Label>
+                  <Input id="claim-notice-date" type="date" value={form.notice_date} onChange={(e) => setForm({ ...form, notice_date: e.target.value })} />
+                </div>
+              </div>
+              <p className="pt-2 text-xs text-muted-foreground">
+                The notice period is counted from the awareness date when given, otherwise from the event date.
+                Leave the notice date empty until notice has actually been served.
+              </p>
+            </fieldset>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
               <div>
-                <Label>Amount claimed</Label>
+                <Label htmlFor="claim-amount">Amount claimed</Label>
                 <Input
+                  id="claim-amount"
                   type="number"
+                  min={0}
+                  disabled={fromBoard}
+                  aria-describedby={fromBoard ? "claim-from-board" : undefined}
                   value={form.amount_claimed ?? ""}
                   onChange={(e) =>
                     setForm({ ...form, amount_claimed: e.target.value === "" ? undefined : Number(e.target.value) })
                   }
                 />
+                {form.amount_claimed != null && (
+                  <p className="pt-1 text-xs text-muted-foreground">{formatCrore(form.amount_claimed, form.currency)}</p>
+                )}
+                {fromBoard && (
+                  <p id="claim-from-board" className="pt-1 text-xs text-muted-foreground">
+                    Comes from the heads on the Claim Bench. Change it there.
+                  </p>
+                )}
               </div>
               <div>
-                <Label>Response due</Label>
-                <Input type="date" value={form.response_due_date} onChange={(e) => setForm({ ...form, response_due_date: e.target.value })} />
+                <Label htmlFor="claim-currency">Currency</Label>
+                <Input id="claim-currency" maxLength={3} value={form.currency} onChange={(e) => setForm({ ...form, currency: e.target.value })} />
+              </div>
+              <div>
+                <Label htmlFor="claim-eot-days">EOT days claimed</Label>
+                <Input
+                  id="claim-eot-days"
+                  type="number"
+                  min={0}
+                  step={1}
+                  disabled={fromBoard}
+                  aria-describedby={fromBoard ? "claim-from-board" : undefined}
+                  value={form.eot_days_claimed ?? ""}
+                  onChange={(e) =>
+                    setForm({ ...form, eot_days_claimed: e.target.value === "" ? undefined : Math.trunc(Number(e.target.value)) })
+                  }
+                />
               </div>
             </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div>
+                <Label htmlFor="claim-clauses">Contract clauses relied on</Label>
+                <Input id="claim-clauses" value={form.contract_clauses} onChange={(e) => setForm({ ...form, contract_clauses: e.target.value })} placeholder="e.g. 8.4, 20.1" />
+              </div>
+              <div>
+                <Label htmlFor="claim-response-due">Response due</Label>
+                <Input id="claim-response-due" type="date" value={form.response_due_date} onChange={(e) => setForm({ ...form, response_due_date: e.target.value })} />
+              </div>
+            </div>
+            <ClaimContractField
+              projectId={form.project_id}
+              value={form.contract_id}
+              onChange={(contractId) => setForm((current) => ({ ...current, contract_id: contractId }))}
+              onOptions={setContractOptions}
+              fixed={
+                editingClaim?.contract_id
+                  ? { contractId: editingClaim.contract_id, label: editingClaim.contract_label || editingClaim.contract_id }
+                  : null
+              }
+            />
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <Label>Project</Label>
@@ -493,9 +806,11 @@ const ClaimsRegisterPage: React.FC = () => {
                   <Select value={form.status} onValueChange={(v) => setForm({ ...form, status: v as ClaimStatus })}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>
-                      {CLAIM_STATUSES.map((s) => (
-                        <SelectItem key={s.value} value={s.value}>{s.label}</SelectItem>
-                      ))}
+                      {[form.status, ...(editingClaim?.allowed_status_transitions ?? [])]
+                        .filter((value, index, all) => all.indexOf(value) === index)
+                        .map((value) => (
+                          <SelectItem key={value} value={value}>{CLAIM_STATUS_LABEL[value] || value}</SelectItem>
+                        ))}
                     </SelectContent>
                   </Select>
                 </div>

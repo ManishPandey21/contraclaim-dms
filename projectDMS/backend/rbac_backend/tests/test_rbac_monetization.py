@@ -91,11 +91,14 @@ class FakeCollection:
 
     async def update_one(self, filter_doc, update_doc):
         self.updates.append((filter_doc, update_doc))
+        matched = 0
         for d in self.data:
             if self._matches(d, filter_doc):
                 d.update(update_doc.get("$set", {}))
+                matched = 1
                 break
-        return type("FakeResult", (), {"modified_count": 1})()
+        # matched_count: the subscription compare-and-set (L3) reads it.
+        return type("FakeResult", (), {"modified_count": 1, "matched_count": matched})()
 
     async def update_many(self, filter_doc, update_doc):
         self.updates.append((filter_doc, update_doc))
@@ -106,7 +109,31 @@ class FakeCollection:
                 count += 1
         return type("FakeResult", (), {"modified_count": count})()
 
+    async def find_one_and_update(self, filter_doc, update_doc, upsert=False, return_document=None):
+        # Operators ($or, ...) are ignored like the other fakes' range operators.
+        plain = {key: value for key, value in filter_doc.items() if not key.startswith("$")}
+        for d in self.data:
+            if self._matches(d, plain):
+                before = dict(d)
+                d.update(update_doc.get("$set", {}))
+                return d if return_document else before
+        if upsert:
+            self.data.append({"_id": filter_doc.get("_id"), **update_doc.get("$set", {})})
+        return None
+
+    async def delete_one(self, query):
+        self.deleted.append(query)
+        for index, d in enumerate(self.data):
+            if self._matches(d, query or {}):
+                del self.data[index]
+                return type("FakeResult", (), {"deleted_count": 1})()
+        return type("FakeResult", (), {"deleted_count": 0})()
+
     async def insert_one(self, doc):
+        from pymongo.errors import DuplicateKeyError
+
+        if "_id" in doc and any(d.get("_id") == doc["_id"] for d in self.data):
+            raise DuplicateKeyError("duplicate _id")
         inserted_id = doc.get("_id", f"inserted_{len(self.data) + 1}")
         saved = {**doc, "_id": inserted_id}
         self.inserted.append(saved)
@@ -138,6 +165,12 @@ class FakeDB:
         self.billing_records = FakeCollection()
         self.plans = FakeCollection()
         self.audit_events = FakeCollection()
+
+    def __getitem__(self, name):
+        # db["collection"], as Motor allows (the durable operation store uses it).
+        if not hasattr(self, name):
+            setattr(self, name, FakeCollection())
+        return getattr(self, name)
 
 
 @pytest.mark.asyncio
@@ -371,17 +404,24 @@ async def test_cancel_calls_gateway_and_updates_local() -> None:
 
 
 @pytest.mark.asyncio
-async def test_reactivate_calls_gateway() -> None:
+async def test_reactivate_without_a_paid_period_is_refused_before_the_gateway() -> None:
+    """R6-6: a cancelled subscription with no recorded paid period is a new purchase, never a
+    revival; the gateway is not asked to bill again. The resume path (period, replacement,
+    gateway confirmation, concurrency) is proven on real MongoDB in
+    tests/integration/test_r6_6_reactivation_mongo.py."""
+    from rbac_backend.services.monetization_service import SubscriptionReactivationRefused
+
     db = FakeDB()
     db.subscriptions.data = [{
         "_id": "sub_3", "organization_id": "org_1", "status": "cancelled",
         "plan_code": "dms_pro", "payment_gateway_subscription_id": "gw_3",
     }]
     gw = _FakeGateway()
-    await MonetizationService(db, gateway=gw).reactivate_subscription("sub_3", SimpleNamespace(id="u1"))
-    assert ("reactivate", "gw_3") in gw.calls
+    with pytest.raises(SubscriptionReactivationRefused):
+        await MonetizationService(db, gateway=gw).reactivate_subscription("sub_3", SimpleNamespace(id="u1"))
+    assert gw.calls == []
     sub = await db.subscriptions.find_one({"_id": "sub_3"})
-    assert sub["status"] == "active"
+    assert sub["status"] == "cancelled"
 
 
 @pytest.mark.asyncio

@@ -54,7 +54,11 @@ The guard test `client/src/config/__tests__/routeInventory.test.ts` fails when a
 | `/letter-quality` | LetterQualityDashboardPage | `drafting.request.view` | Yes | |
 | `/reports` | ReportsAnalyticsPage | `reports:view` | Yes | |
 | `/claims` | ClaimsRegisterPage | `dms.claim.view` or `dms.document.view` | Yes | RoleGuard. |
-| `/claims/:id` | ClaimDetailPage | `dms.claim.view` or `dms.document.view` | No | Prefix mapping through `/claims`; RoleGuard. |
+| `/claims/:id/record` | ClaimDetailPage | `dms.claim.view` or `dms.document.view` (prefix `/claims`) | No | Phase 4b: the claim record behind the bench. |
+| `/skills` | SkillAdminPage | `drafting.skill.publish` or `drafting.skill.read` | Yes | Phase 4b skill registry; publication is server-gated (4B-04/05). |
+| `/skill-reviews` | SkillAdminPage (review queue) | Open | Yes | Phase 4b reviewer queue: a reviewer holds an identity, not a permission; the server returns an empty queue to anyone else (swept: `test_phase4b_route_authz_sweep_mongo.py`). |
+| `/reviewer-roles` | ReviewerAssignmentsPage | `users:update` | Yes | Phase 4b (4B-08/09): reviewer roles granted and revoked; grants are server-gated. |
+| `/claims/:id` | ClaimRoute (the Claim Bench; ClaimDetailPage where the bench is off) | `dms.claim.view` or `dms.document.view` | No | Prefix mapping through `/claims`; RoleGuard. Phase 4b: the bench is server-gated by `CLAIM_BENCH_ROLLOUT_MODE` and per-claim RBAC. |
 | `/sla` | SLATrackerPage | `dms.claim.view` or `dms.document.view` | Yes | RoleGuard. |
 | `/key-dates` | KeyDateRegisterPage | `dms.keydate.view` or `dms.document.view` | Yes | RoleGuard. |
 | `/key-dates/:id` | KeyDateDetailPage | `dms.keydate.view` or `dms.document.view` | No | Prefix mapping through `/key-dates`; RoleGuard. |
@@ -62,7 +66,7 @@ The guard test `client/src/config/__tests__/routeInventory.test.ts` fails when a
 | `/bank-guarantees` | BankGuaranteeRegisterPage | `dms.bankguarantee.view` or `dms.document.view` | Yes | RoleGuard. |
 | `/ipc-bills` | IPCBillRegisterPage | `dms.ipc.view` or `dms.document.view` | Yes | RoleGuard. |
 | `/concerns` | ConcernsPage | `concerns:read` | Yes | RoleGuard. |
-| `/admin/billing-catalog` | BillingCatalogPage | `billing.plan.manage` or `system:admin` | Yes | RoleGuard. |
+| `/admin/billing-catalog` | BillingCatalogPage | `platform.pricing.manage` or `system:admin` | Yes | RoleGuard. M4 (2026-11-20): the catalogue is global; Super Admin or a platform role only. |
 | `/retrieval-console` | RetrievalConsolePage | `dms.document.view` | Yes | RoleGuard. |
 | `/observability` | ObservabilityPage | `reports:view` or `system:admin` | Yes | RoleGuard. |
 | `/letter-templates` | LetterTemplatePage | `letter_templates:read` | Yes | |

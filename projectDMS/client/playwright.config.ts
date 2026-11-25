@@ -31,6 +31,10 @@ const MOCKED_SUITES = [
   "**/cl3a-cross-register-scope.spec.ts",
   "**/cl3b-programme-chronology.spec.ts",
   "**/cl4a-core-active-scope.spec.ts",
+  "**/arbitration-pleading-gates.spec.ts",
+  "**/letter-bench.spec.ts",
+  "**/skills-review.spec.ts",
+  "**/claim-journey.spec.ts",
 ];
 
 export default defineConfig({

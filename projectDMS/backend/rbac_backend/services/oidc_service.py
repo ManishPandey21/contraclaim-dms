@@ -163,7 +163,9 @@ async def resolve_or_provision_user(
 
     existing = await db.users.find_one({"email": email})
     if existing:
-        if existing.get("disabled"):
+        from .account_status import account_is_active
+
+        if not account_is_active(existing):  # SEC-4: the same rule as every other door
             raise OidcError("Account is disabled")
         return existing
 

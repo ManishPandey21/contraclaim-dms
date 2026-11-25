@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from ..core.config import settings
 from ..core.database import get_db
@@ -36,8 +36,18 @@ _EVENT_ID_HEADERS = {
 }
 
 
+#: Providers this endpoint serves. The path segment is canonicalised once (case, spaces) and
+#: anything else is 404, so the idempotency key, the stored provider and the header names all
+#: use one spelling (independent review F1: "/webhooks/RazorPay" reached the Razorpay verifier
+#: under a different provider key and replayed a signed body).
+WEBHOOK_PROVIDERS = frozenset({"razorpay", "stripe", "noop"})
+
+
 @router.post("/webhooks/{provider}")
 async def handle_billing_webhook(provider: str, request: Request, db=Depends(get_db)):
+    provider = str(provider or "").strip().lower()
+    if provider not in WEBHOOK_PROVIDERS:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown billing provider")
     # Bounded, not `await request.body()`. This endpoint is unauthenticated by
     # design, so an anonymous caller decided how much the process held; the only
     # limit was the gateway's `client_max_body_size 200m`. The Gate 5 upload

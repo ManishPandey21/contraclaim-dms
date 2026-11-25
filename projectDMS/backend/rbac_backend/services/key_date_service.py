@@ -254,17 +254,24 @@ class KeyDateService:
     async def _start_and_basis(
         self, project_id: str, override: Optional[datetime],
         organization_id: Optional[str] = None,
+        contract_id: Optional[str] = None,
     ) -> Tuple[datetime, str]:
-        """Resolve (start date, week basis) for the key-date calculation.
+        """Resolve (start date, week basis) for the key-date calculation of one contract.
 
-        The Contract Master is the source of truth: ``contract_start_date`` is the
-        LOA date and ``week_basis`` selects the formula. Falls back to the project
-        record's start date when no Contract Master exists, and only then to an
-        explicit user-provided override.
+        The Contract Master entry of the milestone's own contract is the source of
+        truth: ``contract_start_date`` is the LOA date and ``week_basis`` selects the
+        formula. For the main contract (``"primary"``) it falls back to the project
+        record's start date, then to an explicit override, as before.
+
+        KD-1: a second contract's dates were calculated from the main contract's LOA
+        and week basis. A contract other than the main one now uses only its own
+        Contract Master entry, or an explicit override; it never borrows the main
+        contract's or the project's date, and without either it is refused.
         """
+        contract = str(contract_id or "").strip() or "primary"
         db = await self._get_db()
         try:
-            cm_query: Dict[str, Any] = {"project_id": project_id, "contract_id": "primary"}
+            cm_query: Dict[str, Any] = {"project_id": project_id, "contract_id": contract}
             if organization_id:
                 cm_query["organization_id"] = organization_id
             cm = await db.contract_master.find_one(cm_query)
@@ -272,6 +279,13 @@ class KeyDateService:
             cm = None
         basis = (cm or {}).get("week_basis") or WEEK_BASIS_LOA_PLUS
         start = _as_dt((cm or {}).get("contract_start_date"))
+        if not start and contract != "primary":
+            if override:
+                return override, basis
+            raise KeyDateError(
+                f"The Contract Master entry for contract {contract} has no contract start date (LOA). "
+                "Record it there, or give the start date for this calculation; the main contract's date is not used."
+            )
         if not start:
             try:
                 project_query: Dict[str, Any] = {"_id": project_id}
@@ -305,6 +319,7 @@ class KeyDateService:
             payload.project_id,
             payload.project_start_date,
             payload.organization_id or getattr(current_user, "organization_id", None),
+            payload.contract_id,
         )
         calc = calculate_key_date(start, payload.contractual_week_number, basis)
         doc = KeyDateMilestone(
@@ -456,7 +471,8 @@ class KeyDateService:
         week = payload.get("contractual_week_number") or milestone.get("contractual_week_number")
         if payload.get("contractual_week_number") or payload.get("project_start_date"):
             start, basis = await self._start_and_basis(
-                milestone.get("project_id"), payload.get("project_start_date"), milestone.get("organization_id")
+                milestone.get("project_id"), payload.get("project_start_date"), milestone.get("organization_id"),
+                milestone.get("contract_id"),
             )
             calc = calculate_key_date(start, week, basis)
             update["calculated_key_date"] = calc
@@ -558,6 +574,123 @@ class KeyDateService:
                 )
             raise
 
+    async def _contract_bases(
+        self, project_id: str, milestones: List[Dict[str, Any]], override_start: Optional[datetime],
+        organization_id: Optional[str],
+    ) -> Dict[str, Any]:
+        """KD-1: each contract's (start, basis), or the KeyDateError that stops it.
+
+        The override stands in only for the main contract; a second contract with no LOA
+        of its own is skipped and reported, never rewritten. Shared by the recalculation
+        and its dry-run, so the dry-run proposes exactly what the recalculation would write."""
+        bases: Dict[str, Any] = {}
+        for contract in sorted({str(m.get("contract_id") or "primary") for m in milestones}):
+            try:
+                bases[contract] = await self._start_and_basis(
+                    project_id, override_start if contract == "primary" else None, organization_id, contract
+                )
+            except KeyDateError as exc:
+                bases[contract] = exc
+        return bases
+
+    async def _basis_source(self, project_id: str, contract: str, organization_id: Optional[str]) -> str:
+        """Where a contract's start date comes from: its Contract Master entry, the project
+        record (main contract only), or a date given for the calculation."""
+        db = await self._get_db()
+        query: Dict[str, Any] = {"project_id": project_id, "contract_id": contract}
+        if organization_id:
+            query["organization_id"] = organization_id
+        row = await db.contract_master.find_one(query)
+        if _as_dt((row or {}).get("contract_start_date")):
+            return "contract_master"
+        if contract == "primary":
+            project_query: Dict[str, Any] = {"_id": project_id}
+            if organization_id:
+                project_query["organization_id"] = organization_id
+            project = await db.projects.find_one(project_query)
+            if _as_dt((project or {}).get("project_start_date") or (project or {}).get("start_date")):
+                return "project_start_date"
+        return "given_start_date"
+
+    async def _dependencies(self, milestone_id: str) -> Dict[str, int]:
+        """What relies on a milestone's dates: EOT records, achievements and claim links."""
+        db = await self._get_db()
+        submission_items = [row async for row in db.key_date_eot_submission_items.find({"key_date_id": milestone_id})]
+        determination_items = [row async for row in db.key_date_eot_determination_items.find({"key_date_id": milestone_id})]
+        eot_ids = {str(row.get("eot_submission_id")) for row in submission_items if row.get("eot_submission_id")}
+        eot_ids |= {str(row.get("determination_id")) for row in determination_items if row.get("determination_id")}
+        claim_links = 0
+        if eot_ids:
+            claim_links = await db.claim_head_links.count_documents({"target_id": {"$in": sorted(eot_ids)}, "status": "active"})
+        return {
+            "eot_submission_items": len(submission_items),
+            "eot_determination_items": len(determination_items),
+            "eot_applications": await db.key_date_eot_applications.count_documents({"milestone_id": milestone_id}),
+            "extension_history": await db.key_date_extension_history.count_documents({"milestone_id": milestone_id}),
+            "achievements": await db.key_date_achievements.count_documents({"milestone_id": milestone_id}),
+            "claim_links": claim_links,
+        }
+
+    async def recalculation_preview(
+        self, scope_filter: Dict[str, Any], project_id: str, current_user: Any,
+        *, override_start: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        """KD-1 dry-run (owner decision 2026-11-17): what "Recalculate project" would change,
+        without changing anything. For each milestone: its stored dates, the dates the
+        recalculation would write, the contractual basis used (contract, LOA date, week
+        basis and where the date comes from), whether it would change, why it is skipped,
+        and what relies on it. Reads only."""
+        db = await self._get_db()
+        query: Dict[str, Any] = dict(scope_filter or {})
+        query["project_id"] = project_id
+        milestones = [m async for m in db.key_date_milestones.find(query)]
+        organization_id = getattr(current_user, "organization_id", None)
+        bases = await self._contract_bases(project_id, milestones, override_start, organization_id)
+        basis_view: Dict[str, Any] = {}
+        for contract, value in bases.items():
+            if isinstance(value, KeyDateError):
+                basis_view[contract] = {"skipped": str(value)}
+            else:
+                basis_view[contract] = {
+                    "start_date": value[0], "week_basis": value[1],
+                    "source": await self._basis_source(project_id, contract, organization_id),
+                }
+        rows: List[Dict[str, Any]] = []
+        summary = {"scanned": len(milestones), "would_change": 0, "unchanged": 0, "skipped": 0,
+                   "baseline_kept_under_revision": 0}
+        for m in sorted(milestones, key=lambda item: (str(item.get("contract_id") or "primary"), str(item.get("title") or ""))):
+            contract = str(m.get("contract_id") or "primary")
+            stored = {
+                "calculated_key_date": m.get("calculated_key_date"),
+                "original_planned_key_date": m.get("original_planned_key_date"),
+                "current_approved_key_date": m.get("current_approved_key_date"),
+            }
+            row: Dict[str, Any] = {
+                "milestone_id": str(m.get("_id")), "title": m.get("title"), "milestone_ref": m.get("milestone_ref"),
+                "contract_id": contract, "contractual_week_number": m.get("contractual_week_number"),
+                "current_revision": int(m.get("current_revision") or 0), "stored": stored,
+                "dependencies": await self._dependencies(str(m.get("_id"))),
+            }
+            resolved = bases[contract]
+            if isinstance(resolved, KeyDateError) or m.get("contractual_week_number") is None:
+                reason = str(resolved) if isinstance(resolved, KeyDateError) else "No contractual week number: nothing to calculate from."
+                row.update(proposed=None, changes=[], skipped_reason=reason)
+                summary["skipped"] += 1
+                rows.append(row)
+                continue
+            start, basis = resolved
+            calc = calculate_key_date(start, m.get("contractual_week_number"), basis)
+            proposed = {"calculated_key_date": calc}
+            if row["current_revision"] == 0:
+                proposed.update(original_planned_key_date=calc, current_approved_key_date=calc)
+            else:
+                summary["baseline_kept_under_revision"] += 1
+            changes = [field for field, value in proposed.items() if _as_dt(stored.get(field)) != value]
+            row.update(proposed=proposed, changes=changes, skipped_reason=None)
+            summary["would_change" if changes else "unchanged"] += 1
+            rows.append(row)
+        return {"project_id": project_id, "dry_run": True, "bases": basis_view, "summary": summary, "milestones": rows}
+
     async def recalculate_project(self, scope_filter: Dict[str, Any], project_id: str,
                                   current_user: Any, *, override_start: Optional[datetime] = None) -> Dict[str, Any]:
         """Re-derive milestone key dates from the current LOA + week basis (opt-in).
@@ -574,15 +707,24 @@ class KeyDateService:
             "project_id": project_id,
             "organization_id": getattr(current_user, "organization_id", None),
         })
-        start, basis = await self._start_and_basis(
-            project_id, override_start, getattr(current_user, "organization_id", None)
-        )
         query: Dict[str, Any] = dict(scope_filter or {})
         query["project_id"] = project_id
         cursor = db.key_date_milestones.find(query)
         milestones = [m async for m in cursor]
+        organization_id = getattr(current_user, "organization_id", None)
+        bases = await self._contract_bases(project_id, milestones, override_start, organization_id)
+        if milestones and all(isinstance(value, KeyDateError) for value in bases.values()):
+            raise next(iter(bases.values()))
         updated = 0
+        skipped: Dict[str, int] = {}
         for m in milestones:
+            resolved = bases[str(m.get("contract_id") or "primary")]
+            if isinstance(resolved, KeyDateError) or m.get("contractual_week_number") is None:
+                # A milestone with no week number has nothing to calculate from (it used to stop the whole run).
+                key = str(m.get("contract_id") or "primary")
+                skipped[key] = skipped.get(key, 0) + 1
+                continue
+            start, basis = resolved
             calc = calculate_key_date(start, m.get("contractual_week_number"), basis)
             set_doc: Dict[str, Any] = {
                 "calculated_key_date": calc,
@@ -598,10 +740,23 @@ class KeyDateService:
             action="keydate.recalculated", actor_id=getattr(current_user, "id", None),
             resource_type="key_dates", resource_id=str(project_id),
             organization_id=getattr(current_user, "organization_id", None), project_id=project_id,
-            after={"start_date": str(start), "week_basis": basis, "updated": updated},
+            after={
+                "bases": {
+                    contract: ({"start_date": str(value[0]), "week_basis": value[1]}
+                               if not isinstance(value, KeyDateError) else {"skipped": str(value)})
+                    for contract, value in bases.items()
+                },
+                "updated": updated,
+                "skipped": skipped,
+            },
         )
+        primary = bases.get("primary")
+        start, basis = primary if isinstance(primary, tuple) else (None, None)
         return {"project_id": project_id, "start_date": start, "week_basis": basis,
-                "updated": updated, "scanned": len(milestones)}
+                "updated": updated, "scanned": len(milestones), "skipped_by_contract": skipped,
+                "bases": {contract: ({"start_date": value[0], "week_basis": value[1]}
+                                     if isinstance(value, tuple) else {"error": str(value)})
+                          for contract, value in bases.items()}}
 
     # --- EOT --------------------------------------------------------------
 

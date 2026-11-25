@@ -809,8 +809,11 @@ def test_stopping_the_worker_mid_build_releases_the_generation(database):
 
     instrument_id = _promote(database)
 
+    building = asyncio.Event()
+
     class HangingEmbedder(StrictEmbedder):
         async def embed(self, texts, model=None, *, strict=False):
+            building.set()  # the generation is claimed and the build is under way
             await asyncio.sleep(3600)
 
     async def stop_mid_build(db, client):
@@ -822,7 +825,9 @@ def test_stopping_the_worker_mid_build_releases_the_generation(database):
             worker_id="W-stopping",
         )
         task = asyncio.create_task(runtime.run_once())
-        await asyncio.sleep(1.0)
+        # Mid-build means mid-build: wait for the embedder, not a fixed delay (a slow runner had
+        # not claimed the generation after 1 s, CI run 438).
+        await asyncio.wait_for(building.wait(), timeout=60)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task

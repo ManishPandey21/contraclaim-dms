@@ -35,6 +35,18 @@ async def _selection_pins(
     return await selection.list_filters(None, None)
 
 
+
+async def _organisation_wide_orgs(scope: ScopeService, current_user: Any, member_orgs: Any) -> set:
+    """Organisations searched organisation-wide. Flag not ``on``: every member organisation, as
+    before. M1 (``BUILT_IN_ROLE_ASSIGNMENTS=on``): only where an organisation-wide role is assigned."""
+    from ..services import built_in_role_scope
+    from ..services.scope_service import ORGANIZATION_WIDE_ROLE_KEYS
+
+    orgs = set(member_orgs)
+    if not built_in_role_scope.enforced():
+        return orgs
+    return {org for org in orgs if (await scope.role_names_in(current_user, org)) & ORGANIZATION_WIDE_ROLE_KEYS}
+
 @router.get("/search/documents")
 async def search_documents(
     q: Optional[str] = Query(None, description="Search query"),
@@ -91,7 +103,7 @@ async def search_documents(
         roles = set(current_user.roles or [])
         if "superadmin" not in roles:
             scope = ScopeService()
-            allowed_orgs = await scope.client_organization_ids(current_user)
+            allowed_orgs = await _organisation_wide_orgs(scope, current_user, await scope.client_organization_ids(current_user))
             allowed_projects = await scope.client_project_ids(current_user)
             if "orgadmin" in roles or "orguser" in roles:
                 if allowed_orgs:
@@ -318,7 +330,7 @@ async def get_search_suggestions(
         roles = set(current_user.roles or [])
         if "superadmin" not in roles:
             scope = ScopeService()
-            allowed_orgs = await scope.client_organization_ids(current_user)
+            allowed_orgs = await _organisation_wide_orgs(scope, current_user, await scope.client_organization_ids(current_user))
             allowed_projects = await scope.client_project_ids(current_user)
             if "orgadmin" in roles or "orguser" in roles:
                 if not allowed_orgs:

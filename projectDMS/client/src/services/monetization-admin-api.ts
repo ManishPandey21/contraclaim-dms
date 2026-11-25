@@ -1,7 +1,8 @@
 import { api } from "./api";
 
 // Admin catalog CRUD for the monetization plans/add-ons/expert-allocations.
-// Mutations are step-up gated server-side (billing.plan.manage). This module
+// Mutations are step-up gated server-side (step-up action billing.plan.manage) and, since M4,
+// authorised only for Super Admin or platform.pricing.manage on a platform role. This module
 // covers list + update (activate/deactivate + core-field edit); nested-JSON
 // create is intentionally out of scope here.
 

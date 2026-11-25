@@ -8,9 +8,9 @@ URL and run in the background; the board shows their progress.
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Any, Awaitable, Callable, List, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import JSONResponse
 
 from ..core.database import get_database
@@ -42,8 +42,34 @@ bench_run_limiter = RateLimiter(max_requests=30, window_seconds=60, scope="lette
 bench_edit_limiter = RateLimiter(max_requests=240, window_seconds=60, scope="letter_bench_edits")
 
 
+def _determination_source(db: Any) -> Callable[[str, str, Any], Awaitable[Any]]:
+    """Loads a determination letter's content for the Bench (4B-31).
+
+    The caller must be able to read the determination's claim. Kept here, not in the
+    Bench service, so the Bench does not import the claim services.
+    """
+
+    async def load(determination_id: str, purpose: str, current_user: Any) -> Any:
+        from ..services.claim_bench import ClaimBenchService
+        from ..services.claim_determinations import DETERMINATIONS, load_letter_source
+        from ..services.claim_service import ClaimService
+        from ..services.policy_service import PolicyService
+
+        row = await db[DETERMINATIONS].find_one({"_id": determination_id})
+        if not row:
+            raise HTTPException(status_code=404, detail="Determination not found")
+        record = await ClaimService(db).get(str(row.get("claim_id")))
+        if not record:
+            raise HTTPException(status_code=404, detail="Determination not found")
+        await PolicyService(db).authorize_document(current_user, "dms.claim.view", record, resource_type="claim")
+        return await load_letter_source(db, ClaimBenchService(db), record, determination_id, purpose)  # type: ignore[arg-type]
+
+    return load
+
+
 async def get_bench_service() -> LetterBenchService:
-    return LetterBenchService(await get_database())
+    db = await get_database()
+    return LetterBenchService(db, determination_source=_determination_source(db))
 
 
 def _user_id(current_user: CurrentUser) -> str:

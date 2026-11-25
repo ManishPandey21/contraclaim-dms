@@ -28,6 +28,11 @@ from .routers import (
     contract_master,
     contract_master_api,
     claims,
+    claim_bench,
+    claim_findings,
+    claim_escalation,
+    pickers,
+    reviewer_assignments,
     key_dates,
     variations,
     bank_guarantees,
@@ -69,6 +74,7 @@ from .routers import (
     search,
     security_terms,
     health,
+    build_info,
     smtp_settings,
     sso,
     storage_sync,
@@ -264,6 +270,11 @@ app.include_router(document_grounded_summary.router, prefix="/api", tags=["docum
 app.include_router(legacy_relationship_backfill.router, prefix="/api", tags=["legacy-relationship-backfill"])
 app.include_router(contracts.router, prefix="/api", tags=["contracts"])
 app.include_router(claims.router, prefix="/api", tags=["claims"])
+app.include_router(claim_bench.router, prefix="/api", tags=["claim-bench"])
+app.include_router(claim_findings.router, prefix="/api", tags=["claim-findings"])
+app.include_router(claim_escalation.router, prefix="/api", tags=["claim-escalation"])
+app.include_router(pickers.router, prefix="/api", tags=["pickers"])
+app.include_router(reviewer_assignments.router, prefix="/api", tags=["reviewer-assignments"])
 app.include_router(contract_appraisal.router, prefix="/api", tags=["contract-appraisal"])
 app.include_router(contract_clauses.router, prefix="/api", tags=["contract-clauses"])
 app.include_router(contract_master.router, prefix="/api", tags=["contract-master"])
@@ -320,6 +331,7 @@ app.include_router(smtp_settings.router, prefix="/api", tags=["smtp-settings"])
 app.include_router(retrieval_engine.router, prefix="/api", tags=["retrieval-engine"])
 app.include_router(dashboard.router, prefix="/api", tags=["dashboard"])
 app.include_router(performance.router, prefix="/api", tags=["performance"])
+app.include_router(build_info.router, prefix="/api", tags=["build"])
 app.include_router(ws_router)
 app.include_router(health.router)
 
