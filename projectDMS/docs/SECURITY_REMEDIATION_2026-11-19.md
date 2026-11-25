@@ -686,7 +686,7 @@ Full record: `docs/M1_BUILT_IN_ROLE_SCOPING.md` §9. Evidence: `tests/integratio
 **Mutation testing: 24 mutants over every new authorisation check.**
 - First valid run: 15 caught, 9 survived. The survivors were gaps in the tests, not the code. The most material: the M1 cache test never reached the cache, because no runtime Redis was configured. It now runs on a real Redis and asserts the cached entry and its mode.
 - Tests were added or tightened for each survivor (M1 §9, "Mutation testing").
-- Final result: recorded in M1 §9 with the commit that carries the strengthened tests.
+- **Final result at `8809a12`: 24 of 24 caught** (21 M1, 3 letter-template).
 
 **Separate statuses.**
 
