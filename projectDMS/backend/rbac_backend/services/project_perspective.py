@@ -115,7 +115,7 @@ class ProjectPerspectiveService:
         """An Organization Admin of that organisation. Deliberately not a Super Admin."""
         if not organization_id or self.scope.is_superadmin(user):
             return False
-        if "orgadmin" not in self.scope.role_names(user):
+        if "orgadmin" not in await self.scope.role_names_in(user, str(organization_id)):  # M1: assigned there
             return False
         return await self.scope.has_organization_wide_scope(user, organization_id=str(organization_id))
 

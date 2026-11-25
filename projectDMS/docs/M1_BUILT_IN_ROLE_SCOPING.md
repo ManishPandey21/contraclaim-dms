@@ -202,3 +202,66 @@ Proposed decision = the existing decision allowed it **and** some held role gran
 Mutants 9/10 killed singly; removing the module's error swallow alone is equivalent behind the hook's own guard, and removing both is killed.
 
 **Next steps (each needs approval):** run `shadow` on staging, read P-05 `built_in_role_shadow_divergence` and `built_in_role_scope_impact` together, extend shadowing to the §3 sites (or migrate them to the single resolver first), owner decision per `assignments_needing_a_decision`, then the §5 plan.
+
+## 9. Enforcement mode `on` (remediation, 2026-11-25)
+
+### Authority and status
+
+- **Authority.** The security owner's decision S-4 (private review record, 2026-11-25) rejected M1 for production release and approved its remediation for implementation and verification. The owner then directed the fix to start the same day.
+- **Status.**
+  - Implemented behind `BUILT_IN_ROLE_ASSIGNMENTS=on`. The default stays `off`, and activation needs a separate owner decision.
+  - No role, user, membership or assignment is written.
+  - Nothing is activated or migrated.
+
+### The rule under `on` (`services/built_in_role_scope.py`)
+
+- **Where a tenant built-in role counts.** A tenant built-in role (`orgadmin`, `orguser`, `projectadmin`, `projectuser`, the billing administrator, the reviewer keys and every other tenant built-in key) counts in the user's **primary organisation** (`users.organization_id`) and nowhere else, except where an explicit `role_assignments` row puts it.
+  - An organisation row puts the role at organisation level in that organisation.
+  - A project row puts a project-tier key (`projectadmin`, `projectuser`) on that project only. A project row never makes an organisation-tier key count anywhere.
+- **Platform roles.** `superadmin` and `superuser` keep their platform meaning.
+- **Custom roles.** Unchanged (SEC-1).
+- **No primary organisation.** A tenant built-in key held by a user with no primary organisation counts nowhere.
+- **Inside the primary organisation.** The meaning is unchanged, which the test "primary organisation keeps its meaning" compares against `off`. M1 is about reach into *other* organisations, and that is what `on` removes.
+
+### Sites changed (each behaves exactly as before unless the flag is `on`)
+
+| Site | Change under `on` |
+|---|---|
+| `PermissionService.scoped_grants` | A built-in role's permissions become grants scoped to its assignments, instead of unscoped. Its role name counts only if it is assigned somewhere. The permission cache records the mode, so a grant is never served across a mode change |
+| `PermissionService.holds_organisation_level_custom_role`, `core.security.permission_scope_query` | A built-in assignment scope is never mistaken for a custom organisation role |
+| `ScopeService.has_organization_wide_scope`, `is_client_scope_allowed` | The organisation-wide role must be counted in that organisation (`ScopeService.role_names_in`) |
+| `PolicyService.has_organisation_level_standing` (billing standing, decision 4) | The organisation-level role must be assigned there |
+| `rbac_monetization`: checkout scope with `BILLING_EXPLICIT_PERMISSIONS` off; effective-services widening for the billing administrator | The role must be assigned in the target organisation |
+| `AuthorizationService._collect_user_org_ids` | For a holder of a tenant built-in role, the tier checks reason over the primary organisation only. Explicit assignment rows are not honoured here, which fails closed. A user with custom roles only is unchanged |
+| `RoleService.can_view_role` | Org Admin and Project Admin see roles only of organisations where they are assigned |
+| `routers/search.py` (search and suggestions) | Organisation-wide search only where an organisation-wide role is assigned |
+| `ProjectPerspectiveService._is_organisation_admin` | `orgadmin` must be assigned in that organisation |
+| `reviewer_assignments.arbitration_reviewer_roles` | A bare reviewer key on the role list answers a case's gates only in the primary organisation, or through an explicit row. Live reviewer assignments are unchanged |
+
+`build_scope_query` and `authorize_scope` already bound the organisation and project tiers to the primary organisation, and are unchanged.
+
+### Tests (real HTTP, real MongoDB)
+
+`tests/integration/test_m1_enforcement_mongo.py` has 11 tests.
+
+| Case | Result under `on` |
+|---|---|
+| M1-E1, E2, E4: B's billing records and review queue; B's claims; B's service state | 403, 403, operational state only |
+| M1-E3: sibling project A2 claims; A's billing; A2's state | 403; 403; operational only |
+| M1-E5: B's billing records; B's claims | 403; 403 |
+| Primary organisation: Org Admin (single and dual), billing administrator, Project Admin | Every answer and every effective state identical to `off` |
+| Explicit assignment rows | Organisation row: B reachable. Project row: that project only. Organisation-tier key on a project row: nothing. Revoked row: nothing |
+| No primary organisation | Nothing granted |
+| Super Admin | Unchanged |
+| Scope service | B membership kept; B organisation-wide refused |
+| Permission cache | `off` → `on` → `off` answers change with the mode; nothing stale |
+| AuthorizationService, role visibility, search, reviewer keys | Bounded to the assignment |
+| Writes | None to users, roles, memberships or assignments |
+
+The pinned exposures in `test_m1_cross_org_role_combinations_mongo.py` keep asserting today's behaviour with the flag `off`, which is the default.
+
+### Residual and stated limits
+
+- **Not yet a release condition met.** Every §5 step is still open: P-05, an owner decision for each `assignments_needing_a_decision`, assignments written grant-before-revoke, `shadow` on staging, `on` on staging with two deployed passes, a security review of this code, and a release decision. Until `on` is activated, M1 remains as it is today in production.
+- **Shadow is now incomplete.** The shadow evaluator (§8) compares the policy gate only. It does not shadow the other sites listed above, so a zero shadow count does not prove `on` is safe for those sites.
+- **Letter templates.** `LetterTemplateService._resolve_scope` takes the organisation from the payload for an Org Admin, so for creation it is not bounded by membership or assignment. This was found while auditing and has not been confirmed through the route. It is recorded for the security owner, not changed under the scope freeze.

@@ -145,7 +145,20 @@ async def arbitration_reviewer_roles(
     assigned = await reviewer_roles_for(
         db, user, scope_type=scope, organization_id=organization_id, project_id=project_id
     )
-    return assigned | actor_role_names(user)
+    legacy = actor_role_names(user)
+    from . import built_in_role_scope
+
+    if built_in_role_scope.enforced():
+        # M1 (BUILT_IN_ROLE_ASSIGNMENTS=on): a bare reviewer key on the role list is a built-in
+        # role and counts only where it is assigned (the primary organisation, or an explicit
+        # role_assignments row); reviewer_role_assignments above are already scoped.
+        case_org = organization_id
+        if not case_org and project_id:
+            case_org = await built_in_role_scope.project_organisation(db, str(project_id))
+            if not case_org:
+                return assigned
+        legacy = await built_in_role_scope.role_names_in(db, user, legacy, case_org)
+    return assigned | legacy
 
 
 class ReviewerAssignmentService:

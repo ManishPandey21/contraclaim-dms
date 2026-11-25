@@ -17,13 +17,19 @@ def test_new_flags_default_off() -> None:
     assert fields["PAYMENT_MISMATCH_GRACE_DAYS"].default == 0
 
 
-@pytest.mark.parametrize("mode, expected", [("off", "off"), ("SHADOW", "shadow"), (None, "off")])
-def test_built_in_role_assignments_accepts_off_and_shadow(mode, expected) -> None:
+@pytest.mark.parametrize("mode, expected", [("off", "off"), ("SHADOW", "shadow"), (None, "off"), ("on", "on"), ("ON", "on")])
+def test_built_in_role_assignments_accepts_off_shadow_and_on(mode, expected) -> None:
+    # "on" (M1 enforcement) became accepted on 2026-11-25 (security owner S-4, owner direction);
+    # the default stays "off" (test below), and activation is a separate owner decision.
     assert Settings._built_in_role_assignments_mode(mode) == expected
 
 
-@pytest.mark.parametrize("mode", ["on", "ON", "enforce", "yes"])
-def test_built_in_role_assignments_refuses_enforcement_and_unknown_modes(mode) -> None:
+def test_built_in_role_assignments_defaults_to_off() -> None:
+    assert Settings.model_fields["BUILT_IN_ROLE_ASSIGNMENTS"].default == "off"
+
+
+@pytest.mark.parametrize("mode", ["enforce", "yes", "true", "1"])
+def test_built_in_role_assignments_refuses_unknown_modes(mode) -> None:
     with pytest.raises(ValueError):
         Settings._built_in_role_assignments_mode(mode)
 

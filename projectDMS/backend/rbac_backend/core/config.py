@@ -336,9 +336,11 @@ class Settings(BaseSettings):
     # M1 (workstream 5, 2026-11-21): built-in roles scoped to their assignment. "off" (the
     # default) changes nothing; "shadow" evaluates the proposed per-assignment decision beside
     # every allowed PolicyService.authorize decision and records privacy-safe divergence counts
-    # (services/role_scope_shadow.py) without changing any response. "on" (enforcement) is not
-    # implemented and is refused at startup: it needs P-05, the authorised security review and
-    # a separate owner approval.
+    # (services/role_scope_shadow.py) without changing any response. "on" (M1 remediation,
+    # services/built_in_role_scope.py, 2026-11-25) enforces it: a tenant built-in role counts
+    # only in the primary organisation and where an explicit role_assignments row puts it.
+    # Activation needs P-05, the assignment decisions and migration, staging passes, the
+    # security review and a separate owner approval.
     BUILT_IN_ROLE_ASSIGNMENTS: str = Field(default="off", validation_alias="BUILT_IN_ROLE_ASSIGNMENTS")
     # Workstream 1 (2026-11-21): checkout that replaces a gateway-billed subscription. Off (the
     # default) keeps today's checkout (a warning over a paid plan) and refuses
@@ -648,10 +650,8 @@ class Settings(BaseSettings):
     @classmethod
     def _built_in_role_assignments_mode(cls, value: Any) -> str:
         mode = str(value or "off").strip().lower()
-        if mode == "on":
-            raise ValueError("BUILT_IN_ROLE_ASSIGNMENTS=on (enforcement) is not implemented; use off or shadow")
-        if mode not in {"off", "shadow"}:
-            raise ValueError("BUILT_IN_ROLE_ASSIGNMENTS must be off or shadow")
+        if mode not in {"off", "shadow", "on"}:
+            raise ValueError("BUILT_IN_ROLE_ASSIGNMENTS must be off, shadow or on")
         return mode
 
     @field_validator('PAYMENT_MISMATCH_POLICY', mode='before')

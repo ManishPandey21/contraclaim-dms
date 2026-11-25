@@ -109,14 +109,16 @@ class PolicyService:
         visibility: a member holding an organisation-level built-in role
         (ORGANISATION_LEVEL_BILLING_ROLE_KEYS), or a custom role of that organisation with no
         project that itself grants ``permission`` (an unrelated organisation role does not,
-        re-review N1). Super Admin always. (Built-in roles are still global: M1.)"""
+        re-review N1). Super Admin always. Built-in roles are global unless
+        ``BUILT_IN_ROLE_ASSIGNMENTS=on`` (M1), which counts them only where assigned."""
         if self.scope_service.is_superadmin(current_user):
             return True
         if not organization_id:
             return False
         if str(organization_id) not in await self.scope_service.client_organization_ids(current_user):
             return False
-        if self.scope_service.role_names(current_user) & ORGANISATION_LEVEL_BILLING_ROLE_KEYS:
+        # M1 (on): the organisation-level role must be assigned in this organisation.
+        if (await self.scope_service.role_names_in(current_user, str(organization_id))) & ORGANISATION_LEVEL_BILLING_ROLE_KEYS:
             return True
         return await self.permission_service.holds_organisation_level_custom_role(
             str(getattr(current_user, "id", "") or ""), str(organization_id), permission

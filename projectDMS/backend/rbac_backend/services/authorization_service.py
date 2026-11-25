@@ -93,10 +93,30 @@ class AuthorizationService:
         org_id = getattr(current_user, "organization_id", None)
         if org_id:
             org_ids.add(str(org_id))
+        if self._built_in_tier_bound_to_primary(current_user):
+            # M1 (BUILT_IN_ROLE_ASSIGNMENTS=on): every check in this service grants by a built-in
+            # tier role, so the organisations it reasons over are where that role is assigned -
+            # the primary organisation. (An explicit role_assignments row is honoured by the
+            # policy, scope and permission paths; here it fails closed.)
+            return org_ids
         for org in getattr(current_user, "organizations", []) or []:
             if org:
                 org_ids.add(str(org))
         return org_ids
+
+    @staticmethod
+    def _built_in_tier_bound_to_primary(current_user: Any) -> bool:
+        """``on`` and the user holds a tenant built-in role (``superuser`` keeps its organisations;
+        a user with custom roles only is not reasoned about by tier here, so is unchanged)."""
+        from . import built_in_role_scope
+        from .role_grants import BUILT_IN_ROLE_KEYS
+
+        if not built_in_role_scope.enforced():
+            return False
+        names = {str(role).strip().lower() for role in (getattr(current_user, "roles", []) or []) if isinstance(role, str)}
+        if names & built_in_role_scope.PLATFORM_ROLE_KEYS:
+            return False
+        return bool(names & (BUILT_IN_ROLE_KEYS - built_in_role_scope.PLATFORM_ROLE_KEYS))
 
     def _collect_user_project_ids(self, current_user: Any) -> set[str]:
         project_ids: set[str] = set()

@@ -834,7 +834,14 @@ async def permission_scope_query(
     matching: List[Dict[str, Any]] = []
     for grant in service.grants_naming(grants, permission):
         scope = grant.get("scope")
-        if isinstance(scope, dict) and not scope.get("platform") and str(scope.get("organization_id") or "") == target_org:
+        # M1 (on): a built-in role's assignment scope is not a custom grant; row visibility for
+        # built-in roles stays with build_scope_query.
+        if (
+            isinstance(scope, dict)
+            and not scope.get("platform")
+            and not scope.get("built_in")
+            and str(scope.get("organization_id") or "") == target_org
+        ):
             matching.append(scope)
     if not matching:
         return deny

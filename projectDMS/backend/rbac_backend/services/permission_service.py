@@ -40,6 +40,7 @@ from ..utils.error_handler import BaseDomainError, ValidationError
 from ..utils.audit_logger import AuditLogger
 from .runtime_state import get_runtime_state
 from .role_grants import applicable_names, grant_applies, role_grant_scope, role_is_built_in, user_memberships
+from . import built_in_role_scope
 
 logger = logging.getLogger(__name__)
 
@@ -1136,6 +1137,7 @@ class PermissionService:
             if (
                 isinstance(scope, Mapping)
                 and not scope.get("platform")
+                and not scope.get("built_in")  # M1 (on): a built-in role's assignment is not a custom role
                 and not scope.get("project_id")
                 and str(scope.get("organization_id") or "") == str(organization_id)
                 and wanted & set(grant.get("names") or [])
@@ -1201,14 +1203,38 @@ class PermissionService:
                 continue
             role = resolution.document
             if not role:
-                # A bare built-in key with no document keeps its name, as before.
-                if resolution.key:
+                # A bare built-in key with no document keeps its name, as before - under M1
+                # enforcement only for a user with a primary organisation to hold it in.
+                if resolution.key and not (
+                    built_in_role_scope.enforced()
+                    and resolution.key.strip().lower() not in built_in_role_scope.PLATFORM_ROLE_KEYS
+                    and not built_in_role_scope.primary_organisation_of(user_doc)
+                ):
                     role_names.add(resolution.key)
                 continue
             if not role_is_built_in(role) and memberships is None:
                 memberships = await user_memberships(db, user_doc)
             applies, scope = await role_grant_scope(db, role, memberships or (set(), set()), project_cache)
             if not applies:
+                continue
+            built_in_key = (resolution.key or "").strip().lower()
+            if (
+                role_is_built_in(role)
+                and built_in_role_scope.enforced()
+                and built_in_key not in built_in_role_scope.PLATFORM_ROLE_KEYS
+            ):
+                # M1 (BUILT_IN_ROLE_ASSIGNMENTS=on): the role counts only where it is assigned -
+                # the primary organisation and explicit role_assignments rows - never in every
+                # organisation the user's membership reaches. Unassigned: no permissions and
+                # no role name.
+                scopes = await built_in_role_scope.grant_scopes(db, user_doc, built_in_key, project_cache)
+                if not scopes:
+                    continue
+                if built_in_key:
+                    role_names.add(built_in_key)
+                entries = {str(p).strip() for p in (role.get("permissions") or []) if p is not None and str(p).strip()}
+                built_in_names = sorted(set(entries) | await self._catalogue_names(db, entries))
+                grants.extend({"names": built_in_names, "scope": built_in_scope} for built_in_scope in scopes)
                 continue
             if role_is_built_in(role):
                 if resolution.key:
@@ -1414,6 +1440,9 @@ class PermissionService:
                     cache_parsed is not None
                     and isinstance(cache_parsed.get("grants"), list)
                     and "primary_organization_id" in cache_parsed
+                    # M1: grants computed under another BUILT_IN_ROLE_ASSIGNMENTS mode are
+                    # scoped differently; never serve them across a mode change.
+                    and cache_parsed.get("built_in_role_mode", "off") == built_in_role_scope.mode()
                 ):
                     return await _logged(
                         self._decide(
@@ -1462,6 +1491,7 @@ class PermissionService:
                             "grants": grants,
                             "role_names": sorted(role_names),
                             "primary_organization_id": primary,
+                            "built_in_role_mode": built_in_role_scope.mode(),
                             "computed_at": computed_at,
                         }), ex=PERMISSION_CACHE_TTL_SECONDS)
                 except Exception as e:

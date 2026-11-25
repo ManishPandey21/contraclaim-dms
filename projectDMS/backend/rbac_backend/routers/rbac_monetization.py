@@ -48,6 +48,7 @@ from ..services.monetization_service import (
 from ..services.permission_service import PermissionService
 from ..services.policy_service import PolicyService
 from ..services.scope_service import ScopeService
+from ..services import built_in_role_scope
 from ..services.step_up_service import require_step_up
 from ..utils.rate_limiter import RateLimiter
 
@@ -305,7 +306,14 @@ async def _authorize_checkout_scope(
         )
         return
 
+    # M1 (BUILT_IN_ROLE_ASSIGNMENTS=on): the administrator role must be assigned in the
+    # organisation being changed, not merely held somewhere the user is a member.
     roles = _role_names(current_user)
+    if built_in_role_scope.enforced():
+        target_org = payload.organization_id
+        if not target_org and payload.project_id:
+            target_org = await policy._organisation_of(None, str(payload.project_id))
+        roles = await scope.role_names_in(current_user, str(target_org) if target_org else None)
     has_subscription_admin_permission = await policy.has_permission(
         current_user,
         Permissions.SUBSCRIPTION_ENTITLEMENT_MANAGE,
@@ -588,7 +596,7 @@ async def get_effective_plan_services(
     for org_id in sorted(allowed_orgs):
         widen = bool(roles & {"orgadmin", "orguser"}) and await scope.has_organization_wide_scope(current_user, organization_id=org_id)
         if not widen and entitlement_manager:
-            widen = "contraclaim_billing_admin" in roles or await PermissionService().holds_organisation_level_custom_role(
+            widen = "contraclaim_billing_admin" in await scope.role_names_in(current_user, org_id) or await PermissionService().holds_organisation_level_custom_role(
                 caller_id, org_id, Permissions.SUBSCRIPTION_ENTITLEMENT_MANAGE
             )
         if widen:

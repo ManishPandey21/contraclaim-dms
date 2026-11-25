@@ -328,6 +328,19 @@ class RoleService:
                 org_ids.add(str(org))
         return org_ids
 
+    async def _organisations_where_assigned(self, current_user: Any, role_key: str) -> set[str]:
+        """The member organisations where ``role_key`` counts (M1). Flag not ``on``: every member
+        organisation, as before. ``on``: only those where the role is assigned (the primary
+        organisation and explicit ``role_assignments`` rows)."""
+        from . import built_in_role_scope
+        from .scope_service import ScopeService
+
+        org_ids = self._collect_user_org_ids(current_user)
+        if not built_in_role_scope.enforced():
+            return org_ids
+        scope = ScopeService(self.db if getattr(self, "db", None) is not None else None)
+        return {org for org in org_ids if role_key in await scope.role_names_in(current_user, org)}
+
     def _collect_user_project_ids(self, current_user: Any) -> set[str]:
         project_ids: set[str] = set()
         if current_user is None:
@@ -411,7 +424,7 @@ class RoleService:
                 return False
             if self._role_matches_keys(role_doc, ORG_ADMIN_KEYS):
                 return False
-            org_ids = self._collect_user_org_ids(current_user)
+            org_ids = await self._organisations_where_assigned(current_user, "orgadmin")
             return await self._role_matches_org_scope(role_doc, org_ids)
 
         if "projectadmin" in role_names:
@@ -419,7 +432,7 @@ class RoleService:
                 return False
             if self._role_matches_keys(role_doc, PROJECT_ADMIN_KEYS):
                 return False
-            org_ids = self._collect_user_org_ids(current_user)
+            org_ids = await self._organisations_where_assigned(current_user, "projectadmin")
             project_ids = self._collect_user_project_ids(current_user)
             return await self._role_matches_project_scope(role_doc, project_ids, org_ids)
 

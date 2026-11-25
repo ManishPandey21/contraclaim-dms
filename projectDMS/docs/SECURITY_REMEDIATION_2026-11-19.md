@@ -630,3 +630,36 @@ Review 10 (cold, given the code): 17 findings - 1 High (R10-1, latent), 4 Medium
 | Gitleaks 2 historical findings; picomatch R5 | - | Authorised security review |
 
 **CI:** exact-head run 44895171828 on `1b77419` (the final code; later commits are docs only): backend 8,485 passed, 1,461 skipped, 4 xfailed; exhibit confinement 20; real MongoDB "all 107 module(s) ran: 1367 test case(s)", 1,367 passed, none skipped; frontend (lint, unit, mocked Playwright, build), dependency scan and Docker build/scan passed; **Gitleaks failed** on its 2 known findings. **Local at `1b77419`:** backend unit suite 8,458 passed, 0 failed (135 skipped, 4 xfailed); payment, M1 and P-05 suites on real MongoDB 359 passed; mypy staged gate passed; ruff unchanged on every touched file (one pre-existing finding in `monetization_service.py`). CI success is not security approval.
+
+## M1 remediation: built-in roles scoped to their assignment (2026-11-25)
+
+**Authority.** The security owner's decision S-4 (recorded in the private review workspace) rejected M1 for production release and approved its remediation for implementation and verification. The owner directed the fix to start the same day.
+
+**What changed.**
+- **The flag.** Enforcement mode `BUILT_IN_ROLE_ASSIGNMENTS=on` is now implemented. The default stays `off`, and with the flag `off` or `shadow` every decision is unchanged.
+- **The rule.** With `on`, a tenant built-in role counts only in the user's primary organisation, or where an explicit `role_assignments` row puts it.
+- **Coverage.** The rule is applied at:
+  - the permission grants;
+  - the scope service's organisation-wide and membership checks;
+  - billing standing;
+  - checkout;
+  - effective-services widening;
+  - the `AuthorizationService` tiers;
+  - role visibility;
+  - search;
+  - the perspective administrator check;
+  - legacy reviewer keys.
+- **Data.** Nothing is written, migrated or activated.
+
+Full record: `docs/M1_BUILT_IN_ROLE_SCOPING.md` §9. Evidence: `tests/integration/test_m1_enforcement_mongo.py`, where M1-E1 to M1-E5 are refused with the flag `on`, and the primary organisation's answers are identical to the answers with the flag `off`.
+
+**Status.**
+
+| Implemented | CI-verified | Security-approved | Production-accepted |
+|---|---|---|---|
+| Yes, behind the flag | Pending (this pass) | No: needs the security owner's review of this code | No: the M1 §5 plan (P-05, assignment decisions, grant before revoke, staging `shadow` then `on` with two deployed passes, release decision) is still open |
+
+**Residual.**
+- The shadow evaluator covers the policy gate only.
+- The `AuthorizationService` tiers do not honour explicit assignment rows, so they fail closed.
+- A letter-template creation path found in the audit takes the organisation from the payload. It is unconfirmed and recorded for the security owner.
