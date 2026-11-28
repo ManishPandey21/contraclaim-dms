@@ -1844,13 +1844,13 @@ class LetterBenchService:
                 extra_findings=[finding.as_validation_finding() for finding in findings],
                 sender_texts=[board.incoming_text or "", *(a.quoted_text for a in board.assertions)],
                 user_inputs=[
-                    *(a.user_direction for a in board.assertions if (a.user_direction or "").strip()),
-                    *(item.answer for item in board.questions if (item.answer or "").strip()),
+                    *(a.user_direction or "" for a in board.assertions if (a.user_direction or "").strip()),
+                    *(item.answer or "" for item in board.questions if (item.answer or "").strip()),
                 ],
                 confirmations=[
                     Confirmation(
                         text=p.text,
-                        basis=p.confirmation_basis,
+                        basis=p.confirmation_basis or "",
                         confirmed_by=p.confirmed_by,
                         confirmed_at=p.confirmed_at.isoformat() if p.confirmed_at else None,
                     )
