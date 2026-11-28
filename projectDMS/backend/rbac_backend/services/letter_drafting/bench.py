@@ -371,10 +371,17 @@ class LetterBenchService:
             await self.drafts.policy_service.authorize_document(current_user, "dms.document.view", document)
             organization_id = str(document.get("organization_id") or "")
             project_id = str(document.get("project_id") or "") or None
-            reference = document.get("letterNo") or document.get("subject") or "incoming letter"
-            title = f"Reply to {reference}"
-            subject = f"Re: {document.get('subject') or reference}"
-            recipient = str(document.get("from") or "")
+            if is_consumable(document):
+                reference = document.get("letterNo") or document.get("subject") or "incoming letter"
+                title = f"Reply to {reference}"
+                subject = f"Re: {document.get('subject') or reference}"
+                recipient = str(document.get("from") or "")
+            else:
+                # A held document's metadata is as unverified as its body: none
+                # of it is written onto the letter. The board says it is held.
+                title = "Reply to incoming letter"
+                subject = "Re: incoming letter"
+                recipient = "[CONFIRM: addressee]"
             origin_key = {"incoming_document_id": str(request.incoming_document_id)}
         else:
             from ..variation_service import VariationService
