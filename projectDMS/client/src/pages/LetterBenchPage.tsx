@@ -14,6 +14,7 @@ import {
 import { IncomingLetterCanvas } from "@/components/letter-bench/IncomingLetterCanvas";
 import { PositionGateBar } from "@/components/letter-bench/PositionGateBar";
 import { ReplyComposer } from "@/components/letter-bench/ReplyComposer";
+import { GroundingPanel } from "@/components/letter-bench/GroundingPanel";
 import { SkillPalette } from "@/components/letter-bench/SkillPalette";
 import { SkillRail } from "@/components/letter-bench/SkillRail";
 import { SkillStepDrawer } from "@/components/letter-bench/SkillStepDrawer";
@@ -444,7 +445,10 @@ const LetterBenchPage: React.FC = () => {
                   assertions={orderedAssertions}
                   readOnly={readOnly}
                   composing={board.composing}
-                  onSave={(paragraphId, text) => actions.editParagraph.mutate({ paragraphId, text })}
+                  grounding={board.grounding}
+                  onSave={(paragraphId, text, confirmationBasis) =>
+                    actions.editParagraph.mutate({ paragraphId, text, confirmationBasis })
+                  }
                   onRerun={(assertionId) =>
                     actions.runStep.mutate({
                       skill_key: "indian-infra-contract-letters",
@@ -453,6 +457,7 @@ const LetterBenchPage: React.FC = () => {
                     })
                   }
                 />
+                <GroundingPanel grounding={board.grounding} />
                 <InternalNotePanel note={board.internal_note} />
               </div>
             </section>

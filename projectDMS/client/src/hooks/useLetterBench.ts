@@ -191,8 +191,15 @@ export function useBenchActions(letterId: string) {
 
   const editParagraph = useMutation({
     scope,
-    mutationFn: ({ paragraphId, text }: { paragraphId: string; text: string }) =>
-      withReplay((version) => patchParagraph(letterId, paragraphId, version, text)),
+    mutationFn: ({
+      paragraphId,
+      text,
+      confirmationBasis,
+    }: {
+      paragraphId: string;
+      text: string;
+      confirmationBasis?: string | null;
+    }) => withReplay((version) => patchParagraph(letterId, paragraphId, version, text, confirmationBasis)),
     onSuccess: accept,
     onError: fail("The paragraph could not be saved"),
   });
