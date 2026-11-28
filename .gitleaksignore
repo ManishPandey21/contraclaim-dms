@@ -1,0 +1,18 @@
+# Findings gitleaks reports in history, ignored one by one by fingerprint
+# (commit:file:rule:line). A fingerprint names one occurrence in one commit:
+# the same value added in any other commit, file or line is still reported,
+# and no rule or allowlist in .gitleaks.toml is widened.
+#
+# Every entry here is a SYNTHETIC canary written into a test on purpose:
+#  - 4bcb78a2 adds CANARY_SECRETS to tests/test_ci_static_gates.py, values the
+#    test asserts no .gitleaks.toml allowlist may match. Allowlisting them would
+#    fail that test, so they are ignored here instead.
+#  - 1d03104c adds fake credentials to tests/test_evidence_secret_scan.py, the
+#    inputs the release-evidence secret scanner must catch.
+# A pull request's Secret scan covers every first-parent commit since the
+# branch's first new commit, which reaches back to these two.
+4bcb78a291dab1863c47fb700505fe1dbee28f41:projectDMS/backend/rbac_backend/tests/test_ci_static_gates.py:aws-access-token:287
+4bcb78a291dab1863c47fb700505fe1dbee28f41:projectDMS/backend/rbac_backend/tests/test_ci_static_gates.py:generic-api-key:291
+4bcb78a291dab1863c47fb700505fe1dbee28f41:projectDMS/backend/rbac_backend/tests/test_ci_static_gates.py:generic-api-key:292
+1d03104cfc1dac058fbbc9df115bc10f691ad7f6:projectDMS/backend/rbac_backend/tests/test_evidence_secret_scan.py:generic-api-key:102
+1d03104cfc1dac058fbbc9df115bc10f691ad7f6:projectDMS/backend/rbac_backend/tests/test_evidence_secret_scan.py:generic-api-key:159
