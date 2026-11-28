@@ -273,29 +273,25 @@ an owner decision, not an operator one.
 
 Not part of this deploy.
 
-What a real model run showed (2026-11-28, `gpt-4o`, six synthetic letters):
-
-- Every assertion was a verbatim span of the letter, and 15 of 16 claim
-  sentences became assertions. A plain rejection with no claim keyword was
-  missed, by the model and by the rule-based fallback alike.
-- Clause citations stayed within the ledger. A clause the counterparty cited
-  that is not in the ledger (14.9) was repeated by the model and correctly held
-  as `unsupported_clause_citation`.
-- Instruction-like text in a letter stopped the model, and compose then
-  refused to save a draft. The board says why.
-- **The model writes supporting facts that no source gives** ("the site records
-  do not substantiate the delay", "the notice requirements have not been met",
-  "our evaluation indicates the design was compliant"), and no validator flags
-  them. Reviewers must check every factual statement in a reply before
-  approval. Tightening the paragraph prompt to `[CONFIRM: ...]` any fact not in
-  the sources is recommended before the mode leaves `canary`.
-- Each letter took 4–17 s end to end with the model.
+Read [LETTER_BENCH_GROUNDING_PLAN.md](LETTER_BENCH_GROUNDING_PLAN.md) first. In
+short: the Bench gives the model no project evidence yet, so its replies state
+positions, ask the sender to substantiate, and use `[CONFIRM: ...]`. An
+independent grounding check holds approval while a factual statement is
+unsupported or contradicted, or a placeholder remains, and reviewers confirm
+facts with a recorded basis. The check is lexical (held-out recall 80%, no
+false positives in that set), so **reviewers must check every factual statement
+before approval** until phase 2 of that plan (evidence retrieval and semantic
+verification) is in place. Start in `canary` for one organisation; do not move
+to `primary` before phase 2 items 1–3.
 
 When approved:
 
 1. Confirm the people who will use it hold `drafting.request.view` and
    `drafting.draft.create` for their letters, and an expert allocation covering
-   them (LETTER_BENCH.md, *To check before switching on*).
+   them (LETTER_BENCH.md, *To check before switching on*). Confirm which roles
+   hold `drafting.skill.publish` / `drafting.skill.bind` **by name**: only they
+   (and Super Admin) can administer skills; `drafting.admin` alone cannot.
+   Brief the canary reviewers on the grounding panel and the confirmation basis.
 2. Set `LETTER_BENCH_ROLLOUT_MODE=canary` and
    `LETTER_BENCH_CANARY_TENANT_IDS=<one organisation id>` in the server `.env`,
    then `$DC up -d --no-deps --no-build backend`.
