@@ -513,6 +513,7 @@ class DraftRunService:
                         sender_texts=bench.sender_texts,
                         user_inputs=bench.user_inputs,
                         confirmations=bench.confirmations,
+                        drafting_role=str(role) if role else None,
                     ),
                 )
                 base_run["grounding"] = grounding
