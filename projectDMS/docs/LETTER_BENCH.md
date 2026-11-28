@@ -68,14 +68,14 @@ version changes without a version bump it reports a warning, which fails
 | Permission | Who | Used for |
 | --- | --- | --- |
 | `drafting.skill.read` | roles granted it, within their own scope | the registry routes, including full skill text |
-| `drafting.skill.publish` | holders of `drafting.admin` | import, publish, deprecate |
-| `drafting.skill.bind` | holders of `drafting.admin` | pin or disable per organisation or project |
+| `drafting.skill.publish` | Super Admin, or a role that holds this permission **by name** | import, publish, deprecate, the admin list |
+| `drafting.skill.bind` | Super Admin, or a role that holds this permission **by name** | pin or disable per organisation or project |
 
+An imported skill is a system skill that applies to every organisation.
 `has_permission` treats `drafting.admin` as covering every `drafting.*`
-permission, and an imported skill is a system skill that applies to every
-organisation. **Before the mode leaves `off`**, check which role documents hold
-`drafting.admin`: every holder of those roles will be able to import, publish
-and pin skills for all organisations.
+permission, so the skill admin routes do not rely on it: holding
+`drafting.admin` alone is not enough (`tests/test_skills_router_authority.py`).
+On deploy, startup grants the three skill permissions to `superadmin` only.
 
 Drafters do not need `drafting.skill.read`. The Bench lists the skills that can
 be applied on a letter through `GET /api/letters/{id}/bench/skills`, which is
