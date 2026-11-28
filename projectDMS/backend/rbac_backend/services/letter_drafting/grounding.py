@@ -47,7 +47,7 @@ _REQUEST = re.compile(
     re.I,
 )
 _CORRESPONDENCE = re.compile(
-    r"\b(?:your|their|the (?:contractor|employer|engineer)'?s?) (?:letter|notice|reference|communication|email|submission)\b",
+    r"\b(?:your|their|the (?:contractor|employer|engineer)'?s?) (?:letter|notice|reference|communication|email|submission|claim|request|demand)\b",
     re.I,
 )
 _ALLEGED = re.compile(r"\b(alleged(?:ly)?|purported(?:ly)?|claimed|so-called)\b", re.I)
@@ -65,7 +65,7 @@ _EVIDENCE_CLAIM = re.compile(
     r"\b(we have (?:reviewed|examined|investigated|inspected|assessed|checked|verified)|"
     r"(?:our|the) (?:review|evaluation|investigation|inspection|assessment|examination|analysis)\b|"
     r"records?\s+(?:show|shows|indicate|indicates|confirm|confirms|do not|does not|demonstrate)|"
-    r"(?:site|contemporaneous|project|daily) (?:records|diaries|logs)|"
+    r"(?:site|contemporaneous|project|daily) (?:records|diaries|logs) (?:show|shows|indicate|confirm|record|do not|does not|demonstrate)|"
     r"(?:has|have|was|were) not been (?:met|satisfied|complied|fulfilled|provided|submitted|received)|"
     r"(?:has|have|was|were) (?:been )?(?:met|satisfied|complied with|fulfilled|issued|instructed|approved|"
     r"submitted|received|notified|certified|determined)|"
@@ -285,6 +285,18 @@ def analyse(draft: str, inputs: GroundingInputs) -> List[GroundingStatement]:
             if request and not specifics:
                 statements.append(_statement(sentence, classification="proposed_argument", status="not_applicable", material=False))
                 continue
+            invented_clauses = [
+                c for c in clauses
+                if c not in clause_texts and not any(re.search(r"(?<![0-9.])" + re.escape(c) + r"(?![0-9])", p.text) for p in sender)
+            ]
+            if invented_clauses:
+                # Cited by no contract source and not by the sender either.
+                statements.append(_statement(
+                    sentence, classification="contractual_provision", status="unsupported", material=True,
+                    contradiction=f"Not in the contract sources or the correspondence: Clause {', '.join(invented_clauses)}",
+                    requires_confirmation=True,
+                ))
+                continue
             if _ENGINEER_FINDING.search(claim_text) and not attributed:
                 classification = "engineer_finding"
             elif (attributed or _CORRESPONDENCE.search(claim_text)) and not evidence_claim:
@@ -326,6 +338,11 @@ def analyse(draft: str, inputs: GroundingInputs) -> List[GroundingStatement]:
                     source_id=source.source_id if source else None, source_label=source.label if source else None,
                     passage=(source.text or "")[:600] if source else None, document_id=source.document_id if source else None,
                 ))
+                continue
+            elif position and _MODAL.search(claim_text) and not specifics:
+                # A position about what will or may happen ("only the delay the
+                # records support will be considered") asserts no past fact.
+                statements.append(_statement(sentence, classification="proposed_argument", status="not_applicable", material=False))
                 continue
             elif position and not evidence_claim and not specifics:
                 statements.append(_statement(sentence, classification="proposed_argument", status="not_applicable", material=False))
