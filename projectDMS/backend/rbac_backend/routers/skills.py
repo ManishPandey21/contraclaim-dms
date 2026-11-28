@@ -28,6 +28,7 @@ from ..models.skill import (
     SkillVersion,
 )
 from ..services.ai_guardrails import AIOutputGuardrailService
+from ..services.letter_drafting.bench import bench_rollout
 from ..services.policy_service import PolicyService
 from ..services.skills.loader import MAX_BUNDLE_BYTES, SkillBundleError, load_skill_zip
 from ..services.skills.registry import SkillRegistry
@@ -35,7 +36,16 @@ from ..services.upload_streaming import read_upload_within_limit
 from ..utils.error_handler import handle_exceptions
 from ..utils.rate_limiter import RateLimiter
 
-router = APIRouter(prefix="/skills", tags=["skills"])
+def require_bench_rollout() -> None:
+    """The registry is dark while LETTER_BENCH_ROLLOUT_MODE is off, like every
+    Bench route. System skills reach every organisation, and has_permission
+    treats drafting.admin as covering drafting.skill.*, so without this a role
+    holding drafting.admin could import, publish or pin skills on deploy."""
+    if bench_rollout(None, settings).rollout_mode == "off":
+        raise HTTPException(status_code=404, detail="The Letter Bench is not enabled")
+
+
+router = APIRouter(prefix="/skills", tags=["skills"], dependencies=[Depends(require_bench_rollout)])
 skill_admin_limiter = RateLimiter(max_requests=20, window_seconds=60, scope="skill_registry_admin")
 
 
