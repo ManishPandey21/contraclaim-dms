@@ -250,6 +250,15 @@ def test_rollout_is_off_by_default_and_canary_is_allow_listed() -> None:
     assert bench_rollout("org1", SimpleNamespace(LETTER_BENCH_ROLLOUT_MODE="banana")).rollout_mode == "off"
 
 
+def test_availability_answers_only_for_the_callers_organisation(monkeypatch) -> None:
+    canary = SimpleNamespace(LETTER_BENCH_ROLLOUT_MODE="canary", LETTER_BENCH_CANARY_TENANT_IDS="org-other")
+    service, _, _ = _bench(monkeypatch, StubLLM(down=True), config=canary)
+    user = _user()  # organisation org1, not on the allow-list
+    assert service.availability_for(user, "org-other").enabled is False  # cannot probe another org
+    superadmin = SimpleNamespace(id="sa", roles=["superadmin"], organization_id=None, projects=[])
+    assert service.availability_for(superadmin, "org-other").enabled is True
+
+
 async def test_bench_is_refused_when_switched_off(monkeypatch) -> None:
     service, db, _ = _bench(monkeypatch, StubLLM(down=True), config=SimpleNamespace(LETTER_BENCH_ROLLOUT_MODE="off"))
     with pytest.raises(HTTPException) as failure:

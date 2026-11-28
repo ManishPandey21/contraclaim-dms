@@ -210,6 +210,15 @@ class LetterBenchService:
     def availability(self, tenant_id: Optional[str]) -> BenchAvailability:
         return bench_rollout(tenant_id, self.config)
 
+    def availability_for(self, current_user: Any, organization_id: Optional[str] = None) -> BenchAvailability:
+        """The flag for the caller's own organisation. Only Super Admin may ask
+        about another one, so the canary allow-list cannot be probed."""
+        own = getattr(current_user, "organization_id", None)
+        if organization_id and str(organization_id) != str(own or ""):
+            if not self.drafts.policy_service.scope_service.is_superadmin(current_user):
+                organization_id = own
+        return self.availability(organization_id or own)
+
     def ensure_enabled(self, tenant_id: Optional[str]) -> None:
         if not self.availability(tenant_id).enabled:
             raise HTTPException(status_code=404, detail="The Letter Bench is not enabled for this organisation")

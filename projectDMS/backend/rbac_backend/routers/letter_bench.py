@@ -64,7 +64,7 @@ async def bench_availability(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Whether the Bench is switched on for the caller's organisation. Reveals only the flag."""
-    return service.availability(organization_id or getattr(current_user, "organization_id", None))
+    return service.availability_for(current_user, organization_id)
 
 
 @router.post("/bench/open", response_model=BenchOpenResponse)
