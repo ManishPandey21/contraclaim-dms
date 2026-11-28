@@ -632,9 +632,100 @@ async def test_compose_writes_one_paragraph_per_assertion_into_a_governed_run(mo
     # Skill text is method, never evidence: it is not in the source ledger.
     assert not any("Chief Contract Expert" in (s.text or "") for s in run.sources)
     assert board.assertions[0].source_ids == ["S-clause-20.2"]
-    assert await bench_approval_blockers(db, run) == []
+    # The stub paragraphs carry [CONFIRM: supporting record]: held at approval.
+    blockers = await bench_approval_blockers(db, run)
+    assert len(blockers) == 1 and "confirmation placeholder" in blockers[0]
     # Submit-for-review binds by hash: the letter body is exactly the governed artifact.
     assert db.letters.docs[0]["content"] == letter
+
+
+class _GroundedLLM(StubLLM):
+    """Writes each point as a position plus a request, with no facts and no placeholders."""
+
+    def __init__(self, text: str = "") -> None:
+        super().__init__(analysis={"assertions": []})
+        self.text = text
+
+    async def __call__(self, prompt: str, max_tokens: int) -> str:
+        if "write the reply paragraph" in prompt:
+            self.calls.append(prompt)
+            body = self.text or (
+                "The Employer does not accept this point. The Contractor is requested to substantiate it "
+                "with contemporaneous records."
+            )
+            return json.dumps({"text": body, "clause_refs": []})
+        return await super().__call__(prompt, max_tokens)
+
+
+async def test_a_grounded_draft_without_placeholders_has_no_approval_blockers(monkeypatch) -> None:
+    service, db, _ = _bench(monkeypatch, _GroundedLLM())
+    letter_id = await _opened(service)
+    bench = await _composed(service, letter_id)
+    run = DraftRun(**next(doc for doc in db.letter_draft_runs.docs if doc["run_id"] == bench.board.draft_run_id))
+    assert run.grounding and bench.board.grounding
+    reference = next(s for s in run.grounding if "CTR/2026/118" in s.text)
+    assert reference.status == "supported"  # the incoming letter's own reference and date
+    # Only the closing's signatory placeholder is left; fill it and compose again.
+    assert await bench_approval_blockers(db, run) == ["1 confirmation placeholder(s) are unresolved in the draft."]
+    closing = next(p for p in bench.board.reply_paragraphs if p.part == "closing")
+    edited = await service.patch_paragraph(
+        letter_id, closing.paragraph_id,
+        ParagraphPatchRequest(board_version=bench.board.board_version,
+                              text=closing.text.replace("[CONFIRM: authorised signatory]", "Project Director")),
+        _user(),
+    )
+    request = ComposeRequest(board_version=edited.board.board_version)
+    await service.begin_compose(letter_id, request, _user())
+    await service.run_compose(letter_id, request, _user())
+    final = await service.get(letter_id, _user())
+    run = DraftRun(**next(doc for doc in db.letter_draft_runs.docs if doc["run_id"] == final.board.draft_run_id))
+    assert await bench_approval_blockers(db, run) == []
+
+
+async def test_an_invented_fact_blocks_approval_but_the_draft_is_kept(monkeypatch) -> None:
+    llm = _GroundedLLM("The contract documents and site records do not substantiate the delay as claimed.")
+    service, db, _ = _bench(monkeypatch, llm)
+    letter_id = await _opened(service)
+    bench = await _composed(service, letter_id)
+    run = DraftRun(**next(doc for doc in db.letter_draft_runs.docs if doc["run_id"] == bench.board.draft_run_id))
+    assert run.status == "needs_attention" and run.validation_report.blocking  # saved, editable
+    assert "unsupported_factual_statement" in {f.code for f in run.validation_report.findings}
+    blockers = await bench_approval_blockers(db, run)
+    assert any("unsupported or contradicted" in b for b in blockers)
+
+
+async def test_a_reviewer_confirmation_with_a_basis_resolves_the_fact(monkeypatch) -> None:
+    sentence = "The contract documents and site records do not substantiate the delay as claimed."
+    service, db, _ = _bench(monkeypatch, _GroundedLLM(sentence))
+    letter_id = await _opened(service)
+    bench = await _composed(service, letter_id)
+    paragraph = next(p for p in bench.board.reply_paragraphs if p.part == "point")
+    edited = await service.patch_paragraph(
+        letter_id, paragraph.paragraph_id,
+        ParagraphPatchRequest(board_version=bench.board.board_version, text=paragraph.text,
+                              confirmation_basis="Site diary Oct 2026 reviewed by the Engineer's representative"),
+        _user("reviewer1"),
+    )
+    confirmed = next(p for p in edited.board.reply_paragraphs if p.paragraph_id == paragraph.paragraph_id)
+    assert confirmed.confirmed_by == "reviewer1" and confirmed.confirmed_at is not None
+    # The saved draft no longer matches the board: approval is held until it is composed again.
+    run = DraftRun(**next(doc for doc in db.letter_draft_runs.docs if doc["run_id"] == bench.board.draft_run_id))
+    assert any("edited after this draft was composed" in b for b in await bench_approval_blockers(db, run))
+    request = ComposeRequest(board_version=edited.board.board_version)
+    await service.begin_compose(letter_id, request, _user())
+    await service.run_compose(letter_id, request, _user())
+    recomposed = await service.get(letter_id, _user())
+    statement = next(s for s in recomposed.board.grounding if "site records" in s.text)
+    assert statement.status == "user_confirmed" and statement.confirmation_basis.startswith("Site diary")
+
+
+async def test_a_missing_board_blocks_approval_of_a_bench_run(monkeypatch) -> None:
+    service, db, _ = _bench(monkeypatch, _GroundedLLM())
+    letter_id = await _opened(service)
+    bench = await _composed(service, letter_id)
+    run = DraftRun(**next(doc for doc in db.letter_draft_runs.docs if doc["run_id"] == bench.board.draft_run_id))
+    db[bench_module.BOARDS].docs.clear()
+    assert any("board for this draft is missing" in b for b in await bench_approval_blockers(db, run))
 
 
 async def test_offline_compose_is_saved_as_needs_attention_not_completed(monkeypatch) -> None:

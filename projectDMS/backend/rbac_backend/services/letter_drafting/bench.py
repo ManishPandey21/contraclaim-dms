@@ -86,7 +86,9 @@ from .incoming_analyzer import (
     extract_clause_refs,
     locate_quote,
 )
+from .grounding import Confirmation
 from .prompts import COMPOSE_PROMPT_KEY, SKILL_STEP_PROMPT_KEY
+from .validator import DraftValidator
 from .user_direction import UserDirectionAgent
 
 logger = logging.getLogger(__name__)
@@ -140,7 +142,15 @@ class BenchRunContext:
         skill_manifest_hash: str,
         degraded_reasons: Optional[List[str]] = None,
         extra_findings: Optional[List[ValidationFinding]] = None,
+        sender_texts: Optional[List[str]] = None,
+        user_inputs: Optional[List[str]] = None,
+        confirmations: Optional[List[Any]] = None,
     ) -> None:
+        # Grounding inputs: what the sender wrote (backs only attributed
+        # statements), what the user stated, and reviewer confirmations.
+        self.sender_texts = list(sender_texts or [])
+        self.user_inputs = list(user_inputs or [])
+        self.confirmations = list(confirmations or [])
         self.draft_letter = draft_letter
         self.integrity_notes = integrity_notes
         self.plan = plan
@@ -1458,10 +1468,16 @@ class LetterBenchService:
         paragraph = next((p for p in board.reply_paragraphs if p.paragraph_id == paragraph_id), None)
         if paragraph is None:
             raise HTTPException(status_code=404, detail="Paragraph not found")
-        if paragraph.text != request.text:
+        basis = (request.confirmation_basis or "").strip() or None
+        if paragraph.text != request.text or basis != paragraph.confirmation_basis:
             paragraph.text = request.text
             paragraph.edited_by_user = True
             paragraph.stale = False
+            # A confirmation covers exactly the text it was given with; any
+            # later edit without a basis clears it and the text is re-checked.
+            paragraph.confirmation_basis = basis
+            paragraph.confirmed_by = _user_id(current_user) if basis else None
+            paragraph.confirmed_at = _now() if basis else None
             if board.stage == "composed":
                 board.stage = "locked"  # the saved draft no longer matches; compose saves a new version
         await self._save(board, request.board_version, _user_id(current_user))
@@ -1814,6 +1830,21 @@ class LetterBenchService:
                 if degraded
                 else [],
                 extra_findings=[finding.as_validation_finding() for finding in findings],
+                sender_texts=[board.incoming_text or "", *(a.quoted_text for a in board.assertions)],
+                user_inputs=[
+                    *(a.user_direction for a in board.assertions if (a.user_direction or "").strip()),
+                    *(item.answer for item in board.questions if (item.answer or "").strip()),
+                ],
+                confirmations=[
+                    Confirmation(
+                        text=p.text,
+                        basis=p.confirmation_basis,
+                        confirmed_by=p.confirmed_by,
+                        confirmed_at=p.confirmed_at.isoformat() if p.confirmed_at else None,
+                    )
+                    for p in paragraphs
+                    if p.edited_by_user and (p.confirmation_basis or "").strip()
+                ],
             ),
         )
         if run.status in {"blocked", "failed"} or not (
@@ -1852,6 +1883,7 @@ class LetterBenchService:
             fresh.reply_paragraphs = list(paragraphs)
             fresh.internal_note = note_text
             fresh.draft_run_id = run.run_id
+            fresh.grounding = list(run.grounding)
             fresh.composing = False
             fresh.stage = "composed"
             fresh.last_error = (
@@ -1919,9 +1951,28 @@ async def bench_approval_blockers(db: Any, run: DraftRun) -> List[str]:
         return []
     doc = await db[BOARDS].find_one({"letter_id": str(run.letter_id)})
     if not doc:
-        return []
+        # A Bench-composed run whose board is gone cannot be checked: refuse.
+        return ["The Letter Bench board for this draft is missing; compose the reply again."]
     board = PositionBoard(**doc)
     blockers: List[str] = []
+    if board.stage != "composed":
+        blockers.append("The reply was edited after this draft was composed. Compose it again before approval.")
+    draft_text = (run.draft_artifact.draft_letter if run.draft_artifact else "") or ""
+    placeholders = DraftValidator.PLACEHOLDER_PATTERN.findall(draft_text)
+    if placeholders:
+        blockers.append(f"{len(placeholders)} confirmation placeholder(s) are unresolved in the draft.")
+    unresolved = [
+        s
+        for s in run.grounding
+        if s.material
+        and s.status in {"unsupported", "contradicted"}
+        and s.classification != "requires_confirmation"  # counted as placeholders above
+    ]
+    if unresolved:
+        blockers.append(
+            f"{len(unresolved)} factual statement(s) are unsupported or contradicted by the sources. "
+            "Replace them, or confirm them with a recorded basis, and compose again."
+        )
     undecided = [a.assertion_id for a in board.assertions if not a.verdict]
     if undecided:
         blockers.append(f"Undecided positions on the Letter Bench: {', '.join(undecided)}")

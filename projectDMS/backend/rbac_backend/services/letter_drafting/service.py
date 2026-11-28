@@ -97,6 +97,8 @@ from .frozen_sections import (
     verify_frozen_sections,
 )
 from .bench import bench_approval_blockers
+from .grounding import GroundingInputs, grounding_findings
+from .grounding import analyse as analyse_grounding
 from .planning import PlanningSheetBuilder
 from .prompts import PromptRegistry
 from .repository import DraftRunRepository
@@ -503,6 +505,18 @@ class DraftRunService:
                         findings=list(bench.extra_findings),
                     ),
                 )
+                grounding = analyse_grounding(
+                    artifact.draft_letter,
+                    GroundingInputs(
+                        sources=working_sources,
+                        incoming_document_id=request.incoming_document_id,
+                        sender_texts=bench.sender_texts,
+                        user_inputs=bench.user_inputs,
+                        confirmations=bench.confirmations,
+                    ),
+                )
+                base_run["grounding"] = grounding
+                validation = self._merge_reports(validation, grounding_findings(grounding))
                 sources = working_sources
                 assertion_support = self._assertion_support(artifact, sources, validation)
                 confidence_scores = self._confidence_scores(validation, assertion_support, sources)
