@@ -28,8 +28,8 @@ approval, export and issue are unchanged.
 | `LETTER_BENCH_CANARY_TENANT_IDS` | comma-separated organisation ids | empty |
 | `VITE_LETTER_BENCH_ENABLED` (client build) | `false` hides the Bench | unset |
 
-The server decides. With the mode `off` every Bench route answers 404 and the
-client uses the earlier screens. Both variables are passed to the backend in
+The server decides. With the mode `off` every Bench route and every
+`/api/skills` route answers 404, and the client uses the earlier screens. Both variables are passed to the backend in
 `docker-compose.prod.yml`.
 
 **Rollback:** set `LETTER_BENCH_ROLLOUT_MODE=off` and restart the backend.
@@ -70,6 +70,12 @@ version changes without a version bump it reports a warning, which fails
 | `drafting.skill.read` | roles granted it, within their own scope | the registry routes, including full skill text |
 | `drafting.skill.publish` | holders of `drafting.admin` | import, publish, deprecate |
 | `drafting.skill.bind` | holders of `drafting.admin` | pin or disable per organisation or project |
+
+`has_permission` treats `drafting.admin` as covering every `drafting.*`
+permission, and an imported skill is a system skill that applies to every
+organisation. **Before the mode leaves `off`**, check which role documents hold
+`drafting.admin`: every holder of those roles will be able to import, publish
+and pin skills for all organisations.
 
 Drafters do not need `drafting.skill.read`. The Bench lists the skills that can
 be applied on a letter through `GET /api/letters/{id}/bench/skills`, which is
