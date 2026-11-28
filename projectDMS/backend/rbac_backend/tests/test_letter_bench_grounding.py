@@ -137,6 +137,42 @@ def test_misstating_what_the_sender_claimed_is_caught() -> None:
     assert statement.status == "unsupported" and statement.material
 
 
+def test_saying_the_sender_cited_no_clause_is_checked_against_the_letter() -> None:
+    # Written by gpt-4o in the 30-letter evaluation; the letter does cite 20.2 and 8.4.
+    statement = _one("The Contractor has not cited any specific contractual clause that supports this claim.")
+    assert statement.status == "contradicted" and statement.material and "20.2" in (statement.contradiction or "")
+    no_incoming = [s for s in SOURCES if s.document_id != INCOMING_DOC]
+    inputs = GroundingInputs(sources=no_incoming, incoming_document_id=INCOMING_DOC, sender_texts=["We claim idle plant costs."])
+    [ok] = analyse("The Contractor has not cited any contractual clause for this claim.", inputs)
+    assert ok.status == "supported" and not ok.material
+
+
+def test_the_drafting_sides_own_argument_is_a_position() -> None:
+    inputs = GroundingInputs(sources=SOURCES, incoming_document_id=INCOMING_DOC, sender_texts=[SENDER], drafting_role="employer")
+    [own] = analyse("The Employer contends that the deduction of delay damages is in accordance with the Contract.", inputs)
+    assert own.classification == "proposed_argument" and not own.material
+
+
+def test_reported_speech_of_the_other_party_is_an_attribution() -> None:
+    inputs = GroundingInputs(sources=SOURCES, incoming_document_id=INCOMING_DOC, sender_texts=[SENDER], drafting_role="employer")
+    [other] = analyse("The Contractor states that access to the Site was delayed by 31 days.", inputs)
+    assert other.classification == "contractor_assertion" and not other.material
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "However, the Employer finds that the information provided is insufficient to evaluate this claim.",
+        "The Contractor has not provided sufficient information to support this request.",
+        "We propose a joint inspection to ascertain the nature and cause of the defect.",
+        "We confirm our intention to attend the meeting.",
+    ],
+)
+def test_assessments_of_the_submission_and_proposals_are_not_facts(sentence) -> None:
+    statement = _one(sentence)
+    assert not statement.material, statement
+
+
 def test_framing_lines_and_positions_are_not_facts() -> None:
     inputs = GroundingInputs(sources=SOURCES, incoming_document_id=INCOMING_DOC, sender_texts=[SENDER])
     statements = analyse(

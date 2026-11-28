@@ -47,7 +47,8 @@ _REQUEST = re.compile(
     re.I,
 )
 _CORRESPONDENCE = re.compile(
-    r"\b(?:your|their|the (?:contractor|employer|engineer)'?s?) (?:letter|notice|reference|communication|email|submission|claim|request|demand)\b",
+    r"\b(?:your|their|the (?:contractor|employer|engineer)'?s?) (?:letter|notice|reference|communication|email|submission|claim|request|demand|"
+    r"assertion|contention|invitation|proposal|instruction)\b",
     re.I,
 )
 _ALLEGED = re.compile(r"\b(alleged(?:ly)?|purported(?:ly)?|claimed|so-called)\b", re.I)
@@ -86,7 +87,8 @@ _WORD = re.compile(r"[a-z0-9]+")
 _MODAL = re.compile(r"\b(will|shall|should|may|might|would|could|must|can|cannot|to be)\b", re.I)
 _PROCEDURAL = re.compile(
     r"\b(acknowledge|acknowledges|acknowledged receipt|thank|thanks|enclose|enclosed|attach|attached|"
-    r"repl(?:y|ies) to each point|respond(?:s)? to each point|set out (?:below|above)|as follows)\b",
+    r"repl(?:y|ies) to each point|respond(?:s)? to each point|set out (?:below|above)|as follows|"
+    r"propose|proposes|proposed that|invite|invites|intention|intends?|undertakes?|agrees? to|confirm(?:s)? (?:our|its|their) (?:intention|attendance|agreement))\b",
     re.I,
 )
 _DECLARATIVE = re.compile(
@@ -161,6 +163,34 @@ class Confirmation:
     confirmed_at: Optional[str] = None
 
 
+_REPORTED = re.compile(
+    r"^\s*(?:however,?\s+|further,?\s+|furthermore,?\s+|additionally,?\s+)?"
+    r"(?P<party>(?:the\s+)?(?:contractor|employer|engineer|we|you|your letter|the sender))"
+    r"(?:\s+(?:also|further|again|now|therefore|has|have|had|respectfully))*\s+"
+    r"(?:states?|stated|claims?|claimed|contends?|contended|asserts?|asserted|alleges?|alleged|maintains?|"
+    r"submits?|argues?|considers?|takes the view|is of the view|notes?|says|said)\b(?:\s+that)?",
+    re.I,
+)
+_OWN_SIDE = {
+    "employer": {"the employer", "employer", "we"},
+    "contractor": {"the contractor", "contractor", "we"},
+    "engineer": {"the engineer", "engineer", "we"},
+}
+_OWN_ARGUMENT = re.compile(r"\b(contends?|contended|maintains?|submits?|argues?|considers?|takes the view|is of the view)\b", re.I)
+_SUBMISSION_ASSESSMENT = re.compile(
+    r"\b(?:has|have) not (?:provided|submitted|furnished|given) (?:sufficient|adequate|any|the)?\s*"
+    r"(?:information|particulars|details|evidence|substantiation|records|basis)|"
+    r"\binformation (?:provided|submitted) (?:is|was) (?:insufficient|inadequate|not sufficient)|"
+    r"\b(?:is|are|was|were) (?:insufficient|not sufficient|inadequate) to (?:evaluate|assess|substantiate|support)|"
+    r"\bbasis for [\w\s-]{0,40} has not been provided|\bare necessary to proceed\b|\bthis includes confirmation of\b",
+    re.I,
+)
+_NO_CLAUSE_CITED = re.compile(
+    r"\b(?:has|have|had) not (?:cited|referred to|identified|invoked|relied (?:up)?on) (?:any |a )?(?:specific )?(?:contractual )?(?:clause|provision)",
+    re.I,
+)
+
+
 @dataclass
 class GroundingInputs:
     sources: Sequence[SourceEvidence]
@@ -168,6 +198,9 @@ class GroundingInputs:
     sender_texts: Sequence[str] = ()
     user_inputs: Sequence[str] = ()
     confirmations: Sequence[Confirmation] = field(default_factory=list)
+    # The side drafting the reply ("employer", "contractor", "engineer"):
+    # its own argument verbs ("the Employer contends ...") state a position.
+    drafting_role: Optional[str] = None
 
 
 def split_sentences(text: str) -> List[str]:
@@ -266,6 +299,35 @@ def analyse(draft: str, inputs: GroundingInputs) -> List[GroundingStatement]:
         attributed = bool(_ATTRIBUTION.search(claim_text) or _ALLEGED.search(claim_text))
         request = bool(_REQUEST.search(claim_text))
         position = bool(_POSITION.search(claim_text))
+        reported = _REPORTED.match(claim_text)
+        own_side = bool(reported) and bool(inputs.drafting_role) and (
+            (reported.group("party") or "").lower().strip() in _OWN_SIDE.get(str(inputs.drafting_role).lower(), set())
+        )
+        if reported and own_side and _OWN_ARGUMENT.search(reported.group(0)):
+            # "The Employer contends / maintains / considers that ..." in the
+            # Employer's own letter: its argument, not a statement of fact.
+            statements.append(_statement(sentence, classification="proposed_argument", status="not_applicable", material=False))
+            continue
+        if reported and not own_side:
+            # Reported speech of the other party: whatever follows "states that"
+            # is that party's claim, so it is checked as an attribution.
+            attributed, evidence_claim = True, False
+        if _SUBMISSION_ASSESSMENT.search(claim_text) and not specifics:
+            # A judgement on the incoming submission itself ("the information
+            # provided is insufficient"): a position derived from the letter.
+            statements.append(_statement(sentence, classification="proposed_argument", status="not_applicable", material=False))
+            continue
+        no_clause = _NO_CLAUSE_CITED.search(claim_text)
+        if no_clause:
+            # "has not cited any clause" is checkable against the letter itself.
+            cited = sorted({c for p in sender for c in _CLAUSE.findall(p.text)})
+            statements.append(_statement(
+                sentence, classification="verified_fact",
+                status="contradicted" if cited else "supported", material=bool(cited),
+                contradiction=f"The incoming letter cites Clause {', '.join(cited)}" if cited else None,
+                source_label="Incoming letter", requires_confirmation=bool(cited),
+            ))
+            continue
 
         for confirmation, cwords in confirmed:
             if words and len(words & cwords) / len(words) >= SUPPORTED_AT:
@@ -299,7 +361,7 @@ def analyse(draft: str, inputs: GroundingInputs) -> List[GroundingStatement]:
                 continue
             if _ENGINEER_FINDING.search(claim_text) and not attributed:
                 classification = "engineer_finding"
-            elif (attributed or _CORRESPONDENCE.search(claim_text)) and not evidence_claim:
+            elif (attributed or _CORRESPONDENCE.search(claim_text)) and (not evidence_claim or position):
                 # What a party said, or which letter is being answered. Not a fact
                 # in itself - but the numbers, dates and references it repeats
                 # must be the ones that party actually wrote: a reference or an
