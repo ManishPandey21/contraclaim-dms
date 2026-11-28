@@ -55,26 +55,39 @@ git -C /opt/contraclaim-dms rev-parse HEAD                 # 79324e6dbb12bf549d4
 python3 -c "import json;print(json.load(open('$MANIFESTS/current.json'))['release_sha'])"   # 79324e6d...
 docker inspect contraclaim-backend-1 --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}'
 $DC exec -T backend python -m rbac_backend.scripts.migrate_database --list | grep -c '"status": "applied"'   # 19
+$DC exec -T backend python -m rbac_backend.scripts.migrate_database --list | grep -c applied_not_in_catalogue  # 2 (legacy, expected)
 REQUIRE_FRESH_BACKUP=true COMPOSE_FILES="$COMPOSE_FILES" bash scripts/pre_deploy_readiness.sh
 ```
 
 ## 2. Backup and verified restoration
 
-1. Take a backup now, even if the nightly one is fresh, and note the archive
-   path it prints (`MongoDB backup written to ...`):
+1. Take a backup now, even if the nightly one is fresh, and note the MongoDB
+   archive path it prints (`MongoDB backup written to ...`). Check it is a
+   complete gzip stream:
 
    ```bash
    COMPOSE_FILES="$COMPOSE_FILES" bash scripts/production_backup.sh
-   python3 scripts/validate_backup_archive.py <mongo archive path>
+   gzip -t <mongo archive path> && sha256sum <mongo archive path>
    ```
 
-2. **Restore drill (required before this deploy).** Restore the archive into a
-   disposable MongoDB that is not a member of the production replica set, with
-   `scripts/mongo_restore.sh` and a `MONGO_URI` that names only the disposable
-   server. Compare per-collection counts with production. Record the archive
-   name, size and the comparison in the release PR. This is the release-gate
-   item still uncaptured (CLAUDE.md, *Known open debt*); without it the database
-   path in section 7 is unproven.
+   `scripts/validate_backup_archive.py` checks the volume tarballs, not a
+   `mongodump` archive; it reports a Mongo archive as unreadable.
+
+2. **Restore drill.** Captured on 2026-11-28 against the 01:30 IST nightly
+   archive (21.6 MB): the evidence is in the release PR. It was done like this,
+   and should be repeated if the deploy slips by more than a week or the schema
+   changes:
+   - a three-member `mongo:8.0` replica set on a `docker network create --internal`
+     network, no published ports, anonymous volumes, `--ulimit nofile=64000:64000`
+     and **no** `--memory` cap (a 1.5 GB cap made a member segfault during
+     `mongodump`);
+   - `mongorestore --gzip --archive` into it (0 documents failed);
+   - per-collection counts, index specs and parent/child references compared
+     with production read-only. Any count difference must be explained by
+     documents written after the backup;
+   - all containers, the network and the volumes removed afterwards.
+
+   Never point a restore at the production replica set.
 
 ## 3. Preserve the current production images
 
@@ -157,7 +170,7 @@ The untracked operator files in the checkout (`.deployed-*`, `.rollback-*`,
    $DC run --rm --no-deps backend python -m rbac_backend.scripts.migrate_database --fail-on-warning
    ```
 
-5. Apply. The running 79324e6 backend keeps serving: these migrations only
+5. Apply (2.7 s on the restored production copy). The running 79324e6 backend keeps serving: these migrations only
    create new collections, which its code never reads.
 
    ```bash
@@ -221,8 +234,9 @@ The untracked operator files in the checkout (`.deployed-*`, `.rollback-*`,
 ### Application rollback (no database restore)
 
 The release's migrations only add collections. The 79324e6 code ignores them,
-and its migration runner reports the three versions as `applied_not_in_catalogue`
-without failing (verified, see the release PR). Rollback is the preserved
+and its migration runner reports the three new versions as `applied_not_in_catalogue`
+(five in all, with the two legacy ones) without failing. Verified on the restored
+production copy: its dry run and `--apply` exit 0 and change nothing. Rollback is the preserved
 images plus the baseline checkout, verified against the manifest that was
 approved before this release:
 
