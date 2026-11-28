@@ -1322,6 +1322,9 @@ class LetterBenchService:
             span = TextSpan(start=span.start + trimmed_left, end=span.start + trimmed_left + len(quoted)) if quoted else None
         else:
             quoted = (request.quoted_text or "").strip()
+            # Typed rather than selected from the letter: it reaches the
+            # evaluation prompt like a direction, so it is scanned like one.
+            self._scan_user_text(quoted)
         if len(quoted) < 10:
             raise HTTPException(status_code=422, detail="Select at least 10 characters to create an assertion")
         if span and any(
