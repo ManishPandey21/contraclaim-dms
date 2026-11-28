@@ -15,6 +15,19 @@ DESCRIPTION = (
 )
 
 
+def _summary(version: Any, now: Any) -> Dict[str, Any]:
+    return {
+        "owner_scope": version.owner_scope,
+        "skill_key": version.skill_key,
+        "name": version.name,
+        "description": version.description,
+        "kind": version.kind,
+        "status": "active",
+        "latest_published_version": version.version,
+        "updated_at": now,
+    }
+
+
 async def upgrade(db: Any, dry_run: bool) -> MigrationResult:
     operations: List[Dict[str, Any]] = []
     warnings: List[str] = []
@@ -35,6 +48,20 @@ async def upgrade(db: Any, dry_run: bool) -> MigrationResult:
                 {"operation": "skip_existing", "collection": "skill_versions",
                  "skill_key": version.skill_key, "version": version.version}
             )
+            # A run killed between the version insert and the summary upsert left
+            # the version without its summary row; this rerun is the repair. It
+            # only inserts a missing row, so a newer summary is never rewound.
+            summary_key = {"owner_scope": version.owner_scope, "skill_key": version.skill_key}
+            if await db.skills.find_one(summary_key) is None:
+                operations.append(
+                    {"operation": "insert_missing_summary", "collection": "skills", "skill_key": version.skill_key}
+                )
+                if not dry_run:
+                    await db.skills.update_one(
+                        summary_key,
+                        {"$setOnInsert": {**_summary(version, now), "created_at": now}},
+                        upsert=True,
+                    )
             continue
         operations.append(
             {
@@ -56,19 +83,7 @@ async def upgrade(db: Any, dry_run: bool) -> MigrationResult:
         await db.skill_versions.insert_one(payload)
         await db.skills.update_one(
             {"owner_scope": version.owner_scope, "skill_key": version.skill_key},
-            {
-                "$set": {
-                    "owner_scope": version.owner_scope,
-                    "skill_key": version.skill_key,
-                    "name": version.name,
-                    "description": version.description,
-                    "kind": version.kind,
-                    "status": "active",
-                    "latest_published_version": version.version,
-                    "updated_at": now,
-                },
-                "$setOnInsert": {"created_at": now},
-            },
+            {"$set": _summary(version, now), "$setOnInsert": {"created_at": now}},
             upsert=True,
         )
     return MigrationResult(

@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..utils.datetime import now_utc
-from .letter_drafting import DraftRole, ProbingQuestion
+from .letter_drafting import DraftRole, GroundingStatement, ProbingQuestion
 
 # The letters skill's own four-way classification of an assertion.
 Verdict = Literal["entitlement", "partial", "none", "need_information"]
@@ -116,6 +116,11 @@ class ReplyParagraph(BaseModel):
     degraded: bool = False
     clause_refs: List[str] = Field(default_factory=list)
     source_ids: List[str] = Field(default_factory=list)
+    # A reviewer's confirmation of facts they wrote into this paragraph from
+    # their own knowledge: what they relied on, who, when. Cleared on any later edit.
+    confirmation_basis: Optional[str] = None
+    confirmed_by: Optional[str] = None
+    confirmed_at: Optional[datetime] = None
 
 
 class BoardQuestion(BaseModel):
@@ -162,6 +167,8 @@ class PositionBoard(BaseModel):
     locked_by: Optional[str] = None
     strategy_run_id: Optional[str] = None
     draft_run_id: Optional[str] = None
+    # Per-sentence factual grounding of the composed draft (copied from the run).
+    grounding: List[GroundingStatement] = Field(default_factory=list)
     composing: bool = False
     last_error: Optional[str] = None
     # Set when the incoming text tripped the injection scan: no step on this
@@ -366,6 +373,9 @@ class BoardSettingsRequest(BaseModel):
 class ParagraphPatchRequest(BaseModel):
     board_version: int = Field(..., ge=0)
     text: str = Field(..., max_length=20000)
+    # Optional: the reviewer confirms the facts in this text from their own
+    # knowledge and records the basis (e.g. "site inspection 2 Nov, report IR-22").
+    confirmation_basis: Optional[str] = Field(default=None, max_length=2000)
 
 
 class LockPositionsRequest(BaseModel):

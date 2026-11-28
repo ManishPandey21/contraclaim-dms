@@ -135,6 +135,7 @@ Rules:
 - Quote the sender only verbatim.
 - Cite a clause only when a clause source is listed; otherwise say what must be confirmed.
 - If information is insufficient, say exactly what is missing and from whom it is required.
+- What the sender says is the sender's assertion, not an established fact. Attribute it ("the Contractor states ...").
 
 """ + UNTRUSTED_CONTENT_GUARD + "\n"
 
@@ -167,6 +168,36 @@ Rules:
 - Cite a clause only when a clause source is listed; otherwise write [CONFIRM: ...].
 - Never invent facts, dates, amounts or references. Use [CONFIRM: ...] for anything not in the sources.
 - Do not write a salutation, closing or reservation of rights; those are added separately.
+
+Facts and grounding (these override any wish to sound conclusive):
+- The decided position is the user's; the REASONS you give for it must come from the
+  sources. A position needs no invented justification.
+- What the sender wrote is the sender's assertion, never an established fact. Attribute
+  it: "the Contractor states", "the Employer contends".
+- Never state, as fact, any review, investigation, evaluation, inspection, finding,
+  measurement, record, instruction, determination, approval, notice, date, amount,
+  obligation or correspondence that is not in the sources. Do not write "we have
+  reviewed", "our evaluation indicates", "the site records show / do not substantiate",
+  "the notice requirements have not been met", "the design was compliant" or anything
+  like them unless a listed source says exactly that.
+- Do not present a contractual argument as an Engineer's determination, or an
+  interpretation as an agreed fact. Mark an argument as the {role}'s position.
+- Where the position needs a fact the sources do not give, do one of these instead:
+  (a) require the sender to substantiate it, e.g. "The Contractor is requested to
+      substantiate the alleged delay with contemporaneous records and a delay analysis
+      demonstrating its impact on the critical path."; or
+  (b) write a specific placeholder naming what must be checked and where, e.g.
+      "[CONFIRM: whether the alleged delay is substantiated by the site records, the
+      approved programme and the submitted delay analysis]".
+- Do not accept or reject on the strength of a finding you cannot point to in the
+  sources; state the position and what the sender must provide.
+
+Example. Unacceptable: "The contract documents and site records do not substantiate
+the delay; your claim is therefore rejected." Acceptable: "The Employer does not accept
+that an extension of time is due. The Contractor has not provided particulars of the
+alleged delay and is requested to substantiate it with contemporaneous records and a
+delay analysis. [CONFIRM: whether the site records for the period support the alleged
+31-day delay in access]"
 
 """ + UNTRUSTED_CONTENT_GUARD + "\n"
 

@@ -28,8 +28,8 @@ approval, export and issue are unchanged.
 | `LETTER_BENCH_CANARY_TENANT_IDS` | comma-separated organisation ids | empty |
 | `VITE_LETTER_BENCH_ENABLED` (client build) | `false` hides the Bench | unset |
 
-The server decides. With the mode `off` every Bench route answers 404 and the
-client uses the earlier screens. Both variables are passed to the backend in
+The server decides. With the mode `off` every Bench route and every
+`/api/skills` route answers 404, and the client uses the earlier screens. Both variables are passed to the backend in
 `docker-compose.prod.yml`.
 
 **Rollback:** set `LETTER_BENCH_ROLLOUT_MODE=off` and restart the backend.
@@ -68,8 +68,14 @@ version changes without a version bump it reports a warning, which fails
 | Permission | Who | Used for |
 | --- | --- | --- |
 | `drafting.skill.read` | roles granted it, within their own scope | the registry routes, including full skill text |
-| `drafting.skill.publish` | holders of `drafting.admin` | import, publish, deprecate |
-| `drafting.skill.bind` | holders of `drafting.admin` | pin or disable per organisation or project |
+| `drafting.skill.publish` | Super Admin, or a role that holds this permission **by name** | import, publish, deprecate, the admin list |
+| `drafting.skill.bind` | Super Admin, or a role that holds this permission **by name** | pin or disable per organisation or project |
+
+An imported skill is a system skill that applies to every organisation.
+`has_permission` treats `drafting.admin` as covering every `drafting.*`
+permission, so the skill admin routes do not rely on it: holding
+`drafting.admin` alone is not enough (`tests/test_skills_router_authority.py`).
+On deploy, startup grants the three skill permissions to `superadmin` only.
 
 Drafters do not need `drafting.skill.read`. The Bench lists the skills that can
 be applied on a letter through `GET /api/letters/{id}/bench/skills`, which is

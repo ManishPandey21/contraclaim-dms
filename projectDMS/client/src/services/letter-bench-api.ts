@@ -108,11 +108,12 @@ export async function patchParagraph(
   letterId: string,
   paragraphId: string,
   boardVersion: number,
-  text: string
+  text: string,
+  confirmationBasis?: string | null
 ): Promise<BenchResponse> {
   const { data } = await api.patch<BenchResponse>(
     `${bench(letterId)}/paragraphs/${encodeURIComponent(paragraphId)}`,
-    { board_version: boardVersion, text }
+    { board_version: boardVersion, text, confirmation_basis: confirmationBasis || null }
   );
   return data;
 }

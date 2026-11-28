@@ -19,6 +19,7 @@ class DraftValidator:
         r"\b(?:clause|section|sub-clause|subclause|article)\s+([0-9A-Za-z.\-()]+)",
         re.IGNORECASE,
     )
+    ROMAN_NUMERAL = re.compile(r"(?=[mdclxvi])m{0,4}(?:cm|cd|d?c{0,3})(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3})")
     PLACEHOLDER_PATTERN = re.compile(
         r"\[(?:CONFIRM:|TO BE INSERTED BY USER:|POSITION CONFLICT:)[^\]]+\]",
         re.IGNORECASE,
@@ -96,15 +97,25 @@ class DraftValidator:
                 )
             )
 
+        # The pattern's character class includes "." (for "20.2"), so a clause
+        # cited at the end of a sentence arrives as "20.2."; trailing sentence
+        # punctuation is not part of a clause number. Same normalisation as
+        # incoming_analyzer.
         allowed_clauses = {
-            (source.clause_number or "").lower().strip()
+            (source.clause_number or "").lower().strip(" .;,")
             for source in sources
             if source.source_type == "contract_clause" and source.clause_number
         }
+        # A clause number carries a digit ("20.2", "4A", "8.4(a)") or is a roman
+        # numeral ("XIII"); anything else after "clause" is prose ("the clause
+        # that ...", "no clause exists ...") and is not a citation.
         mentioned = {
-            match.group(1).lower().strip()
-            for match in self.CLAUSE_PATTERN.finditer(artifact.draft_letter)
-            if match.group(1)
+            token
+            for token in (
+                match.group(1).lower().strip(" .;,")
+                for match in self.CLAUSE_PATTERN.finditer(artifact.draft_letter)
+            )
+            if token and (any(ch.isdigit() for ch in token) or self.ROMAN_NUMERAL.fullmatch(token))
         }
         missing_clauses = sorted([clause for clause in mentioned if clause not in allowed_clauses])
         if missing_clauses:

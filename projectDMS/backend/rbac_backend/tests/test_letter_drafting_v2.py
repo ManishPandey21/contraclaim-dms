@@ -318,6 +318,60 @@ def test_validator_blocks_unsupported_clause_citation() -> None:
     assert any(finding.code == "unsupported_clause_citation" for finding in report.findings)
 
 
+def _clause_report(text: str, clause_number: str = "20.2"):
+    return DraftValidator().validate(
+        DraftArtifact(draft_letter=text, source_integrity_notes="Clause source supplied."),
+        role="contractor",
+        sources=[
+            SourceEvidence(
+                source_id=f"clause:{clause_number}",
+                source_type="contract_clause",
+                allowed_use="clause",
+                label="Claims",
+                clause_number=clause_number,
+            )
+        ],
+    )
+
+
+def test_a_word_after_clause_is_prose_not_a_citation() -> None:
+    # Written by gpt-4o in the release evaluation: "the clause that", "the
+    # clause has", "a clause for" were read as clauses "that", "has", "for".
+    for text in (
+        "We refer to Sub-Clause 20.2 and the clause that governs notices.",
+        "The clause has no application to this delay; see Sub-Clause 20.2.",
+        "No clause exists for this cost, and the section for payments is silent.",
+    ):
+        report = _clause_report(text)
+        assert not any(f.code == "unsupported_clause_citation" for f in report.findings), text
+
+
+def test_numbered_and_roman_clause_citations_are_still_checked() -> None:
+    for text, evidence in (
+        ("Under Clause 14.9 retention is due.", "14.9"),
+        ("See Clause 8.4(a) of the Contract.", "8.4(a)"),
+        ("Article XIII applies.", "xiii"),
+        ("See Section 4A.", "4a"),
+    ):
+        report = _clause_report(text)
+        finding = next(f for f in report.findings if f.code == "unsupported_clause_citation")
+        assert report.blocking and finding.evidence == evidence, text
+
+
+def test_a_sentence_final_full_stop_is_not_part_of_the_cited_clause() -> None:
+    # "Sub-Clause 20.2." used to be read as clause "20.2." and blocked as
+    # unsupported although 20.2 is in the ledger.
+    for text in ("We refer to Sub-Clause 20.2.", "Under Clause 20.2, notice is due.", "See Clause 20.2; it applies."):
+        report = _clause_report(text)
+        assert not any(f.code == "unsupported_clause_citation" for f in report.findings), text
+
+
+def test_a_sentence_final_unsupported_clause_is_still_blocked_and_named_without_punctuation() -> None:
+    report = _clause_report("We refer to Sub-Clause 20.2 and Clause 99.9.")
+    finding = next(f for f in report.findings if f.code == "unsupported_clause_citation")
+    assert report.blocking is True and finding.evidence == "99.9"
+
+
 def test_critique_flags_contractual_red_flags_without_blocking() -> None:
     report = DraftValidator().critique(
         DraftArtifact(

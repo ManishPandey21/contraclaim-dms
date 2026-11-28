@@ -28,6 +28,7 @@ from ..models.skill import (
     SkillVersion,
 )
 from ..services.ai_guardrails import AIOutputGuardrailService
+from ..services.letter_drafting.bench import bench_rollout
 from ..services.policy_service import PolicyService
 from ..services.skills.loader import MAX_BUNDLE_BYTES, SkillBundleError, load_skill_zip
 from ..services.skills.registry import SkillRegistry
@@ -35,7 +36,16 @@ from ..services.upload_streaming import read_upload_within_limit
 from ..utils.error_handler import handle_exceptions
 from ..utils.rate_limiter import RateLimiter
 
-router = APIRouter(prefix="/skills", tags=["skills"])
+def require_bench_rollout() -> None:
+    """The registry is dark while LETTER_BENCH_ROLLOUT_MODE is off, like every
+    Bench route. System skills reach every organisation, and has_permission
+    treats drafting.admin as covering drafting.skill.*, so without this a role
+    holding drafting.admin could import, publish or pin skills on deploy."""
+    if bench_rollout(None, settings).rollout_mode == "off":
+        raise HTTPException(status_code=404, detail="The Letter Bench is not enabled")
+
+
+router = APIRouter(prefix="/skills", tags=["skills"], dependencies=[Depends(require_bench_rollout)])
 skill_admin_limiter = RateLimiter(max_requests=20, window_seconds=60, scope="skill_registry_admin")
 
 
@@ -49,6 +59,20 @@ async def get_policy_service() -> PolicyService:
 
 def _user_id(current_user: CurrentUser) -> str:
     return str(getattr(current_user, "id", "") or "")
+
+
+async def _require_explicit_skill_admin(policy: PolicyService, current_user: CurrentUser, permission: str) -> None:
+    """Skills are system-wide: administering them needs the permission itself.
+
+    PolicyService.has_permission lets drafting.admin satisfy any drafting.*
+    check, and tenant-assignable roles hold drafting.admin. That implication is
+    not enough to change what every organisation's drafts are built from, so
+    the role must hold ``permission`` by name (or ``*``), or be Super Admin.
+    """
+    if policy.scope_service.is_superadmin(current_user):
+        return
+    if not await policy.permission_service.user_has_permission(_user_id(current_user), permission, log=False):
+        raise HTTPException(status_code=403, detail=f"Administering skills requires the {permission} permission")
 
 
 @router.get("", response_model=List[EffectiveSkill])
@@ -81,6 +105,7 @@ async def list_skills_for_admin(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Every skill and version, including drafts, plus bindings."""
+    await _require_explicit_skill_admin(policy, current_user, "drafting.skill.publish")
     await policy.authorize(current_user, "drafting.skill.publish", resource_type="skill")
     return await registry.admin_list(organization_id)
 
@@ -130,6 +155,7 @@ async def import_skill_bundle(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Upload a zip as a DRAFT version. It is untrusted until published."""
+    await _require_explicit_skill_admin(policy, current_user, "drafting.skill.publish")
     await policy.authorize(current_user, "drafting.skill.publish", resource_type="skill")
     await skill_admin_limiter.check_user_limit(_user_id(current_user))
     # Capped while reading: the request is refused with 413 on the byte that
@@ -165,6 +191,7 @@ async def publish_skill_version(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Publish a draft once its evaluation report passes. Published versions are immutable."""
+    await _require_explicit_skill_admin(policy, current_user, "drafting.skill.publish")
     await policy.authorize(
         current_user, "drafting.skill.publish", resource_type="skill", resource_id=skill_key
     )
@@ -182,6 +209,7 @@ async def deprecate_skill_version(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Stop new use of a version. Runs that used it stay readable."""
+    await _require_explicit_skill_admin(policy, current_user, "drafting.skill.publish")
     await policy.authorize(
         current_user, "drafting.skill.publish", resource_type="skill", resource_id=skill_key
     )
@@ -198,6 +226,7 @@ async def set_skill_binding(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Pin a version, or turn a skill off, for an organisation or project."""
+    await _require_explicit_skill_admin(policy, current_user, "drafting.skill.bind")
     await policy.authorize(
         current_user,
         "drafting.skill.bind",

@@ -283,6 +283,14 @@ class _FakeService:
     def availability(self, tenant_id):
         return BenchAvailability(enabled=tenant_id == "org1", rollout_mode="canary")
 
+    def availability_for(self, current_user, organization_id=None):
+        # The real rule (tested in test_letter_bench_service): a non-Super-Admin
+        # always gets the answer for its own organisation.
+        own = getattr(current_user, "organization_id", None)
+        if organization_id and organization_id != own and "superadmin" not in (getattr(current_user, "roles", None) or []):
+            organization_id = own
+        return self.availability(organization_id or own)
+
     async def open(self, payload, current_user):
         self.calls.append(("open", payload.incoming_document_id))
         if self.error:
@@ -363,7 +371,8 @@ def test_refusals_keep_their_status_and_do_not_start_work(monkeypatch) -> None:
 def test_availability_route_is_not_shadowed_and_reveals_only_the_flag(monkeypatch) -> None:
     client, _ = _client(monkeypatch)
     assert client.get("/api/letters/bench/availability").json() == {"enabled": True, "rollout_mode": "canary"}
-    assert client.get("/api/letters/bench/availability?organization_id=org2").json()["enabled"] is False
+    # Asking about another organisation answers for the caller's own (org1): nothing about org2 leaks.
+    assert client.get("/api/letters/bench/availability?organization_id=org2").json()["enabled"] is True
     assert client.get("/api/letters/L1/bench/skills").json() == []
     assert client.patch("/api/letters/L1/bench/assertions/A1", json={"verdict": "maybe", "board_version": 1}).status_code == 422
     assert client.patch("/api/letters/L1/bench/assertions/A1", json={"verdict": "none"}).status_code == 422

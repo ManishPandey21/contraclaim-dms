@@ -4,9 +4,9 @@ import { RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useLetterBenchStore } from "@/stores/useLetterBenchStore";
-import type { Assertion, ReplyParagraph } from "@/types/letterBench";
+import type { Assertion, GroundingStatement, ReplyParagraph } from "@/types/letterBench";
 import { VERDICT_LABELS } from "@/types/letterBench";
-import { paragraphBadge } from "./benchLogic";
+import { paragraphBadge, unresolvedStatements } from "./benchLogic";
 import { VERDICT_TONE } from "./verdictStyles";
 
 const PART_LABEL: Record<string, string> = {
@@ -28,12 +28,15 @@ interface ParagraphEditorProps {
   paragraph: ReplyParagraph;
   assertion?: Assertion;
   readOnly: boolean;
-  onSave: (text: string) => void;
+  flagged: GroundingStatement[];
+  onSave: (text: string, confirmationBasis?: string | null) => void;
   onRerun: () => void;
 }
 
-const ParagraphEditor: React.FC<ParagraphEditorProps> = ({ paragraph, assertion, readOnly, onSave, onRerun }) => {
+const ParagraphEditor: React.FC<ParagraphEditorProps> = ({ paragraph, assertion, readOnly, flagged, onSave, onRerun }) => {
   const [text, setText] = useState(paragraph.text);
+  const [confirming, setConfirming] = useState(false);
+  const [basis, setBasis] = useState("");
   const ref = useRef<HTMLTextAreaElement>(null);
   const activeId = useLetterBenchStore((state) => state.activeAssertionId);
   const setActive = useLetterBenchStore((state) => state.setActiveAssertion);
@@ -82,7 +85,20 @@ const ParagraphEditor: React.FC<ParagraphEditorProps> = ({ paragraph, assertion,
             {BADGE[badge].text}
           </span>
         )}
-        {assertion && !readOnly && (paragraph.stale || paragraph.degraded) && (
+        {flagged.length > 0 && (
+          <span
+            data-testid={`paragraph-unsupported-${paragraph.paragraph_id}`}
+            className="rounded border border-red-700 bg-red-50 px-1.5 py-0.5 text-[11px] font-medium text-red-900 dark:bg-red-950 dark:text-red-100"
+          >
+            {flagged.length} unsupported statement{flagged.length > 1 ? "s" : ""}
+          </span>
+        )}
+        {paragraph.confirmation_basis && (
+          <span className="rounded border border-sky-700 bg-sky-50 px-1.5 py-0.5 text-[11px] font-medium text-sky-900 dark:bg-sky-950 dark:text-sky-100">
+            Confirmed: {paragraph.confirmation_basis}
+          </span>
+        )}
+        {assertion && !readOnly && (paragraph.stale || paragraph.degraded || flagged.length > 0) && (
           <Button variant="outline" size="sm" className="ml-auto h-7 text-xs" onClick={onRerun}>
             <RefreshCw className="mr-1 h-3 w-3" aria-hidden="true" />
             Re-run
@@ -103,6 +119,47 @@ const ParagraphEditor: React.FC<ParagraphEditorProps> = ({ paragraph, assertion,
         }}
         className="w-full resize-none overflow-hidden whitespace-pre-wrap rounded bg-transparent font-serif text-[15px] leading-7 text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       />
+      {!readOnly && paragraph.part !== "header" && (
+        <div className="mt-1.5">
+          {!confirming ? (
+            <button
+              type="button"
+              className="text-xs font-medium text-primary underline-offset-2 hover:underline"
+              onClick={() => setConfirming(true)}
+            >
+              Confirm the facts in this paragraph from my own knowledge
+            </button>
+          ) : (
+            <form
+              className="flex flex-wrap items-center gap-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (!basis.trim()) return;
+                onSave(text, basis.trim());
+                setConfirming(false);
+                setBasis("");
+              }}
+            >
+              <label htmlFor={`basis-${paragraph.paragraph_id}`} className="text-xs text-muted-foreground">
+                Basis of confirmation
+              </label>
+              <input
+                id={`basis-${paragraph.paragraph_id}`}
+                value={basis}
+                onChange={(event) => setBasis(event.target.value)}
+                placeholder="e.g. site inspection 2 Nov, report IR-22"
+                className="min-w-[16rem] flex-1 rounded border bg-background px-2 py-1 text-xs"
+              />
+              <Button type="submit" size="sm" className="h-7 text-xs" disabled={!basis.trim()}>
+                Confirm
+              </Button>
+              <Button type="button" variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setConfirming(false)}>
+                Cancel
+              </Button>
+            </form>
+          )}
+        </div>
+      )}
     </li>
   );
 };
@@ -112,7 +169,8 @@ interface ReplyComposerProps {
   assertions: Assertion[];
   readOnly: boolean;
   composing: boolean;
-  onSave: (paragraphId: string, text: string) => void;
+  grounding?: GroundingStatement[];
+  onSave: (paragraphId: string, text: string, confirmationBasis?: string | null) => void;
   onRerun: (assertionId: string) => void;
 }
 
@@ -126,9 +184,11 @@ export const ReplyComposer: React.FC<ReplyComposerProps> = ({
   assertions,
   readOnly,
   composing,
+  grounding,
   onSave,
   onRerun,
 }) => {
+  const unresolved = unresolvedStatements(grounding);
   const byId = new Map(assertions.map((assertion) => [assertion.assertion_id, assertion]));
   if (!paragraphs.length) {
     return (
@@ -149,7 +209,12 @@ export const ReplyComposer: React.FC<ReplyComposerProps> = ({
             paragraph={paragraph}
             assertion={assertion}
             readOnly={readOnly}
-            onSave={(text) => onSave(paragraph.paragraph_id, text)}
+            flagged={unresolved.filter((s) => paragraph.text.includes(s.text.slice(0, 60)))}
+            onSave={(text, confirmationBasis) =>
+              confirmationBasis
+                ? onSave(paragraph.paragraph_id, text, confirmationBasis)
+                : onSave(paragraph.paragraph_id, text)
+            }
             onRerun={() => assertion && onRerun(assertion.assertion_id)}
           />
         );
