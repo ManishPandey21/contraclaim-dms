@@ -35,7 +35,7 @@ _FRAMING = re.compile(
 _CLAUSE = re.compile(r"\b(?:sub-?clause|clause|article|section)\s+([0-9][0-9A-Za-z.\-()]*)", re.I)
 _PARTY = r"(?:the\s+)?(?:contractor|employer|engineer|sub-?contractor|consultant|client|you|your letter|your notice|the sender)"
 _ATTRIBUTION = re.compile(
-    _PARTY + r"\b[^.]{0,60}?\b(?:states?|stated|claims?|claimed|contends?|contended|asserts?|asserted|alleges?|alleged|"
+    _PARTY + r"(?!'s)(?!s\b)\b(?:\s+(?!(?:is|was|are|were)\b)[\w./,-]+){0,6}?\s+(?:states?|stated|claims?|claimed|contends?|contended|asserts?|asserted|alleges?|alleged|"
     r"says|said|submits?|submitted that|maintains?|argues?|requests?|requested|refers?|referred|seeks?|sought|"
     r"demands?|demanded|notif(?:y|ies|ied)|has given notice|gives notice)\b",
     re.I,
@@ -77,10 +77,29 @@ _EVIDENCE_CLAIM = re.compile(
 _SPECIFIC = re.compile(
     r"(?:rs\.?|inr|₹)\s?[0-9][0-9,]*(?:\.[0-9]+)?|\b[0-9]{1,2}[-/.][0-9]{1,2}[-/.][0-9]{2,4}\b|\b[0-9]{4}-[0-9]{2}-[0-9]{2}\b|"
     r"\b[0-9]+(?:[.,][0-9]+)*\s?(?:days?|weeks?|months?|%|per cent|lakh|crore|m|km|mm|cum|sqm|nos?)\b|"
-    r"\b(?:no\.?|ref\.?|letter)\s?[A-Z0-9][A-Z0-9/\-_.]{2,}\b|\b[A-Z]{2,}[/\-][A-Z0-9/\-_.]{2,}\b",
+    r"\b(?:no\.?|ref\.?|letter)\s?[A-Z0-9][A-Z0-9/\-_.]{2,}\b|\b[A-Z]{2,}[/\-][A-Z0-9/\-_.]{2,}\b|"
+    r"\b[0-9]{1,2}(?:st|nd|rd|th)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?,?\s+[0-9]{4}\b|"
+    r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+[0-9]{1,2},?\s+[0-9]{4}\b",
     re.I,
 )
 _WORD = re.compile(r"[a-z0-9]+")
+_MODAL = re.compile(r"\b(will|shall|should|may|might|would|could|must|can|cannot|to be)\b", re.I)
+_PROCEDURAL = re.compile(
+    r"\b(acknowledge|acknowledges|acknowledged receipt|thank|thanks|enclose|enclosed|attach|attached|"
+    r"repl(?:y|ies) to each point|respond(?:s)? to each point|set out (?:below|above)|as follows)\b",
+    re.I,
+)
+_DECLARATIVE = re.compile(
+    r"\b(?:was|were|has been|have been|had been|is|are)\s+(?:\w+\s+)?\w+(?:ed|en|wn)\b|\b\w+ed\b|"
+    r"\b(?:shows?|records?|confirms?|indicates?|caused|found|instructed|issued|approved|gave|given|made|paid|reduced|increased)\b",
+    re.I,
+)
+_PROVISION = re.compile(
+    r"\b(requires?|provides?|entitles?|obliges?|stipulates?|states? that|under (?:sub-?)?clause|in accordance with (?:sub-?)?clause)\b",
+    re.I,
+)
+_MONTHS = {m: i for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
+_ABBREVIATIONS = re.compile(r"\b(No|Nos|Rs|Ref|Cl|Sr|Dt|Encl|viz|etc|Mr|Ms|Dr|St|Km|Ch)\.(?=\s)", re.I)
 _STOP = set(
     "a an the and or of to in on at by for with from as is are was were be been being this that these those it its "
     "we our you your they their he she his her which who whom whose there here has have had do does did not no "
@@ -97,6 +116,14 @@ def _norm_specific(token: str) -> str:
     token = token.lower().replace(",", "").replace("₹", "rs").replace("inr", "rs").replace(" ", "")
     # "letter NCW/118", "ref. NCW/118" and "NCW/118" are the same reference.
     token = re.sub(r"^(?:letter|ref\.?|no\.?)(?=[a-z0-9])", "", token)
+    named = re.fullmatch(r"([0-9]{1,2})(?:st|nd|rd|th)?([a-z]{3})[a-z]*\.?,?([0-9]{4})", token) or re.fullmatch(
+        r"([a-z]{3})[a-z]*\.?([0-9]{1,2}),?([0-9]{4})", token
+    )
+    if named:
+        a, b, y = named.groups()
+        d, mon = (a, b) if a.isdigit() else (b, a)
+        if mon in _MONTHS:
+            return f"{y}-{_MONTHS[mon]:02d}-{int(d):02d}"
     date = re.fullmatch(r"([0-9]{1,2})[-/.]([0-9]{1,2})[-/.]([0-9]{2,4})", token)
     if date:
         d, m, y = date.groups()
@@ -144,7 +171,9 @@ class GroundingInputs:
 
 
 def split_sentences(text: str) -> List[str]:
-    parts = (p.strip() for p in _SENTENCE_SPLIT.split(text or ""))
+    # "IPC No. 7" and "Rs. 4,50,000" do not end a sentence: hide those dots while splitting.
+    protected = _ABBREVIATIONS.sub(lambda m: m.group(0)[:-1] + "․", text or "")
+    parts = (p.strip().replace("․", ".") for p in _SENTENCE_SPLIT.split(protected))
     return [p for p in parts if p and len(_WORD.findall(p)) >= 2]
 
 
@@ -303,17 +332,25 @@ def analyse(draft: str, inputs: GroundingInputs) -> List[GroundingStatement]:
                 continue
             elif evidence_claim or specifics:
                 classification = "verified_fact"
+            elif _DECLARATIVE.search(claim_text) and not _MODAL.search(claim_text) and not _PROCEDURAL.search(claim_text):
+                # A plain statement that something happened ("the Engineer instructed
+                # ...", "the delay was caused by ...") is a factual claim.
+                classification = "verified_fact"
             else:
                 statements.append(_statement(sentence, classification="non_factual", status="not_applicable", material=False))
                 continue
 
-            passage, score = _best(words, specifics, evidence + user)
+            # Contract wording states obligations, not events: it backs a sentence
+            # about what a clause provides, never one about what happened.
+            provision = bool(clauses) or bool(_PROVISION.search(claim_text))
+            pool = [p for p in evidence if provision or not (p.source and p.source.source_type == "contract_clause")]
+            passage, score = _best(words, specifics, pool + user)
             contradiction = _contradiction(specifics, passage) if passage and specifics and score >= PARTIAL_AT * 0.9 else None
             if contradiction:
                 status = "contradicted"
             elif score >= SUPPORTED_AT:
                 status = "user_confirmed" if passage and passage.kind == "user" else "supported"
-            elif score >= PARTIAL_AT:
+            elif score >= PARTIAL_AT and not (specifics and not (passage and specifics <= passage.specifics)):
                 status = "partially_supported"
             else:
                 status = "unsupported"
