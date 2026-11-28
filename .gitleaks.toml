@@ -78,3 +78,19 @@ other value, in that file or any other, is still reported.
 targetRules = ["generic-api-key"]
 regexTarget = "secret"
 regexes = ['''^shadow-(?:failure|artifacts)-1$''']
+
+[[allowlists]]
+description = """
+Dummy settings for the Gate 6 fresh-install run. scripts/gate6_fresh_install.sh
+starts the backend image against a disposable, empty MongoDB and must satisfy
+the startup config validator, so it passes `gate6-placeholder` and
+`gate6-placeholder-secret-key-32-characters` for SECRET_KEY, the AWS keys,
+OPENAI_API_KEY, SMTP_PASSWORD and LANGGRAPH_API_TOKEN. Nothing in that run talks
+to S3, SMTP or a language model.
+
+Two exact values only, and no path: a real key in that script, or anywhere else,
+is still reported.
+"""
+targetRules = ["generic-api-key"]
+regexTarget = "secret"
+regexes = ['''^gate6-placeholder(?:-secret-key-32-characters)?$''']
