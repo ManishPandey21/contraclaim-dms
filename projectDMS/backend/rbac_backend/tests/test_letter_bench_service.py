@@ -1168,6 +1168,33 @@ async def test_a_held_document_is_not_dissected_or_sent_to_the_model(monkeypatch
     assert bench.gate.can_lock is False
 
 
+@pytest.mark.parametrize(
+    "held",
+    [
+        {"processing_status": "human_review_required"},
+        {"duplicate_status": "duplicate"},
+        {"lifecycle_state": "deleted"},
+    ],
+    ids=lambda fields: "-".join(f"{k}={v}" for k, v in fields.items()),
+)
+async def test_opening_a_held_document_copies_none_of_its_metadata_onto_the_letter(monkeypatch, held) -> None:
+    service, db, _ = _bench(monkeypatch, StubLLM(analysis={"assertions": []}))
+    db.documents.docs[0].update(held)
+    opened = await service.open(BenchOpenRequest(incoming_document_id=DOC_ID), _user())
+    letter = next(d for d in db.letters.docs if str(d.get("_id")) == opened.letter_id)
+    written = json.dumps({key: letter.get(key) for key in ("title", "subject", "recipient")}, default=str)
+    for unverified in ("CTR/2026/118", "Notice of delay and variation", "ABC Infra Ltd"):
+        assert unverified not in written
+
+
+async def test_opening_a_consumable_document_names_the_letter_after_it(monkeypatch) -> None:
+    service, db, _ = _bench(monkeypatch, StubLLM(analysis={"assertions": []}))
+    opened = await service.open(BenchOpenRequest(incoming_document_id=DOC_ID), _user())
+    letter = next(d for d in db.letters.docs if str(d.get("_id")) == opened.letter_id)
+    assert letter["title"] == "Reply to CTR/2026/118"
+    assert letter["recipient"] == "ABC Infra Ltd"
+
+
 async def test_the_summary_never_stands_in_for_the_letter(monkeypatch) -> None:
     service, db, _ = _bench(monkeypatch, StubLLM(down=True))
     db.documents.docs[0]["full_text"] = ""
