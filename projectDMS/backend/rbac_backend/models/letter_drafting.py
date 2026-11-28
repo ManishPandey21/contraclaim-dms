@@ -90,6 +90,10 @@ DraftLifecycleEventType = Literal[
     "cancel_requested",
     "cancelled",
     "fallback_started",
+    # Letter Bench (skill-based drafting)
+    "skill_step_run",
+    "verdict_set",
+    "positions_locked",
 ]
 DraftEngine = Literal["v2", "langgraph_v3"]
 DraftExecutionStatus = Literal[
@@ -503,6 +507,43 @@ class SourceEvidence(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
+GroundingClassification = Literal[
+    "verified_fact",
+    "contractor_assertion",
+    "employer_assertion",
+    "engineer_finding",
+    "contractual_provision",
+    "contractual_interpretation",
+    "proposed_argument",
+    "inference",
+    "unverified_assertion",
+    "requires_confirmation",
+    "non_factual",
+]
+GroundingStatus = Literal[
+    "supported", "partially_supported", "contradicted", "unsupported", "user_confirmed", "not_applicable"
+]
+
+
+class GroundingStatement(BaseModel):
+    """One sentence of a composed letter and what, if anything, backs it."""
+
+    text: str
+    classification: GroundingClassification
+    status: GroundingStatus
+    material: bool = False
+    source_id: Optional[str] = None
+    source_label: Optional[str] = None
+    document_id: Optional[str] = None
+    passage: Optional[str] = None
+    location: Optional[str] = None
+    contradiction: Optional[str] = None
+    requires_confirmation: bool = False
+    confirmation_basis: Optional[str] = None
+    confirmed_by: Optional[str] = None
+    confirmed_at: Optional[str] = None
+
+
 class DraftContextBundle(BaseModel):
     active_workspace: Dict[str, Optional[str]] = Field(default_factory=dict)
     current_materials: List[str] = Field(default_factory=list)
@@ -890,6 +931,14 @@ class DraftRun(BaseModel):
     cancellation_reason: Optional[str] = None
     resumed_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    # Skill provenance (Letter Bench). Absent on runs created by the wizard.
+    # Each entry pins step_id, skill_key, version and content hash, so
+    # publishing a new skill version never alters what a past run records.
+    skill_chain: List[Dict[str, Any]] = Field(default_factory=list)
+    board_version: Optional[int] = None
+    skill_manifest_hash: Optional[str] = None
+    # Letter Bench: per-sentence factual grounding of the composed letter.
+    grounding: List["GroundingStatement"] = Field(default_factory=list)
     trace: List[Dict[str, Any]] = Field(default_factory=list)
     started_at: datetime = Field(default_factory=now_utc)
     completed_at: datetime = Field(default_factory=now_utc)

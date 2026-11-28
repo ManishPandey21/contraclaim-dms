@@ -59,6 +59,9 @@ KNOWN_UPLOAD_ROUTES = frozenset(
         ("POST", "/key-dates/eot-determinations/{determination_id}/import/preview"),
         ("POST", "/key-dates/eot-determinations/{determination_id}/import"),
         ("POST", "/profiles/photo"),
+        # Skill bundle import (drafting.skill.publish only). Capped at 2 MB while
+        # reading; the zip is parsed in memory with per-file and total caps.
+        ("POST", "/skills/import"),
         ("POST", "/upload-file"),
     }
 )

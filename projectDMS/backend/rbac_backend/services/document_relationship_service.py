@@ -214,6 +214,8 @@ class DocumentRelationshipService:
             document_id,
             session=session,
         )
+        if document is None:  # fail-closed lookup raises instead; this narrows the type
+            raise DocumentRelationshipError("Document not found", 404)
         result = await self.db.documents.update_one(
             {"_id": document.get("_id")},
             {"$inc": {"document_relationship_revision": 1}},
@@ -321,7 +323,9 @@ class DocumentRelationshipService:
         context = await self._target(actor, target_type, target_id, manage=True)
         if context.frozen:
             raise DocumentRelationshipError("Evidence relationships are frozen", 409)
-        prepared: list[tuple[DocumentRelationshipInput, dict[str, Any], DocumentRelationship, dict[str, Any]]] = []
+        prepared: list[
+            tuple[DocumentRelationshipInput, Optional[dict[str, Any]], DocumentRelationship, dict[str, Any]]
+        ] = []
         for link in links:
             if link.relationship_role not in context.allowed_roles:
                 raise DocumentRelationshipError("Relationship role is not valid for this target", 422)
@@ -1320,15 +1324,15 @@ class DocumentRelationshipService:
             candidate = str(legacy_id or "")
             if not candidate or candidate in seen:
                 continue
-            document = await self._document(actor, context, candidate, fail_closed=False)
-            if document is None:
+            legacy_document = await self._document(actor, context, candidate, fail_closed=False)
+            if legacy_document is None:
                 continue
-            canonical_id = str(document.get("_id") or candidate)
+            canonical_id = str(legacy_document.get("_id") or candidate)
             sources.append(
                 {
                     "document_id": canonical_id,
-                    "document_version_id": document.get("current_version_id"),
-                    "file_object_id": document.get("file_object_id"),
+                    "document_version_id": legacy_document.get("current_version_id"),
+                    "file_object_id": legacy_document.get("file_object_id"),
                 }
             )
             seen.add(canonical_id)

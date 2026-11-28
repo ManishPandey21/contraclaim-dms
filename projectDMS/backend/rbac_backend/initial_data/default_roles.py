@@ -403,6 +403,9 @@ _merge_role_permissions(
         "drafting.workflow.cancel",
         "drafting.workflow.checkpoints",
         "drafting.workflow.force_v2",
+        "drafting.skill.read",
+        "drafting.skill.publish",
+        "drafting.skill.bind",
     ],
 )
 
