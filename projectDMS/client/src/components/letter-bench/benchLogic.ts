@@ -1,15 +1,5 @@
 // Pure helpers for the Letter Bench. No React, no I/O: unit-tested directly.
-import type {
-  Assertion,
-  AssertionPatch,
-  BenchResponse,
-  ChainLink,
-  ChainLinkInput,
-  DraftRole,
-  EffectiveSkill,
-  ReplyParagraph,
-  SkillStepSummary,
-} from "@/types/letterBench";
+import type { Assertion, AssertionPatch, BenchResponse, ChainLink, ChainLinkInput, DraftRole, EffectiveSkill, ReplyParagraph, SkillStepSummary, GroundingStatement, GroundingStatus } from "@/types/letterBench";
 
 export interface LetterSegment {
   key: string;
@@ -289,4 +279,14 @@ export function scrollWithinPane(element: HTMLElement | null | undefined): void 
   } else {
     pane.scrollTop = Math.max(0, target);
   }
+}
+
+/** Statuses that hold approval for a material factual statement. */
+export const BLOCKING_GROUNDING = new Set<GroundingStatus>(["unsupported", "contradicted"]);
+
+/** Material facts that are unsupported or contradicted. Placeholders are held separately. */
+export function unresolvedStatements(grounding: GroundingStatement[] | undefined): GroundingStatement[] {
+  return (grounding ?? []).filter(
+    (s) => s.material && BLOCKING_GROUNDING.has(s.status) && s.classification !== "requires_confirmation"
+  );
 }

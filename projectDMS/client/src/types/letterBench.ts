@@ -84,6 +84,35 @@ export interface ReplyParagraph {
   degraded: boolean;
   clause_refs: string[];
   source_ids: string[];
+  confirmation_basis?: string | null;
+  confirmed_by?: string | null;
+  confirmed_at?: string | null;
+}
+
+export type GroundingStatus =
+  | "supported"
+  | "partially_supported"
+  | "contradicted"
+  | "unsupported"
+  | "user_confirmed"
+  | "not_applicable";
+
+/** One sentence of the composed letter and what, if anything, backs it. */
+export interface GroundingStatement {
+  text: string;
+  classification: string;
+  status: GroundingStatus;
+  material: boolean;
+  source_id?: string | null;
+  source_label?: string | null;
+  document_id?: string | null;
+  passage?: string | null;
+  location?: string | null;
+  contradiction?: string | null;
+  requires_confirmation: boolean;
+  confirmation_basis?: string | null;
+  confirmed_by?: string | null;
+  confirmed_at?: string | null;
 }
 
 export interface BoardQuestion {
@@ -136,6 +165,7 @@ export interface PositionBoard {
   analysis_step_id?: string | null;
   locked_strategy_version?: number | null;
   draft_run_id?: string | null;
+  grounding?: GroundingStatement[];
   composing: boolean;
   last_error?: string | null;
   /** Set when the letter tripped the injection scan: no step on this board calls the model. */
