@@ -96,15 +96,19 @@ class DraftValidator:
                 )
             )
 
+        # The pattern's character class includes "." (for "20.2"), so a clause
+        # cited at the end of a sentence arrives as "20.2."; trailing sentence
+        # punctuation is not part of a clause number. Same normalisation as
+        # incoming_analyzer.
         allowed_clauses = {
-            (source.clause_number or "").lower().strip()
+            (source.clause_number or "").lower().strip(" .;,")
             for source in sources
             if source.source_type == "contract_clause" and source.clause_number
         }
         mentioned = {
-            match.group(1).lower().strip()
+            match.group(1).lower().strip(" .;,")
             for match in self.CLAUSE_PATTERN.finditer(artifact.draft_letter)
-            if match.group(1)
+            if match.group(1).strip(" .;,")
         }
         missing_clauses = sorted([clause for clause in mentioned if clause not in allowed_clauses])
         if missing_clauses:
