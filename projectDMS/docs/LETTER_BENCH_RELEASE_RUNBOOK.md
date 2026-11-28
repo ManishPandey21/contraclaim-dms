@@ -271,7 +271,27 @@ an owner decision, not an operator one.
 
 ## 8. Turning the Bench on (separate change, after the deploy is stable)
 
-Not part of this deploy. When approved:
+Not part of this deploy.
+
+What a real model run showed (2026-11-28, `gpt-4o`, six synthetic letters):
+
+- Every assertion was a verbatim span of the letter, and 15 of 16 claim
+  sentences became assertions. A plain rejection with no claim keyword was
+  missed, by the model and by the rule-based fallback alike.
+- Clause citations stayed within the ledger. A clause the counterparty cited
+  that is not in the ledger (14.9) was repeated by the model and correctly held
+  as `unsupported_clause_citation`.
+- Instruction-like text in a letter stopped the model, and compose then
+  refused to save a draft. The board says why.
+- **The model writes supporting facts that no source gives** ("the site records
+  do not substantiate the delay", "the notice requirements have not been met",
+  "our evaluation indicates the design was compliant"), and no validator flags
+  them. Reviewers must check every factual statement in a reply before
+  approval. Tightening the paragraph prompt to `[CONFIRM: ...]` any fact not in
+  the sources is recommended before the mode leaves `canary`.
+- Each letter took 4–17 s end to end with the model.
+
+When approved:
 
 1. Confirm the people who will use it hold `drafting.request.view` and
    `drafting.draft.create` for their letters, and an expert allocation covering
