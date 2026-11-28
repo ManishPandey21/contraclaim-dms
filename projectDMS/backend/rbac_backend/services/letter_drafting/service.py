@@ -96,6 +96,7 @@ from .frozen_sections import (
     section_map,
     verify_frozen_sections,
 )
+from .bench import bench_approval_blockers
 from .planning import PlanningSheetBuilder
 from .prompts import PromptRegistry
 from .repository import DraftRunRepository
@@ -144,7 +145,13 @@ class DraftRunService:
         request_hash: Optional[str] = None,
         engine_metadata: Optional[Dict[str, Any]] = None,
         stop_after_generation: bool = False,
+        bench: Optional[Any] = None,
     ) -> DraftRun:
+        """``bench`` (a ``BenchRunContext``) is supplied when the Letter Bench
+        composes a reply. The letter text then comes from locked positions and
+        skill steps instead of the draft prompt; the source ledger, guardrail
+        scan, validators, legal-risk review and persistence below are the same.
+        """
         started = datetime.now(timezone.utc)
         run_id = str(uuid.uuid4())
         warnings: list[str] = []
@@ -217,6 +224,12 @@ class DraftRunService:
         )
         if engine_metadata:
             base_run.update(engine_metadata)
+        if bench is not None:
+            base_run.update(
+                skill_chain=list(bench.skill_chain),
+                board_version=bench.board_version,
+                skill_manifest_hash=bench.skill_manifest_hash,
+            )
 
         document_service = DocumentService(self.db)
         context_builder = DraftContextBuilder(
@@ -320,6 +333,10 @@ class DraftRunService:
                     incoming_analysis,
                 )
             )
+            if bench is not None:
+                # The locked board is the reply matrix and the plan.
+                reply_matrix = list(bench.reply_matrix)
+                deterministic_plan = bench.plan
             threshold_report = self._merge_reports(
                 self.validator.threshold_findings(context),
                 self.input_validator.validate_request(letter, request, context, sources),
@@ -373,7 +390,9 @@ class DraftRunService:
                 for answer in supplied_directions
                 if answer.question_id and answer.question_id != "free_text"
             }
-            if required_question_ids - answered_question_ids:
+            # On the Bench the gate is enforced before compose: every assertion
+            # carries a decided verdict and every required question an answer.
+            if bench is None and required_question_ids - answered_question_ids:
                 context_pack = _context_pack(sources)
                 run = DraftRun(
                     **base_run,
@@ -408,6 +427,8 @@ class DraftRunService:
                 return await self._create_and_record(run, current_user, context_pack=context_pack)
 
             plan = await self._resolve_strategy_plan(letter_id, letter, request)
+            if bench is not None and self._strategy_is_approved(letter):
+                plan = bench.plan
             if request.mode in _AI_DRAFT_MODES and not plan:
                 validation = ValidationReport(
                     blocking=True,
@@ -466,7 +487,48 @@ class DraftRunService:
             confidence_scores: Optional[DraftConfidenceScores] = None
             status = "completed"
 
-            if request.mode in _AI_DRAFT_MODES:
+            if request.mode in _AI_DRAFT_MODES and bench is not None:
+                artifact = DraftArtifact(
+                    draft_letter=bench.draft_letter,
+                    source_integrity_notes=bench.integrity_notes,
+                    raw_model_output=bench.draft_letter,
+                    model_name="letter_bench",
+                )
+                working_sources = self._with_source_hashes(sources)
+                validation = self._merge_reports(
+                    self.validator.critique(artifact, role, working_sources, finalized=request.finalized),
+                    self.validator.strategy_alignment(artifact, plan),
+                    ValidationReport(
+                        blocking=any(f.level == "error" for f in bench.extra_findings),
+                        findings=list(bench.extra_findings),
+                    ),
+                )
+                sources = working_sources
+                assertion_support = self._assertion_support(artifact, sources, validation)
+                confidence_scores = self._confidence_scores(validation, assertion_support, sources)
+                if validation.blocking or bench.degraded_reasons:
+                    status = "needs_attention"
+                warnings.extend(f"skill_step_degraded: {reason}" for reason in bench.degraded_reasons)
+                trace.append(
+                    {
+                        "stage": "bench_compose",
+                        "status": "degraded" if bench.degraded_reasons else "success",
+                        "board_version": bench.board_version,
+                        "skill_steps": len(bench.skill_chain),
+                        "blocking": validation.blocking,
+                        "finding_count": len(validation.findings),
+                    }
+                )
+                if artifact.draft_letter:
+                    previous_positions = [
+                        source.text
+                        for source in sources
+                        if source.text and (source.metadata or {}).get("previous_position")
+                    ]
+                    legal_risk_report = self.legal_risk_reviewer.review(
+                        artifact.draft_letter, previous_positions
+                    )
+            elif request.mode in _AI_DRAFT_MODES:
                 generator = DraftGenerator(self.prompt_registry)
                 artifact, draft_warnings = await generator.generate(
                     letter,
@@ -2183,6 +2245,11 @@ class DraftRunService:
             )
         if existing.validation_report.blocking:
             raise HTTPException(status_code=400, detail="Draft has blocking validation findings")
+        # A Bench-composed draft must still match the board it was composed from:
+        # no undecided assertion, no stale step.
+        bench_blockers = await bench_approval_blockers(getattr(self, "db", None), existing)
+        if bench_blockers:
+            raise HTTPException(status_code=409, detail="; ".join(bench_blockers))
         if existing.guardrail_report and existing.guardrail_report.verdict != "pass":
             raise HTTPException(
                 status_code=409,

@@ -32,9 +32,13 @@ GATE_FILE = PROJECT / "docs" / "PRODUCTION_READINESS_RELEASE_GATE.md"
 EVIDENCE = PROJECT / "docs" / "GATE_6_FRESH_INSTALL_EVIDENCE.md"
 MIGRATIONS = RBAC_BACKEND / "migrations"
 
-#: What R-A8Q Stage B actually applied to the empty `contraclaim_staging`
-#: database on 2026-09-08. Not a target - a measurement.
-MIGRATIONS_PROVEN_ON_A_FRESH_DATABASE = 19
+#: What has actually been applied to an empty database. Not a target - a
+#: measurement. R-A8Q Stage B applied 19 to the empty `contraclaim_staging` on
+#: 2026-09-08; run `gate6-20261114t222928z-9390` of scripts/gate6_fresh_install.sh
+#: applied all 22 to an empty, disposable mongo:8.0 on 2026-11-14. Both are
+#: recorded in docs/GATE_6_FRESH_INSTALL_EVIDENCE.md.
+MIGRATIONS_PROVEN_ON_A_FRESH_DATABASE = 22
+FRESH_INSTALL_RUN_ID = "gate6-20261114t222928z-9390"
 
 
 def _gate6_bullets():
@@ -103,12 +107,29 @@ def test_the_migration_catalogue_is_the_one_the_staging_run_measured() -> None:
     """The tick expires when a migration lands that has never seen an empty database."""
     registered = _registered_migrations()
     assert registered == MIGRATIONS_PROVEN_ON_A_FRESH_DATABASE, (
-        f"the migration catalogue now has {registered} migrations; R-A8Q Stage B "
-        f"applied {MIGRATIONS_PROVEN_ON_A_FRESH_DATABASE} to a fresh database on "
-        "2026-09-08. Gate 6 bullet 2's tick covers what that run measured and "
-        "nothing after it - re-run the fresh-install path against a real MongoDB, "
-        "record it in docs/GATE_6_FRESH_INSTALL_EVIDENCE.md, and update this "
-        "number. Do not update the number alone."
+        f"the migration catalogue now has {registered} migrations; run "
+        f"{FRESH_INSTALL_RUN_ID} applied {MIGRATIONS_PROVEN_ON_A_FRESH_DATABASE} to "
+        "a fresh database. Gate 6 bullet 2's tick covers what that run measured "
+        "and nothing after it - run scripts/gate6_fresh_install.sh against a real, "
+        "empty MongoDB, record its evidence block in "
+        "docs/GATE_6_FRESH_INSTALL_EVIDENCE.md, and update this number and the run "
+        "id. Do not update the number alone."
+    )
+
+
+def test_the_recorded_run_is_in_the_evidence_document() -> None:
+    """The number and the run it came from have to be readable in the same place.
+
+    Without this, the constant could be moved while the document still described
+    an older catalogue, which is the "number alone" change the message forbids.
+    """
+    text = EVIDENCE.read_text(encoding="utf-8")
+    assert FRESH_INSTALL_RUN_ID in text, (
+        f"{EVIDENCE.name} does not contain run {FRESH_INSTALL_RUN_ID}"
+    )
+    expected = MIGRATIONS_PROVEN_ON_A_FRESH_DATABASE
+    assert f"PASS - {expected}/{expected} migrations applied to an empty MongoDB" in text, (
+        f"{EVIDENCE.name} records no passing run for {expected} migrations"
     )
 
 

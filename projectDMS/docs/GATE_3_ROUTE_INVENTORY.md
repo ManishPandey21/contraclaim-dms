@@ -36,10 +36,10 @@ Gate 3's execution plan; it is not a licence to ship a page with no error state.
 ## Counts
 
 - Source: `client/src/routes.tsx`
-- Routes: **96**
-- Authenticated routes: **89**
-- Routes owing an empty state: **61**
-- Routes owing a loading state: **89**
+- Routes: **99**
+- Authenticated routes: **92**
+- Routes owing an empty state: **63**
+- Routes owing a loading state: **92**
 
 ## The inventory
 
@@ -109,12 +109,15 @@ Gate 3's execution plan; it is not a licence to ship a page with no error state.
 | `/letter-templates/:id/edit` | GET | yes | `LetterTemplateEditorPage` | no | yes | MISSING - no fault-injection coverage yet |
 | `/letters` | GET | yes | `LetterWorkflowPage` | yes | yes | `client/src/pages/__tests__/LetterWorkflowPage.integration.test.tsx` |
 | `/letters/:id/approval` | GET | yes | `LetterApprovalPage` | no | yes | MISSING - no fault-injection coverage yet |
+| `/letters/:id/bench` | GET | yes | `LetterBenchPage` | yes | yes | MISSING - no fault-injection coverage yet |
 | `/letters/:id/completed` | GET | yes | `LetterCompletedPage` | no | yes | MISSING - no fault-injection coverage yet |
 | `/letters/:id/draft` | GET | yes | `LetterDraftPage` | no | yes | `client/src/pages/__tests__/LetterDraftPage.basic-render.test.tsx` |
 | `/letters/:id/input` | GET | yes | `LetterInputPage` | no | yes | MISSING - no fault-injection coverage yet |
 | `/letters/:id/review` | GET | yes | `LetterReviewPage` | no | yes | MISSING - no fault-injection coverage yet |
 | `/letters/:id/strategic-plan` | GET | yes | `LetterStrategicPlanPage` | no | yes | MISSING - no fault-injection coverage yet |
 | `/letters/:id/strategy` | GET | yes | `LetterStrategicPlanPage` | no | yes | MISSING - no fault-injection coverage yet |
+| `/letters/bench/new` | GET | yes | `BenchOpenRoute` | no | yes | MISSING - no fault-injection coverage yet |
+| `/letters/skills` | GET | yes | `SkillAdminPage` | yes | yes | MISSING - no fault-injection coverage yet |
 | `/login` | GET | no | `LoginPage` | no | yes | `client/src/pages/__tests__/LoginPage.login.test.tsx` |
 | `/notifications` | GET | yes | `NotificationCenterPage` | yes | yes | MISSING - no fault-injection coverage yet |
 | `/observability` | GET | yes | `ObservabilityPage` | yes | yes | MISSING - no fault-injection coverage yet |
