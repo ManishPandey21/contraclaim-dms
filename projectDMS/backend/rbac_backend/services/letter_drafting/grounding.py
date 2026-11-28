@@ -300,10 +300,12 @@ def analyse(draft: str, inputs: GroundingInputs) -> List[GroundingStatement]:
         request = bool(_REQUEST.search(claim_text))
         position = bool(_POSITION.search(claim_text))
         reported = _REPORTED.match(claim_text)
-        own_side = bool(reported) and bool(inputs.drafting_role) and (
-            (reported.group("party") or "").lower().strip() in _OWN_SIDE.get(str(inputs.drafting_role).lower(), set())
+        own_side = (
+            reported is not None
+            and bool(inputs.drafting_role)
+            and (reported.group("party") or "").lower().strip() in _OWN_SIDE.get(str(inputs.drafting_role).lower(), set())
         )
-        if reported and own_side and _OWN_ARGUMENT.search(reported.group(0)):
+        if reported is not None and own_side and _OWN_ARGUMENT.search(reported.group(0)):
             # "The Employer contends / maintains / considers that ..." in the
             # Employer's own letter: its argument, not a statement of fact.
             statements.append(_statement(sentence, classification="proposed_argument", status="not_applicable", material=False))
